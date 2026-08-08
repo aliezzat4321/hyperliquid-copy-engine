@@ -101,7 +101,11 @@ def calculate_wallet_metrics(episodes: list[PositionEpisode], fills: list[Fill])
         for fill in fills:
             notionals[fill.coin] += float(fill.notional)
         total_notional = sum(notionals.values())
-        concentration = max(notionals.values(), default=0.0) / total_notional if total_notional else 0.0
+        concentration = (
+            max(notionals.values(), default=0.0) / total_notional
+            if total_notional
+            else 0.0
+        )
     else:
         trades_per_day = maker_share = taker_share = concentration = 0.0
 

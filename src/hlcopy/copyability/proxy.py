@@ -21,4 +21,5 @@ def copyability_proxy(metrics: WalletMetrics) -> float:
     fast_penalty = 60.0 * metrics.fast_trade_fraction
     frequency_penalty = 30.0 * min(1.0, max(0.0, (metrics.trades_per_day - 50.0) / 150.0))
     fills_penalty = 20.0 * min(1.0, max(0.0, (metrics.fills_per_trade - 15.0) / 35.0))
-    return round(_clamp(hold_score - maker_penalty - fast_penalty - frequency_penalty - fills_penalty), 2)
+    score = hold_score - maker_penalty - fast_penalty - frequency_penalty - fills_penalty
+    return round(_clamp(score), 2)

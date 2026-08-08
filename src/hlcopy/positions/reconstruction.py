@@ -6,7 +6,9 @@ from hlcopy.models import Fill
 from hlcopy.positions.state_machine import InstrumentState, PositionEpisode
 
 
-def reconstruct_positions(fills: list[Fill]) -> tuple[list[PositionEpisode], dict[str, InstrumentState]]:
+def reconstruct_positions(
+    fills: list[Fill],
+) -> tuple[list[PositionEpisode], dict[str, InstrumentState]]:
     states: dict[str, InstrumentState] = {}
     completed: list[PositionEpisode] = []
     grouped: dict[str, list[Fill]] = defaultdict(list)
