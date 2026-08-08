@@ -82,9 +82,9 @@ class HyperliquidHttpClient:
         weight: int = 1,
         retries: int = 4,
     ) -> Any:
-        await self._limiter.consume(weight)
         async with self._sem:
             for attempt in range(retries + 1):
+                await self._limiter.consume(weight)
                 try:
                     response = await self._client.request(method, url, json=json)
                     if response.status_code == 429 or response.status_code >= 500:
