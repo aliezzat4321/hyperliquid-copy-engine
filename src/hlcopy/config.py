@@ -50,7 +50,7 @@ class Settings:
         return f"https://stats-data.hyperliquid.xyz/{network}/leaderboard"
 
     @classmethod
-    def from_env(cls) -> "Settings":
+    def from_env(cls) -> Settings:
         network = os.getenv("HLCOPY_NETWORK", "mainnet").lower().strip()
         if network not in {"mainnet", "testnet"}:
             raise ValueError("HLCOPY_NETWORK must be 'mainnet' or 'testnet'")

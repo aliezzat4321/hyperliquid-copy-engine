@@ -64,7 +64,7 @@ class HyperliquidHttpClient:
         self._sem = asyncio.Semaphore(concurrency)
         self._limiter = WeightedRateLimiter()
 
-    async def __aenter__(self) -> "HyperliquidHttpClient":
+    async def __aenter__(self) -> HyperliquidHttpClient:
         return self
 
     async def __aexit__(self, *_: object) -> None:

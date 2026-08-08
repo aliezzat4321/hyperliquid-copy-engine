@@ -46,7 +46,7 @@ class Fill:
         return self.price * self.size
 
     @classmethod
-    def from_raw(cls, wallet_address: str, raw: dict[str, Any]) -> "Fill":
+    def from_raw(cls, wallet_address: str, raw: dict[str, Any]) -> Fill:
         return cls(
             wallet_address=wallet_address.lower(),
             tid=int(raw["tid"]),

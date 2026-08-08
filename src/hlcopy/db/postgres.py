@@ -23,7 +23,7 @@ class Database:
         self.dsn = dsn
         self.conn: psycopg.AsyncConnection[Any] | None = None
 
-    async def __aenter__(self) -> "Database":
+    async def __aenter__(self) -> Database:
         self.conn = await psycopg.AsyncConnection.connect(self.dsn, autocommit=True)
         return self
 
