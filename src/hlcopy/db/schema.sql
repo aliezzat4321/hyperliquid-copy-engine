@@ -78,12 +78,12 @@ CREATE TABLE IF NOT EXISTS orders (
 CREATE TABLE IF NOT EXISTS portfolio_snapshots (
     wallet_address TEXT NOT NULL REFERENCES wallets(address),
     timestamp TIMESTAMPTZ NOT NULL,
-    window TEXT NOT NULL,
+    ranking_window TEXT NOT NULL,
     account_value NUMERIC,
     pnl NUMERIC,
     volume NUMERIC,
     raw_json JSONB NOT NULL,
-    PRIMARY KEY (wallet_address, timestamp, window)
+    PRIMARY KEY (wallet_address, timestamp, ranking_window)
 );
 
 CREATE TABLE IF NOT EXISTS position_episodes (
