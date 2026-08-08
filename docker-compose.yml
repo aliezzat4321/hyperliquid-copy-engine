@@ -1,12 +1,13 @@
 services:
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_USER: hlcopy
       POSTGRES_PASSWORD: hlcopy
       POSTGRES_DB: hlcopy
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - hlcopy_pgdata:/var/lib/postgresql/data
     healthcheck:
