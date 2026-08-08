@@ -9,6 +9,7 @@ htmlcov/
 .env.*
 !.env.example
 outputs/
+data/
 *.parquet
 *.csv
 .DS_Store

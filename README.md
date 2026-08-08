@@ -4,7 +4,7 @@ Research-first infrastructure for finding Hyperliquid traders whose edge is both
 
 The objective is not to copy the highest-PnL leaderboard wallets. The objective is to estimate which future leader position changes a follower can capture after latency, spread, slippage, fees, funding, missed fills, partial fills and independent risk controls.
 
-## Current milestone: Phase 1 + reconstruction foundation
+## Current milestone: research foundation + live market evidence capture
 
 This repository intentionally starts before live execution. V0.1 implements the highest-ROI foundation:
 
@@ -19,10 +19,13 @@ This repository intentionally starts before live execution. V0.1 implements the 
 - fee-aware reconstructed performance metrics;
 - transparent behavioral copyability proxy used only for research prioritization;
 - executable order-book VWAP/slippage primitives for the next delayed-copy stage;
+- continuous Hyperliquid BBO/L2/trades/asset-context capture into immutable Parquet;
+- exchange + local nanosecond receive timestamps and explicit reconnect/gap events;
+- microprice, spread, BBO imbalance and 5/10 bps depth features;
 - ranked CSV + Parquet research output;
-- unit tests and CI for the reconstruction core.
+- unit tests and CI for the reconstruction and market-data core.
 
-**Not yet implemented:** historical order-book replay, true delayed follower fills, funding allocation to episodes, walk-forward historical universe snapshots, live paper watcher, portfolio allocation, or live execution. The current `copyability_score` is deliberately a proxy and must not be interpreted as executable follower ROI.
+**Not yet implemented:** historical delayed-copy replay, true follower fills, funding allocation to episodes, walk-forward historical universe snapshots, live paper watcher, portfolio allocation, or live execution. The current `copyability_score` is deliberately a proxy and must not be interpreted as executable follower ROI.
 
 ## Why the pipeline pre-screens first
 
@@ -48,12 +51,39 @@ set +a
 hlcopy pipeline
 ```
 
-The command writes timestamped outputs to `outputs/`:
+The research command writes timestamped outputs to `outputs/`:
 
 ```text
 ranked_candidates_YYYYMMDDTHHMMSSZ.csv
 ranked_candidates_YYYYMMDDTHHMMSSZ.parquet
 ```
+
+## Start the market tape immediately
+
+Historical high-resolution BBO/L2 state cannot be recreated reliably after the fact, so market-data collection should run in parallel with wallet research:
+
+```bash
+hlcopy capture-market
+```
+
+Default markets are `BTC,ETH,SOL`. Override them directly when useful:
+
+```bash
+hlcopy capture-market --coins BTC ETH SOL HYPE
+```
+
+Data is written as append-only partitioned Parquet:
+
+```text
+data/market/date=YYYY-MM-DD/coin=BTC/channel=bbo/part-....parquet
+data/market/date=YYYY-MM-DD/coin=BTC/channel=l2Book/part-....parquet
+data/market/date=YYYY-MM-DD/coin=BTC/channel=trades/part-....parquet
+data/market/date=YYYY-MM-DD/coin=BTC/channel=activeAssetCtx/part-....parquet
+```
+
+The collector records connection-loss/reconnect intervals in a `system` partition. Future 100-500 ms simulations must reject periods crossing those gaps rather than inventing missing microstructure.
+
+See [`docs/market_tape.md`](docs/market_tape.md) for the tape contract and replay rules.
 
 ## Key configuration
 
@@ -63,9 +93,15 @@ HLCOPY_MIN_ACCOUNT_VALUE=10000
 HLCOPY_MIN_MONTH_ROI=0
 HLCOPY_MIN_MONTH_VOLUME=50000
 HLCOPY_HTTP_CONCURRENCY=3
+
+HLCOPY_MARKET_DATA_DIR=data/market
+HLCOPY_MARKET_COINS=BTC,ETH,SOL
+HLCOPY_MARKET_FLUSH_ROWS=5000
+HLCOPY_MARKET_FLUSH_SECONDS=5
+HLCOPY_MARKET_QUEUE_SIZE=50000
 ```
 
-Start small. Increase `HLCOPY_MAX_CANDIDATES` only after measuring API budget and data quality.
+Start small. Increase `HLCOPY_MAX_CANDIDATES` and the market universe only after measuring API budget, disk growth and data quality.
 
 ## Data lineage
 
@@ -76,9 +112,14 @@ Hyperliquid response
   -> reconstructed position_episodes
   -> wallet_metrics
   -> ranked research output
+
+Hyperliquid WebSocket
+  -> immutable market Parquet tape
+  -> normalized microstructure fields
+  -> delayed-copy replay (next milestone)
 ```
 
-Raw responses are never replaced by derived records.
+Raw source records are never replaced by derived records.
 
 ## Reconstruction invariant
 
@@ -100,14 +141,15 @@ Warnings flag low sample sizes, very fast alpha, maker-heavy behavior, high conc
 
 ## Next highest-ROI milestone
 
-The next milestone is **real delayed-copy simulation**, not live trading:
+With market evidence now being collected, the next milestone is **real delayed-copy simulation**, not live trading:
 
-1. collect/replay market state around leader fills;
+1. replay market state around leader fills;
 2. evaluate 0ms / 100ms / 250ms / 500ms / 1s / 2s / 3s / 5s / 10s / 30s;
-3. cross actual book depth for follower size;
-4. include taker/maker fees and funding;
-5. replicate target position state, not blindly copy every raw fill;
-6. compute follower net PnL and edge retention;
-7. use historical point-in-time leaderboard snapshots for walk-forward selection.
+3. use BBO plus L2 depth to calculate achievable follower VWAP;
+4. reject periods with market-tape gaps or stale state;
+5. include taker/maker fees and funding;
+6. replicate target position state, not blindly copy every raw fill;
+7. compute follower net PnL and edge retention;
+8. use historical point-in-time leaderboard snapshots for walk-forward selection.
 
 Only after that survives out-of-sample and prospective paper trading should a live execution adapter be added.
