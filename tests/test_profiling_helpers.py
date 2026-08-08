@@ -3,7 +3,6 @@ from __future__ import annotations
 from hlcopy.hyperliquid.http_client import ApiResponse
 from hlcopy.profiling import _fill_history_cap_hit, _merge_fill_pages
 
-
 WALLET = "0x1111111111111111111111111111111111111111"
 
 
