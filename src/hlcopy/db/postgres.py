@@ -4,7 +4,7 @@ import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -12,6 +12,9 @@ from psycopg.types.json import Jsonb
 from hlcopy.discovery.leaderboard import LeaderboardCandidate
 from hlcopy.models import Fill
 from hlcopy.positions.state_machine import PositionEpisode
+
+if TYPE_CHECKING:
+    from hlcopy.analytics.trader_profile import TraderProfile
 
 
 def _dt(ms: int) -> datetime:
@@ -190,4 +193,25 @@ class Database:
             DO UPDATE SET metrics_json = EXCLUDED.metrics_json
             """,
             (wallet, _dt(as_of_ms), lookback, Jsonb(metrics)),
+        )
+
+    async def store_trader_profile(self, profile: TraderProfile) -> None:
+        await self._require().execute(
+            """
+            INSERT INTO trader_profiles(
+              wallet_address, as_of_timestamp, lookback_start, model_version, profile_json
+            )
+            VALUES (%s,%s,%s,%s,%s)
+            ON CONFLICT(wallet_address, as_of_timestamp, model_version)
+            DO UPDATE SET
+              lookback_start = EXCLUDED.lookback_start,
+              profile_json = EXCLUDED.profile_json
+            """,
+            (
+                profile.wallet_address,
+                _dt(profile.as_of_ms),
+                _dt(profile.lookback_start_ms),
+                profile.model_version,
+                Jsonb(profile.to_dict()),
+            ),
         )

@@ -7,12 +7,34 @@ import logging
 from hlcopy.config import Settings
 from hlcopy.market.capture import capture_market
 from hlcopy.pipeline import run
+from hlcopy.profiling import run as run_profiles
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("value must be at least 1")
+    return parsed
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="hlcopy")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("pipeline", help="discover, ingest, reconstruct, analyze and rank wallets")
+    profile = sub.add_parser(
+        "profile-traders",
+        help="build forensic profiles for top official Hyperliquid leaderboard traders",
+    )
+    profile.add_argument(
+        "--limit",
+        type=_positive_int,
+        help="number of official leaderboard traders to profile",
+    )
+    profile.add_argument(
+        "--lookback-days",
+        type=_positive_int,
+        help="historical fill and funding lookback in days",
+    )
     capture = sub.add_parser(
         "capture-market",
         help="continuously record Hyperliquid BBO, L2, trades and asset context",
@@ -58,6 +80,12 @@ def main() -> None:
     settings = Settings.from_env()
     if args.command == "pipeline":
         run(settings)
+    elif args.command == "profile-traders":
+        run_profiles(
+            settings,
+            limit=args.limit,
+            lookback_days=args.lookback_days,
+        )
     elif args.command == "capture-market":
         _run_capture(settings, args.coins)
 

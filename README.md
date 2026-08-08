@@ -2,36 +2,30 @@
 
 Research-first infrastructure for finding Hyperliquid traders whose edge is both **persistent** and **replicable after execution reality**.
 
-The objective is not to copy the highest-PnL leaderboard wallets. The objective is to estimate which future leader position changes a follower can capture after latency, spread, slippage, fees, funding, missed fills, partial fills and independent risk controls.
+The objective is not to copy the highest-PnL leaderboard wallets. The objective is to determine how top traders actually make money, what risk/leverage/execution style that requires, and how much of that edge a follower can retain after latency, spread, slippage, fees, funding, missed fills, partial fills and independent risk controls.
 
-## Current milestone: research foundation + live market evidence capture
+## Current milestone: trader forensics + market evidence
 
-This repository intentionally starts before live execution. V0.1 implements the highest-ROI foundation:
+The system now provides the foundation needed before execution-realistic historical copying:
 
-- Hyperliquid stats leaderboard discovery;
-- cheap leaderboard pre-screening before expensive per-wallet API calls;
-- weighted API-rate limiting and retries;
-- immutable raw API response storage in PostgreSQL;
-- normalized fill persistence with duplicate protection;
-- position-episode reconstruction using `startPosition` as a data-quality invariant;
-- correct handling of scale-ins, reductions, closes and single-fill reversals;
-- explicit detection of truncated fill history so partial historical episodes are not scored;
-- fee-aware reconstructed performance metrics;
-- transparent behavioral copyability proxy used only for research prioritization;
-- executable order-book VWAP/slippage primitives for the next delayed-copy stage;
+- official Hyperliquid leaderboard discovery;
+- top-trader forensic profiling before copyability filtering;
+- normalized fill persistence and strict position reconstruction;
+- success, tail-risk, consistency and profit-concentration metrics;
+- scalper/intraday/swing/position/hybrid style classification;
+- long/short, scale-in, reduction, reversal and adverse-averaging behavior;
+- maker/taker, TWAP and recent order-style analysis;
+- funding dependence and asset concentration;
+- current exact leverage/margin/liquidation-state evidence;
+- sampled historical effective-exposure estimates with explicit provenance;
+- immutable raw API storage in PostgreSQL;
+- executable order-book VWAP/slippage primitives;
 - continuous Hyperliquid BBO/L2/trades/asset-context capture into immutable Parquet;
 - exchange + local nanosecond receive timestamps and explicit reconnect/gap events;
 - microprice, spread, BBO imbalance and 5/10 bps depth features;
-- ranked CSV + Parquet research output;
-- unit tests and CI for the reconstruction and market-data core.
+- unit tests and CI for the research core.
 
-**Not yet implemented:** historical delayed-copy replay, true follower fills, funding allocation to episodes, walk-forward historical universe snapshots, live paper watcher, portfolio allocation, or live execution. The current `copyability_score` is deliberately a proxy and must not be interpreted as executable follower ROI.
-
-## Why the pipeline pre-screens first
-
-Hyperliquid's API uses weighted REST limits and wallet fill history is materially more expensive than fetching the cached leaderboard. Pulling thousands of full wallet histories blindly wastes the request budget and slows research. V0.1 ranks the cheap leaderboard fields first and only downloads recent unaggregated fills for the most promising candidates.
-
-Defaults are deliberately conservative and configurable.
+**Not yet implemented:** exact historical configured-leverage reconstruction from L1 actions, historical delayed-copy replay, true follower fills, walk-forward universe selection, live paper watcher, portfolio allocation, or live execution. Existing behavioral copyability scores are proxies and must not be interpreted as executable follower ROI.
 
 ## Quick start
 
@@ -47,20 +41,55 @@ pip install -e '.[dev]'
 set -a
 source .env
 set +a
+```
 
+## Profile the top leaderboard traders
+
+Run the forensic profiler before deciding which wallets deserve a realistic copy backtest:
+
+```bash
+hlcopy profile-traders
+```
+
+Defaults profile the top 20 official leaderboard rows over a 90-day requested lookback. Override them directly:
+
+```bash
+hlcopy profile-traders --limit 50 --lookback-days 120
+```
+
+Each run writes:
+
+```text
+outputs/trader_profiles_YYYYMMDDTHHMMSSZ.json
+outputs/trader_profiles_YYYYMMDDTHHMMSSZ.csv
+outputs/trader_profiles_YYYYMMDDTHHMMSSZ.parquet
+```
+
+The JSON is the nested trader dossier. CSV/Parquet flatten the major fields for screening, comparison and the future delayed-copy engine.
+
+The profiler examines success rate, profit factor, expectancy, payoff ratio, drawdowns, tail losses, profit concentration, recent performance, holding style, direction bias, scaling/reversals, post-loss sizing, maker/taker/TWAP behavior, funding, asset concentration, concurrent positions and leverage/risk evidence.
+
+### Leverage evidence is deliberately provenance-aware
+
+Current open-position configured leverage, cross/isolated mode, margin use and liquidation state come from current clearinghouse state and are labeled exact-current evidence.
+
+Historical effective exposure is currently an estimate using reconstructed position notional versus the preceding sampled portfolio account value. It is explicitly labeled as sampled evidence and is **not** treated as exact historical configured leverage.
+
+Exact historical configured leverage will be reconstructed separately from historical L1 `updateLeverage` actions before that field is used as exact backtest evidence.
+
+See [`docs/trader_forensics.md`](docs/trader_forensics.md) for the full evidence contract and warning definitions.
+
+## Run the original research ranking
+
+```bash
 hlcopy pipeline
 ```
 
-The research command writes timestamped outputs to `outputs/`:
-
-```text
-ranked_candidates_YYYYMMDDTHHMMSSZ.csv
-ranked_candidates_YYYYMMDDTHHMMSSZ.parquet
-```
+The ranking command writes timestamped candidate CSV/Parquet outputs. It is useful for research prioritization, but its current copyability dimension remains a behavioral proxy rather than follower ROI.
 
 ## Start the market tape immediately
 
-Historical high-resolution BBO/L2 state cannot be recreated reliably after the fact, so market-data collection should run in parallel with wallet research:
+Hyperliquid publishes historical market archives, but they can have gaps and they do not contain our local receive timestamps. Our own market collection should therefore run in parallel with wallet research:
 
 ```bash
 hlcopy capture-market
@@ -81,7 +110,7 @@ data/market/date=YYYY-MM-DD/coin=BTC/channel=trades/part-....parquet
 data/market/date=YYYY-MM-DD/coin=BTC/channel=activeAssetCtx/part-....parquet
 ```
 
-The collector records connection-loss/reconnect intervals in a `system` partition. Future 100-500 ms simulations must reject periods crossing those gaps rather than inventing missing microstructure.
+The collector records connection-loss/reconnect intervals in a `system` partition. Future short-latency simulations must reject periods crossing those gaps rather than inventing missing microstructure.
 
 See [`docs/market_tape.md`](docs/market_tape.md) for the tape contract and replay rules.
 
@@ -93,6 +122,8 @@ HLCOPY_MIN_ACCOUNT_VALUE=10000
 HLCOPY_MIN_MONTH_ROI=0
 HLCOPY_MIN_MONTH_VOLUME=50000
 HLCOPY_HTTP_CONCURRENCY=3
+HLCOPY_PROFILE_CANDIDATES=20
+HLCOPY_PROFILE_LOOKBACK_DAYS=90
 
 HLCOPY_MARKET_DATA_DIR=data/market
 HLCOPY_MARKET_COINS=BTC,ETH,SOL
@@ -101,22 +132,21 @@ HLCOPY_MARKET_FLUSH_SECONDS=5
 HLCOPY_MARKET_QUEUE_SIZE=50000
 ```
 
-Start small. Increase `HLCOPY_MAX_CANDIDATES` and the market universe only after measuring API budget, disk growth and data quality.
-
 ## Data lineage
 
 ```text
-Hyperliquid response
-  -> raw_api_responses (immutable JSONB)
-  -> normalized fills / leaderboard snapshots
-  -> reconstructed position_episodes
-  -> wallet_metrics
-  -> ranked research output
+Official leaderboard
+  -> top leaderboard wallets
+  -> raw user fills / funding / orders / account state
+  -> strict reconstructed position episodes
+  -> trader forensic profiles
+  -> execution-realistic delayed-copy replay (next)
+  -> follower net PnL / edge retention
 
-Hyperliquid WebSocket
-  -> immutable market Parquet tape
-  -> normalized microstructure fields
-  -> delayed-copy replay (next milestone)
+Hyperliquid WebSocket / historical archive
+  -> market evidence
+  -> BBO + L2 + trades + context
+  -> follower execution model
 ```
 
 Raw source records are never replaced by derived records.
@@ -127,29 +157,19 @@ Every Hyperliquid perp fill contains `startPosition`. During replay, the state m
 
 Because recent fill APIs can truncate old history, the first visible fill may start with a non-zero position. In that case the engine bootstraps the quantity from `startPosition`, marks that episode `complete_start = false`, and excludes it from scored trade statistics. Once the position returns to flat, subsequent episodes are complete and scoreable.
 
-## Ranking philosophy
-
-The current research composite exposes separate dimensions:
-
-- performance;
-- risk;
-- persistence across leaderboard windows;
-- behavioral copyability proxy;
-- statistical confidence.
-
-Warnings flag low sample sizes, very fast alpha, maker-heavy behavior, high concentration, and recent reconstructed losses. Win rate is recorded but is not a primary scoring input.
-
 ## Next highest-ROI milestone
 
-With market evidence now being collected, the next milestone is **real delayed-copy simulation**, not live trading:
+After the forensic profiles are validated, the next milestone is **historical execution-realistic copyability simulation**:
 
-1. replay market state around leader fills;
-2. evaluate 0ms / 100ms / 250ms / 500ms / 1s / 2s / 3s / 5s / 10s / 30s;
-3. use BBO plus L2 depth to calculate achievable follower VWAP;
-4. reject periods with market-tape gaps or stale state;
-5. include taker/maker fees and funding;
-6. replicate target position state, not blindly copy every raw fill;
-7. compute follower net PnL and edge retention;
-8. use historical point-in-time leaderboard snapshots for walk-forward selection.
+1. reconstruct exact historical configured leverage where L1 evidence is available;
+2. join leader actions to historical/recorded BBO + L2 state;
+3. evaluate 0ms / 100ms / 250ms / 500ms / 1s / 2s / 3s / 5s / 10s / 30s delays;
+4. calculate follower VWAP using actual available depth;
+5. reject stale or missing market-state intervals;
+6. include follower fees, funding, partial fills and missed fills;
+7. replicate target position state rather than blindly copying each raw fill;
+8. test multiple follower capital sizes;
+9. calculate follower net PnL, drawdown and edge retention per trader;
+10. only historically robust survivors proceed to prospective live shadow testing.
 
-Only after that survives out-of-sample and prospective paper trading should a live execution adapter be added.
+Real-money execution remains gated behind both historical out-of-sample evidence and prospective paper validation.

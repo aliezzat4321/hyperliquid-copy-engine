@@ -127,6 +127,17 @@ CREATE TABLE IF NOT EXISTS wallet_metrics (
     PRIMARY KEY (wallet_address, as_of_timestamp, lookback)
 );
 
+CREATE TABLE IF NOT EXISTS trader_profiles (
+    wallet_address TEXT NOT NULL REFERENCES wallets(address),
+    as_of_timestamp TIMESTAMPTZ NOT NULL,
+    lookback_start TIMESTAMPTZ NOT NULL,
+    model_version TEXT NOT NULL,
+    profile_json JSONB NOT NULL,
+    PRIMARY KEY (wallet_address, as_of_timestamp, model_version)
+);
+CREATE INDEX IF NOT EXISTS idx_trader_profiles_wallet_time
+    ON trader_profiles(wallet_address, as_of_timestamp DESC);
+
 CREATE TABLE IF NOT EXISTS copyability_runs (
     id BIGSERIAL PRIMARY KEY,
     wallet_address TEXT NOT NULL REFERENCES wallets(address),
