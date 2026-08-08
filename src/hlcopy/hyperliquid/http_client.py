@@ -115,6 +115,7 @@ class HyperliquidHttpClient:
             "userFunding",
             "fundingHistory",
             "userTwapSliceFills",
+            "userTwapSliceFillsByTime",
         }:
             await self._limiter.consume(math.ceil(len(data) / 20))
         return ApiResponse("info", payload, data, int(time.time() * 1000))
@@ -125,11 +126,7 @@ class HyperliquidHttpClient:
     async def user_fills_by_time(
         self, user: str, start_time_ms: int, end_time_ms: int | None = None
     ) -> list[ApiResponse]:
-        """Paginate time-range fills without assuming one response is complete.
-
-        Hyperliquid only exposes the most recent 10k fills through this endpoint. The caller
-        must treat a non-flat starting position as truncated history during reconstruction.
-        """
+        """Paginate time-range fills without assuming one response is complete."""
         pages: list[ApiResponse] = []
         cursor = start_time_ms
         seen: set[tuple[int, int, str | None]] = set()
@@ -177,8 +174,73 @@ class HyperliquidHttpClient:
             payload["endTime"] = end_time_ms
         return await self.info(payload)
 
+    async def user_funding_by_time(
+        self,
+        user: str,
+        start_time_ms: int,
+        end_time_ms: int | None = None,
+        *,
+        max_pages: int = 200,
+    ) -> list[ApiResponse]:
+        """Paginate funding history; time-range info responses are capped per page."""
+        pages: list[ApiResponse] = []
+        cursor = start_time_ms
+        seen: set[tuple[int, str, str, str]] = set()
+        for _ in range(max_pages):
+            page = await self.user_funding(user, cursor, end_time_ms)
+            pages.append(page)
+            rows = page.response_payload
+            if not isinstance(rows, list) or not rows:
+                break
+            fresh = 0
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                delta = row.get("delta") or {}
+                if not isinstance(delta, dict):
+                    delta = {}
+                key = (
+                    int(row.get("time", 0)),
+                    str(delta.get("coin", "")),
+                    str(delta.get("usdc", "")),
+                    str(row.get("hash", "")),
+                )
+                if key not in seen:
+                    seen.add(key)
+                    fresh += 1
+            if fresh == 0:
+                break
+            valid_times = [int(row.get("time", 0)) for row in rows if isinstance(row, dict)]
+            if not valid_times:
+                break
+            last_time = max(valid_times)
+            if end_time_ms is not None and last_time >= end_time_ms:
+                break
+            if last_time < cursor:
+                raise HyperliquidError("userFunding pagination moved backwards")
+            cursor = last_time
+        return pages
+
     async def clearinghouse_state(self, user: str) -> ApiResponse:
         return await self.info({"type": "clearinghouseState", "user": user}, weight=2)
+
+    async def portfolio(self, user: str) -> ApiResponse:
+        return await self.info({"type": "portfolio", "user": user})
+
+    async def historical_orders(self, user: str) -> ApiResponse:
+        return await self.info({"type": "historicalOrders", "user": user})
+
+    async def user_twap_slice_fills(self, user: str) -> ApiResponse:
+        return await self.info({"type": "userTwapSliceFills", "user": user})
+
+    async def user_role(self, user: str) -> ApiResponse:
+        return await self.info({"type": "userRole", "user": user}, weight=60)
+
+    async def user_abstraction(self, user: str) -> ApiResponse:
+        return await self.info({"type": "userAbstraction", "user": user})
+
+    async def user_fees(self, user: str) -> ApiResponse:
+        return await self.info({"type": "userFees", "user": user})
 
     async def l2_book(self, coin: str) -> ApiResponse:
         return await self.info({"type": "l2Book", "coin": coin}, weight=2)
