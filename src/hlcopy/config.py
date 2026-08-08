@@ -23,6 +23,8 @@ class Settings:
     min_month_volume: float = 50_000.0
     http_concurrency: int = 3
     output_dir: Path = Path("outputs")
+    profile_candidates: int = 20
+    profile_lookback_days: int = 90
     market_data_dir: Path = Path("data/market")
     market_coins: tuple[str, ...] = ("BTC", "ETH", "SOL")
     market_flush_rows: int = 5_000
@@ -65,6 +67,11 @@ class Settings:
             min_month_volume=float(os.getenv("HLCOPY_MIN_MONTH_VOLUME", "50000")),
             http_concurrency=max(1, int(os.getenv("HLCOPY_HTTP_CONCURRENCY", "3"))),
             output_dir=Path(os.getenv("HLCOPY_OUTPUT_DIR", "outputs")),
+            profile_candidates=max(1, int(os.getenv("HLCOPY_PROFILE_CANDIDATES", "20"))),
+            profile_lookback_days=max(
+                1,
+                int(os.getenv("HLCOPY_PROFILE_LOOKBACK_DAYS", "90")),
+            ),
             market_data_dir=Path(os.getenv("HLCOPY_MARKET_DATA_DIR", "data/market")),
             market_coins=_market_coins_from_env(),
             market_flush_rows=max(1, int(os.getenv("HLCOPY_MARKET_FLUSH_ROWS", "5000"))),
