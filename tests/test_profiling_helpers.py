@@ -28,3 +28,37 @@ def test_merge_fill_pages_deduplicates_and_keeps_perps_only():
 
     assert _merge_fill_pages(pages) == [perp]
     assert not _fill_history_cap_hit(pages)
+
+
+def test_merge_fill_pages_preserves_source_order_within_same_timestamp():
+    first = {
+        "time": 100,
+        "tid": 300,
+        "hash": "0x300",
+        "dir": "Open Long",
+        "coin": "BTC",
+    }
+    second = {
+        "time": 100,
+        "tid": 100,
+        "hash": "0x100",
+        "dir": "Add Long",
+        "coin": "BTC",
+    }
+    later = {
+        "time": 101,
+        "tid": 200,
+        "hash": "0x200",
+        "dir": "Close Long",
+        "coin": "BTC",
+    }
+    pages = [
+        ApiResponse(
+            "info",
+            {"type": "userFillsByTime", "user": WALLET},
+            [first, second, later],
+            1,
+        )
+    ]
+
+    assert _merge_fill_pages(pages) == [first, second, later]
