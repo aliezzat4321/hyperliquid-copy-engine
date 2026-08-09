@@ -11,7 +11,8 @@ from decimal import Decimal
 from typing import Any
 
 from hlcopy.models import Fill
-from hlcopy.positions.state_machine import PositionEpisode
+from hlcopy.positions.reconstruction import order_fills_by_position_state
+from hlcopy.positions.state_machine import PositionEpisode, normalize_position
 
 PROFILE_MODEL_VERSION = "trader_forensics_v1"
 
@@ -183,8 +184,9 @@ def _style(episodes: list[PositionEpisode]) -> tuple[str, dict[str, object]]:
 
 
 def _fill_action(fill: Fill) -> str:
-    before, delta = fill.start_position, fill.signed_size
-    after = before + delta
+    before = normalize_position(fill.start_position)
+    delta = fill.signed_size
+    after = normalize_position(before + delta)
     if before == 0:
         return "OPEN"
     if before * delta > 0:
@@ -202,11 +204,13 @@ def _behavior(fills: list[Fill], episodes: list[PositionEpisode]) -> dict[str, o
     total = sum(notionals.values())
     states: dict[str, tuple[Decimal, Decimal | None]] = {}
     scale_ins = adverse = 0
-    for fill in sorted(fills, key=lambda item: (item.timestamp_ms, item.tid)):
+    for fill in order_fills_by_position_state(fills):
         qty, avg = states.get(fill.coin, (Decimal("0"), None))
-        if qty != fill.start_position:
-            qty, avg = fill.start_position, None
-        delta, after = fill.signed_size, qty + fill.signed_size
+        source_start = normalize_position(fill.start_position)
+        if qty != source_start:
+            qty, avg = source_start, None
+        delta = fill.signed_size
+        after = normalize_position(qty + delta)
         if qty == 0:
             avg = fill.price if after else None
         elif qty * delta > 0:
