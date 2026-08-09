@@ -8,6 +8,8 @@ from hlcopy.positions.state_machine import (
     InstrumentState,
     PositionEpisode,
     PositionReconstructionError,
+    normalize_position,
+    positions_match,
 )
 
 
@@ -18,12 +20,12 @@ def _order_timestamp_group(
 ) -> list[Fill]:
     """Order fills sharing one exchange timestamp by their position-state transitions.
 
-    Hyperliquid gives each fill an exact ``startPosition``. Multiple fills for the same
+    Hyperliquid gives each fill a ``startPosition``. Multiple fills for the same
     instrument can share the same millisecond timestamp, and ``tid`` is not a safe
     substitute for execution order. Treat each fill as a directed edge from
     ``startPosition`` to ``startPosition + signed_size`` and reconstruct a state-valid
-    trail. When the very first visible timestamp forms a closed Euler circuit, the
-    source API order is the only available tie-breaker for where that circuit begins.
+    trail. Position vertices are canonicalized at sub-nanounit precision so harmless
+    API decimal artifacts do not split an otherwise valid trail.
     """
     if len(fills) <= 1:
         return fills
@@ -34,8 +36,8 @@ def _order_timestamp_group(
     source_order = {id(fill): index for index, fill in enumerate(fills)}
 
     for fill in fills:
-        start = fill.start_position
-        end = start + fill.signed_size
+        start = normalize_position(fill.start_position)
+        end = normalize_position(fill.start_position + fill.signed_size)
         adjacency[start].append((source_order[id(fill)], fill, end))
         outdegree[start] += 1
         indegree[end] += 1
@@ -46,7 +48,7 @@ def _order_timestamp_group(
 
     vertices = set(indegree) | set(outdegree)
     if expected_start is not None:
-        start_vertex = expected_start
+        start_vertex = normalize_position(expected_start)
     else:
         heads = [vertex for vertex in vertices if outdegree[vertex] - indegree[vertex] == 1]
         tails = [vertex for vertex in vertices if indegree[vertex] - outdegree[vertex] == 1]
@@ -66,7 +68,7 @@ def _order_timestamp_group(
         else:
             # Closed circuit at the first visible timestamp: state continuity cannot
             # identify a unique rotation, so preserve the exchange response ordering.
-            start_vertex = fills[0].start_position
+            start_vertex = normalize_position(fills[0].start_position)
 
     stack: list[tuple[Decimal, Fill | None]] = [(start_vertex, None)]
     reverse_path: list[Fill] = []
@@ -93,15 +95,41 @@ def _order_timestamp_group(
 
     qty = start_vertex
     for fill in ordered:
-        if fill.start_position != qty:
+        if not positions_match(fill.start_position, qty):
             timestamp = fills[0].timestamp_ms
             raise PositionReconstructionError(
                 f"{fills[0].wallet_address} {fills[0].coin} time={timestamp}: "
                 "unable to derive a state-continuous same-timestamp fill order"
             )
-        qty += fill.signed_size
+        qty = normalize_position(fill.start_position + fill.signed_size)
 
     return ordered
+
+
+def order_fills_by_position_state(fills: list[Fill]) -> list[Fill]:
+    """Return fills in state-valid per-instrument order for analytics consumers."""
+    grouped: dict[str, list[Fill]] = defaultdict(list)
+    for fill in fills:
+        grouped[fill.coin].append(fill)
+
+    ordered_all: list[Fill] = []
+    for coin_fills in grouped.values():
+        by_timestamp: dict[int, list[Fill]] = defaultdict(list)
+        for fill in coin_fills:
+            by_timestamp[fill.timestamp_ms].append(fill)
+
+        expected_start: Decimal | None = None
+        for timestamp in sorted(by_timestamp):
+            ordered = _order_timestamp_group(
+                by_timestamp[timestamp],
+                expected_start=expected_start,
+            )
+            ordered_all.extend(ordered)
+            if ordered:
+                last = ordered[-1]
+                expected_start = normalize_position(last.start_position + last.signed_size)
+
+    return ordered_all
 
 
 def reconstruct_positions(
