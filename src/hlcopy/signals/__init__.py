@@ -1,0 +1,1 @@
+"""External trader signal normalization."""
