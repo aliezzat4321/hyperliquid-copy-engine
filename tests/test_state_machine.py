@@ -79,6 +79,31 @@ def test_start_position_mismatch_is_fatal_data_quality_error():
         reconstruct_positions(fills)
 
 
+def test_same_timestamp_fills_follow_position_chain_not_tid():
+    fills = [
+        fill(300, 1000, "B", "1", "0", px="100"),
+        fill(100, 1000, "B", "1", "1", px="101"),
+        fill(200, 1000, "A", "2", "2", px="102", pnl="3"),
+    ]
+
+    episodes, states = reconstruct_positions(fills)
+
+    assert states["BTC"].qty == 0
+    assert len(episodes) == 1
+    assert episodes[0].complete_start is True
+    assert episodes[0].fill_tids == [300, 100, 200]
+
+
+def test_disconnected_same_timestamp_fills_fail_closed():
+    fills = [
+        fill(1, 1000, "B", "1", "0"),
+        fill(2, 1000, "B", "1", "5"),
+    ]
+
+    with pytest.raises(PositionReconstructionError, match="position-state trail"):
+        reconstruct_positions(fills)
+
+
 def test_reversal_does_not_inflate_closed_episode_max_size():
     fills = [
         fill(1, 1_000, "B", "1", "0", px="100"),

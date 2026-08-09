@@ -36,8 +36,12 @@ def _merge_fill_pages(pages: list[ApiResponse]) -> list[dict[str, Any]]:
                 key = (int(row["time"]), int(row["tid"]), str(row.get("hash", "")))
             except (KeyError, TypeError, ValueError):
                 continue
-            rows[key] = row
-    return [rows[key] for key in sorted(rows)]
+            rows.setdefault(key, row)
+    merged = list(rows.values())
+    # Pages are fetched forward in time. Sort only on exchange timestamp so Python's
+    # stable sort preserves first-seen API order among fills sharing that millisecond.
+    merged.sort(key=lambda row: int(row["time"]))
+    return merged
 
 
 def _fill_history_cap_hit(pages: list[ApiResponse]) -> bool:
@@ -225,7 +229,7 @@ async def run_trader_profiles(
                         await _store_response(db, page)
                     raw_fills = _merge_fill_pages(fill_pages)
                     fills = [Fill.from_raw(wallet, row) for row in raw_fills]
-                    fills.sort(key=lambda fill: (fill.timestamp_ms, fill.tid))
+                    fills.sort(key=lambda fill: fill.timestamp_ms)
                     await db.upsert_fills(fills)
                     episodes, _states = reconstruct_positions(fills) if fills else ([], {})
                     await db.replace_episodes(wallet, episodes)
