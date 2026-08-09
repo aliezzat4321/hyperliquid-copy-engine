@@ -28,6 +28,7 @@ class BacktestConfig:
     taker_fee_rate: Decimal = D("0.00045")
     max_slippage_bps: Decimal = D("20")
     max_margin_fraction_per_trade: Decimal = D("0.05")
+    max_total_margin_fraction: Decimal = D("0.50")
 
     def __post_init__(self) -> None:
         if self.starting_capital <= ZERO:
@@ -40,6 +41,8 @@ class BacktestConfig:
             raise ValueError("taker_fee_rate is invalid")
         if not ZERO < self.max_margin_fraction_per_trade <= D("1"):
             raise ValueError("max_margin_fraction_per_trade must be within (0,1]")
+        if not ZERO < self.max_total_margin_fraction <= D("1"):
+            raise ValueError("max_total_margin_fraction must be within (0,1]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +58,7 @@ class TradeReplay:
     entry_book_age_ms: int | None
     exit_book_age_ms: int | None
     requested_notional: Decimal
+    margin_reserved: Decimal
     filled_quantity: Decimal
     entry_vwap: Decimal | None
     exit_vwap: Decimal | None
@@ -86,8 +90,14 @@ class BacktestSummary:
     attempted: int
     copied: int
     missed: int
+    unresolved: int
     win_rate: Decimal
     max_drawdown: Decimal
+    max_margin_reserved: Decimal
+    execution_replay_complete: bool
+    funding_mode: str
+    liquidation_path_mode: str
+    equity_sizing_mode: str
 
     def to_dict(self) -> dict[str, object]:
         row = asdict(self)
@@ -97,8 +107,26 @@ class BacktestSummary:
         return row
 
 
-def _source_execution_prices(signal: CopySignal) -> tuple[Decimal, Decimal]:
-    return signal.entry_price, signal.exit_price
+@dataclass(slots=True)
+class _PreparedSignal:
+    signal: CopySignal
+    entry_target_ms: int
+    exit_target_ms: int
+    entry_snapshot: L2Snapshot | None
+    exit_snapshot: L2Snapshot | None
+    data_gap_reason: str | None = None
+
+
+@dataclass(slots=True)
+class _OpenPosition:
+    prepared: _PreparedSignal
+    margin_reserved: Decimal
+    requested_notional: Decimal
+    quantity: Decimal
+    entry_price: Decimal
+    entry_fee: Decimal
+    entry_timestamp_ms: int
+    entry_book_age_ms: int | None
 
 
 def _entry_side(signal: CopySignal) -> str:
@@ -113,10 +141,9 @@ def _market_fill(
     *,
     snapshot: L2Snapshot,
     side: str,
-    notional: Decimal,
+    quantity: Decimal,
     max_slippage_bps: Decimal,
 ) -> tuple[Decimal, Decimal] | None:
-    quantity = notional / snapshot.mid
     levels = list(snapshot.asks if side == "BUY" else snapshot.bids)
     estimate = estimate_marketable_fill(
         side=side,
@@ -130,235 +157,318 @@ def _market_fill(
     return estimate.filled_size, estimate.vwap
 
 
+def _prepare(
+    signals: list[CopySignal] | tuple[CopySignal, ...],
+    *,
+    latency_ms: int,
+    book_provider: BookProvider | None,
+) -> list[_PreparedSignal]:
+    prepared: list[_PreparedSignal] = []
+    for signal in signals:
+        entry_target = signal.opened_at_ms + latency_ms
+        exit_target = signal.closed_at_ms + latency_ms
+        entry_snapshot = None
+        exit_snapshot = None
+        reason = None
+        if book_provider is not None:
+            entry_snapshot = book_provider.snapshot_at_or_before(signal.coin, entry_target)
+            exit_snapshot = book_provider.snapshot_at_or_before(signal.coin, exit_target)
+            if entry_snapshot is None:
+                reason = "ENTRY_BOOK_MISSING"
+            elif exit_snapshot is None:
+                reason = "EXIT_BOOK_MISSING"
+        prepared.append(
+            _PreparedSignal(
+                signal=signal,
+                entry_target_ms=entry_target,
+                exit_target_ms=exit_target,
+                entry_snapshot=entry_snapshot,
+                exit_snapshot=exit_snapshot,
+                data_gap_reason=reason,
+            )
+        )
+    return prepared
+
+
+def _missed_replay(
+    prepared: _PreparedSignal,
+    *,
+    equity: Decimal,
+    reason: str,
+    requested_notional: Decimal = ZERO,
+    margin_reserved: Decimal = ZERO,
+) -> TradeReplay:
+    signal = prepared.signal
+    entry_snapshot = prepared.entry_snapshot
+    exit_snapshot = prepared.exit_snapshot
+    return TradeReplay(
+        signal_id=signal.signal_id,
+        coin=signal.coin,
+        direction=signal.direction,
+        source_opened_at_ms=signal.opened_at_ms,
+        source_closed_at_ms=signal.closed_at_ms,
+        status="MISSED",
+        entry_timestamp_ms=entry_snapshot.timestamp_ms if entry_snapshot else None,
+        exit_timestamp_ms=exit_snapshot.timestamp_ms if exit_snapshot else None,
+        entry_book_age_ms=(
+            prepared.entry_target_ms - entry_snapshot.timestamp_ms
+            if entry_snapshot is not None
+            else None
+        ),
+        exit_book_age_ms=(
+            prepared.exit_target_ms - exit_snapshot.timestamp_ms
+            if exit_snapshot is not None
+            else None
+        ),
+        requested_notional=requested_notional,
+        margin_reserved=margin_reserved,
+        filled_quantity=ZERO,
+        entry_vwap=None,
+        exit_vwap=None,
+        gross_pnl=ZERO,
+        fees=ZERO,
+        net_pnl=ZERO,
+        equity_after=equity,
+        source_underlying_return_bps=signal.underlying_return * BPS,
+        source_leveraged_return=signal.source_leveraged_return,
+        reason=reason,
+    )
+
+
 def run_backtest(
     signals: list[CopySignal] | tuple[CopySignal, ...],
     config: BacktestConfig,
     *,
     book_provider: BookProvider | None = None,
 ) -> tuple[BacktestSummary, list[TradeReplay]]:
-    """Replay copied entries/exits.
+    """Replay copied entries and exits with explicit execution limitations.
 
-    Without a book provider this is a SOURCE_PRICE_BASELINE: it uses the source entry
-    and exit prices, applies follower sizing and taker fees, and must never be presented
-    as execution proof.
+    SOURCE_PRICE_BASELINE uses source prices and fees only. L2_EXECUTION uses the
+    latest non-future historical book at signal-time + latency and requires enough
+    depth inside the slippage cap.
 
-    With a provider, the follower executes against the latest non-future L2 snapshot at
-    entry/exit signal time plus configured latency and requires a complete marketable
-    fill within the slippage cap. Missing/stale books or insufficient depth are skipped.
+    This version reserves concurrent margin and never uses profit from a trade before
+    its close time. It intentionally does not claim mark-to-market liquidation or
+    funding accuracy; both limitations are exposed in the summary.
     """
 
     mode = "L2_EXECUTION" if book_provider is not None else "SOURCE_PRICE_BASELINE"
+    prepared = _prepare(
+        signals,
+        latency_ms=config.latency_ms,
+        book_provider=book_provider,
+    )
+    by_id = {item.signal.signal_id: item for item in prepared}
+
+    events: list[tuple[int, int, str]] = []
+    for item in prepared:
+        events.append((item.exit_target_ms, 0, item.signal.signal_id))
+        events.append((item.entry_target_ms, 1, item.signal.signal_id))
+    events.sort()
+
     equity = config.starting_capital
     peak = equity
     max_drawdown = ZERO
-    replays: list[TradeReplay] = []
+    margin_reserved_total = ZERO
+    max_margin_reserved = ZERO
+    open_positions: dict[str, _OpenPosition] = {}
+    final_rows: dict[str, TradeReplay] = {}
 
-    # Conservative V1 accounting: entries are sized using equity available when their
-    # replay is processed. We process by source close time so realized PnL is never used
-    # before it existed. Exact concurrent-margin accounting is a later execution layer.
-    ordered = sorted(
-        signals,
-        key=lambda item: (item.closed_at_ms, item.opened_at_ms, item.signal_id),
-    )
+    for _timestamp, event_kind, signal_id in events:
+        item = by_id[signal_id]
+        signal = item.signal
 
-    for signal in ordered:
-        requested_margin_fraction = min(
-            signal.allocation_fraction,
-            config.max_margin_fraction_per_trade,
-        )
-        requested_notional = equity * requested_margin_fraction * config.follower_leverage
-        if requested_notional <= ZERO:
-            replays.append(
-                TradeReplay(
+        if event_kind == 1:
+            if item.data_gap_reason is not None:
+                final_rows[signal_id] = _missed_replay(
+                    item,
+                    equity=equity,
+                    reason=item.data_gap_reason,
+                )
+                continue
+
+            desired_fraction = min(
+                signal.allocation_fraction,
+                config.max_margin_fraction_per_trade,
+            )
+            total_margin_cap = max(ZERO, equity * config.max_total_margin_fraction)
+            available_margin = max(ZERO, total_margin_cap - margin_reserved_total)
+            desired_margin = equity * desired_fraction
+            margin = min(desired_margin, available_margin)
+            if margin <= ZERO:
+                final_rows[signal_id] = _missed_replay(
+                    item,
+                    equity=equity,
+                    reason="MARGIN_CAP",
+                )
+                continue
+
+            requested_notional = margin * config.follower_leverage
+            if book_provider is None:
+                entry_price = signal.entry_price
+                quantity = requested_notional / entry_price
+                entry_ts = signal.opened_at_ms
+                entry_age = None
+            else:
+                assert item.entry_snapshot is not None
+                quantity_requested = requested_notional / item.entry_snapshot.mid
+                fill = _market_fill(
+                    snapshot=item.entry_snapshot,
+                    side=_entry_side(signal),
+                    quantity=quantity_requested,
+                    max_slippage_bps=config.max_slippage_bps,
+                )
+                if fill is None:
+                    final_rows[signal_id] = _missed_replay(
+                        item,
+                        equity=equity,
+                        reason="ENTRY_DEPTH_OR_SLIPPAGE",
+                        requested_notional=requested_notional,
+                        margin_reserved=margin,
+                    )
+                    continue
+                quantity, entry_price = fill
+                entry_ts = item.entry_snapshot.timestamp_ms
+                entry_age = item.entry_target_ms - entry_ts
+
+            entry_notional = quantity * entry_price
+            entry_fee = entry_notional * config.taker_fee_rate
+            equity -= entry_fee
+            margin_reserved_total += margin
+            max_margin_reserved = max(max_margin_reserved, margin_reserved_total)
+            peak = max(peak, equity)
+            max_drawdown = min(max_drawdown, equity - peak)
+            open_positions[signal_id] = _OpenPosition(
+                prepared=item,
+                margin_reserved=margin,
+                requested_notional=requested_notional,
+                quantity=quantity,
+                entry_price=entry_price,
+                entry_fee=entry_fee,
+                entry_timestamp_ms=entry_ts,
+                entry_book_age_ms=entry_age,
+            )
+            continue
+
+        position = open_positions.pop(signal_id, None)
+        if position is None:
+            continue
+
+        if book_provider is None:
+            exit_price = signal.exit_price
+            exit_ts = signal.closed_at_ms
+            exit_age = None
+        else:
+            assert item.exit_snapshot is not None
+            fill = _market_fill(
+                snapshot=item.exit_snapshot,
+                side=_exit_side(signal),
+                quantity=position.quantity,
+                max_slippage_bps=config.max_slippage_bps,
+            )
+            if fill is None:
+                final_rows[signal_id] = TradeReplay(
                     signal_id=signal.signal_id,
                     coin=signal.coin,
                     direction=signal.direction,
                     source_opened_at_ms=signal.opened_at_ms,
                     source_closed_at_ms=signal.closed_at_ms,
-                    status="MISSED",
-                    entry_timestamp_ms=None,
-                    exit_timestamp_ms=None,
-                    entry_book_age_ms=None,
-                    exit_book_age_ms=None,
-                    requested_notional=ZERO,
-                    filled_quantity=ZERO,
-                    entry_vwap=None,
+                    status="UNRESOLVED",
+                    entry_timestamp_ms=position.entry_timestamp_ms,
+                    exit_timestamp_ms=item.exit_snapshot.timestamp_ms,
+                    entry_book_age_ms=position.entry_book_age_ms,
+                    exit_book_age_ms=item.exit_target_ms - item.exit_snapshot.timestamp_ms,
+                    requested_notional=position.requested_notional,
+                    margin_reserved=position.margin_reserved,
+                    filled_quantity=position.quantity,
+                    entry_vwap=position.entry_price,
                     exit_vwap=None,
                     gross_pnl=ZERO,
-                    fees=ZERO,
-                    net_pnl=ZERO,
+                    fees=position.entry_fee,
+                    net_pnl=-position.entry_fee,
                     equity_after=equity,
                     source_underlying_return_bps=signal.underlying_return * BPS,
                     source_leveraged_return=signal.source_leveraged_return,
-                    reason="ZERO_NOTIONAL",
-                )
-            )
-            continue
-
-        entry_target = signal.opened_at_ms + config.latency_ms
-        exit_target = signal.closed_at_ms + config.latency_ms
-        entry_book_age: int | None = None
-        exit_book_age: int | None = None
-
-        if book_provider is None:
-            entry_price, exit_price = _source_execution_prices(signal)
-            quantity = requested_notional / entry_price
-            entry_ts = signal.opened_at_ms
-            exit_ts = signal.closed_at_ms
-        else:
-            entry_snapshot = book_provider.snapshot_at_or_before(signal.coin, entry_target)
-            exit_snapshot = book_provider.snapshot_at_or_before(signal.coin, exit_target)
-            if entry_snapshot is None or exit_snapshot is None:
-                reason = "ENTRY_BOOK_MISSING" if entry_snapshot is None else "EXIT_BOOK_MISSING"
-                replays.append(
-                    TradeReplay(
-                        signal_id=signal.signal_id,
-                        coin=signal.coin,
-                        direction=signal.direction,
-                        source_opened_at_ms=signal.opened_at_ms,
-                        source_closed_at_ms=signal.closed_at_ms,
-                        status="MISSED",
-                        entry_timestamp_ms=entry_snapshot.timestamp_ms if entry_snapshot else None,
-                        exit_timestamp_ms=exit_snapshot.timestamp_ms if exit_snapshot else None,
-                        entry_book_age_ms=(
-                            entry_target - entry_snapshot.timestamp_ms
-                            if entry_snapshot
-                            else None
-                        ),
-                        exit_book_age_ms=(
-                            exit_target - exit_snapshot.timestamp_ms
-                            if exit_snapshot
-                            else None
-                        ),
-                        requested_notional=requested_notional,
-                        filled_quantity=ZERO,
-                        entry_vwap=None,
-                        exit_vwap=None,
-                        gross_pnl=ZERO,
-                        fees=ZERO,
-                        net_pnl=ZERO,
-                        equity_after=equity,
-                        source_underlying_return_bps=signal.underlying_return * BPS,
-                        source_leveraged_return=signal.source_leveraged_return,
-                        reason=reason,
-                    )
+                    reason="EXIT_DEPTH_OR_SLIPPAGE",
                 )
                 continue
-
-            entry_book_age = entry_target - entry_snapshot.timestamp_ms
-            exit_book_age = exit_target - exit_snapshot.timestamp_ms
-            entry_fill = _market_fill(
-                snapshot=entry_snapshot,
-                side=_entry_side(signal),
-                notional=requested_notional,
-                max_slippage_bps=config.max_slippage_bps,
-            )
-            if entry_fill is None:
-                replays.append(
-                    TradeReplay(
-                        signal_id=signal.signal_id,
-                        coin=signal.coin,
-                        direction=signal.direction,
-                        source_opened_at_ms=signal.opened_at_ms,
-                        source_closed_at_ms=signal.closed_at_ms,
-                        status="MISSED",
-                        entry_timestamp_ms=entry_snapshot.timestamp_ms,
-                        exit_timestamp_ms=exit_snapshot.timestamp_ms,
-                        entry_book_age_ms=entry_book_age,
-                        exit_book_age_ms=exit_book_age,
-                        requested_notional=requested_notional,
-                        filled_quantity=ZERO,
-                        entry_vwap=None,
-                        exit_vwap=None,
-                        gross_pnl=ZERO,
-                        fees=ZERO,
-                        net_pnl=ZERO,
-                        equity_after=equity,
-                        source_underlying_return_bps=signal.underlying_return * BPS,
-                        source_leveraged_return=signal.source_leveraged_return,
-                        reason="ENTRY_DEPTH_OR_SLIPPAGE",
-                    )
-                )
-                continue
-            quantity, entry_price = entry_fill
-
-            exit_levels = list(
-                exit_snapshot.bids if _exit_side(signal) == "SELL" else exit_snapshot.asks
-            )
-            exit_estimate = estimate_marketable_fill(
-                side=_exit_side(signal),
-                quantity=quantity,
-                levels=exit_levels,
-                reference_mid=exit_snapshot.mid,
-                max_slippage_bps=config.max_slippage_bps,
-            )
-            if not exit_estimate.complete or exit_estimate.vwap is None:
-                replays.append(
-                    TradeReplay(
-                        signal_id=signal.signal_id,
-                        coin=signal.coin,
-                        direction=signal.direction,
-                        source_opened_at_ms=signal.opened_at_ms,
-                        source_closed_at_ms=signal.closed_at_ms,
-                        status="MISSED",
-                        entry_timestamp_ms=entry_snapshot.timestamp_ms,
-                        exit_timestamp_ms=exit_snapshot.timestamp_ms,
-                        entry_book_age_ms=entry_book_age,
-                        exit_book_age_ms=exit_book_age,
-                        requested_notional=requested_notional,
-                        filled_quantity=quantity,
-                        entry_vwap=entry_price,
-                        exit_vwap=None,
-                        gross_pnl=ZERO,
-                        fees=ZERO,
-                        net_pnl=ZERO,
-                        equity_after=equity,
-                        source_underlying_return_bps=signal.underlying_return * BPS,
-                        source_leveraged_return=signal.source_leveraged_return,
-                        reason="EXIT_DEPTH_OR_SLIPPAGE",
-                    )
-                )
-                continue
-            exit_price = exit_estimate.vwap
-            entry_ts = entry_snapshot.timestamp_ms
-            exit_ts = exit_snapshot.timestamp_ms
+            _filled, exit_price = fill
+            exit_ts = item.exit_snapshot.timestamp_ms
+            exit_age = item.exit_target_ms - exit_ts
 
         sign = D("1") if signal.direction == "LONG" else D("-1")
-        gross_pnl = sign * quantity * (exit_price - entry_price)
-        entry_notional = quantity * entry_price
-        exit_notional = quantity * exit_price
-        fees = (entry_notional + exit_notional) * config.taker_fee_rate
+        gross_pnl = sign * position.quantity * (exit_price - position.entry_price)
+        exit_notional = position.quantity * exit_price
+        exit_fee = exit_notional * config.taker_fee_rate
+        fees = position.entry_fee + exit_fee
         net_pnl = gross_pnl - fees
-        equity += net_pnl
+
+        equity += gross_pnl - exit_fee
+        margin_reserved_total -= position.margin_reserved
         peak = max(peak, equity)
         max_drawdown = min(max_drawdown, equity - peak)
 
-        replays.append(
-            TradeReplay(
-                signal_id=signal.signal_id,
-                coin=signal.coin,
-                direction=signal.direction,
-                source_opened_at_ms=signal.opened_at_ms,
-                source_closed_at_ms=signal.closed_at_ms,
-                status="COPIED",
-                entry_timestamp_ms=entry_ts,
-                exit_timestamp_ms=exit_ts,
-                entry_book_age_ms=entry_book_age,
-                exit_book_age_ms=exit_book_age,
-                requested_notional=requested_notional,
-                filled_quantity=quantity,
-                entry_vwap=entry_price,
-                exit_vwap=exit_price,
-                gross_pnl=gross_pnl,
-                fees=fees,
-                net_pnl=net_pnl,
-                equity_after=equity,
-                source_underlying_return_bps=signal.underlying_return * BPS,
-                source_leveraged_return=signal.source_leveraged_return,
-            )
+        final_rows[signal_id] = TradeReplay(
+            signal_id=signal.signal_id,
+            coin=signal.coin,
+            direction=signal.direction,
+            source_opened_at_ms=signal.opened_at_ms,
+            source_closed_at_ms=signal.closed_at_ms,
+            status="COPIED",
+            entry_timestamp_ms=position.entry_timestamp_ms,
+            exit_timestamp_ms=exit_ts,
+            entry_book_age_ms=position.entry_book_age_ms,
+            exit_book_age_ms=exit_age,
+            requested_notional=position.requested_notional,
+            margin_reserved=position.margin_reserved,
+            filled_quantity=position.quantity,
+            entry_vwap=position.entry_price,
+            exit_vwap=exit_price,
+            gross_pnl=gross_pnl,
+            fees=fees,
+            net_pnl=net_pnl,
+            equity_after=equity,
+            source_underlying_return_bps=signal.underlying_return * BPS,
+            source_leveraged_return=signal.source_leveraged_return,
         )
 
-    copied = [row for row in replays if row.status == "COPIED"]
+    for signal_id, position in open_positions.items():
+        if signal_id in final_rows:
+            continue
+        item = position.prepared
+        signal = item.signal
+        final_rows[signal_id] = TradeReplay(
+            signal_id=signal.signal_id,
+            coin=signal.coin,
+            direction=signal.direction,
+            source_opened_at_ms=signal.opened_at_ms,
+            source_closed_at_ms=signal.closed_at_ms,
+            status="UNRESOLVED",
+            entry_timestamp_ms=position.entry_timestamp_ms,
+            exit_timestamp_ms=None,
+            entry_book_age_ms=position.entry_book_age_ms,
+            exit_book_age_ms=None,
+            requested_notional=position.requested_notional,
+            margin_reserved=position.margin_reserved,
+            filled_quantity=position.quantity,
+            entry_vwap=position.entry_price,
+            exit_vwap=None,
+            gross_pnl=ZERO,
+            fees=position.entry_fee,
+            net_pnl=-position.entry_fee,
+            equity_after=equity,
+            source_underlying_return_bps=signal.underlying_return * BPS,
+            source_leveraged_return=signal.source_leveraged_return,
+            reason="POSITION_LEFT_OPEN",
+        )
+
+    rows = [
+        final_rows[item.signal.signal_id]
+        for item in prepared
+        if item.signal.signal_id in final_rows
+    ]
+    copied = [row for row in rows if row.status == "COPIED"]
+    unresolved = [row for row in rows if row.status == "UNRESOLVED"]
     wins = sum(row.net_pnl > ZERO for row in copied)
     net_pnl = equity - config.starting_capital
     summary = BacktestSummary(
@@ -369,13 +479,19 @@ def run_backtest(
         ending_capital=equity,
         net_pnl=net_pnl,
         roi=net_pnl / config.starting_capital,
-        attempted=len(replays),
+        attempted=len(rows),
         copied=len(copied),
-        missed=len(replays) - len(copied),
+        missed=sum(row.status == "MISSED" for row in rows),
+        unresolved=len(unresolved),
         win_rate=D(wins) / D(len(copied)) if copied else ZERO,
         max_drawdown=max_drawdown,
+        max_margin_reserved=max_margin_reserved,
+        execution_replay_complete=not unresolved,
+        funding_mode="NOT_MODELED",
+        liquidation_path_mode="NOT_MODELED",
+        equity_sizing_mode="REALIZED_EQUITY_WITH_CONCURRENT_MARGIN_RESERVATION",
     )
-    return summary, replays
+    return summary, rows
 
 
 def write_backtest_outputs(
