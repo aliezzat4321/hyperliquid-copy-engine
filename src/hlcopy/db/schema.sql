@@ -102,9 +102,12 @@ CREATE TABLE IF NOT EXISTS position_episodes (
     holding_seconds DOUBLE PRECISION,
     complete_start BOOLEAN NOT NULL,
     fill_count INTEGER NOT NULL,
-    fill_tids BIGINT[] NOT NULL,
-    UNIQUE (wallet_address, coin, fill_tids)
+    fill_tids BIGINT[] NOT NULL
 );
+ALTER TABLE position_episodes
+    DROP CONSTRAINT IF EXISTS position_episodes_wallet_address_coin_fill_tids_key;
+CREATE INDEX IF NOT EXISTS idx_position_episodes_wallet_coin_opened
+    ON position_episodes(wallet_address, coin, opened_at);
 
 CREATE TABLE IF NOT EXISTS market_snapshots (
     timestamp TIMESTAMPTZ NOT NULL,
