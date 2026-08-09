@@ -180,6 +180,32 @@ def test_profile_covers_success_style_execution_leverage_and_funding():
     assert profile.account["current_leader_taker_fee_rate"] == 0.00045
 
 
+def test_behavior_metrics_use_position_chain_not_tid_for_same_timestamp_fills():
+    fills = [
+        _fill(300, 1_000, "BTC", "B", "Open Long", "100", "1", "0"),
+        _fill(100, 1_000, "BTC", "B", "Add Long", "90", "1", "1"),
+        _fill(200, 1_000, "BTC", "A", "Close Long", "110", "2", "2", "30"),
+    ]
+    episodes, _ = reconstruct_positions(fills)
+
+    profile = build_trader_profile(
+        wallet_address=WALLET,
+        leaderboard_rank=1,
+        display_name=None,
+        as_of_ms=2_000,
+        lookback_start_ms=0,
+        leaderboard_metrics={},
+        fills=fills,
+        episodes=episodes,
+        clearinghouse_state=None,
+        portfolio=None,
+    )
+
+    assert profile.behavior["scale_in_fill_count"] == 1
+    assert profile.behavior["adverse_scale_in_fraction"] == 1.0
+    assert profile.behavior["close_fill_count"] == 1
+
+
 def test_profile_flags_truncated_history_and_flattens_safely():
     fills = [
         _fill(

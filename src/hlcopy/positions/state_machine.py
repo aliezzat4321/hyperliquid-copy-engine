@@ -7,6 +7,18 @@ from hlcopy.models import Fill
 
 D = Decimal
 ZERO = D("0")
+# Hyperliquid perp sizes are lot-size constrained well above this tolerance. Some API
+# startPosition values contain sub-nanounit decimal artifacts (for example
+# 2171230.5000000002) even though the economically valid position is 2171230.5.
+POSITION_EPSILON = D("1e-9")
+
+
+def normalize_position(value: Decimal) -> Decimal:
+    return value.quantize(POSITION_EPSILON)
+
+
+def positions_match(left: Decimal, right: Decimal) -> bool:
+    return abs(left - right) <= POSITION_EPSILON
 
 
 class PositionReconstructionError(RuntimeError):
@@ -53,9 +65,9 @@ class InstrumentState:
     def _bootstrap_if_needed(self, fill: Fill) -> None:
         if self.episode is not None or self.qty != ZERO:
             return
-        if fill.start_position == ZERO:
+        if positions_match(fill.start_position, ZERO):
             return
-        self.qty = fill.start_position
+        self.qty = normalize_position(fill.start_position)
         self.episode = PositionEpisode(
             wallet_address=self.wallet_address,
             coin=self.coin,
@@ -67,11 +79,14 @@ class InstrumentState:
         )
 
     def _assert_start_position(self, fill: Fill) -> None:
-        if self.qty != fill.start_position:
+        if not positions_match(self.qty, fill.start_position):
             raise PositionReconstructionError(
                 f"{self.wallet_address} {self.coin} tid={fill.tid}: reconstructed start "
                 f"{self.qty} != source startPosition {fill.start_position}"
             )
+        # Anchor back to Hyperliquid's source state after accepting only sub-nanounit
+        # representation noise, then normalize before applying the fill delta.
+        self.qty = normalize_position(fill.start_position)
 
     def apply(self, fill: Fill) -> list[PositionEpisode]:
         self._bootstrap_if_needed(fill)
@@ -81,7 +96,7 @@ class InstrumentState:
             return []
 
         before = self.qty
-        after = before + delta
+        after = normalize_position(before + delta)
         completed: list[PositionEpisode] = []
 
         if before == ZERO:
