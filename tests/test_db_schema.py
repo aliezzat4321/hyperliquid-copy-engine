@@ -62,3 +62,5 @@ def test_position_episode_accepts_large_fill_tid_array():
             (wallet,),
         ).fetchone()
         assert stored == (1000,)
+        conn.execute("DELETE FROM position_episodes WHERE wallet_address = %s", (wallet,))
+        conn.execute("DELETE FROM wallets WHERE address = %s", (wallet,))
