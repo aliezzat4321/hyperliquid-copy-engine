@@ -153,34 +153,35 @@ class Database:
 
     async def replace_episodes(self, wallet: str, episodes: list[PositionEpisode]) -> None:
         conn = self._require()
-        await conn.execute("DELETE FROM position_episodes WHERE wallet_address = %s", (wallet,))
-        for ep in episodes:
-            await conn.execute(
-                """
-                INSERT INTO position_episodes
-                  (wallet_address, coin, direction, opened_at, closed_at, avg_entry, avg_exit,
-                   max_size, realized_pnl, fees, funding, holding_seconds, complete_start,
-                   fill_count, fill_tids)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                """,
-                (
-                    ep.wallet_address,
-                    ep.coin,
-                    ep.direction,
-                    _dt(ep.opened_at_ms) if ep.opened_at_ms is not None else None,
-                    _dt(ep.closed_at_ms) if ep.closed_at_ms is not None else None,
-                    ep.avg_entry,
-                    ep.avg_exit,
-                    ep.max_abs_size,
-                    ep.realized_pnl,
-                    ep.fees,
-                    ep.funding,
-                    ep.holding_seconds,
-                    ep.complete_start,
-                    ep.fill_count,
-                    ep.fill_tids,
-                ),
-            )
+        async with conn.transaction():
+            await conn.execute("DELETE FROM position_episodes WHERE wallet_address = %s", (wallet,))
+            for ep in episodes:
+                await conn.execute(
+                    """
+                    INSERT INTO position_episodes
+                      (wallet_address, coin, direction, opened_at, closed_at, avg_entry, avg_exit,
+                       max_size, realized_pnl, fees, funding, holding_seconds, complete_start,
+                       fill_count, fill_tids)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (
+                        ep.wallet_address,
+                        ep.coin,
+                        ep.direction,
+                        _dt(ep.opened_at_ms) if ep.opened_at_ms is not None else None,
+                        _dt(ep.closed_at_ms) if ep.closed_at_ms is not None else None,
+                        ep.avg_entry,
+                        ep.avg_exit,
+                        ep.max_abs_size,
+                        ep.realized_pnl,
+                        ep.fees,
+                        ep.funding,
+                        ep.holding_seconds,
+                        ep.complete_start,
+                        ep.fill_count,
+                        ep.fill_tids,
+                    ),
+                )
 
     async def store_metrics(
         self, wallet: str, as_of_ms: int, lookback: str, metrics: dict[str, Any]
