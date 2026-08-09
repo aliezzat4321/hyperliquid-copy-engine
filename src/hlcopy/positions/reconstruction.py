@@ -21,8 +21,9 @@ def _order_timestamp_group(
     Hyperliquid gives each fill an exact ``startPosition``. Multiple fills for the same
     instrument can share the same millisecond timestamp, and ``tid`` is not a safe
     substitute for execution order. Treat each fill as a directed edge from
-    ``startPosition`` to ``startPosition + signed_size`` and reconstruct the only state-
-    valid trail. If the available fills cannot form one trail, fail closed.
+    ``startPosition`` to ``startPosition + signed_size`` and reconstruct a state-valid
+    trail. When the very first visible timestamp forms a closed Euler circuit, the
+    source API order is the only available tie-breaker for where that circuit begins.
     """
     if len(fills) <= 1:
         return fills
@@ -30,16 +31,16 @@ def _order_timestamp_group(
     adjacency: dict[Decimal, list[tuple[int, Fill, Decimal]]] = defaultdict(list)
     indegree: Counter[Decimal] = Counter()
     outdegree: Counter[Decimal] = Counter()
+    source_order = {id(fill): index for index, fill in enumerate(fills)}
 
     for fill in fills:
         start = fill.start_position
         end = start + fill.signed_size
-        adjacency[start].append((fill.tid, fill, end))
+        adjacency[start].append((source_order[id(fill)], fill, end))
         outdegree[start] += 1
         indegree[end] += 1
 
-    # Pop lower tids first only as a deterministic tie-break among multiple valid edges.
-    # State continuity, not tid, determines whether the final sequence is admissible.
+    # Pop source-earlier edges first among multiple state-valid choices.
     for edges in adjacency.values():
         edges.sort(key=lambda item: item[0], reverse=True)
 
@@ -63,9 +64,9 @@ def _order_timestamp_group(
         if heads:
             start_vertex = heads[0]
         else:
-            # Euler circuit: any vertex on the circuit is state-valid. Use the start
-            # position of the lowest-tid fill only to keep reconstruction deterministic.
-            start_vertex = min(fills, key=lambda fill: fill.tid).start_position
+            # Closed circuit at the first visible timestamp: state continuity cannot
+            # identify a unique rotation, so preserve the exchange response ordering.
+            start_vertex = fills[0].start_position
 
     stack: list[tuple[Decimal, Fill | None]] = [(start_vertex, None)]
     reverse_path: list[Fill] = []
@@ -74,7 +75,7 @@ def _order_timestamp_group(
         vertex, _incoming = stack[-1]
         edges = adjacency.get(vertex)
         if edges:
-            _tid, fill, end = edges.pop()
+            _source_index, fill, end = edges.pop()
             stack.append((end, fill))
             continue
 
