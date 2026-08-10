@@ -12,6 +12,9 @@ from hlcopy.signals.invo import CopySignal, load_invo_closed_trades
 D = Decimal
 ZERO = D("0")
 BPS = D("10000")
+DEFAULT_STARTING_CAPITAL = D("10000")
+DEFAULT_TAKER_FEE_BPS = D("4.5")
+DEFAULT_SIM_MATCH_TOLERANCE = D("0.000001")
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,9 +155,9 @@ def _max_concurrent_allocation(signals: tuple[CopySignal, ...]) -> Decimal:
 def audit_signals(
     signals: tuple[CopySignal, ...],
     *,
-    starting_capital: Decimal = D("10000"),
-    follower_taker_fee_bps: Decimal = D("4.5"),
-    sim_match_tolerance: Decimal = D("0.000001"),
+    starting_capital: Decimal = DEFAULT_STARTING_CAPITAL,
+    follower_taker_fee_bps: Decimal = DEFAULT_TAKER_FEE_BPS,
+    sim_match_tolerance: Decimal = DEFAULT_SIM_MATCH_TOLERANCE,
 ) -> SourceAudit:
     if not signals:
         raise ValueError("at least one signal is required")
@@ -221,11 +224,26 @@ def audit_signals(
     )
 
     notes = (
-        "Trade-card return is reconstructed as signed entry-to-exit price return times source leverage.",
-        "entry_sim / allocation_fraction is treated only as an observed implied source-equity diagnostic.",
-        "The mirror deliberately sizes from realized follower equity only; it does not mark open positions to market.",
-        "Therefore the mirror is not expected to reproduce Invo lifetime portfolio P&L when overlapping unrealized P&L changes later trade sizing.",
-        "Fee-adjusted mirror uses the supplied follower taker fee on both entry and exit; source Invo simulation values are not assumed to include those fees.",
+        (
+            "Trade-card return is reconstructed as signed entry-to-exit price return "
+            "times source leverage."
+        ),
+        (
+            "entry_sim / allocation_fraction is treated only as an observed implied "
+            "source-equity diagnostic."
+        ),
+        (
+            "The mirror deliberately sizes from realized follower equity only; it does "
+            "not mark open positions to market."
+        ),
+        (
+            "Therefore the mirror is not expected to reproduce Invo lifetime portfolio "
+            "P&L when overlapping unrealized P&L changes later trade sizing."
+        ),
+        (
+            "Fee-adjusted mirror uses the supplied follower taker fee on both entry and "
+            "exit; source Invo simulation values are not assumed to include those fees."
+        ),
     )
 
     return SourceAudit(
@@ -273,8 +291,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--since")
     parser.add_argument("--coins", nargs="+")
     parser.add_argument("--directions", nargs="+", choices=["LONG", "SHORT"])
-    parser.add_argument("--capital", type=Decimal, default=D("10000"))
-    parser.add_argument("--taker-fee-bps", type=Decimal, default=D("4.5"))
+    parser.add_argument("--capital", type=Decimal, default=DEFAULT_STARTING_CAPITAL)
+    parser.add_argument("--taker-fee-bps", type=Decimal, default=DEFAULT_TAKER_FEE_BPS)
     parser.add_argument("--json-out", type=Path)
     return parser
 
