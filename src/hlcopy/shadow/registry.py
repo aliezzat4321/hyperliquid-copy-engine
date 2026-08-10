@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
 import tempfile
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Iterator
 
 STAGES = {"research", "validation", "approved", "rejected"}
 SOURCE_TYPES = {"hyperliquid_wallet", "external"}
@@ -47,9 +50,8 @@ class WalletSpec:
         if not self.source_ref:
             raise ValueError("source_ref is required")
         object.__setattr__(self, "coins", _clean_coins(self.coins))
-        # Validation may start with an empty coin allow-list: the shadow collector
-        # persistently learns a coin from the first prospective userFill. Trading
-        # approval remains stricter and requires an explicit coin allow-list.
+        # Shadow validation can learn coins prospectively from userFills. Trading
+        # approval remains stricter and requires an explicit market allow-list.
         if (
             self.source_type == "hyperliquid_wallet"
             and self.stage == "approved"
@@ -84,9 +86,23 @@ class WalletRegistry:
     def __init__(self, path: Path) -> None:
         self.path = path
 
+    @contextmanager
+    def _mutation_lock(self) -> Iterator[None]:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+        with lock_path.open("a", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
     def init(self) -> None:
-        if not self.path.exists():
-            self._save(())
+        if self.path.exists():
+            return
+        with self._mutation_lock():
+            if not self.path.exists():
+                self._save(())
 
     def load(self) -> tuple[WalletSpec, ...]:
         if not self.path.exists():
@@ -124,25 +140,26 @@ class WalletRegistry:
             )
 
     def add(self, wallet: WalletSpec) -> WalletSpec:
-        wallets = list(self.load())
-        if any(existing.id == wallet.id for existing in wallets):
-            raise ValueError(f"wallet id already exists: {wallet.id}")
-        if wallet.source_type == "hyperliquid_wallet" and any(
-            existing.source_type == "hyperliquid_wallet"
-            and existing.source_ref.lower() == wallet.source_ref.lower()
-            for existing in wallets
-        ):
-            raise ValueError(f"Hyperliquid wallet already exists: {wallet.source_ref.lower()}")
-        now = _now()
-        stored = replace(
-            wallet,
-            created_at=wallet.created_at or now,
-            updated_at=now,
-        )
-        wallets.append(stored)
-        self._assert_valid(wallets)
-        self._save(wallets)
-        return stored
+        with self._mutation_lock():
+            wallets = list(self.load())
+            if any(existing.id == wallet.id for existing in wallets):
+                raise ValueError(f"wallet id already exists: {wallet.id}")
+            if wallet.source_type == "hyperliquid_wallet" and any(
+                existing.source_type == "hyperliquid_wallet"
+                and existing.source_ref.lower() == wallet.source_ref.lower()
+                for existing in wallets
+            ):
+                raise ValueError(f"Hyperliquid wallet already exists: {wallet.source_ref.lower()}")
+            now = _now()
+            stored = replace(
+                wallet,
+                created_at=wallet.created_at or now,
+                updated_at=now,
+            )
+            wallets.append(stored)
+            self._assert_valid(wallets)
+            self._save(wallets)
+            return stored
 
     def update(
         self,
@@ -153,30 +170,54 @@ class WalletRegistry:
         coins: tuple[str, ...] | None = None,
         notes: str | None = None,
     ) -> WalletSpec:
-        wallets = list(self.load())
-        for index, wallet in enumerate(wallets):
-            if wallet.id != wallet_id:
-                continue
-            updated = replace(
-                wallet,
-                stage=stage if stage is not None else wallet.stage,
-                enabled=enabled if enabled is not None else wallet.enabled,
-                coins=_clean_coins(coins) if coins is not None else wallet.coins,
-                notes=notes if notes is not None else wallet.notes,
-                updated_at=_now(),
-            )
-            wallets[index] = updated
-            self._assert_valid(wallets)
-            self._save(wallets)
-            return updated
+        with self._mutation_lock():
+            wallets = list(self.load())
+            for index, wallet in enumerate(wallets):
+                if wallet.id != wallet_id:
+                    continue
+                updated = replace(
+                    wallet,
+                    stage=stage if stage is not None else wallet.stage,
+                    enabled=enabled if enabled is not None else wallet.enabled,
+                    coins=_clean_coins(coins) if coins is not None else wallet.coins,
+                    notes=notes if notes is not None else wallet.notes,
+                    updated_at=_now(),
+                )
+                wallets[index] = updated
+                self._assert_valid(wallets)
+                self._save(wallets)
+                return updated
+        raise KeyError(wallet_id)
+
+    def add_coin(self, wallet_id: str, coin: str) -> WalletSpec:
+        normalized = str(coin).strip().upper()
+        if not normalized:
+            raise ValueError("coin is required")
+        with self._mutation_lock():
+            wallets = list(self.load())
+            for index, wallet in enumerate(wallets):
+                if wallet.id != wallet_id:
+                    continue
+                if normalized in wallet.coins:
+                    return wallet
+                updated = replace(
+                    wallet,
+                    coins=(*wallet.coins, normalized),
+                    updated_at=_now(),
+                )
+                wallets[index] = updated
+                self._assert_valid(wallets)
+                self._save(wallets)
+                return updated
         raise KeyError(wallet_id)
 
     def remove(self, wallet_id: str) -> None:
-        wallets = list(self.load())
-        filtered = [wallet for wallet in wallets if wallet.id != wallet_id]
-        if len(filtered) == len(wallets):
-            raise KeyError(wallet_id)
-        self._save(filtered)
+        with self._mutation_lock():
+            wallets = list(self.load())
+            filtered = [wallet for wallet in wallets if wallet.id != wallet_id]
+            if len(filtered) == len(wallets):
+                raise KeyError(wallet_id)
+            self._save(filtered)
 
     def active_hyperliquid_wallets(
         self,
