@@ -2,17 +2,20 @@ from __future__ import annotations
 
 
 def canonical_coin(value: object) -> str:
-    """Normalize Hyperliquid coin identifiers without corrupting HIP-3 DEX prefixes.
+    """Normalize coin identifiers for internal comparisons and registry storage."""
+    return str(value).strip().upper()
 
-    Native perp symbols are conventionally uppercase (for example ``BTC``), while
-    HIP-3 symbols are namespaced as ``dex:COIN``.  The namespace is part of the
-    exchange identifier and must not be uppercased; doing so can turn a valid
-    ``xyz:SNDK`` subscription into the invalid ``XYZ:SNDK``.
+
+def wire_coin(value: object) -> str:
+    """Return the exchange-facing Hyperliquid symbol.
+
+    Native perp symbols are uppercase. HIP-3 symbols are namespaced as
+    ``dex:COIN``; the DEX namespace on exchange messages/subscriptions is
+    lowercase (for example ``xyz:SNDK``), even though the engine keeps an
+    uppercase internal representation for stable comparisons.
     """
-    text = str(value).strip()
-    if not text:
-        return ""
-    if ":" not in text:
-        return text.upper()
+    text = canonical_coin(value)
+    if not text or ":" not in text:
+        return text
     dex, coin = text.split(":", 1)
-    return f"{dex.lower()}:{coin.upper()}"
+    return f"{dex.lower()}:{coin}"
