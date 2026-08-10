@@ -9,7 +9,8 @@ Type=oneshot
 WorkingDirectory=/root/hyperliquid-copy-engine
 EnvironmentFile=/root/hyperliquid-copy-engine/.env
 Environment=REAL_TRADING_ENABLED=NO
-ExecStart=/root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.research.coverage_cli \
+ExecStart=/usr/bin/flock --wait 1800 /run/hyperliquid-rest-research.lock \
+  /root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.research.coverage_cli \
   --source-registry /mnt/HC_Volume_106576526/hyperliquid/resolver/sources.json \
   scan-all \
   --output-dir /mnt/HC_Volume_106576526/hyperliquid/outputs/resolver \
@@ -17,7 +18,7 @@ ExecStart=/root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.research.cove
   --evidence-lookback-days 14 \
   --time-tolerance-ms 5000 \
   --price-tolerance-bps 5 \
-  --batch-size 50 \
+  --batch-size 100 \
   --universe-limit 5000
 Nice=15
 IOSchedulingClass=idle

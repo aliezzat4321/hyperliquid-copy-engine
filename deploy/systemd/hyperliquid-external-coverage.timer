@@ -3,7 +3,7 @@ Description=Periodic public fill coverage for external trader resolution
 
 [Timer]
 OnBootSec=10min
-OnUnitActiveSec=1h
+OnUnitActiveSec=30min
 RandomizedDelaySec=2min
 Persistent=true
 Unit=hyperliquid-external-coverage.service

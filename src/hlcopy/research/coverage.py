@@ -157,23 +157,12 @@ async def populate_external_evidence_coverage(
                 f"status=complete wallets={len(candidates)} elapsed={_elapsed(run_started)}",
                 flush=True,
             )
-
-            upsert_started = time.monotonic()
-
-            def leaderboard_progress(done: int, total: int) -> None:
-                percent = (100.0 * done / total) if total else 100.0
-                print(
-                    f"coverage progress source={source.id} stage=leaderboard_db_upsert "
-                    f"done={done}/{total} percent={percent:.1f} "
-                    f"stage_elapsed={_elapsed(upsert_started)}",
-                    flush=True,
-                )
-
-            await db.upsert_leaderboard(
-                candidates,
-                leaderboard_response.fetched_at_ms,
-                progress=leaderboard_progress,
+            print(
+                f"coverage progress source={source.id} stage=leaderboard_db_upsert "
+                "status=skipped owner=native_research",
+                flush=True,
             )
+
             ordered = shortlist(
                 candidates,
                 limit=coverage_config.universe_limit,
@@ -200,6 +189,12 @@ async def populate_external_evidence_coverage(
                     f"coverage [{index}/{len(batch)}] {candidate.address} "
                     f"cheap_score={candidate.cheap_score} elapsed={_elapsed(wallet_started)}",
                     flush=True,
+                )
+                # Full leaderboard snapshots are owned by native research. Coverage
+                # only ensures the batch wallet exists so fill FK constraints hold.
+                await db.ensure_leaderboard_wallet(
+                    candidate,
+                    leaderboard_response.fetched_at_ms,
                 )
                 pages = await client.user_fills_by_time(candidate.address, start_ms, end_ms)
                 fills: list[Fill] = []
