@@ -11,7 +11,6 @@ from hlcopy.signals.invo import CopySignal, load_invo_closed_trades
 
 D = Decimal
 ZERO = D("0")
-BPS = D("10000")
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,10 +65,22 @@ def audit_source_truth(signals: tuple[CopySignal, ...]) -> SourceTruth:
         allocation_max=max(allocations),
         allocation_mean=sum(allocations) / D(len(allocations)),
         notes=(
-            "Gross trade P&L is reconstructed only from direction, entry price, exit price, and source leverage.",
-            "Each trade is weighted by its own exported entry_size percentage; no equal-size assumption is used.",
-            "entry_sim and last_sim are deliberately ignored because their currency/unit semantics are undocumented.",
-            "No fees, latency, slippage, funding, or liquidation-path assumptions are included in source truth.",
+            (
+                "Gross trade P&L is reconstructed only from direction, entry price, "
+                "exit price, and source leverage."
+            ),
+            (
+                "Each trade is weighted by its own exported entry_size percentage; "
+                "no equal-size assumption is used."
+            ),
+            (
+                "entry_sim and last_sim are deliberately ignored because their "
+                "currency/unit semantics are undocumented."
+            ),
+            (
+                "No fees, latency, slippage, funding, or liquidation-path assumptions "
+                "are included in source truth."
+            ),
         ),
     )
 
