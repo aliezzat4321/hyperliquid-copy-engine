@@ -43,7 +43,7 @@ def test_registry_lifecycle_is_explicit_and_atomic(tmp_path: Path):
     assert registry.active_hyperliquid_wallets() == ()
 
 
-def test_validation_wallet_requires_explicit_coin_coverage(tmp_path: Path):
+def test_validation_can_learn_coins_but_approval_requires_allow_list(tmp_path: Path):
     registry = WalletRegistry(tmp_path / "wallets.json")
     registry.add(
         WalletSpec(
@@ -53,8 +53,24 @@ def test_validation_wallet_requires_explicit_coin_coverage(tmp_path: Path):
             source_ref=ADDRESS,
         )
     )
-    with pytest.raises(ValueError, match="explicit market coins"):
-        registry.update("alpha", stage="validation")
+    validated = registry.update("alpha", stage="validation")
+    assert validated.coins == ()
+    learned = registry.add_coin("alpha", "btc")
+    assert learned.coins == ("BTC",)
+    approved = registry.update("alpha", stage="approved")
+    assert approved.coins == ("BTC",)
+
+    registry.add(
+        WalletSpec(
+            id="beta",
+            label="Beta",
+            source_type="hyperliquid_wallet",
+            source_ref=ADDRESS_2,
+        )
+    )
+    registry.update("beta", stage="validation")
+    with pytest.raises(ValueError, match="approved Hyperliquid wallets"):
+        registry.update("beta", stage="approved")
 
 
 def test_duplicate_hyperliquid_address_is_rejected(tmp_path: Path):
