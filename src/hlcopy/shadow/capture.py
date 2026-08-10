@@ -197,7 +197,12 @@ class HyperliquidWalletFillCollector:
         )
         coin = str(fill.get("coin", "")).upper()
         learned_coin = False
-        if wallet is not None and wallet.stage == "validation" and coin and coin not in wallet.coins:
+        if (
+            wallet is not None
+            and wallet.stage == "validation"
+            and coin
+            and coin not in wallet.coins
+        ):
             try:
                 wallet = await asyncio.to_thread(self.registry.add_coin, wallet.id, coin)
                 learned_coin = True
