@@ -2,6 +2,7 @@
 Description=Hyperliquid point-in-time wallet research
 After=network-online.target
 Wants=network-online.target
+OnSuccess=hyperliquid-validation-cohort.service
 
 [Service]
 Type=oneshot

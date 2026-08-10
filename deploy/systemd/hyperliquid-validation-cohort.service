@@ -1,0 +1,18 @@
+[Unit]
+Description=Hyperliquid deterministic shadow validation cohort selector
+After=network-online.target postgresql.service hyperliquid-wallet-research.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/hyperliquid-copy-engine
+EnvironmentFile=/root/hyperliquid-copy-engine/.env
+Environment=REAL_TRADING_ENABLED=NO
+ExecStart=/bin/bash -lc 'set -euo pipefail; artifact="$(ls -1t /mnt/HC_Volume_106576526/hyperliquid/outputs/ranked_candidates_*.parquet | head -1)"; exec /root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.research.cohort_cli --registry /mnt/HC_Volume_106576526/hyperliquid/shadow/wallets.json --artifact "$artifact" --max-validation-wallets 6 --max-seed-coins 6 apply'
+Nice=15
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

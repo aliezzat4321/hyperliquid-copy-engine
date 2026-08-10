@@ -11,20 +11,13 @@ from hlcopy.db.postgres import Database
 from hlcopy.discovery.leaderboard import parse_leaderboard, shortlist
 from hlcopy.hyperliquid.http_client import HyperliquidHttpClient
 from hlcopy.models import Fill
-from hlcopy.resolver.engine import (
-    ResolverConfig,
-    ResolverRun,
-    _load_source_signals,
-    _recent_signals,
-    resolve_source,
-)
+from hlcopy.resolver.engine import ResolverConfig, _load_source_signals, _recent_signals
 from hlcopy.resolver.matcher import evidence_events, select_anchor_trades
 from hlcopy.resolver.source_registry import ExternalSourceSpec
-from hlcopy.shadow.registry import WalletRegistry
 
 
 @dataclass(frozen=True, slots=True)
-class ScanConfig:
+class CoverageConfig:
     batch_size: int = 50
     universe_limit: int = 5_000
     min_account_value: float = 0.0
@@ -39,18 +32,17 @@ class ScanConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class ScanResult:
+class CoverageResult:
     source_id: str
     scanned_this_run: int
     scanned_total: int
     universe_size: int
     exhausted: bool
-    resolver: ResolverRun
     state_path: str
 
 
 def _state_path(output_dir: Path, source_id: str) -> Path:
-    return output_dir / f"external_scan_state_{source_id}.json"
+    return output_dir / f"external_coverage_state_{source_id}.json"
 
 
 def _load_state(path: Path) -> dict[str, object]:
@@ -58,10 +50,10 @@ def _load_state(path: Path) -> dict[str, object]:
         return {"version": 1, "checked_addresses": []}
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
-        raise ValueError("resolver scan state must be a JSON object")
+        raise ValueError("coverage state must be a JSON object")
     checked = payload.get("checked_addresses", [])
     if not isinstance(checked, list):
-        raise ValueError("resolver scan state checked_addresses must be a list")
+        raise ValueError("coverage state checked_addresses must be a list")
     return payload
 
 
@@ -72,6 +64,8 @@ def _write_state(
     checked_addresses: set[str],
     leaderboard_snapshot_ms: int,
     universe_addresses: tuple[str, ...],
+    evidence_start_ms: int,
+    evidence_end_ms: int,
 ) -> None:
     universe_payload = json.dumps(sorted(universe_addresses), separators=(",", ":")).encode()
     payload = {
@@ -81,6 +75,8 @@ def _write_state(
         "leaderboard_snapshot_ms": leaderboard_snapshot_ms,
         "universe_size": len(universe_addresses),
         "universe_fingerprint": hashlib.sha256(universe_payload).hexdigest(),
+        "evidence_start_ms": evidence_start_ms,
+        "evidence_end_ms": evidence_end_ms,
         "checked_addresses": sorted(checked_addresses),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -89,29 +85,40 @@ def _write_state(
     tmp.replace(path)
 
 
-async def scan_and_resolve(
+async def populate_external_evidence_coverage(
     *,
     source: ExternalSourceSpec,
     settings: Settings,
-    wallet_registry: WalletRegistry,
     output_dir: Path,
     resolver_config: ResolverConfig,
-    scan_config: ScanConfig,
-) -> ScanResult:
+    coverage_config: CoverageConfig,
+) -> CoverageResult:
+    """Populate public Hyperliquid fills needed by the resolver; never score identity."""
     all_signals = _load_source_signals(source)
     recent = _recent_signals(all_signals, resolver_config.evidence_lookback_days)
     anchors = select_anchor_trades(recent, max_trades=resolver_config.anchor_trades)
     events = evidence_events(anchors)
     if len(events) < 12:
-        raise ValueError("insufficient external evidence for expanding scan")
+        raise ValueError("insufficient external evidence for coverage crawl")
+
     start_ms = min(event.timestamp_ms for event in events) - resolver_config.time_tolerance_ms
     end_ms = max(event.timestamp_ms for event in events) + resolver_config.time_tolerance_ms
-
     state_path = _state_path(output_dir, source.id)
     state = _load_state(state_path)
-    checked_addresses = {
-        str(address).lower() for address in state.get("checked_addresses", []) if str(address)
-    }
+
+    # A changed evidence window invalidates the old checkpoint. This prevents the
+    # crawler from claiming coverage for addresses fetched against stale evidence.
+    if (
+        state.get("evidence_start_ms") not in {None, start_ms}
+        or state.get("evidence_end_ms") not in {None, end_ms}
+    ):
+        checked_addresses: set[str] = set()
+    else:
+        checked_addresses = {
+            str(address).lower()
+            for address in state.get("checked_addresses", [])
+            if str(address)
+        }
 
     async with Database(settings.database_url) as db:
         await db.init_schema()
@@ -121,25 +128,32 @@ async def scan_and_resolve(
             concurrency=settings.http_concurrency,
         ) as client:
             leaderboard_response = await client.leaderboard()
+            await db.store_raw(
+                source="hyperliquid",
+                endpoint=leaderboard_response.endpoint,
+                request_payload=None,
+                response_payload=leaderboard_response.response_payload,
+                fetched_at_ms=leaderboard_response.fetched_at_ms,
+            )
             candidates = parse_leaderboard(leaderboard_response.response_payload)
             await db.upsert_leaderboard(candidates, leaderboard_response.fetched_at_ms)
             ordered = shortlist(
                 candidates,
-                limit=scan_config.universe_limit,
-                min_account_value=scan_config.min_account_value,
-                min_month_roi=scan_config.min_month_roi,
-                min_month_volume=scan_config.min_month_volume,
+                limit=coverage_config.universe_limit,
+                min_account_value=coverage_config.min_account_value,
+                min_month_roi=coverage_config.min_month_roi,
+                min_month_volume=coverage_config.min_month_volume,
             )
-            universe_addresses = tuple(candidate.address for candidate in ordered)
+            universe_addresses = tuple(candidate.address.lower() for candidate in ordered)
             batch = [
                 candidate
                 for candidate in ordered
                 if candidate.address.lower() not in checked_addresses
-            ][: scan_config.batch_size]
+            ][: coverage_config.batch_size]
 
             for index, candidate in enumerate(batch, start=1):
                 print(
-                    f"resolver scan [{index}/{len(batch)}] {candidate.address} "
+                    f"coverage [{index}/{len(batch)}] {candidate.address} "
                     f"cheap_score={candidate.cheap_score}",
                     flush=True,
                 )
@@ -175,23 +189,15 @@ async def scan_and_resolve(
         checked_addresses=checked_addresses,
         leaderboard_snapshot_ms=leaderboard_response.fetched_at_ms,
         universe_addresses=universe_addresses,
+        evidence_start_ms=start_ms,
+        evidence_end_ms=end_ms,
     )
-
-    resolver = await resolve_source(
-        source=source,
-        database_url=settings.database_url,
-        wallet_registry=wallet_registry,
-        output_dir=output_dir,
-        config=resolver_config,
-    )
-    scanned_in_universe = len(set(universe_addresses) & checked_addresses)
-    exhausted = scanned_in_universe >= len(universe_addresses)
-    return ScanResult(
+    scanned_total = len(set(universe_addresses) & checked_addresses)
+    return CoverageResult(
         source_id=source.id,
         scanned_this_run=len(batch),
-        scanned_total=scanned_in_universe,
+        scanned_total=scanned_total,
         universe_size=len(universe_addresses),
-        exhausted=exhausted,
-        resolver=resolver,
+        exhausted=scanned_total >= len(universe_addresses),
         state_path=str(state_path),
     )
