@@ -32,8 +32,13 @@ class CandidateObservation:
 
 def append_observation(path: Path, observation: CandidateObservation) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    serialized = json.dumps(
+        observation.to_dict(),
+        separators=(",", ":"),
+        sort_keys=True,
+    )
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(observation.to_dict(), separators=(",", ":"), sort_keys=True) + "\n")
+        handle.write(serialized + "\n")
         handle.flush()
         os.fsync(handle.fileno())
 
