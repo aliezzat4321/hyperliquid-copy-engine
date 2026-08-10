@@ -9,6 +9,7 @@ from pathlib import Path
 
 from hlcopy.config import Settings
 from hlcopy.resolver.engine import ResolverConfig, resolve_source
+from hlcopy.resolver.scanner import ScanConfig, scan_and_resolve
 from hlcopy.resolver.source_registry import ExternalSourceRegistry, ExternalSourceSpec
 from hlcopy.shadow.registry import WalletRegistry
 
@@ -31,6 +32,15 @@ def build_parser() -> argparse.ArgumentParser:
     resolve = sub.add_parser("resolve")
     resolve.add_argument("--id", required=True)
     _add_resolver_options(resolve)
+
+    scan = sub.add_parser("scan-resolve")
+    scan.add_argument("--id", required=True)
+    _add_resolver_options(scan)
+    scan.add_argument("--batch-size", type=int, default=50)
+    scan.add_argument("--universe-limit", type=int, default=5_000)
+    scan.add_argument("--scan-min-account-value", type=float, default=0.0)
+    scan.add_argument("--scan-min-month-roi", type=float, default=0.0)
+    scan.add_argument("--scan-min-month-volume", type=float, default=0.0)
 
     resolve_all = sub.add_parser("run-all")
     _add_resolver_options(resolve_all)
@@ -78,6 +88,36 @@ async def _resolve_one(args: argparse.Namespace, source: ExternalSourceSpec) -> 
     }
 
 
+async def _scan_one(args: argparse.Namespace, source: ExternalSourceSpec) -> dict[str, object]:
+    result = await scan_and_resolve(
+        source=source,
+        settings=Settings.from_env(),
+        wallet_registry=WalletRegistry(args.wallet_registry),
+        output_dir=args.output_dir,
+        resolver_config=_config(args),
+        scan_config=ScanConfig(
+            batch_size=max(1, args.batch_size),
+            universe_limit=max(1, args.universe_limit),
+            min_account_value=args.scan_min_account_value,
+            min_month_roi=args.scan_min_month_roi,
+            min_month_volume=args.scan_min_month_volume,
+        ),
+    )
+    resolver = result.resolver
+    return {
+        "source_id": result.source_id,
+        "scanned_this_run": result.scanned_this_run,
+        "scanned_total": result.scanned_total,
+        "universe_size": result.universe_size,
+        "exhausted": result.exhausted,
+        "status": resolver.status,
+        "verified_address": resolver.verified_address,
+        "candidate_wallets": resolver.candidate_wallets,
+        "report_path": resolver.report_path,
+        "state_path": result.state_path,
+    }
+
+
 async def _run(args: argparse.Namespace) -> None:
     if os.getenv("REAL_TRADING_ENABLED", "NO").strip().upper() == "YES":
         raise SystemExit("external resolver refuses to run with REAL_TRADING_ENABLED=YES")
@@ -106,6 +146,11 @@ async def _run(args: argparse.Namespace) -> None:
 
     if args.command == "resolve":
         result = await _resolve_one(args, source_registry.get(args.id))
+        print(json.dumps(result, sort_keys=True))
+        return
+
+    if args.command == "scan-resolve":
+        result = await _scan_one(args, source_registry.get(args.id))
         print(json.dumps(result, sort_keys=True))
         return
 
