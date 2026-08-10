@@ -57,6 +57,16 @@ class _FillDeduper:
         return False
 
 
+def required_market_coins(
+    registry: WalletRegistry,
+    extra_coins: tuple[str, ...],
+) -> tuple[str, ...]:
+    normalized_extra = tuple(
+        dict.fromkeys(str(coin).strip().upper() for coin in extra_coins if str(coin).strip())
+    )
+    return tuple(dict.fromkeys((*normalized_extra, *registry.market_coins())))
+
+
 class HyperliquidWalletFillCollector:
     """Prospective, reconnect-safe public userFills collector for a wallet registry."""
 
@@ -186,7 +196,7 @@ class HyperliquidWalletFillCollector:
             else None
         )
         coin = str(fill.get("coin", "")).upper()
-        coverage = wallet is not None and (not wallet.coins or coin in wallet.coins)
+        coverage = wallet is not None and coin in wallet.coins
         await self.sink.put(
             {
                 "kind": "wallet_fill",
@@ -204,10 +214,10 @@ class HyperliquidWalletFillCollector:
                 "fill": fill,
             }
         )
-        if wallet is not None and wallet.coins and coin not in wallet.coins:
+        if wallet is not None and coin not in wallet.coins:
             await self._system(
                 "uncovered_coin",
-                f"{wallet.id}:{coin}; add coin to registry and restart market capture",
+                f"{wallet.id}:{coin}; add the coin to that registry entry",
             )
 
     async def _watch_registry(self, websocket: Any, subscribed: dict[str, WalletSpec]) -> None:
@@ -273,6 +283,68 @@ class HyperliquidWalletFillCollector:
         )
 
 
+async def _market_capture_supervisor(
+    *,
+    ws_url: str,
+    registry: WalletRegistry,
+    sink: JsonlShadowSink,
+    market_dir: Path,
+    extra_coins: tuple[str, ...],
+    market_flush_rows: int,
+    market_flush_seconds: float,
+    market_queue_size: int,
+    heartbeat_seconds: float,
+    reconnect_base_seconds: float,
+    reconnect_max_seconds: float,
+    reload_seconds: float = 5.0,
+) -> None:
+    active_task: asyncio.Task[None] | None = None
+    active_coins: tuple[str, ...] = ()
+    try:
+        while True:
+            desired_coins = required_market_coins(registry, extra_coins)
+            if desired_coins != active_coins:
+                if active_task is not None:
+                    active_task.cancel()
+                    await asyncio.gather(active_task, return_exceptions=True)
+                    active_task = None
+                active_coins = desired_coins
+                await sink.put(
+                    {
+                        "kind": "system",
+                        "event": "market_universe_changed",
+                        "detail": ",".join(active_coins) or "EMPTY",
+                        "received_at_ns": time.time_ns(),
+                        "received_monotonic_ns": time.monotonic_ns(),
+                    }
+                )
+                if active_coins:
+                    active_task = asyncio.create_task(
+                        capture_market(
+                            ws_url=ws_url,
+                            coins=active_coins,
+                            output_dir=market_dir,
+                            flush_rows=market_flush_rows,
+                            flush_seconds=market_flush_seconds,
+                            queue_size=market_queue_size,
+                            heartbeat_seconds=heartbeat_seconds,
+                            reconnect_base_seconds=reconnect_base_seconds,
+                            reconnect_max_seconds=reconnect_max_seconds,
+                        ),
+                        name="shadow-market-capture-child",
+                    )
+            if active_task is not None and active_task.done():
+                error = active_task.exception()
+                if error is not None:
+                    raise error
+                active_task = None
+            await asyncio.sleep(max(1.0, reload_seconds))
+    finally:
+        if active_task is not None:
+            active_task.cancel()
+            await asyncio.gather(active_task, return_exceptions=True)
+
+
 async def run_shadow_validation(
     *,
     ws_url: str,
@@ -288,33 +360,34 @@ async def run_shadow_validation(
     reconnect_max_seconds: float = 30.0,
 ) -> None:
     registry.init()
-    coins = tuple(dict.fromkeys((*extra_coins, *registry.market_coins())))
+    sink = JsonlShadowSink(shadow_dir)
     fill_collector = HyperliquidWalletFillCollector(
         ws_url=ws_url,
         registry=registry,
-        sink=JsonlShadowSink(shadow_dir),
+        sink=sink,
         heartbeat_seconds=heartbeat_seconds,
         reconnect_base_seconds=reconnect_base_seconds,
         reconnect_max_seconds=reconnect_max_seconds,
     )
-    tasks = [asyncio.create_task(fill_collector.run(), name="shadow-wallet-fills")]
-    if coins:
-        tasks.append(
-            asyncio.create_task(
-                capture_market(
-                    ws_url=ws_url,
-                    coins=coins,
-                    output_dir=market_dir,
-                    flush_rows=market_flush_rows,
-                    flush_seconds=market_flush_seconds,
-                    queue_size=market_queue_size,
-                    heartbeat_seconds=heartbeat_seconds,
-                    reconnect_base_seconds=reconnect_base_seconds,
-                    reconnect_max_seconds=reconnect_max_seconds,
-                ),
-                name="shadow-market-capture",
-            )
-        )
+    tasks = [
+        asyncio.create_task(fill_collector.run(), name="shadow-wallet-fills"),
+        asyncio.create_task(
+            _market_capture_supervisor(
+                ws_url=ws_url,
+                registry=registry,
+                sink=sink,
+                market_dir=market_dir,
+                extra_coins=extra_coins,
+                market_flush_rows=market_flush_rows,
+                market_flush_seconds=market_flush_seconds,
+                market_queue_size=market_queue_size,
+                heartbeat_seconds=heartbeat_seconds,
+                reconnect_base_seconds=reconnect_base_seconds,
+                reconnect_max_seconds=reconnect_max_seconds,
+            ),
+            name="shadow-market-supervisor",
+        ),
+    ]
     try:
         await asyncio.gather(*tasks)
     finally:
