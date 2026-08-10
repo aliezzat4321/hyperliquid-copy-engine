@@ -10,6 +10,7 @@ from pathlib import Path
 
 STAGES = {"research", "validation", "approved", "rejected"}
 SOURCE_TYPES = {"hyperliquid_wallet", "external"}
+MAX_ACTIVE_HYPERLIQUID_USERS_PER_IP = 10
 _ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 
@@ -93,11 +94,11 @@ class WalletRegistry:
         if payload.get("version") != 1:
             raise ValueError("unsupported wallet registry version")
         wallets = tuple(WalletSpec.from_dict(row) for row in payload.get("wallets", []))
-        self._assert_unique(wallets)
+        self._assert_valid(wallets)
         return wallets
 
     @staticmethod
-    def _assert_unique(wallets: tuple[WalletSpec, ...] | list[WalletSpec]) -> None:
+    def _assert_valid(wallets: tuple[WalletSpec, ...] | list[WalletSpec]) -> None:
         ids = [wallet.id for wallet in wallets]
         if len(ids) != len(set(ids)):
             raise ValueError("wallet registry contains duplicate ids")
@@ -108,6 +109,18 @@ class WalletRegistry:
         ]
         if len(addresses) != len(set(addresses)):
             raise ValueError("wallet registry contains duplicate Hyperliquid addresses")
+        active_users = [
+            wallet
+            for wallet in wallets
+            if wallet.enabled
+            and wallet.source_type == "hyperliquid_wallet"
+            and wallet.stage in {"validation", "approved"}
+        ]
+        if len(active_users) > MAX_ACTIVE_HYPERLIQUID_USERS_PER_IP:
+            raise ValueError(
+                "active Hyperliquid validation/approved wallets exceed the per-IP "
+                f"limit of {MAX_ACTIVE_HYPERLIQUID_USERS_PER_IP}; use another validation shard"
+            )
 
     def add(self, wallet: WalletSpec) -> WalletSpec:
         wallets = list(self.load())
@@ -126,6 +139,7 @@ class WalletRegistry:
             updated_at=now,
         )
         wallets.append(stored)
+        self._assert_valid(wallets)
         self._save(wallets)
         return stored
 
@@ -151,7 +165,7 @@ class WalletRegistry:
                 updated_at=_now(),
             )
             wallets[index] = updated
-            self._assert_unique(wallets)
+            self._assert_valid(wallets)
             self._save(wallets)
             return updated
         raise KeyError(wallet_id)
@@ -191,7 +205,7 @@ class WalletRegistry:
         )
 
     def _save(self, wallets: tuple[WalletSpec, ...] | list[WalletSpec]) -> None:
-        self._assert_unique(wallets)
+        self._assert_valid(wallets)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "version": 1,
