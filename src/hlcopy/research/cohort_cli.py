@@ -8,6 +8,7 @@ from pathlib import Path
 import psycopg
 
 from hlcopy.config import Settings
+from hlcopy.market.symbols import canonical_coin
 from hlcopy.research.cohort import CohortPolicy, apply_cohort, plan_cohort
 from hlcopy.shadow.registry import WalletRegistry
 
@@ -47,7 +48,9 @@ def _seed_coins(addresses: list[str], max_coins: int) -> dict[str, tuple[str, ..
                     """,
                     (address.lower(), max_coins),
                 )
-                result[address.lower()] = tuple(str(row[0]).upper() for row in cursor.fetchall())
+                result[address.lower()] = tuple(
+                    canonical_coin(row[0]) for row in cursor.fetchall()
+                )
     return result
 
 
