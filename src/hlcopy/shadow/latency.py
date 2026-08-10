@@ -5,7 +5,11 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class LatencyScenario:
-    """Execution latency budget with feed and order-path latency separated."""
+    """Execution latency budget with feed and order-path latency separated.
+
+    Values must come from measurement or an explicitly named stress scenario. This module deliberately
+    ships no guessed production defaults.
+    """
 
     name: str
     decision_ms: float
@@ -41,14 +45,7 @@ class ObservedSignalLatency:
         return min_ms <= self.feed_ms <= max_ms
 
     def estimated_order_arrival_ms(self, scenario: LatencyScenario) -> float:
-        """Exchange-clock target for a follower order under the given latency budget."""
+        """Exchange-clock target for a follower order under an explicit latency budget."""
         if not self.clock_plausible():
             raise ValueError(f"implausible exchange/local clock delta: {self.feed_ms:.3f} ms")
         return self.exchange_ts_ms + max(0.0, self.feed_ms) + scenario.post_receipt_ms
-
-
-DEFAULT_LATENCY_SCENARIOS = (
-    LatencyScenario("fast", decision_ms=5.0, outbound_order_ms=20.0, exchange_processing_ms=5.0),
-    LatencyScenario("base", decision_ms=15.0, outbound_order_ms=50.0, exchange_processing_ms=10.0),
-    LatencyScenario("slow", decision_ms=50.0, outbound_order_ms=150.0, exchange_processing_ms=25.0),
-)
