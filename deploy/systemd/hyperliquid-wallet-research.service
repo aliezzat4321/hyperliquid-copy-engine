@@ -1,0 +1,23 @@
+[Unit]
+Description=Hyperliquid point-in-time wallet research
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/hyperliquid-copy-engine
+EnvironmentFile=/root/hyperliquid-copy-engine/.env
+Environment=REAL_TRADING_ENABLED=NO
+ExecStart=/root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.research.cli \
+  --registry /mnt/HC_Volume_106576526/hyperliquid/shadow/wallets.json \
+  --ledger /mnt/HC_Volume_106576526/hyperliquid/research/candidate_observations.jsonl \
+  --max-publish 25 \
+  --min-composite-score 0 \
+  run
+Nice=15
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

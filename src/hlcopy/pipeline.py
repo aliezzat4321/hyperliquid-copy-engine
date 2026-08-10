@@ -16,6 +16,8 @@ from hlcopy.positions.reconstruction import reconstruct_positions
 from hlcopy.positions.state_machine import PositionReconstructionError
 from hlcopy.ranking.scores import RankedWallet, rank_wallet
 
+RANKING_RULE_VERSION = "rank-wallet-v1"
+
 
 async def run_pipeline(settings: Settings) -> Path:
     settings.output_dir.mkdir(parents=True, exist_ok=True)
@@ -88,13 +90,33 @@ async def run_pipeline(settings: Settings) -> Path:
                 ranked.append(rank_wallet(candidate, metrics))
 
     ranked.sort(key=lambda item: item.composite_score, reverse=True)
-    rows = [item.to_dict() | {"rank": idx} for idx, item in enumerate(ranked, start=1)]
+    screened_count = len(candidates)
+    shortlisted_count = len(selected)
+    ranked_count = len(ranked)
+    rows = [
+        item.to_dict()
+        | {
+            "rank": idx,
+            "source_snapshot_ms": leaderboard_response.fetched_at_ms,
+            "screened_count": screened_count,
+            "shortlisted_count": shortlisted_count,
+            "ranked_count": ranked_count,
+            "ranking_rule_version": RANKING_RULE_VERSION,
+        }
+        for idx, item in enumerate(ranked, start=1)
+    ]
     frame = pl.DataFrame(rows) if rows else pl.DataFrame({"rank": [], "address": []})
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     csv_path = settings.output_dir / f"ranked_candidates_{stamp}.csv"
     parquet_path = settings.output_dir / f"ranked_candidates_{stamp}.parquet"
     frame.write_csv(csv_path)
     frame.write_parquet(parquet_path)
+    print(
+        "research snapshot "
+        f"screened={screened_count} shortlisted={shortlisted_count} ranked={ranked_count} "
+        f"as_of_ms={leaderboard_response.fetched_at_ms} rule={RANKING_RULE_VERSION}",
+        flush=True,
+    )
     print(f"wrote {csv_path}")
     print(f"wrote {parquet_path}")
     return parquet_path
