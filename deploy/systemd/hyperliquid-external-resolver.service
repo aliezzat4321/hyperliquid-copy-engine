@@ -1,0 +1,28 @@
+[Unit]
+Description=Hyperliquid external source wallet identity resolver
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/hyperliquid-copy-engine
+EnvironmentFile=/root/hyperliquid-copy-engine/.env
+Environment=REAL_TRADING_ENABLED=NO
+ExecStart=/root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.resolver.cli \
+  --source-registry /mnt/HC_Volume_106576526/hyperliquid/resolver/sources.json \
+  --wallet-registry /mnt/HC_Volume_106576526/hyperliquid/shadow/wallets.json \
+  run-all \
+  --output-dir /mnt/HC_Volume_106576526/hyperliquid/outputs/resolver \
+  --anchor-trades 16 \
+  --evidence-lookback-days 14 \
+  --time-tolerance-ms 5000 \
+  --price-tolerance-bps 5 \
+  --max-candidates 500 \
+  --report-candidates 25
+Nice=15
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
