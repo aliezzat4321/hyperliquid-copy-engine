@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -19,15 +20,31 @@ from hlcopy.ranking.scores import RankedWallet, rank_wallet
 RANKING_RULE_VERSION = "rank-wallet-v1"
 
 
+def _elapsed(started: float) -> str:
+    seconds = max(0, int(time.monotonic() - started))
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours:d}h{minutes:02d}m{seconds:02d}s"
+    return f"{minutes:d}m{seconds:02d}s"
+
+
 async def run_pipeline(settings: Settings) -> Path:
+    run_started = time.monotonic()
     settings.output_dir.mkdir(parents=True, exist_ok=True)
+    print("research progress stage=database_init status=started", flush=True)
     async with Database(settings.database_url) as db:
         await db.init_schema()
+        print(
+            f"research progress stage=database_init status=complete elapsed={_elapsed(run_started)}",
+            flush=True,
+        )
         async with HyperliquidHttpClient(
             settings.api_url,
             settings.leaderboard_url,
             concurrency=settings.http_concurrency,
         ) as client:
+            print("research progress stage=leaderboard_fetch status=started", flush=True)
             leaderboard_response = await client.leaderboard()
             await db.store_raw(
                 source="hyperliquid",
@@ -37,7 +54,38 @@ async def run_pipeline(settings: Settings) -> Path:
                 fetched_at_ms=leaderboard_response.fetched_at_ms,
             )
             candidates = parse_leaderboard(leaderboard_response.response_payload)
-            await db.upsert_leaderboard(candidates, leaderboard_response.fetched_at_ms)
+            print(
+                "research progress stage=leaderboard_fetch status=complete "
+                f"wallets={len(candidates)} elapsed={_elapsed(run_started)}",
+                flush=True,
+            )
+
+            upsert_started = time.monotonic()
+            print(
+                "research progress stage=leaderboard_db_upsert status=started "
+                f"wallets={len(candidates)}",
+                flush=True,
+            )
+
+            def leaderboard_progress(done: int, total: int) -> None:
+                percent = (100.0 * done / total) if total else 100.0
+                print(
+                    "research progress stage=leaderboard_db_upsert "
+                    f"done={done}/{total} percent={percent:.1f} "
+                    f"stage_elapsed={_elapsed(upsert_started)} run_elapsed={_elapsed(run_started)}",
+                    flush=True,
+                )
+
+            await db.upsert_leaderboard(
+                candidates,
+                leaderboard_response.fetched_at_ms,
+                progress=leaderboard_progress,
+            )
+            print(
+                "research progress stage=leaderboard_db_upsert status=complete "
+                f"elapsed={_elapsed(upsert_started)}",
+                flush=True,
+            )
             selected = shortlist(
                 candidates,
                 limit=settings.max_candidates,
@@ -45,10 +93,28 @@ async def run_pipeline(settings: Settings) -> Path:
                 min_month_roi=settings.min_month_roi,
                 min_month_volume=settings.min_month_volume,
             )
+            print(
+                "research progress stage=wallet_analysis status=started "
+                f"selected={len(selected)} screened={len(candidates)} "
+                f"run_elapsed={_elapsed(run_started)}",
+                flush=True,
+            )
 
+            analysis_started = time.monotonic()
             ranked: list[RankedWallet] = []
             for idx, candidate in enumerate(selected, start=1):
-                print(f"[{idx}/{len(selected)}] analyzing {candidate.address}", flush=True)
+                completed_before = idx - 1
+                if completed_before:
+                    avg_seconds = (time.monotonic() - analysis_started) / completed_before
+                    eta_seconds = int(avg_seconds * (len(selected) - completed_before))
+                    eta_text = f"~{eta_seconds // 60}m{eta_seconds % 60:02d}s"
+                else:
+                    eta_text = "calculating"
+                print(
+                    f"[{idx}/{len(selected)}] analyzing {candidate.address} "
+                    f"elapsed={_elapsed(analysis_started)} eta={eta_text}",
+                    flush=True,
+                )
                 response = await client.user_fills(candidate.address)
                 await db.store_raw(
                     source="hyperliquid",
@@ -73,6 +139,7 @@ async def run_pipeline(settings: Settings) -> Path:
                 fills.sort(key=lambda f: (f.timestamp_ms, f.tid))
                 await db.upsert_fills(fills)
                 if not fills:
+                    print(f"  no perp fills; continuing ({idx}/{len(selected)})", flush=True)
                     continue
                 try:
                     episodes, _states = reconstruct_positions(fills)
@@ -80,14 +147,29 @@ async def run_pipeline(settings: Settings) -> Path:
                     print(f"  data-quality rejection: {exc}", flush=True)
                     continue
                 await db.replace_episodes(candidate.address, episodes)
-                metrics = calculate_wallet_metrics(episodes, fills)
-                await db.store_metrics(
-                    candidate.address,
-                    response.fetched_at_ms,
-                    "recent_userFills_window",
-                    metrics.to_dict(),
-                )
-                ranked.append(rank_wallet(candidate, metrics))
+                try:
+                    metrics = calculate_wallet_metrics(episodes, fills)
+                    await db.store_metrics(
+                        candidate.address,
+                        response.fetched_at_ms,
+                        "recent_userFills_window",
+                        metrics.to_dict(),
+                    )
+                    ranked.append(rank_wallet(candidate, metrics))
+                except (ArithmeticError, TypeError, ValueError) as exc:
+                    print(
+                        "  analytics rejection: "
+                        f"{candidate.address} {type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
+                    continue
+
+            print(
+                "research progress stage=wallet_analysis status=complete "
+                f"processed={len(selected)} ranked={len(ranked)} "
+                f"elapsed={_elapsed(analysis_started)}",
+                flush=True,
+            )
 
     ranked.sort(key=lambda item: item.composite_score, reverse=True)
     screened_count = len(candidates)
@@ -114,7 +196,8 @@ async def run_pipeline(settings: Settings) -> Path:
     print(
         "research snapshot "
         f"screened={screened_count} shortlisted={shortlisted_count} ranked={ranked_count} "
-        f"as_of_ms={leaderboard_response.fetched_at_ms} rule={RANKING_RULE_VERSION}",
+        f"as_of_ms={leaderboard_response.fetched_at_ms} rule={RANKING_RULE_VERSION} "
+        f"total_elapsed={_elapsed(run_started)}",
         flush=True,
     )
     print(f"wrote {csv_path}")
