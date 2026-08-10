@@ -105,6 +105,32 @@ def test_market_universe_changes_with_registry_without_code_changes(tmp_path: Pa
     assert required_market_coins(registry, ("SOL",)) == ("SOL", "BTC", "ETH", "HYPE")
 
 
+def test_registry_refuses_more_than_ten_active_hyperliquid_users_per_ip(tmp_path: Path):
+    registry = WalletRegistry(tmp_path / "wallets.json")
+    for index in range(10):
+        registry.add(
+            WalletSpec(
+                id=f"wallet-{index}",
+                label=f"Wallet {index}",
+                source_type="hyperliquid_wallet",
+                source_ref=f"0x{index + 1:040x}",
+                stage="validation",
+                coins=("BTC",),
+            )
+        )
+    with pytest.raises(ValueError, match="per-IP"):
+        registry.add(
+            WalletSpec(
+                id="wallet-10",
+                label="Wallet 10",
+                source_type="hyperliquid_wallet",
+                source_ref=f"0x{11:040x}",
+                stage="validation",
+                coins=("BTC",),
+            )
+        )
+
+
 def test_registry_supports_external_research_sources(tmp_path: Path):
     registry = WalletRegistry(tmp_path / "wallets.json")
     wallet = registry.add(
