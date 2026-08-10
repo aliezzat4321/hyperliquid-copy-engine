@@ -47,14 +47,15 @@ class WalletSpec:
         if not self.source_ref:
             raise ValueError("source_ref is required")
         object.__setattr__(self, "coins", _clean_coins(self.coins))
+        # Validation may start with an empty coin allow-list: the shadow collector
+        # persistently learns a coin from the first prospective userFill. Trading
+        # approval remains stricter and requires an explicit coin allow-list.
         if (
             self.source_type == "hyperliquid_wallet"
-            and self.stage in {"validation", "approved"}
+            and self.stage == "approved"
             and not self.coins
         ):
-            raise ValueError(
-                "validation/approved Hyperliquid wallets require explicit market coins"
-            )
+            raise ValueError("approved Hyperliquid wallets require explicit market coins")
 
     def to_dict(self) -> dict[str, object]:
         row = asdict(self)
