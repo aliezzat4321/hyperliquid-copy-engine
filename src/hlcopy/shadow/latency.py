@@ -7,8 +7,8 @@ from dataclasses import dataclass
 class LatencyScenario:
     """Execution latency budget with feed and order-path latency separated.
 
-    Values must come from measurement or an explicitly named stress scenario. This module deliberately
-    ships no guessed production defaults.
+    Values must come from measurement or an explicitly named stress scenario.
+    This module deliberately ships no guessed production defaults.
     """
 
     name: str
