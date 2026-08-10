@@ -2,9 +2,9 @@
 Description=Periodic external source wallet identity resolution
 
 [Timer]
-OnBootSec=20min
-OnUnitActiveSec=6h
-RandomizedDelaySec=5min
+OnBootSec=15min
+OnUnitActiveSec=1h
+RandomizedDelaySec=2min
 Persistent=true
 Unit=hyperliquid-external-resolver.service
 
