@@ -196,6 +196,17 @@ class HyperliquidWalletFillCollector:
             else None
         )
         coin = str(fill.get("coin", "")).upper()
+        learned_coin = False
+        if wallet is not None and wallet.stage == "validation" and coin and coin not in wallet.coins:
+            try:
+                wallet = await asyncio.to_thread(self.registry.add_coin, wallet.id, coin)
+                learned_coin = True
+                await self._system("market_coin_learned", f"{wallet.id}:{coin}")
+            except (KeyError, OSError, ValueError, json.JSONDecodeError) as exc:
+                await self._system(
+                    "market_coin_learn_failed",
+                    f"{wallet.id}:{coin}:{type(exc).__name__}",
+                )
         coverage = wallet is not None and coin in wallet.coins
         await self.sink.put(
             {
@@ -211,13 +222,14 @@ class HyperliquidWalletFillCollector:
                 "observed_event_lag_ms": observed_lag_ms,
                 "is_snapshot": is_snapshot,
                 "market_coin_configured": coverage,
+                "market_coin_learned": learned_coin,
                 "fill": fill,
             }
         )
-        if wallet is not None and coin not in wallet.coins:
+        if wallet is not None and not coverage:
             await self._system(
                 "uncovered_coin",
-                f"{wallet.id}:{coin}; add the coin to that registry entry",
+                f"{wallet.id}:{coin}; market data may be incomplete for this fill",
             )
 
     async def _watch_registry(self, websocket: Any, subscribed: dict[str, WalletSpec]) -> None:
@@ -296,7 +308,7 @@ async def _market_capture_supervisor(
     heartbeat_seconds: float,
     reconnect_base_seconds: float,
     reconnect_max_seconds: float,
-    reload_seconds: float = 5.0,
+    reload_seconds: float = 0.5,
 ) -> None:
     active_task: asyncio.Task[None] | None = None
     active_coins: tuple[str, ...] = ()
@@ -338,7 +350,7 @@ async def _market_capture_supervisor(
                 if error is not None:
                     raise error
                 active_task = None
-            await asyncio.sleep(max(1.0, reload_seconds))
+            await asyncio.sleep(max(0.25, reload_seconds))
     finally:
         if active_task is not None:
             active_task.cancel()
