@@ -4,10 +4,12 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 
 from hlcopy.config import Settings
-from hlcopy.shadow.capture import run_shadow_validation
+from hlcopy.shadow.capture import required_market_coins, run_shadow_validation
+from hlcopy.shadow.manifest import write_run_manifest
 from hlcopy.shadow.registry import SOURCE_TYPES, STAGES, WalletRegistry, WalletSpec
 
 
@@ -115,11 +117,23 @@ def main() -> None:
         print(f"removed {args.id}")
         return
     if args.command == "run":
+        if os.getenv("REAL_TRADING_ENABLED", "NO").strip().upper() == "YES":
+            raise SystemExit("shadow validation refuses to run with REAL_TRADING_ENABLED=YES")
         settings = Settings.from_env()
+        registry.init()
         extra_coins = tuple(str(coin).upper() for coin in args.coins)
+        initial_market_coins = required_market_coins(registry, extra_coins)
+        manifest_path = write_run_manifest(
+            registry=registry,
+            shadow_dir=args.shadow_dir,
+            websocket_url=settings.ws_url,
+            extra_coins=extra_coins,
+            initial_market_coins=initial_market_coins,
+        )
         print(
             "shadow validation starting; REAL TRADING IS NOT PART OF THIS PROCESS; "
-            f"registry={registry.path} extra_coins={','.join(extra_coins) or '-'}",
+            f"registry={registry.path} coins={','.join(initial_market_coins) or '-'} "
+            f"manifest={manifest_path}",
             flush=True,
         )
         try:
