@@ -439,7 +439,8 @@ def main() -> None:
         raise SystemExit("no signals matched")
     if args.archive_dir is None:
         print(
-            "WARNING: source-price baseline only; this does not prove latency/slippage copyability.",
+            "WARNING: source-price baseline only; this does not prove "
+            "latency/slippage copyability.",
             flush=True,
         )
     json_path, csv_path = run_percent_matrix(
