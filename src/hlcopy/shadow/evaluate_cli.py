@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-from dataclasses import asdict
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
