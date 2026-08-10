@@ -11,12 +11,8 @@ from typing import Any, Protocol
 from websockets.asyncio.client import connect
 from websockets.exceptions import WebSocketException
 
-from hlcopy.market.normalize import (
-    TradeDeduper,
-    build_subscriptions,
-    normalize_market_message,
-    system_record,
-)
+from hlcopy.market.normalize import TradeDeduper, normalize_market_message, system_record
+from hlcopy.market.symbols import canonical_coin
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +23,17 @@ class MarketSink(Protocol):
     async def put(self, row: dict[str, Any]) -> None: ...
 
     async def close(self) -> None: ...
+
+
+def _market_subscriptions(coins: Iterable[str]) -> list[dict[str, str]]:
+    cleaned = dict.fromkeys(
+        normalized for coin in coins if (normalized := canonical_coin(coin))
+    )
+    return [
+        {"type": subscription_type, "coin": coin}
+        for coin in cleaned
+        for subscription_type in ("bbo", "l2Book", "trades", "activeAssetCtx")
+    ]
 
 
 class HyperliquidMarketCollector:
@@ -43,7 +50,7 @@ class HyperliquidMarketCollector:
         reconnect_max_seconds: float = 30.0,
     ) -> None:
         self.ws_url = ws_url
-        self.subscriptions = build_subscriptions(coins)
+        self.subscriptions = _market_subscriptions(coins)
         if not self.subscriptions:
             raise ValueError("at least one market coin is required")
         self.sink = sink
@@ -65,8 +72,9 @@ class HyperliquidMarketCollector:
                 except asyncio.CancelledError:
                     raise
                 except (WebSocketException, OSError, TimeoutError) as exc:
-                    await self.sink.put(system_record("connection_lost", type(exc).__name__))
-                    logger.warning("Hyperliquid WebSocket lost: %s", type(exc).__name__)
+                    detail = f"{type(exc).__name__}: {exc}"
+                    await self.sink.put(system_record("connection_lost", detail))
+                    logger.warning("Hyperliquid WebSocket lost: %s", detail)
                 except Exception as exc:
                     await self.sink.put(system_record("fatal_collector_error", repr(exc)))
                     raise
