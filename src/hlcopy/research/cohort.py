@@ -127,6 +127,7 @@ def apply_cohort(
     parquet_path: Path,
     registry: WalletRegistry,
     policy: CohortPolicy,
+    seed_coins_by_address: dict[str, tuple[str, ...]] | None = None,
 ) -> CohortApplyResult:
     registry.init()
     plan = plan_cohort(parquet_path, policy)
@@ -147,6 +148,10 @@ def apply_cohort(
     promoted: list[str] = []
     already: list[str] = []
     chosen = [candidate for candidate in plan if candidate.selected]
+    seed_map = {
+        address.lower(): tuple(coins)
+        for address, coins in (seed_coins_by_address or {}).items()
+    }
 
     for candidate in chosen:
         wallet = by_address.get(candidate.address)
@@ -164,7 +169,13 @@ def apply_cohort(
             f"copyability={candidate.copyability_score:.2f} "
             f"confidence={candidate.confidence_score:.2f}"
         ).strip("; ")
-        registry.update(wallet.id, stage="validation", notes=note)
+        seed_coins = seed_map.get(candidate.address, wallet.coins)
+        registry.update(
+            wallet.id,
+            stage="validation",
+            coins=seed_coins,
+            notes=note,
+        )
         promoted.append(wallet.id)
         capacity -= 1
 
