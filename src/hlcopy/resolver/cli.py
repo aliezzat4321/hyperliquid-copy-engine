@@ -9,7 +9,6 @@ from pathlib import Path
 
 from hlcopy.config import Settings
 from hlcopy.resolver.engine import ResolverConfig, resolve_source
-from hlcopy.resolver.scanner import ScanConfig, scan_and_resolve
 from hlcopy.resolver.source_registry import ExternalSourceRegistry, ExternalSourceSpec
 from hlcopy.shadow.registry import WalletRegistry
 
@@ -33,17 +32,8 @@ def build_parser() -> argparse.ArgumentParser:
     resolve.add_argument("--id", required=True)
     _add_resolver_options(resolve)
 
-    scan = sub.add_parser("scan-resolve")
-    scan.add_argument("--id", required=True)
-    _add_resolver_options(scan)
-    _add_scan_options(scan)
-
     resolve_all = sub.add_parser("run-all")
     _add_resolver_options(resolve_all)
-
-    scan_all = sub.add_parser("scan-all")
-    _add_resolver_options(scan_all)
-    _add_scan_options(scan_all)
     return parser
 
 
@@ -57,14 +47,6 @@ def _add_resolver_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--report-candidates", type=int, default=25)
 
 
-def _add_scan_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--batch-size", type=int, default=50)
-    parser.add_argument("--universe-limit", type=int, default=5_000)
-    parser.add_argument("--scan-min-account-value", type=float, default=0.0)
-    parser.add_argument("--scan-min-month-roi", type=float, default=0.0)
-    parser.add_argument("--scan-min-month-volume", type=float, default=0.0)
-
-
 def _config(args: argparse.Namespace) -> ResolverConfig:
     return ResolverConfig(
         anchor_trades=max(6, args.anchor_trades),
@@ -73,16 +55,6 @@ def _config(args: argparse.Namespace) -> ResolverConfig:
         price_tolerance_bps=args.price_tolerance_bps,
         max_candidates=max(1, args.max_candidates),
         report_candidates=max(1, args.report_candidates),
-    )
-
-
-def _scan_config(args: argparse.Namespace) -> ScanConfig:
-    return ScanConfig(
-        batch_size=max(1, args.batch_size),
-        universe_limit=max(1, args.universe_limit),
-        min_account_value=args.scan_min_account_value,
-        min_month_roi=args.scan_min_month_roi,
-        min_month_volume=args.scan_min_month_volume,
     )
 
 
@@ -103,30 +75,6 @@ async def _resolve_one(args: argparse.Namespace, source: ExternalSourceSpec) -> 
         "evidence_events": result.evidence_events,
         "candidate_wallets": result.candidate_wallets,
         "report_path": result.report_path,
-    }
-
-
-async def _scan_one(args: argparse.Namespace, source: ExternalSourceSpec) -> dict[str, object]:
-    result = await scan_and_resolve(
-        source=source,
-        settings=Settings.from_env(),
-        wallet_registry=WalletRegistry(args.wallet_registry),
-        output_dir=args.output_dir,
-        resolver_config=_config(args),
-        scan_config=_scan_config(args),
-    )
-    resolver = result.resolver
-    return {
-        "source_id": result.source_id,
-        "scanned_this_run": result.scanned_this_run,
-        "scanned_total": result.scanned_total,
-        "universe_size": result.universe_size,
-        "exhausted": result.exhausted,
-        "status": resolver.status,
-        "verified_address": resolver.verified_address,
-        "candidate_wallets": resolver.candidate_wallets,
-        "report_path": resolver.report_path,
-        "state_path": result.state_path,
     }
 
 
@@ -157,25 +105,15 @@ async def _run(args: argparse.Namespace) -> None:
         return
 
     if args.command == "resolve":
-        result = await _resolve_one(args, source_registry.get(args.id))
-        print(json.dumps(result, sort_keys=True))
+        print(json.dumps(await _resolve_one(args, source_registry.get(args.id)), sort_keys=True))
         return
 
-    if args.command == "scan-resolve":
-        result = await _scan_one(args, source_registry.get(args.id))
-        print(json.dumps(result, sort_keys=True))
-        return
-
-    scanner = args.command == "scan-all"
     results = []
     for source in source_registry.load():
         if not source.enabled:
             continue
         try:
-            if scanner:
-                results.append(await _scan_one(args, source))
-            else:
-                results.append(await _resolve_one(args, source))
+            results.append(await _resolve_one(args, source))
         except (FileNotFoundError, ValueError) as exc:
             results.append(
                 {
