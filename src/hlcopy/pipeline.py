@@ -36,7 +36,8 @@ async def run_pipeline(settings: Settings) -> Path:
     async with Database(settings.database_url) as db:
         await db.init_schema()
         print(
-            f"research progress stage=database_init status=complete elapsed={_elapsed(run_started)}",
+            "research progress stage=database_init status=complete "
+            f"elapsed={_elapsed(run_started)}",
             flush=True,
         )
         async with HyperliquidHttpClient(
