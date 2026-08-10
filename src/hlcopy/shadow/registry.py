@@ -46,6 +46,12 @@ class WalletSpec:
         if not self.source_ref:
             raise ValueError("source_ref is required")
         object.__setattr__(self, "coins", _clean_coins(self.coins))
+        if (
+            self.source_type == "hyperliquid_wallet"
+            and self.stage in {"validation", "approved"}
+            and not self.coins
+        ):
+            raise ValueError("validation/approved Hyperliquid wallets require explicit market coins")
 
     def to_dict(self) -> dict[str, object]:
         row = asdict(self)
@@ -69,7 +75,7 @@ class WalletSpec:
 
 
 class WalletRegistry:
-    """Small atomic JSON registry that separates research, validation, and approval."""
+    """Atomic source registry separating research, validation, and trading approval."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -85,15 +91,32 @@ class WalletRegistry:
         if payload.get("version") != 1:
             raise ValueError("unsupported wallet registry version")
         wallets = tuple(WalletSpec.from_dict(row) for row in payload.get("wallets", []))
+        self._assert_unique(wallets)
+        return wallets
+
+    @staticmethod
+    def _assert_unique(wallets: tuple[WalletSpec, ...] | list[WalletSpec]) -> None:
         ids = [wallet.id for wallet in wallets]
         if len(ids) != len(set(ids)):
             raise ValueError("wallet registry contains duplicate ids")
-        return wallets
+        addresses = [
+            wallet.source_ref.lower()
+            for wallet in wallets
+            if wallet.source_type == "hyperliquid_wallet"
+        ]
+        if len(addresses) != len(set(addresses)):
+            raise ValueError("wallet registry contains duplicate Hyperliquid addresses")
 
     def add(self, wallet: WalletSpec) -> WalletSpec:
         wallets = list(self.load())
         if any(existing.id == wallet.id for existing in wallets):
             raise ValueError(f"wallet id already exists: {wallet.id}")
+        if wallet.source_type == "hyperliquid_wallet" and any(
+            existing.source_type == "hyperliquid_wallet"
+            and existing.source_ref.lower() == wallet.source_ref.lower()
+            for existing in wallets
+        ):
+            raise ValueError(f"Hyperliquid wallet already exists: {wallet.source_ref.lower()}")
         now = _now()
         stored = replace(
             wallet,
@@ -126,6 +149,7 @@ class WalletRegistry:
                 updated_at=_now(),
             )
             wallets[index] = updated
+            self._assert_unique(wallets)
             self._save(wallets)
             return updated
         raise KeyError(wallet_id)
@@ -165,6 +189,7 @@ class WalletRegistry:
         )
 
     def _save(self, wallets: tuple[WalletSpec, ...] | list[WalletSpec]) -> None:
+        self._assert_unique(wallets)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "version": 1,
