@@ -51,7 +51,9 @@ class WalletSpec:
             and self.stage in {"validation", "approved"}
             and not self.coins
         ):
-            raise ValueError("validation/approved Hyperliquid wallets require explicit market coins")
+            raise ValueError(
+                "validation/approved Hyperliquid wallets require explicit market coins"
+            )
 
     def to_dict(self) -> dict[str, object]:
         row = asdict(self)
