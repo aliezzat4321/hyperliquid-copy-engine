@@ -120,6 +120,68 @@ class HyperliquidHttpClient:
             await self._limiter.consume(math.ceil(len(data) / 20))
         return ApiResponse("info", payload, data, int(time.time() * 1000))
 
+    async def meta(self) -> ApiResponse:
+        return await self.info({"type": "meta"}, weight=2)
+
+    async def meta_and_asset_ctxs(self) -> ApiResponse:
+        return await self.info({"type": "metaAndAssetCtxs"}, weight=2)
+
+    async def funding_history(
+        self,
+        coin: str,
+        start_time_ms: int,
+        end_time_ms: int | None = None,
+    ) -> ApiResponse:
+        payload: dict[str, Any] = {
+            "type": "fundingHistory",
+            "coin": coin,
+            "startTime": start_time_ms,
+        }
+        if end_time_ms is not None:
+            payload["endTime"] = end_time_ms
+        return await self.info(payload)
+
+    async def funding_history_by_time(
+        self,
+        coin: str,
+        start_time_ms: int,
+        end_time_ms: int | None = None,
+        *,
+        max_pages: int = 200,
+    ) -> list[ApiResponse]:
+        """Paginate immutable public funding rates without silently truncating at 500 rows."""
+        pages: list[ApiResponse] = []
+        cursor = start_time_ms
+        seen: set[tuple[int, str, str]] = set()
+        for _ in range(max_pages):
+            page = await self.funding_history(coin, cursor, end_time_ms)
+            pages.append(page)
+            rows = page.response_payload
+            if not isinstance(rows, list) or not rows:
+                break
+            fresh_times: list[int] = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                timestamp = int(row.get("time", 0))
+                key = (
+                    timestamp,
+                    str(row.get("fundingRate", "")),
+                    str(row.get("premium", "")),
+                )
+                if key not in seen:
+                    seen.add(key)
+                    fresh_times.append(timestamp)
+            if not fresh_times:
+                break
+            last_time = max(fresh_times)
+            if end_time_ms is not None and last_time >= end_time_ms:
+                break
+            if last_time < cursor:
+                raise HyperliquidError("fundingHistory pagination moved backwards")
+            cursor = last_time + 1
+        return pages
+
     async def user_fills(self, user: str) -> ApiResponse:
         return await self.info({"type": "userFills", "user": user, "aggregateByTime": False})
 
