@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodic Hyperliquid shadow perp metadata snapshot
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=6h
+RandomizedDelaySec=2min
+Persistent=true
+Unit=hyperliquid-shadow-metadata.service
+
+[Install]
+WantedBy=timers.target
