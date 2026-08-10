@@ -9,26 +9,54 @@ Research may discover candidates from public Hyperliquid data, imported research
 permitted sources. A candidate enters the registry with `stage=research`. Research code cannot place
 orders and a research candidate is not subscribed by the validation wallet collector.
 
+Candidate selection should be point-in-time: store when the wallet was discovered, what data was
+available then, and what score/rules caused it to enter research. Do not rebuild candidate lists later
+from future leaderboard information and call the result historical performance.
+
 ## 2. Validation / shadow
 
-A human or explicit promotion step moves a candidate to `stage=validation`. The shadow service then:
+A human or explicit promotion step moves a candidate to `stage=validation`. Hyperliquid wallet
+candidates must declare explicit market coins before validation so the system can guarantee L2
+coverage. The shadow service then:
 
 - subscribes to public Hyperliquid `userFills` for enabled Hyperliquid wallet candidates;
 - records exchange fill timestamp and local receipt timestamp using wall and monotonic clocks;
-- records whether the fill's coin is covered by the configured market-capture universe;
+- records observed exchange-to-local signal latency;
 - concurrently captures BBO, L2, trades, and active asset context for covered coins;
+- persists spread, depth, imbalance, microprice, funding and mark-price evidence in the market tape;
 - persists raw prospective evidence before any strategy decision is made;
+- creates an immutable run manifest/fingerprint for reproducibility;
 - never places orders.
 
-Registry edits are reloaded by the wallet-fill collector without code changes. Market coin coverage is
-computed at process start from validation/approved wallet coin lists plus explicit extra coins. Restart
-the shadow service after changing coin coverage.
+Registry edits are hot-reloaded. Wallet subscriptions change without a deployment. If validation coin
+coverage changes, the market-data supervisor restarts only its child collector with the new universe;
+the wallet-fill collector stays alive. The change itself is written as a system event in the evidence
+log.
 
-## 3. Approved for trading
+Feed latency and future order latency are kept separate. The shadow recorder measures source-event to
+local-receipt latency now. Future paper/live order instrumentation must separately measure decision,
+outbound order, exchange acknowledgement and fill latency; production values are never guessed.
 
-`stage=approved` means the wallet has passed the validation policy. It does not itself enable real
-trading. The future trading process must have a separate explicit real-trading gate and must consume
-only approved candidates. It must not be able to change registry stages.
+## 3. Validation decision
+
+A validation report may say that a wallet is `ELIGIBLE_FOR_HUMAN_APPROVAL`, but the evaluator cannot
+promote the wallet itself. Eligibility requires prospective evidence rather than historical headline
+ROI and can require minimum sample/days, executable-fill fraction, positive post-cost expectancy,
+uncertainty lower bound, latency stress survival, data quality, funding and liquidation-path treatment.
+
+This separation prevents research optimization from silently turning itself into a production rule.
+
+## 4. Approved for trading
+
+`stage=approved` means the wallet passed the validation process and was explicitly promoted. It does
+not itself enable real trading. The future trading process must pass two independent gates:
+
+1. the source is enabled and `stage=approved` in the registry;
+2. `REAL_TRADING_ENABLED=YES` is explicitly set for the trading process.
+
+The validation systemd service hard-sets `REAL_TRADING_ENABLED=NO`, and the shadow CLI refuses to run
+when that variable is `YES`. Future order execution code must call the trading permission boundary
+before any state-changing exchange action. Trading code must not be able to change registry stages.
 
 ## Registry source types
 
@@ -38,7 +66,8 @@ tracked without automating private or prohibited endpoints.
 
 ## Promotion principle
 
-Promotion must be based on prospective follower results, not source headline returns. Candidate
-validation should eventually include minimum sample size, net return after fees/slippage, latency
-survival, missed-fill rate, drawdown/tail loss, liquidation behavior, funding, regime stability,
-correlation, and out-of-sample persistence.
+Promotion is based on prospective **follower** results, not source headline returns. Validation should
+include net return after fees/slippage, separate feed/order latency, missed-fill rate, drawdown/tail
+loss, liquidation behavior, funding, regime stability, correlation, data gaps and out-of-sample
+persistence. When many candidate wallets are screened, the research process must also account for
+multiple-testing/winner's-curse risk.
