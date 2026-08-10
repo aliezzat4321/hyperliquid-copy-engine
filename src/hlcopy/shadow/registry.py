@@ -5,11 +5,11 @@ import json
 import os
 import re
 import tempfile
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterator
 
 STAGES = {"research", "validation", "approved", "rejected"}
 SOURCE_TYPES = {"hyperliquid_wallet", "external"}
