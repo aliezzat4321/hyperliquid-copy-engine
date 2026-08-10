@@ -8,7 +8,7 @@ from pathlib import Path
 
 from hlcopy.config import Settings
 from hlcopy.shadow.capture import run_shadow_validation
-from hlcopy.shadow.registry import STAGES, SOURCE_TYPES, WalletRegistry, WalletSpec
+from hlcopy.shadow.registry import SOURCE_TYPES, STAGES, WalletRegistry, WalletSpec
 
 
 def _registry(args: argparse.Namespace) -> WalletRegistry:
