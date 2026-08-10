@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -11,7 +11,13 @@ from hlcopy.db.postgres import Database
 from hlcopy.discovery.leaderboard import parse_leaderboard, shortlist
 from hlcopy.hyperliquid.http_client import HyperliquidHttpClient
 from hlcopy.models import Fill
-from hlcopy.resolver.engine import ResolverConfig, ResolverRun, _load_source_signals, _recent_signals, resolve_source
+from hlcopy.resolver.engine import (
+    ResolverConfig,
+    ResolverRun,
+    _load_source_signals,
+    _recent_signals,
+    resolve_source,
+)
 from hlcopy.resolver.matcher import evidence_events, select_anchor_trades
 from hlcopy.resolver.source_registry import ExternalSourceSpec
 from hlcopy.shadow.registry import WalletRegistry
