@@ -37,6 +37,9 @@ class ResolverConfig:
     report_candidates: int = 25
 
 
+DEFAULT_RESOLVER_CONFIG = ResolverConfig()
+
+
 @dataclass(frozen=True, slots=True)
 class ResolverRun:
     source_id: str
@@ -78,8 +81,6 @@ def _recent_signals(signals: tuple[CopySignal, ...], lookback_days: int) -> tupl
     newest_ms = max(signal.closed_at_ms for signal in signals)
     cutoff_ms = newest_ms - int(timedelta(days=max(1, lookback_days)).total_seconds() * 1000)
     recent = tuple(signal for signal in signals if signal.closed_at_ms >= cutoff_ms)
-    # A resolver needs enough independent observations; if the recent slice is too small,
-    # fall back to the latest trades from the full evidence rather than lowering thresholds.
     if len(recent) >= 6:
         return recent
     return tuple(sorted(signals, key=lambda item: item.closed_at_ms)[-16:])
@@ -172,7 +173,7 @@ async def resolve_source(
     database_url: str,
     wallet_registry: WalletRegistry,
     output_dir: Path,
-    config: ResolverConfig = ResolverConfig(),
+    config: ResolverConfig = DEFAULT_RESOLVER_CONFIG,
 ) -> ResolverRun:
     evidence_path = Path(source.evidence_path)
     if not evidence_path.is_file():
