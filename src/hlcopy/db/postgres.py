@@ -93,6 +93,37 @@ class Database:
             ),
         )
 
+    async def ensure_leaderboard_wallet(
+        self,
+        candidate: LeaderboardCandidate,
+        observed_at_ms: int,
+    ) -> None:
+        """Ensure one leaderboard wallet exists without persisting a full snapshot.
+
+        External evidence coverage only needs a wallet row so candidate fills satisfy
+        the fills foreign key. The native research job owns full leaderboard snapshot
+        persistence; coverage should not rewrite ~40k wallets every batch.
+        """
+        observed_at = _dt(observed_at_ms)
+        await self._require().execute(
+            """
+            INSERT INTO wallets(
+              address, first_seen, last_seen, source, display_name, metadata_json
+            )
+            VALUES (%s, %s, %s, 'official_leaderboard', %s, %s)
+            ON CONFLICT(address) DO UPDATE SET
+              last_seen = GREATEST(wallets.last_seen, EXCLUDED.last_seen),
+              display_name = COALESCE(EXCLUDED.display_name, wallets.display_name)
+            """,
+            (
+                candidate.address,
+                observed_at,
+                observed_at,
+                candidate.display_name,
+                Jsonb({}),
+            ),
+        )
+
     async def upsert_leaderboard(
         self,
         candidates: list[LeaderboardCandidate],
