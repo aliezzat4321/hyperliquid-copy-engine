@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -85,6 +86,12 @@ def _write_state(
     tmp.replace(path)
 
 
+def _elapsed(started: float) -> str:
+    seconds = max(0, int(time.monotonic() - started))
+    minutes, seconds = divmod(seconds, 60)
+    return f"{minutes:d}m{seconds:02d}s"
+
+
 async def populate_external_evidence_coverage(
     *,
     source: ExternalSourceSpec,
@@ -94,6 +101,7 @@ async def populate_external_evidence_coverage(
     coverage_config: CoverageConfig,
 ) -> CoverageResult:
     """Populate public Hyperliquid fills needed by the resolver; never score identity."""
+    run_started = time.monotonic()
     all_signals = _load_source_signals(source)
     recent = _recent_signals(all_signals, resolver_config.evidence_lookback_days)
     anchors = select_anchor_trades(recent, max_trades=resolver_config.anchor_trades)
@@ -120,6 +128,10 @@ async def populate_external_evidence_coverage(
             if str(address)
         }
 
+    print(
+        f"coverage progress source={source.id} stage=database_init status=started",
+        flush=True,
+    )
     async with Database(settings.database_url) as db:
         await db.init_schema()
         async with HyperliquidHttpClient(
@@ -127,6 +139,10 @@ async def populate_external_evidence_coverage(
             settings.leaderboard_url,
             concurrency=settings.http_concurrency,
         ) as client:
+            print(
+                f"coverage progress source={source.id} stage=leaderboard_fetch status=started",
+                flush=True,
+            )
             leaderboard_response = await client.leaderboard()
             await db.store_raw(
                 source="hyperliquid",
@@ -136,7 +152,28 @@ async def populate_external_evidence_coverage(
                 fetched_at_ms=leaderboard_response.fetched_at_ms,
             )
             candidates = parse_leaderboard(leaderboard_response.response_payload)
-            await db.upsert_leaderboard(candidates, leaderboard_response.fetched_at_ms)
+            print(
+                f"coverage progress source={source.id} stage=leaderboard_fetch "
+                f"status=complete wallets={len(candidates)} elapsed={_elapsed(run_started)}",
+                flush=True,
+            )
+
+            upsert_started = time.monotonic()
+
+            def leaderboard_progress(done: int, total: int) -> None:
+                percent = (100.0 * done / total) if total else 100.0
+                print(
+                    f"coverage progress source={source.id} stage=leaderboard_db_upsert "
+                    f"done={done}/{total} percent={percent:.1f} "
+                    f"stage_elapsed={_elapsed(upsert_started)}",
+                    flush=True,
+                )
+
+            await db.upsert_leaderboard(
+                candidates,
+                leaderboard_response.fetched_at_ms,
+                progress=leaderboard_progress,
+            )
             ordered = shortlist(
                 candidates,
                 limit=coverage_config.universe_limit,
@@ -150,11 +187,18 @@ async def populate_external_evidence_coverage(
                 for candidate in ordered
                 if candidate.address.lower() not in checked_addresses
             ][: coverage_config.batch_size]
+            print(
+                f"coverage progress source={source.id} stage=wallet_fetch status=started "
+                f"batch={len(batch)} checked={len(checked_addresses)} "
+                f"universe={len(universe_addresses)}",
+                flush=True,
+            )
 
+            wallet_started = time.monotonic()
             for index, candidate in enumerate(batch, start=1):
                 print(
                     f"coverage [{index}/{len(batch)}] {candidate.address} "
-                    f"cheap_score={candidate.cheap_score}",
+                    f"cheap_score={candidate.cheap_score} elapsed={_elapsed(wallet_started)}",
                     flush=True,
                 )
                 pages = await client.user_fills_by_time(candidate.address, start_ms, end_ms)
@@ -193,6 +237,12 @@ async def populate_external_evidence_coverage(
         evidence_end_ms=end_ms,
     )
     scanned_total = len(set(universe_addresses) & checked_addresses)
+    print(
+        f"coverage progress source={source.id} stage=complete scanned_this_run={len(batch)} "
+        f"scanned_total={scanned_total}/{len(universe_addresses)} "
+        f"elapsed={_elapsed(run_started)}",
+        flush=True,
+    )
     return CoverageResult(
         source_id=source.id,
         scanned_this_run=len(batch),

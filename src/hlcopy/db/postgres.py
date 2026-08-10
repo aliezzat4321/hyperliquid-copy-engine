@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -19,6 +21,24 @@ if TYPE_CHECKING:
 
 def _dt(ms: int) -> datetime:
     return datetime.fromtimestamp(ms / 1000, tz=UTC)
+
+
+def _json_safe(value: Any) -> Any:
+    """Return a strict RFC-8259-compatible value for PostgreSQL json/jsonb.
+
+    Python's json encoder can emit NaN/Infinity by default, but PostgreSQL's
+    JSON parser correctly rejects those tokens. Analytics can legitimately
+    produce non-finite sentinels (for example an infinite profit factor when a
+    sample has winners and zero losses), so persistence normalizes only those
+    values to null while leaving the in-memory metric available to ranking.
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
 
 
 class Database:
@@ -74,7 +94,12 @@ class Database:
         )
 
     async def upsert_leaderboard(
-        self, candidates: list[LeaderboardCandidate], snapshot_at_ms: int
+        self,
+        candidates: list[LeaderboardCandidate],
+        snapshot_at_ms: int,
+        *,
+        progress: Callable[[int, int], None] | None = None,
+        progress_every: int = 2_500,
     ) -> None:
         conn = self._require()
         snapshot_at = _dt(snapshot_at_ms)
@@ -83,7 +108,8 @@ class Database:
         for period in periods:
             ordered = sorted(candidates, key=lambda c: c.window(period).pnl, reverse=True)
             period_ranks[period] = {c.address: i for i, c in enumerate(ordered, start=1)}
-        for candidate in candidates:
+        total = len(candidates)
+        for index, candidate in enumerate(candidates, start=1):
             await conn.execute(
                 """
                 INSERT INTO wallets(
@@ -117,6 +143,10 @@ class Database:
                         Jsonb(candidate.raw),
                     ),
                 )
+            if progress is not None and (
+                index == total or index % max(1, progress_every) == 0
+            ):
+                progress(index, total)
 
     async def upsert_fills(self, fills: list[Fill]) -> None:
         conn = self._require()
@@ -193,7 +223,7 @@ class Database:
             ON CONFLICT(wallet_address, as_of_timestamp, lookback)
             DO UPDATE SET metrics_json = EXCLUDED.metrics_json
             """,
-            (wallet, _dt(as_of_ms), lookback, Jsonb(metrics)),
+            (wallet, _dt(as_of_ms), lookback, Jsonb(_json_safe(metrics))),
         )
 
     async def store_trader_profile(self, profile: TraderProfile) -> None:
@@ -213,6 +243,6 @@ class Database:
                 _dt(profile.as_of_ms),
                 _dt(profile.lookback_start_ms),
                 profile.model_version,
-                Jsonb(profile.to_dict()),
+                Jsonb(_json_safe(profile.to_dict())),
             ),
         )
