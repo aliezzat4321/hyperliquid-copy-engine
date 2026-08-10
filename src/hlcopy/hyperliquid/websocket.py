@@ -12,7 +12,7 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import WebSocketException
 
 from hlcopy.market.normalize import TradeDeduper, normalize_market_message, system_record
-from hlcopy.market.symbols import canonical_coin
+from hlcopy.market.symbols import wire_coin
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ class MarketSink(Protocol):
 
 def _market_subscriptions(coins: Iterable[str]) -> list[dict[str, str]]:
     cleaned = dict.fromkeys(
-        normalized for coin in coins if (normalized := canonical_coin(coin))
+        normalized for coin in coins if (normalized := wire_coin(coin))
     )
     return [
         {"type": subscription_type, "coin": coin}
