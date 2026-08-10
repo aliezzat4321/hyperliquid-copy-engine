@@ -8,6 +8,8 @@ from typing import Any
 
 import polars as pl
 
+from hlcopy.hyperliquid.http_client import HyperliquidHttpClient
+
 D = Decimal
 ZERO = D("0")
 ONE = D("1")
@@ -21,15 +23,47 @@ class FundingRateEvent:
     funding_rate: Decimal
 
 
+async def fetch_funding_events(
+    client: HyperliquidHttpClient,
+    *,
+    coin: str,
+    start_ms: int,
+    end_ms: int,
+) -> tuple[FundingRateEvent, ...]:
+    pages = await client.funding_history_by_time(coin, start_ms, end_ms)
+    events: dict[tuple[int, str], FundingRateEvent] = {}
+    for page in pages:
+        rows = page.response_payload
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                timestamp = int(row["time"])
+                rate = D(str(row["fundingRate"]))
+            except (KeyError, TypeError, ValueError, ArithmeticError):
+                continue
+            if start_ms < timestamp <= end_ms:
+                events[(timestamp, str(rate))] = FundingRateEvent(
+                    coin=coin,
+                    timestamp_ms=timestamp,
+                    funding_rate=rate,
+                )
+    return tuple(sorted(events.values(), key=lambda event: event.timestamp_ms))
+
+
 @dataclass(frozen=True, slots=True)
 class AssetContextPoint:
     coin: str
-    exchange_ts_ms: int
+    observed_ts_ms: int
     oracle_px: Decimal
     mark_px: Decimal
 
 
 class ParquetAssetContextProvider:
+    """Prospective oracle/mark path using exchange timestamp when available, else local receipt."""
+
     def __init__(self, market_dir: Path) -> None:
         self.market_dir = market_dir
         self._cache: dict[str, list[AssetContextPoint]] = {}
@@ -46,23 +80,31 @@ class ParquetAssetContextProvider:
         frame = pl.concat(
             [pl.read_parquet(path) for path in files],
             how="diagonal_relaxed",
-        ).sort(["exchange_ts_ms", "received_at_ns"])
+        ).sort("received_at_ns")
         points: list[AssetContextPoint] = []
         for row in frame.iter_rows(named=True):
+            received_at_ns = row.get("received_at_ns")
             if (
-                row.get("exchange_ts_ms") is None
+                received_at_ns is None
                 or row.get("oracle_px") is None
                 or row.get("mark_px") is None
             ):
                 continue
+            exchange_ts = row.get("exchange_ts_ms")
+            observed_ts_ms = (
+                int(exchange_ts)
+                if exchange_ts is not None
+                else int(received_at_ns) // 1_000_000
+            )
             points.append(
                 AssetContextPoint(
                     coin=coin,
-                    exchange_ts_ms=int(row["exchange_ts_ms"]),
+                    observed_ts_ms=observed_ts_ms,
                     oracle_px=D(str(row["oracle_px"])),
                     mark_px=D(str(row["mark_px"])),
                 )
             )
+        points.sort(key=lambda point: point.observed_ts_ms)
         self._cache[coin] = points
         return points
 
@@ -72,7 +114,7 @@ class ParquetAssetContextProvider:
         hi = len(points)
         while lo < hi:
             mid = (lo + hi) // 2
-            if points[mid].exchange_ts_ms < timestamp_ms:
+            if points[mid].observed_ts_ms < timestamp_ms:
                 lo = mid + 1
             else:
                 hi = mid
@@ -82,7 +124,7 @@ class ParquetAssetContextProvider:
         return tuple(
             point
             for point in self._load_coin(coin)
-            if start_ms <= point.exchange_ts_ms <= end_ms
+            if start_ms <= point.observed_ts_ms <= end_ms
         )
 
 
@@ -224,7 +266,7 @@ def follower_funding_cashflow(
     oracle_px: Decimal,
     funding_rate: Decimal,
 ) -> Decimal:
-    """Positive return means funding received; positive rates charge longs and pay shorts."""
+    """Positive means received; Hyperliquid positive funding charges longs and pays shorts."""
     if direction not in {"LONG", "SHORT"}:
         raise ValueError("direction must be LONG or SHORT")
     side = ONE if direction == "LONG" else D("-1")
@@ -238,7 +280,7 @@ class IsolatedPathResult:
     liquidation_mark_px: Decimal | None
     cumulative_funding_usd: Decimal
     min_equity_usd: Decimal
-    min_maintenance_margin_usd: Decimal
+    max_maintenance_margin_usd: Decimal
 
 
 def simulate_isolated_path(
@@ -258,22 +300,24 @@ def simulate_isolated_path(
         raise ValueError(
             f"requested leverage {leverage} exceeds {margin_spec.coin} max {margin_spec.max_leverage}"
         )
+    if not context_points:
+        raise ValueError("isolated liquidation path requires mark/oracle context")
     side = ONE if direction == "LONG" else D("-1")
     initial_notional = quantity * entry_vwap
     isolated_margin = initial_notional / leverage
     cumulative_funding = ZERO
     min_equity = isolated_margin
-    min_maintenance = margin_spec.maintenance_margin(initial_notional)
+    max_maintenance = margin_spec.maintenance_margin(initial_notional)
     funding_index = 0
     ordered_funding = sorted(funding_events, key=lambda event: event.timestamp_ms)
 
-    for point in sorted(context_points, key=lambda item: item.exchange_ts_ms):
+    for point in sorted(context_points, key=lambda item: item.observed_ts_ms):
         while (
             funding_index < len(ordered_funding)
-            and ordered_funding[funding_index].timestamp_ms <= point.exchange_ts_ms
+            and ordered_funding[funding_index].timestamp_ms <= point.observed_ts_ms
         ):
             event = ordered_funding[funding_index]
-            if point.exchange_ts_ms - event.timestamp_ms > max_context_forward_ms:
+            if point.observed_ts_ms - event.timestamp_ms > max_context_forward_ms:
                 raise ValueError("funding event lacks sufficiently close oracle context")
             cumulative_funding += follower_funding_cashflow(
                 direction=direction,
@@ -288,15 +332,15 @@ def simulate_isolated_path(
         notional = quantity * point.mark_px
         maintenance = margin_spec.maintenance_margin(notional)
         min_equity = min(min_equity, equity)
-        min_maintenance = min(min_maintenance, maintenance)
+        max_maintenance = max(max_maintenance, maintenance)
         if equity <= maintenance:
             return IsolatedPathResult(
                 liquidated=True,
-                liquidation_timestamp_ms=point.exchange_ts_ms,
+                liquidation_timestamp_ms=point.observed_ts_ms,
                 liquidation_mark_px=point.mark_px,
                 cumulative_funding_usd=cumulative_funding,
                 min_equity_usd=min_equity,
-                min_maintenance_margin_usd=min_maintenance,
+                max_maintenance_margin_usd=max_maintenance,
             )
 
     if funding_index != len(ordered_funding):
@@ -307,5 +351,5 @@ def simulate_isolated_path(
         liquidation_mark_px=None,
         cumulative_funding_usd=cumulative_funding,
         min_equity_usd=min_equity,
-        min_maintenance_margin_usd=min_maintenance,
+        max_maintenance_margin_usd=max_maintenance,
     )
