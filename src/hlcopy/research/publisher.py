@@ -95,6 +95,7 @@ def publish_ranked_candidates(
             continue
         display_name = str(row.get("display_name") or "").strip()
         label = display_name or f"HL {address[:8]}…{address[-6:]}"
+        score = float(row.get("composite_score") or 0.0)
         registry.add(
             WalletSpec(
                 id=_wallet_id(address),
@@ -105,7 +106,7 @@ def publish_ranked_candidates(
                 coins=(),
                 notes=(
                     "Point-in-time research candidate; "
-                    f"rank={int(row['rank'])} composite={float(row.get('composite_score') or 0.0):.2f} "
+                    f"rank={int(row['rank'])} composite={score:.2f} "
                     f"artifact={parquet_path.name} fingerprint={fingerprint[:16]}"
                 ),
             )
