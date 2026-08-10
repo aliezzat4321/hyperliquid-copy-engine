@@ -2,6 +2,7 @@
 Description=Hyperliquid public fill coverage for external trader evidence
 After=network-online.target postgresql.service
 Wants=network-online.target
+OnSuccess=hyperliquid-external-resolver.service
 
 [Service]
 Type=oneshot
