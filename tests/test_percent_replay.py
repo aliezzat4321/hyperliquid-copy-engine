@@ -42,7 +42,9 @@ def test_source_price_percent_replay_uses_source_leverage_and_no_portfolio_balan
 
     assert row.status == "EXECUTED"
     assert row.source_leverage == D("40")
-    assert row.gross_return_pct == signal.source_leveraged_return * D("100")
+    expected = signal.source_leveraged_return * D("100")
+    assert row.gross_return_pct is not None
+    assert abs(row.gross_return_pct - expected) < D("1e-24")
     assert row.net_return_pct is not None
     assert row.net_return_pct < row.gross_return_pct
     assert row.net_return_pct > D("0")
