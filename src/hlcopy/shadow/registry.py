@@ -11,6 +11,8 @@ from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
+from hlcopy.market.symbols import canonical_coin
+
 STAGES = {"research", "validation", "approved", "rejected"}
 SOURCE_TYPES = {"hyperliquid_wallet", "external"}
 MAX_ACTIVE_HYPERLIQUID_USERS_PER_IP = 10
@@ -22,7 +24,13 @@ def _now() -> str:
 
 
 def _clean_coins(coins: tuple[str, ...] | list[str]) -> tuple[str, ...]:
-    return tuple(dict.fromkeys(str(coin).strip().upper() for coin in coins if str(coin).strip()))
+    return tuple(
+        dict.fromkeys(
+            normalized
+            for coin in coins
+            if (normalized := canonical_coin(coin))
+        )
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,7 +198,7 @@ class WalletRegistry:
         raise KeyError(wallet_id)
 
     def add_coin(self, wallet_id: str, coin: str) -> WalletSpec:
-        normalized = str(coin).strip().upper()
+        normalized = canonical_coin(coin)
         if not normalized:
             raise ValueError("coin is required")
         with self._mutation_lock():
