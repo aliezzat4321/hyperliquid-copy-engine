@@ -49,6 +49,9 @@ class ValidationPolicy:
     require_liquidation_path: bool = True
 
 
+DEFAULT_VALIDATION_POLICY = ValidationPolicy()
+
+
 @dataclass(frozen=True, slots=True)
 class ValidationDecision:
     source_id: str
@@ -60,8 +63,9 @@ class ValidationDecision:
 
 def evaluate_validation(
     evidence: ValidationEvidence,
-    policy: ValidationPolicy = ValidationPolicy(),
+    policy: ValidationPolicy | None = None,
 ) -> ValidationDecision:
+    policy = policy or DEFAULT_VALIDATION_POLICY
     failures: list[str] = []
     if not evidence.prospective:
         failures.append("NOT_PROSPECTIVE")
