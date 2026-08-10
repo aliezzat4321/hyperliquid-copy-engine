@@ -1,11 +1,14 @@
+from __future__ import annotations
+
 from pathlib import Path
 
 import pytest
 
+from hlcopy.shadow.capture import required_market_coins
 from hlcopy.shadow.registry import WalletRegistry, WalletSpec
 
-
 ADDRESS = "0x1111111111111111111111111111111111111111"
+ADDRESS_2 = "0x2222222222222222222222222222222222222222"
 
 
 def test_registry_lifecycle_is_explicit_and_atomic(tmp_path: Path):
@@ -38,6 +41,68 @@ def test_registry_lifecycle_is_explicit_and_atomic(tmp_path: Path):
 
     registry.update("alpha", enabled=False)
     assert registry.active_hyperliquid_wallets() == ()
+
+
+def test_validation_wallet_requires_explicit_coin_coverage(tmp_path: Path):
+    registry = WalletRegistry(tmp_path / "wallets.json")
+    registry.add(
+        WalletSpec(
+            id="alpha",
+            label="Alpha",
+            source_type="hyperliquid_wallet",
+            source_ref=ADDRESS,
+        )
+    )
+    with pytest.raises(ValueError, match="explicit market coins"):
+        registry.update("alpha", stage="validation")
+
+
+def test_duplicate_hyperliquid_address_is_rejected(tmp_path: Path):
+    registry = WalletRegistry(tmp_path / "wallets.json")
+    registry.add(
+        WalletSpec(
+            id="alpha",
+            label="Alpha",
+            source_type="hyperliquid_wallet",
+            source_ref=ADDRESS,
+        )
+    )
+    with pytest.raises(ValueError, match="already exists"):
+        registry.add(
+            WalletSpec(
+                id="beta",
+                label="Beta",
+                source_type="hyperliquid_wallet",
+                source_ref=ADDRESS.upper().replace("0X", "0x"),
+            )
+        )
+
+
+def test_market_universe_changes_with_registry_without_code_changes(tmp_path: Path):
+    registry = WalletRegistry(tmp_path / "wallets.json")
+    registry.add(
+        WalletSpec(
+            id="alpha",
+            label="Alpha",
+            source_type="hyperliquid_wallet",
+            source_ref=ADDRESS,
+            stage="validation",
+            coins=("BTC", "ETH"),
+        )
+    )
+    assert required_market_coins(registry, ("SOL",)) == ("SOL", "BTC", "ETH")
+
+    registry.add(
+        WalletSpec(
+            id="beta",
+            label="Beta",
+            source_type="hyperliquid_wallet",
+            source_ref=ADDRESS_2,
+            stage="validation",
+            coins=("HYPE", "BTC"),
+        )
+    )
+    assert required_market_coins(registry, ("SOL",)) == ("SOL", "BTC", "ETH", "HYPE")
 
 
 def test_registry_supports_external_research_sources(tmp_path: Path):
