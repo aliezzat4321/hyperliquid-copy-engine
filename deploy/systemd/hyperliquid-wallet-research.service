@@ -8,10 +8,14 @@ Type=oneshot
 WorkingDirectory=/root/hyperliquid-copy-engine
 EnvironmentFile=/root/hyperliquid-copy-engine/.env
 Environment=REAL_TRADING_ENABLED=NO
+# Screen a broader point-in-time cohort than the original 25-wallet default.
+# Only the best ranked research candidates are published; this does not promote
+# any wallet into validation or trading.
+Environment=HLCOPY_MAX_CANDIDATES=100
 ExecStart=/root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.research.cli \
   --registry /mnt/HC_Volume_106576526/hyperliquid/shadow/wallets.json \
   --ledger /mnt/HC_Volume_106576526/hyperliquid/research/candidate_observations.jsonl \
-  --max-publish 25 \
+  --max-publish 50 \
   --min-composite-score 0 \
   run
 Nice=15

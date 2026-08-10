@@ -8,12 +8,17 @@ Type=simple
 WorkingDirectory=/root/hyperliquid-copy-engine
 EnvironmentFile=/root/hyperliquid-copy-engine/.env
 Environment=REAL_TRADING_ENABLED=NO
+# Full market tape is expensive. Capture only coins explicitly attached to
+# validation/approved wallets in the registry; research-only sources consume no tape.
+# A 60s time flush materially reduces tiny Parquet files while preserving bounded loss
+# on an unexpected process crash. HLCOPY_MARKET_FLUSH_ROWS still forces earlier flushes
+# under unusually high message volume.
+Environment=HLCOPY_MARKET_FLUSH_SECONDS=60
 ExecStart=/root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.shadow.cli \
   --registry /mnt/HC_Volume_106576526/hyperliquid/shadow/wallets.json \
   run \
   --shadow-dir /mnt/HC_Volume_106576526/hyperliquid/shadow \
-  --market-dir /mnt/HC_Volume_106576526/hyperliquid/market-shadow \
-  --coins BTC ETH HYPE NEAR SOL
+  --market-dir /mnt/HC_Volume_106576526/hyperliquid/market-shadow
 Restart=always
 RestartSec=5
 Nice=10
