@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 from dataclasses import asdict, dataclass
 from decimal import Decimal
 from statistics import median
@@ -13,6 +12,10 @@ from hlcopy.signals.invo import CopySignal
 
 D = Decimal
 BPS = D("10000")
+DEFAULT_MIN_MATCH_RATIO = D("0.70")
+DEFAULT_MIN_SCORE = D("80")
+DEFAULT_MAX_MEDIAN_PRICE_BPS = D("3")
+DEFAULT_MIN_RUNNER_UP_GAP = D("15")
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,7 +122,12 @@ def evidence_events(signals: tuple[CopySignal, ...]) -> tuple[EvidenceEvent, ...
                 ),
             ]
         )
-    return tuple(sorted(events, key=lambda event: (event.timestamp_ms, event.trade_id, event.action)))
+    return tuple(
+        sorted(
+            events,
+            key=lambda event: (event.timestamp_ms, event.trade_id, event.action),
+        )
+    )
 
 
 def select_anchor_trades(
@@ -135,15 +143,18 @@ def select_anchor_trades(
         by_coin.setdefault(signal.coin, []).append(signal)
     selected: list[CopySignal] = []
     seen: set[str] = set()
-    # First take the most recent trade for every coin so rare assets remain informative.
     for coin in sorted(by_coin, key=lambda key: (len(by_coin[key]), key)):
         signal = max(by_coin[coin], key=lambda item: (item.closed_at_ms, item.signal_id))
         selected.append(signal)
         seen.add(signal.signal_id)
         if len(selected) >= max_trades:
             break
-    # Fill remaining capacity strictly by recency.
-    for signal in sorted(signals, key=lambda item: (item.closed_at_ms, item.signal_id), reverse=True):
+    ordered = sorted(
+        signals,
+        key=lambda item: (item.closed_at_ms, item.signal_id),
+        reverse=True,
+    )
+    for signal in ordered:
         if len(selected) >= max_trades:
             break
         if signal.signal_id in seen:
@@ -301,7 +312,9 @@ def score_candidate(
         total_trades=total_trades,
         matched_coins=matched_coins,
         evidence_coins=evidence_coins,
-        median_time_delta_ms=(median(match.time_delta_ms for match in matches) if matches else None),
+        median_time_delta_ms=(
+            median(match.time_delta_ms for match in matches) if matches else None
+        ),
         median_price_delta_bps=(
             D(str(median(match.price_delta_bps for match in matches))) if matches else None
         ),
@@ -324,11 +337,11 @@ def decide_resolution(
     ranked: tuple[CandidateResolution, ...],
     *,
     min_matched_events: int = 12,
-    min_match_ratio: Decimal = D("0.70"),
-    min_score: Decimal = D("80"),
+    min_match_ratio: Decimal = DEFAULT_MIN_MATCH_RATIO,
+    min_score: Decimal = DEFAULT_MIN_SCORE,
     max_median_time_ms: float = 2_000.0,
-    max_median_price_bps: Decimal = D("3"),
-    min_runner_up_gap: Decimal = D("15"),
+    max_median_price_bps: Decimal = DEFAULT_MAX_MEDIAN_PRICE_BPS,
+    min_runner_up_gap: Decimal = DEFAULT_MIN_RUNNER_UP_GAP,
 ) -> ResolutionDecision:
     if not ranked:
         return ResolutionDecision("UNRESOLVED", None, ("NO_CANDIDATES",), None, None, None)
