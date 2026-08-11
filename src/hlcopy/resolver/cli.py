@@ -43,7 +43,7 @@ def _add_resolver_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--evidence-lookback-days", type=int, default=14)
     parser.add_argument("--time-tolerance-ms", type=int, default=5_000)
     parser.add_argument("--price-tolerance-bps", type=Decimal, default=Decimal("5"))
-    parser.add_argument("--max-candidates", type=int, default=500)
+    parser.add_argument("--max-candidates", type=int, default=5_000)
     parser.add_argument("--report-candidates", type=int, default=25)
 
 
