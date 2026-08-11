@@ -10,6 +10,12 @@ def test_internal_and_wire_coin_forms_are_distinct_for_hip3() -> None:
     assert wire_coin("btc") == "BTC"
 
 
+def test_case_significant_native_multiplier_symbol_is_preserved() -> None:
+    assert canonical_coin("kBONK") == "kBONK"
+    assert wire_coin("kBONK") == "kBONK"
+    assert wire_coin("KAITO") == "KAITO"
+
+
 def test_market_subscriptions_emit_lowercase_hip3_namespace() -> None:
     subscriptions = _market_subscriptions(("BTC", "XYZ:SNDK"))
     assert len(subscriptions) == 8
@@ -22,11 +28,12 @@ def test_market_subscriptions_emit_lowercase_hip3_namespace() -> None:
     }
 
 
-def test_l2_only_subscription_mode_keeps_hip3_wire_symbol() -> None:
-    subscriptions = _market_subscriptions(("BTC", "XYZ:SNDK"), ("l2Book",))
+def test_l2_only_subscription_mode_keeps_wire_symbol_case() -> None:
+    subscriptions = _market_subscriptions(("BTC", "XYZ:SNDK", "kBONK"), ("l2Book",))
     assert subscriptions == [
         {"type": "l2Book", "coin": "BTC"},
         {"type": "l2Book", "coin": "xyz:SNDK"},
+        {"type": "l2Book", "coin": "kBONK"},
     ]
 
 
@@ -37,6 +44,6 @@ def test_registry_keeps_stable_internal_form_for_hip3() -> None:
         source_type="hyperliquid_wallet",
         source_ref="0x" + "1" * 40,
         stage="validation",
-        coins=("xyz:SNDK", "BTC"),
+        coins=("xyz:SNDK", "BTC", "kBONK"),
     )
-    assert wallet.coins == ("XYZ:SNDK", "BTC")
+    assert wallet.coins == ("XYZ:SNDK", "BTC", "kBONK")
