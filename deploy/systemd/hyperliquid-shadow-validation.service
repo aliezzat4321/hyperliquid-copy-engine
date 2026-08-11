@@ -8,8 +8,10 @@ Type=simple
 WorkingDirectory=/root/hyperliquid-copy-engine
 EnvironmentFile=/root/hyperliquid-copy-engine/.env
 Environment=REAL_TRADING_ENABLED=NO
-# Full market tape is expensive. Capture only coins explicitly attached to
-# validation/approved wallets in the registry; research-only sources consume no tape.
+# Validation needs executable order-book state before a wallet trades a market.
+# Prewarm the full historical cohort market universe, but persist only l2Book here:
+# BBO is derivable from L2 and trades/assetCtx are not required by the execution evaluator.
+Environment=HLCOPY_MARKET_SUBSCRIPTION_TYPES=l2Book
 # A 60s time flush materially reduces tiny Parquet files while preserving bounded loss
 # on an unexpected process crash. HLCOPY_MARKET_FLUSH_ROWS still forces earlier flushes
 # under unusually high message volume.
