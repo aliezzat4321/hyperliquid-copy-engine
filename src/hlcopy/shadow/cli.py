@@ -8,7 +8,12 @@ import os
 from pathlib import Path
 
 from hlcopy.config import Settings
-from hlcopy.shadow.capture import required_market_coins, run_shadow_validation
+from hlcopy.market.symbols import canonical_coin
+from hlcopy.shadow.capture import (
+    load_market_coin_file,
+    required_market_coins,
+    run_shadow_validation,
+)
 from hlcopy.shadow.manifest import write_run_manifest
 from hlcopy.shadow.registry import SOURCE_TYPES, STAGES, WalletRegistry, WalletSpec
 
@@ -62,6 +67,15 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="*",
         default=[],
         help="extra market coins to capture even if no validation wallet declares them",
+    )
+    run.add_argument(
+        "--coins-file",
+        type=Path,
+        default=None,
+        help=(
+            "newline-delimited market universe to merge into market capture; "
+            "the file is re-read prospectively so cohort refreshes take effect"
+        ),
     )
     return parser
 
@@ -121,13 +135,19 @@ def main() -> None:
             raise SystemExit("shadow validation refuses to run with REAL_TRADING_ENABLED=YES")
         settings = Settings.from_env()
         registry.init()
-        extra_coins = tuple(str(coin).upper() for coin in args.coins)
-        initial_market_coins = required_market_coins(registry, extra_coins)
+        extra_coins = tuple(
+            normalized
+            for coin in args.coins
+            if (normalized := canonical_coin(coin))
+        )
+        file_coins = load_market_coin_file(args.coins_file)
+        initial_extra_coins = tuple(dict.fromkeys((*extra_coins, *file_coins)))
+        initial_market_coins = required_market_coins(registry, initial_extra_coins)
         manifest_path = write_run_manifest(
             registry=registry,
             shadow_dir=args.shadow_dir,
             websocket_url=settings.ws_url,
-            extra_coins=extra_coins,
+            extra_coins=initial_extra_coins,
             initial_market_coins=initial_market_coins,
         )
         print(
@@ -144,6 +164,7 @@ def main() -> None:
                     shadow_dir=args.shadow_dir,
                     market_dir=args.market_dir,
                     extra_coins=extra_coins,
+                    extra_coins_file=args.coins_file,
                     market_flush_rows=settings.market_flush_rows,
                     market_flush_seconds=settings.market_flush_seconds,
                     market_queue_size=settings.market_queue_size,

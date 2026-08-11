@@ -13,6 +13,7 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import WebSocketException
 
 from hlcopy.market.capture import capture_market
+from hlcopy.market.symbols import canonical_coin
 from hlcopy.shadow.registry import WalletRegistry, WalletSpec
 
 logger = logging.getLogger(__name__)
@@ -62,9 +63,26 @@ def required_market_coins(
     extra_coins: tuple[str, ...],
 ) -> tuple[str, ...]:
     normalized_extra = tuple(
-        dict.fromkeys(str(coin).strip().upper() for coin in extra_coins if str(coin).strip())
+        dict.fromkeys(
+            normalized
+            for coin in extra_coins
+            if (normalized := canonical_coin(coin))
+        )
     )
     return tuple(dict.fromkeys((*normalized_extra, *registry.market_coins())))
+
+
+def load_market_coin_file(path: Path | None) -> tuple[str, ...]:
+    if path is None:
+        return ()
+    text = path.read_text(encoding="utf-8")
+    return tuple(
+        dict.fromkeys(
+            normalized
+            for line in text.splitlines()
+            if (normalized := canonical_coin(line))
+        )
+    )
 
 
 class HyperliquidWalletFillCollector:
@@ -195,7 +213,7 @@ class HyperliquidWalletFillCollector:
             if exchange_ts_ms is not None
             else None
         )
-        coin = str(fill.get("coin", "")).upper()
+        coin = canonical_coin(fill.get("coin", ""))
         learned_coin = False
         if (
             wallet is not None
@@ -307,6 +325,7 @@ async def _market_capture_supervisor(
     sink: JsonlShadowSink,
     market_dir: Path,
     extra_coins: tuple[str, ...],
+    extra_coins_file: Path | None,
     market_flush_rows: int,
     market_flush_seconds: float,
     market_queue_size: int,
@@ -319,7 +338,11 @@ async def _market_capture_supervisor(
     active_coins: tuple[str, ...] = ()
     try:
         while True:
-            desired_coins = required_market_coins(registry, extra_coins)
+            file_coins = load_market_coin_file(extra_coins_file)
+            desired_coins = required_market_coins(
+                registry,
+                (*extra_coins, *file_coins),
+            )
             if desired_coins != active_coins:
                 if active_task is not None:
                     active_task.cancel()
@@ -369,6 +392,7 @@ async def run_shadow_validation(
     shadow_dir: Path,
     market_dir: Path,
     extra_coins: tuple[str, ...] = (),
+    extra_coins_file: Path | None = None,
     market_flush_rows: int = 5_000,
     market_flush_seconds: float = 5.0,
     market_queue_size: int = 50_000,
@@ -395,6 +419,7 @@ async def run_shadow_validation(
                 sink=sink,
                 market_dir=market_dir,
                 extra_coins=extra_coins,
+                extra_coins_file=extra_coins_file,
                 market_flush_rows=market_flush_rows,
                 market_flush_seconds=market_flush_seconds,
                 market_queue_size=market_queue_size,

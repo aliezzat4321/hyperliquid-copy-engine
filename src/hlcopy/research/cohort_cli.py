@@ -17,6 +17,7 @@ from hlcopy.shadow.registry import MAX_ACTIVE_HYPERLIQUID_USERS_PER_IP, WalletRe
 
 DEFAULT_MAX_SEED_COINS = 200
 MAX_PREWARM_MARKETS = 200
+MAX_ACTIVE_MARKET_UNIVERSE = 900
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -33,8 +34,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_MAX_SEED_COINS,
         help=(
-            "maximum historical markets to prewarm per validation wallet; "
-            "the shadow process enforces a separate global market-universe safety cap"
+            "maximum historical markets to attach to each validation wallet; "
+            "the shadow process may independently prewarm the full live market universe"
+        ),
+    )
+    parser.add_argument(
+        "--market-universe-out",
+        type=Path,
+        default=None,
+        help=(
+            "optional newline-delimited file containing every current non-delisted perp; "
+            "used by shadow validation to avoid missing a wallet's first trade in a new market"
         ),
     )
     sub = parser.add_subparsers(dest="command", required=True)
@@ -118,6 +128,13 @@ def _filter_current_markets(
     }
 
 
+def _write_market_universe(path: Path, markets: frozenset[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(f".{path.name}.tmp")
+    temp.write_text("".join(f"{coin}\n" for coin in sorted(markets)), encoding="utf-8")
+    os.replace(temp, path)
+
+
 def _active_validation_addresses(registry: WalletRegistry) -> list[str]:
     registry.init()
     return [
@@ -185,22 +202,27 @@ def main() -> None:
     )
     historical_seeds = _seed_coins(seed_addresses, max(0, args.max_seed_coins))
     current_markets = asyncio.run(_current_perp_markets())
+    if len(current_markets) > MAX_ACTIVE_MARKET_UNIVERSE:
+        raise SystemExit(
+            "current perp universe exceeds safe L2-only single-connection budget: "
+            f"{len(current_markets)} > {MAX_ACTIVE_MARKET_UNIVERSE}"
+        )
     seeds = _filter_current_markets(historical_seeds, current_markets)
     prewarm_union = tuple(dict.fromkeys(coin for coins in seeds.values() for coin in coins))
     if len(prewarm_union) > MAX_PREWARM_MARKETS:
         raise SystemExit(
-            "validation prewarm exceeds safe single-shard market budget: "
-            f"{len(prewarm_union)} > {MAX_PREWARM_MARKETS}; shard market capture before continuing"
+            "validation wallet-history prewarm exceeds safe registry budget: "
+            f"{len(prewarm_union)} > {MAX_PREWARM_MARKETS}"
         )
+    if args.market_universe_out is not None:
+        _write_market_universe(args.market_universe_out, current_markets)
     result = apply_cohort(
         parquet_path=args.artifact,
         registry=registry,
         policy=policy,
         seed_coins_by_address=seeds,
     )
-    historical_union = {
-        coin for coins in historical_seeds.values() for coin in coins
-    }
+    historical_union = {coin for coins in historical_seeds.values() for coin in coins}
     print(
         json.dumps(
             {
@@ -213,6 +235,9 @@ def main() -> None:
                 "historical_market_union_count": len(historical_union),
                 "prewarm_market_union_count": len(prewarm_union),
                 "dropped_noncurrent_markets": sorted(historical_union - current_markets),
+                "market_universe_out": (
+                    str(args.market_universe_out) if args.market_universe_out is not None else None
+                ),
                 "seed_coins": {address: list(coins) for address, coins in seeds.items()},
             },
             sort_keys=True,

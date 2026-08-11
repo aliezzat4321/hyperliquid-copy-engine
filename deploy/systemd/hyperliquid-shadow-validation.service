@@ -9,19 +9,21 @@ WorkingDirectory=/root/hyperliquid-copy-engine
 EnvironmentFile=/root/hyperliquid-copy-engine/.env
 Environment=REAL_TRADING_ENABLED=NO
 # Validation needs executable order-book state before a wallet trades a market.
-# Prewarm the full historical cohort market universe, but persist only l2Book here:
-# BBO is derivable from L2 and trades/assetCtx are not required by the execution evaluator.
+# Persist only l2Book here: BBO is derivable from L2 and trades/assetCtx are not
+# required by the execution evaluator. The current non-delisted perp universe is
+# supplied by the cohort job so a wallet's first trade in a previously unseen market
+# is still evaluable.
 Environment=HLCOPY_MARKET_SUBSCRIPTION_TYPES=l2Book
-# Broad prewarm can cover O(100) markets. Batch tape writes so partition file counts
-# do not explode; graceful shutdown still flushes buffered rows. Unexpected crashes can
-# lose at most this recent tape window, which is treated as an evidence gap, never PnL.
+# Full-current-market prewarm is intentionally a short prospective validation sprint.
+# Batch tape writes to control file count; gaps from crashes/restarts are never scored.
 Environment=HLCOPY_MARKET_FLUSH_SECONDS=300
 Environment=HLCOPY_MARKET_FLUSH_ROWS=100000
 ExecStart=/root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.shadow.cli \
   --registry /mnt/HC_Volume_106576526/hyperliquid/shadow/wallets.json \
   run \
   --shadow-dir /mnt/HC_Volume_106576526/hyperliquid/shadow \
-  --market-dir /mnt/HC_Volume_106576526/hyperliquid/market-shadow
+  --market-dir /mnt/HC_Volume_106576526/hyperliquid/market-shadow \
+  --coins-file /mnt/HC_Volume_106576526/hyperliquid/shadow/active_perp_markets.txt
 Restart=always
 RestartSec=5
 Nice=10
