@@ -1,0 +1,22 @@
+[Unit]
+Description=Hyperliquid unified prospective follower profitability scorer
+After=hyperliquid-shadow-validation.service hyperliquid-wide-trade-watch-live.service hyperliquid-wide-fill-enrichment-live.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/hyperliquid-copy-engine
+EnvironmentFile=/root/hyperliquid-copy-engine/.env
+Environment=REAL_TRADING_ENABLED=NO
+ExecStart=/root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.profitability.live_cli \
+  --registry /mnt/HC_Volume_106576526/hyperliquid/shadow/wallets.json \
+  --shadow-dir /mnt/HC_Volume_106576526/hyperliquid/shadow \
+  --shadow-market-dir /mnt/HC_Volume_106576526/hyperliquid/market-shadow \
+  --wide-enriched-dir /mnt/HC_Volume_106576526/hyperliquid/shadow/wide-enriched-live \
+  --wide-cutoff-ns-file /mnt/HC_Volume_106576526/hyperliquid/shadow/wide_clean_cutoff_ns.txt \
+  --wide-market-dir /mnt/HC_Volume_106576526/hyperliquid/market-data \
+  --output-dir /mnt/HC_Volume_106576526/hyperliquid/profitability
+Nice=15
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
