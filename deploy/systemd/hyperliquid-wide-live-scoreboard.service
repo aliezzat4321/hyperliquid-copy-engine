@@ -1,0 +1,26 @@
+[Unit]
+Description=Hyperliquid wide live execution PnL scoreboard
+After=hyperliquid-wide-trade-watch-live.service hyperliquid-wide-fill-enrichment-live.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/hyperliquid-copy-engine
+EnvironmentFile=/root/hyperliquid-copy-engine/.env
+Environment=REAL_TRADING_ENABLED=NO
+ExecStart=/root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.shadow.wide_score_cli \
+  --enriched-dir /mnt/HC_Volume_106576526/hyperliquid/shadow/wide-enriched-live \
+  --cutoff-ns-file /mnt/HC_Volume_106576526/hyperliquid/shadow/wide_clean_cutoff_ns.txt \
+  --market-dir /mnt/HC_Volume_106576526/hyperliquid/market-data \
+  --output-dir /mnt/HC_Volume_106576526/hyperliquid/shadow/scoreboard \
+  --notional-usd 1000 \
+  --taker-fee-bps 4.5 \
+  --max-slippage-bps 20 \
+  --max-book-forward-ms 750 \
+  --decision-ms 50 \
+  --outbound-ms 100 \
+  --exchange-ms 100
+Nice=15
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
