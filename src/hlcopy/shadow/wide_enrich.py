@@ -67,7 +67,7 @@ def _match_fill(
     for row in rows:
         try:
             row_tid = int(row.get("tid"))
-            row_ts = int(row.get("time"))
+            int(row.get("time"))
         except (TypeError, ValueError):
             continue
         if row_tid != tid or canonical_coin(row.get("coin", "")) != canonical:
