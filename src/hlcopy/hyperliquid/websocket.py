@@ -16,6 +16,9 @@ from hlcopy.market.symbols import wire_coin
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_MARKET_SUBSCRIPTION_TYPES = ("bbo", "l2Book", "trades", "activeAssetCtx")
+ALLOWED_MARKET_SUBSCRIPTION_TYPES = frozenset(DEFAULT_MARKET_SUBSCRIPTION_TYPES)
+
 
 class MarketSink(Protocol):
     async def start(self) -> None: ...
@@ -25,14 +28,23 @@ class MarketSink(Protocol):
     async def close(self) -> None: ...
 
 
-def _market_subscriptions(coins: Iterable[str]) -> list[dict[str, str]]:
+def _market_subscriptions(
+    coins: Iterable[str],
+    subscription_types: Iterable[str] = DEFAULT_MARKET_SUBSCRIPTION_TYPES,
+) -> list[dict[str, str]]:
     cleaned = dict.fromkeys(
         normalized for coin in coins if (normalized := wire_coin(coin))
     )
+    types = tuple(dict.fromkeys(str(value).strip() for value in subscription_types if str(value).strip()))
+    if not types:
+        raise ValueError("at least one market subscription type is required")
+    invalid = sorted(set(types) - ALLOWED_MARKET_SUBSCRIPTION_TYPES)
+    if invalid:
+        raise ValueError(f"unsupported market subscription types: {','.join(invalid)}")
     return [
         {"type": subscription_type, "coin": coin}
         for coin in cleaned
-        for subscription_type in ("bbo", "l2Book", "trades", "activeAssetCtx")
+        for subscription_type in types
     ]
 
 
@@ -45,12 +57,13 @@ class HyperliquidMarketCollector:
         coins: Iterable[str],
         sink: MarketSink,
         *,
+        subscription_types: Iterable[str] = DEFAULT_MARKET_SUBSCRIPTION_TYPES,
         heartbeat_seconds: float = 30.0,
         reconnect_base_seconds: float = 1.0,
         reconnect_max_seconds: float = 30.0,
     ) -> None:
         self.ws_url = ws_url
-        self.subscriptions = _market_subscriptions(coins)
+        self.subscriptions = _market_subscriptions(coins, subscription_types)
         if not self.subscriptions:
             raise ValueError("at least one market coin is required")
         self.sink = sink
