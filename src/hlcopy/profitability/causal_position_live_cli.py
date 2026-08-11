@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hlcopy.profitability.causal_book import CausalParquetL2BookProvider
 from hlcopy.profitability import position_live_cli
+from hlcopy.profitability.causal_book import CausalParquetL2BookProvider
 
 
 _PROVIDER_CACHE: dict[Path, CausalParquetL2BookProvider] = {}
