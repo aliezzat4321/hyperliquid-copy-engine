@@ -129,6 +129,25 @@ def _active_validation_addresses(registry: WalletRegistry) -> list[str]:
     ]
 
 
+def _prewarm_addresses(
+    *,
+    active_addresses: list[str],
+    selected_addresses: list[str],
+    max_validation_wallets: int,
+) -> list[str]:
+    active = list(dict.fromkeys(address.lower() for address in active_addresses))
+    active_set = set(active)
+    remaining = max(0, max_validation_wallets - len(active))
+    if remaining == 0:
+        return active
+    candidates = [
+        address.lower()
+        for address in selected_addresses
+        if address.lower() not in active_set
+    ]
+    return [*active, *list(dict.fromkeys(candidates))[:remaining]]
+
+
 def main() -> None:
     args = build_parser().parse_args()
     if os.getenv("REAL_TRADING_ENABLED", "NO").strip().upper() == "YES":
@@ -159,7 +178,11 @@ def main() -> None:
     registry = WalletRegistry(args.registry)
     selected_addresses = [row.address for row in plan if row.selected]
     active_addresses = _active_validation_addresses(registry)
-    seed_addresses = list(dict.fromkeys((*active_addresses, *selected_addresses)))
+    seed_addresses = _prewarm_addresses(
+        active_addresses=active_addresses,
+        selected_addresses=selected_addresses,
+        max_validation_wallets=policy.max_validation_wallets,
+    )
     historical_seeds = _seed_coins(seed_addresses, max(0, args.max_seed_coins))
     current_markets = asyncio.run(_current_perp_markets())
     seeds = _filter_current_markets(historical_seeds, current_markets)
