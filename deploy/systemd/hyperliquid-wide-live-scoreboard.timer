@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Hyperliquid wide live execution scoreboard every minute
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+AccuracySec=1s
+Persistent=false
+Unit=hyperliquid-wide-live-scoreboard.service
+
+[Install]
+WantedBy=timers.target
