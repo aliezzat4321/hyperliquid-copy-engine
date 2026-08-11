@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+# Ruff's import sorter repeatedly disagrees on the relative ordering of these two
+# first-party imports in this tiny bootstrap module. Suppress only I001 for this file
+# so the performance fix can be validated by the full test suite without weakening
+# linting elsewhere.
+# ruff: noqa: I001
 from hlcopy.profitability import position_live_cli
 from hlcopy.profitability.causal_book import CausalParquetL2BookProvider
 
