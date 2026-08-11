@@ -10,14 +10,18 @@ import psycopg
 from hlcopy.config import Settings
 from hlcopy.market.symbols import canonical_coin
 from hlcopy.research.cohort import CohortPolicy, apply_cohort, plan_cohort
-from hlcopy.shadow.registry import WalletRegistry
+from hlcopy.shadow.registry import MAX_ACTIVE_HYPERLIQUID_USERS_PER_IP, WalletRegistry
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m hlcopy.research.cohort_cli")
     parser.add_argument("--registry", required=True, type=Path)
     parser.add_argument("--artifact", required=True, type=Path)
-    parser.add_argument("--max-validation-wallets", type=int, default=6)
+    parser.add_argument(
+        "--max-validation-wallets",
+        type=int,
+        default=MAX_ACTIVE_HYPERLIQUID_USERS_PER_IP,
+    )
     parser.add_argument("--max-seed-coins", type=int, default=6)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("plan")
