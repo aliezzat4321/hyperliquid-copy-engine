@@ -3,7 +3,11 @@ from pathlib import Path
 import polars as pl
 
 from hlcopy.research.cohort import CohortPolicy, apply_cohort
-from hlcopy.research.cohort_cli import _filter_current_markets, _parse_active_perp_markets
+from hlcopy.research.cohort_cli import (
+    _filter_current_markets,
+    _parse_active_perp_markets,
+    _prewarm_addresses,
+)
 from hlcopy.shadow.registry import WalletRegistry, WalletSpec
 
 
@@ -98,3 +102,25 @@ def test_current_market_filter_preserves_per_wallet_order() -> None:
         "0x1": ("BTC", "XYZ:SNDK"),
         "0x2": ("PARA:COHR",),
     }
+
+
+def test_prewarm_addresses_do_not_include_reserves_when_capacity_is_full() -> None:
+    active = [f"0x{i:040x}" for i in range(1, 11)]
+    reserve = "0x" + "f" * 40
+
+    assert _prewarm_addresses(
+        active_addresses=active,
+        selected_addresses=[*active, reserve],
+        max_validation_wallets=10,
+    ) == active
+
+
+def test_prewarm_addresses_include_only_available_new_slots() -> None:
+    active = [f"0x{i:040x}" for i in range(1, 9)]
+    candidates = [f"0x{i:040x}" for i in range(9, 13)]
+
+    assert _prewarm_addresses(
+        active_addresses=active,
+        selected_addresses=candidates,
+        max_validation_wallets=10,
+    ) == [*active, *candidates[:2]]
