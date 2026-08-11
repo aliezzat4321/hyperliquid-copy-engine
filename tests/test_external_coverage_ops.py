@@ -28,3 +28,19 @@ def test_external_coverage_timer_runs_every_thirty_minutes() -> None:
         encoding="utf-8"
     )
     assert "OnUnitActiveSec=30min" in timer
+
+
+def test_external_resolver_scores_full_five_thousand_candidate_universe() -> None:
+    service = Path("deploy/systemd/hyperliquid-external-resolver.service").read_text(
+        encoding="utf-8"
+    )
+    source = Path("src/hlcopy/resolver/engine.py").read_text(encoding="utf-8")
+    assert "--max-candidates 5000" in service
+    assert "max_candidates: int = 5_000" in source
+
+
+def test_external_resolver_avoids_one_query_per_candidate_wallet() -> None:
+    source = Path("src/hlcopy/resolver/engine.py").read_text(encoding="utf-8")
+    assert "WITH selected AS" in source
+    assert "JOIN selected AS s" in source
+    assert "for address in addresses:" not in source

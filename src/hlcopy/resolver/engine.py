@@ -33,7 +33,7 @@ class ResolverConfig:
     evidence_lookback_days: int = 14
     time_tolerance_ms: int = 5_000
     price_tolerance_bps: Decimal = D("5")
-    max_candidates: int = 500
+    max_candidates: int = 5_000
     report_candidates: int = 25
 
 
@@ -93,39 +93,43 @@ async def _candidate_rows(
     end_ms: int,
     max_candidates: int,
 ) -> dict[str, list[dict[str, Any]]]:
+    """Load candidate fill evidence with one bounded DB query.
+
+    Coverage can persist thousands of candidate wallets. The old implementation
+    first selected candidate addresses and then issued one additional query per
+    wallet, which made a full 5k resolver universe unnecessarily expensive. The
+    CTE preserves the same deterministic candidate ordering while fetching all
+    selected wallets' evidence in one round trip.
+    """
     start = datetime.fromtimestamp(start_ms / 1000, tz=UTC)
     end = datetime.fromtimestamp(end_ms / 1000, tz=UTC)
     async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
         cursor = await conn.execute(
             """
-            SELECT wallet_address, COUNT(*) AS n, MAX(timestamp) AS latest
-            FROM fills
-            WHERE timestamp BETWEEN %s AND %s
-            GROUP BY wallet_address
-            ORDER BY n DESC, latest DESC
-            LIMIT %s
-            """,
-            (start, end, max_candidates),
-        )
-        addresses = [str(row[0]).lower() for row in await cursor.fetchall()]
-        rows_by_wallet: dict[str, list[dict[str, Any]]] = {}
-        for address in addresses:
-            fill_cursor = await conn.execute(
-                """
-                SELECT raw_json
+            WITH selected AS (
+                SELECT wallet_address, COUNT(*) AS n, MAX(timestamp) AS latest
                 FROM fills
-                WHERE wallet_address = %s
-                  AND timestamp BETWEEN %s AND %s
-                ORDER BY timestamp, tid
-                """,
-                (address, start, end),
+                WHERE timestamp BETWEEN %s AND %s
+                GROUP BY wallet_address
+                ORDER BY n DESC, latest DESC
+                LIMIT %s
             )
-            raw_rows: list[dict[str, Any]] = []
-            for row in await fill_cursor.fetchall():
-                raw = row[0]
-                if isinstance(raw, dict):
-                    raw_rows.append(raw)
-            rows_by_wallet[address] = raw_rows
+            SELECT f.wallet_address, f.raw_json
+            FROM fills AS f
+            JOIN selected AS s
+              ON s.wallet_address = f.wallet_address
+            WHERE f.timestamp BETWEEN %s AND %s
+            ORDER BY f.wallet_address, f.timestamp, f.tid
+            """,
+            (start, end, max_candidates, start, end),
+        )
+        rows_by_wallet: dict[str, list[dict[str, Any]]] = {}
+        for row in await cursor.fetchall():
+            address = str(row[0]).lower()
+            raw = row[1]
+            rows_by_wallet.setdefault(address, [])
+            if isinstance(raw, dict):
+                rows_by_wallet[address].append(raw)
         return rows_by_wallet
 
 
