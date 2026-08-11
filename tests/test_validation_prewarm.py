@@ -3,6 +3,7 @@ from pathlib import Path
 import polars as pl
 
 from hlcopy.research.cohort import CohortPolicy, apply_cohort
+from hlcopy.research.cohort_cli import _filter_current_markets, _parse_active_perp_markets
 from hlcopy.shadow.registry import WalletRegistry, WalletSpec
 
 
@@ -57,3 +58,43 @@ def test_apply_cohort_refreshes_existing_validation_market_prewarm(tmp_path: Pat
     stored = registry.load()[0]
     assert result.already_validation_ids == ("wallet",)
     assert stored.coins == ("BTC", "XYZ:SNDK", "ETH")
+
+
+def test_active_perp_parser_keeps_live_native_and_hip3_and_drops_delisted() -> None:
+    payload = [
+        [
+            {
+                "universe": [
+                    {"name": "BTC", "maxLeverage": 50},
+                    {"name": "LOOM", "isDelisted": True},
+                ]
+            },
+            [],
+        ],
+        [
+            {
+                "universe": [
+                    {"name": "xyz:SNDK", "maxLeverage": 10},
+                    {"name": "para:COHR", "maxLeverage": 10},
+                ]
+            },
+            [],
+        ],
+    ]
+
+    assert _parse_active_perp_markets(payload) == frozenset(
+        {"BTC", "XYZ:SNDK", "PARA:COHR"}
+    )
+
+
+def test_current_market_filter_preserves_per_wallet_order() -> None:
+    seeds = {
+        "0x1": ("BTC", "XYZ:SNDK", "LOOM"),
+        "0x2": ("PARA:COHR", "ETH"),
+    }
+    current = frozenset({"BTC", "XYZ:SNDK", "PARA:COHR"})
+
+    assert _filter_current_markets(seeds, current) == {
+        "0x1": ("BTC", "XYZ:SNDK"),
+        "0x2": ("PARA:COHR",),
+    }
