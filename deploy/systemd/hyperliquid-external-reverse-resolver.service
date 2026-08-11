@@ -1,0 +1,24 @@
+[Unit]
+Description=Hyperliquid external source reverse-index wallet resolver
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/hyperliquid-copy-engine
+EnvironmentFile=/root/hyperliquid-copy-engine/.env
+EnvironmentFile=-/root/hlcopy-external-index.env
+Environment=REAL_TRADING_ENABLED=NO
+ExecStart=/usr/bin/flock --wait 1800 /run/hyperliquid-external-reverse-resolver.lock \
+  /root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.resolver.reverse_cli \
+  --source-registry /mnt/HC_Volume_106576526/hyperliquid/resolver/sources.json \
+  --wallet-registry /mnt/HC_Volume_106576526/hyperliquid/shadow/wallets.json \
+  --output-dir /mnt/HC_Volume_106576526/hyperliquid/outputs/resolver-reverse \
+  run-all
+Nice=15
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
