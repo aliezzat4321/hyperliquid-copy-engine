@@ -48,3 +48,5 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/hlcopy/resolver/reverse_index.py" = ["E501", "UP035"]
+"src/hlcopy/resolver/fingerprint_cli.py" = ["E501", "F401"]
+"src/hlcopy/profitability/live_cli.py" = ["E501"]
