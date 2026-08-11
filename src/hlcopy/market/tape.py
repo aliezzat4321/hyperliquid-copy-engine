@@ -14,7 +14,10 @@ import polars as pl
 
 logger = logging.getLogger(__name__)
 
-_PARTITION_SAFE = re.compile(r"[^A-Za-z0-9_.-]+")
+# ':' is legal on the Linux validation host and is semantically meaningful for
+# Hyperliquid HIP-3 symbols (for example xyz:SNDK). Preserve it so the evaluator
+# can address the same coin string that appears on wallet fills.
+_PARTITION_SAFE = re.compile(r"[^A-Za-z0-9_.:-]+")
 
 _BASE_COLUMNS = {
     "channel": pl.String,

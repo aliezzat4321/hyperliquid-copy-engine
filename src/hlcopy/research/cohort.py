@@ -153,6 +153,15 @@ def apply_cohort(
         for address, coins in (seed_coins_by_address or {}).items()
     }
 
+    # Coverage is part of validation correctness, not a one-time promotion detail.
+    # Refresh every already-active wallet before looking for new promotions so the
+    # market collector is warm on markets that the trader used historically instead
+    # of learning a coin only after the first live fill has already happened.
+    for wallet in active:
+        seed_coins = seed_map.get(wallet.source_ref.lower())
+        if seed_coins and tuple(seed_coins) != tuple(wallet.coins):
+            registry.update(wallet.id, coins=seed_coins)
+
     for candidate in chosen:
         wallet = by_address.get(candidate.address)
         if wallet is None:

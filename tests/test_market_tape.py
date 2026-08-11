@@ -45,3 +45,25 @@ def test_market_tape_writer_is_append_only_and_partitioned(tmp_path) -> None:
     assert frame.height == 1
     assert frame["coin"][0] == "BTC"
     assert frame["bid_px"][0] == 100.0
+
+
+def test_market_tape_preserves_hip3_namespace_for_evaluator_lookup(tmp_path) -> None:
+    received_at_ns = int(datetime(2026, 8, 11, tzinfo=UTC).timestamp() * 1_000_000_000)
+    writer = MarketTapeWriter(tmp_path)
+    writer.append(
+        {
+            "channel": "l2Book",
+            "coin": "xyz:SKHX",
+            "exchange_ts_ms": 1_000,
+            "received_at_ns": received_at_ns,
+            "received_monotonic_ns": 123,
+            "observed_event_lag_ms": 1.0,
+            "raw_json": "{}",
+            "bid_levels_json": "[]",
+            "ask_levels_json": "[]",
+        }
+    )
+    paths = writer.flush()
+
+    assert len(paths) == 1
+    assert "coin=xyz:SKHX/channel=l2Book" in paths[0].as_posix()
