@@ -12,7 +12,7 @@ POLICY_VERSION = "shadow-cohort-v1"
 
 @dataclass(frozen=True, slots=True)
 class CohortPolicy:
-    max_validation_wallets: int = 6
+    max_validation_wallets: int = MAX_ACTIVE_HYPERLIQUID_USERS_PER_IP
     min_trade_count: int = 25
     min_composite_score: float = 45.0
     min_copyability_score: float = 70.0
