@@ -35,7 +35,13 @@ def _market_subscriptions(
     cleaned = dict.fromkeys(
         normalized for coin in coins if (normalized := wire_coin(coin))
     )
-    types = tuple(dict.fromkeys(str(value).strip() for value in subscription_types if str(value).strip()))
+    types = tuple(
+        dict.fromkeys(
+            str(value).strip()
+            for value in subscription_types
+            if str(value).strip()
+        )
+    )
     if not types:
         raise ValueError("at least one market subscription type is required")
     invalid = sorted(set(types) - ALLOWED_MARKET_SUBSCRIPTION_TYPES)
