@@ -9,16 +9,16 @@ WorkingDirectory=/root/hyperliquid-copy-engine
 EnvironmentFile=/root/hyperliquid-copy-engine/.env
 Environment=REAL_TRADING_ENABLED=NO
 # Validation needs executable order-book state before a wallet trades a market.
-# Persist only l2Book here: BBO is derivable from L2 and trades/assetCtx are not
-# required by the execution evaluator. The current non-delisted perp universe is
-# supplied by the cohort job so a wallet's first trade in a previously unseen market
-# is still evaluable.
-Environment=HLCOPY_MARKET_SUBSCRIPTION_TYPES=l2Book
-# Full-current-market prewarm is intentionally a short prospective validation sprint.
-# Batch tape writes to control file count; gaps from crashes/restarts are never scored.
-Environment=HLCOPY_MARKET_FLUSH_SECONDS=300
-Environment=HLCOPY_MARKET_FLUSH_ROWS=100000
-ExecStart=/root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.shadow.cli \
+# The current non-delisted perp universe is supplied by the cohort job so a wallet's
+# first trade in a previously unseen market is still evaluable.
+# IMPORTANT: use /usr/bin/env on ExecStart for validation-critical market settings.
+# EnvironmentFile values can otherwise shadow service-level Environment assignments.
+# This makes the Python process receive the exact L2-only / batching configuration.
+ExecStart=/usr/bin/env \
+  HLCOPY_MARKET_SUBSCRIPTION_TYPES=l2Book \
+  HLCOPY_MARKET_FLUSH_SECONDS=300 \
+  HLCOPY_MARKET_FLUSH_ROWS=100000 \
+  /root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.shadow.cli \
   --registry /mnt/HC_Volume_106576526/hyperliquid/shadow/wallets.json \
   run \
   --shadow-dir /mnt/HC_Volume_106576526/hyperliquid/shadow \
