@@ -12,6 +12,8 @@ from hlcopy.market.symbols import canonical_coin
 from hlcopy.research.cohort import CohortPolicy, apply_cohort, plan_cohort
 from hlcopy.shadow.registry import MAX_ACTIVE_HYPERLIQUID_USERS_PER_IP, WalletRegistry
 
+DEFAULT_MAX_SEED_COINS = 200
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m hlcopy.research.cohort_cli")
@@ -22,7 +24,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=MAX_ACTIVE_HYPERLIQUID_USERS_PER_IP,
     )
-    parser.add_argument("--max-seed-coins", type=int, default=6)
+    parser.add_argument(
+        "--max-seed-coins",
+        type=int,
+        default=DEFAULT_MAX_SEED_COINS,
+        help=(
+            "maximum historical markets to prewarm per validation wallet; "
+            "the shadow process enforces a separate global market-universe safety cap"
+        ),
+    )
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("plan")
     sub.add_parser("apply")
@@ -58,6 +68,17 @@ def _seed_coins(addresses: list[str], max_coins: int) -> dict[str, tuple[str, ..
     return result
 
 
+def _active_validation_addresses(registry: WalletRegistry) -> list[str]:
+    registry.init()
+    return [
+        wallet.source_ref.lower()
+        for wallet in registry.load()
+        if wallet.enabled
+        and wallet.source_type == "hyperliquid_wallet"
+        and wallet.stage in {"validation", "approved"}
+    ]
+
+
 def main() -> None:
     args = build_parser().parse_args()
     if os.getenv("REAL_TRADING_ENABLED", "NO").strip().upper() == "YES":
@@ -85,11 +106,14 @@ def main() -> None:
         )
         return
 
+    registry = WalletRegistry(args.registry)
     selected_addresses = [row.address for row in plan if row.selected]
-    seeds = _seed_coins(selected_addresses, max(0, args.max_seed_coins))
+    active_addresses = _active_validation_addresses(registry)
+    seed_addresses = list(dict.fromkeys((*active_addresses, *selected_addresses)))
+    seeds = _seed_coins(seed_addresses, max(0, args.max_seed_coins))
     result = apply_cohort(
         parquet_path=args.artifact,
-        registry=WalletRegistry(args.registry),
+        registry=registry,
         policy=policy,
         seed_coins_by_address=seeds,
     )
@@ -100,6 +124,7 @@ def main() -> None:
                 "promoted_ids": list(result.promoted_ids),
                 "already_validation_ids": list(result.already_validation_ids),
                 "remaining_capacity": result.remaining_capacity,
+                "prewarmed_addresses": seed_addresses,
                 "seed_coins": {address: list(coins) for address, coins in seeds.items()},
             },
             sort_keys=True,
