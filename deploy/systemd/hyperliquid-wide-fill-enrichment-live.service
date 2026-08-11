@@ -1,0 +1,26 @@
+[Unit]
+Description=Hyperliquid prospective-only wide trade official fill enrichment
+After=network-online.target hyperliquid-wide-trade-watch-live.service
+Wants=network-online.target hyperliquid-wide-trade-watch-live.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root/hyperliquid-copy-engine
+EnvironmentFile=/root/hyperliquid-copy-engine/.env
+Environment=REAL_TRADING_ENABLED=NO
+ExecStart=/root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.shadow.wide_enrich_cli_live \
+  --source-dir /mnt/HC_Volume_106576526/hyperliquid/shadow/wide-trades-live \
+  --output-dir /mnt/HC_Volume_106576526/hyperliquid/shadow/wide-enriched-live \
+  --checkpoint /mnt/HC_Volume_106576526/hyperliquid/shadow/wide-enriched-live/checkpoint.json \
+  --poll-seconds 0.5 \
+  --query-window-ms 2000 \
+  --max-event-age-ms 10000
+Restart=always
+RestartSec=5
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
