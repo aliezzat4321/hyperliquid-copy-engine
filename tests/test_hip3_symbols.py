@@ -22,6 +22,14 @@ def test_market_subscriptions_emit_lowercase_hip3_namespace() -> None:
     }
 
 
+def test_l2_only_subscription_mode_keeps_hip3_wire_symbol() -> None:
+    subscriptions = _market_subscriptions(("BTC", "XYZ:SNDK"), ("l2Book",))
+    assert subscriptions == [
+        {"type": "l2Book", "coin": "BTC"},
+        {"type": "l2Book", "coin": "xyz:SNDK"},
+    ]
+
+
 def test_registry_keeps_stable_internal_form_for_hip3() -> None:
     wallet = WalletSpec(
         id="wallet",
