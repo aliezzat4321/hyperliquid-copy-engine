@@ -21,15 +21,10 @@ ZERO = D("0")
 
 
 class CausalParquetL2BookProvider(ParquetL2BookProvider):
-    """Causal L2 provider optimized for event-targeted profitability sweeps.
+    """Causal L2 provider optimized for event-targeted profitability sweeps."""
 
-    Production profitability only needs the latest book available at a finite set of
-    simulated order-arrival timestamps. ``prime`` resolves those timestamps with a
-    backward as-of join and materializes only the selected L2 snapshots.
-
-    The inherited full-coin loader remains as a compatibility fallback for tests and
-    ad-hoc callers that do not prime the provider first.
-    """
+    MAX_TARGET_BATCH = 128
+    MAX_TARGET_SPAN_NS = 30_000_000_000
 
     def __init__(
         self,
@@ -44,6 +39,9 @@ class CausalParquetL2BookProvider(ParquetL2BookProvider):
         self._cache = OrderedDict()
         self._received_ms_cache: dict[str, tuple[float, ...]] = {}
         self._targeted: dict[tuple[str, int], TapeBook | None] = {}
+        self.prime_candidate_rows = 0
+        self.prime_book_rows = 0
+        self.prime_peak_candidate_rows = 0
 
     @staticmethod
     def _target_ns(target_ms: float) -> int:
@@ -53,34 +51,68 @@ class CausalParquetL2BookProvider(ParquetL2BookProvider):
     def _date_for_ns(value_ns: int) -> str:
         return datetime.fromtimestamp(value_ns / 1_000_000_000, UTC).date().isoformat()
 
-    def _relevant_files(
-        self,
-        coin: str,
-        targets: list[int],
-        max_age_ns: int,
-    ) -> list[Path]:
-        dates: set[str] = set()
-        for target in targets:
-            dates.add(self._date_for_ns(target))
-            dates.add(self._date_for_ns(target - max_age_ns))
+    @staticmethod
+    def _merge_windows(targets: Iterable[int], max_age_ns: int) -> list[tuple[int, int]]:
+        windows: list[tuple[int, int]] = []
+        for target in sorted(set(targets)):
+            start = target - max_age_ns
+            end = target
+            if windows and start <= windows[-1][1] + 1:
+                windows[-1] = (windows[-1][0], max(windows[-1][1], end))
+            else:
+                windows.append((start, end))
+        return windows
 
-        files: list[Path] = []
-        for date in sorted(dates):
-            files.extend(
-                sorted(
-                    self.market_dir.glob(
-                        f"date={date}/coin={coin}/channel=l2Book/*.parquet"
-                    )
-                )
-            )
-        return files
+    @classmethod
+    def _target_batches(cls, targets: Iterable[int]) -> list[list[int]]:
+        batches: list[list[int]] = []
+        current: list[int] = []
+        for target in sorted(set(targets)):
+            if current and (
+                len(current) >= cls.MAX_TARGET_BATCH
+                or target - current[0] > cls.MAX_TARGET_SPAN_NS
+            ):
+                batches.append(current)
+                current = []
+            current.append(target)
+        if current:
+            batches.append(current)
+        return batches
+
+    @classmethod
+    def _windows_by_date(
+        cls,
+        targets: Iterable[int],
+        max_age_ns: int,
+    ) -> dict[str, list[tuple[int, int]]]:
+        grouped: dict[str, list[tuple[int, int]]] = defaultdict(list)
+        for start, end in cls._merge_windows(targets, max_age_ns):
+            start_date = cls._date_for_ns(start)
+            grouped[start_date].append((start, end))
+            end_date = cls._date_for_ns(end)
+            if end_date != start_date:
+                grouped[end_date].append((start, end))
+        return grouped
+
+    def _partition_glob(self, date: str, coin: str) -> str | None:
+        folder = self.market_dir / f"date={date}" / f"coin={coin}" / "channel=l2Book"
+        if not folder.exists() or next(folder.glob("*.parquet"), None) is None:
+            return None
+        return str(folder / "*.parquet")
+
+    @staticmethod
+    def _window_expr(windows: Iterable[tuple[int, int]]) -> pl.Expr:
+        expr: pl.Expr | None = None
+        for start, end in windows:
+            current = pl.col("received_at_ns").is_between(start, end, closed="both")
+            expr = current if expr is None else (expr | current)
+        return expr if expr is not None else pl.lit(False)
 
     def _load_coin(self, coin: str) -> list[TapeBook]:
         cached = self._cache.get(coin)
         if cached is not None:
             self._cache.move_to_end(coin)
             return cached
-
         books = super()._load_coin(coin)
         self._cache.move_to_end(coin)
         while len(self._cache) > self.max_cached_coins:
@@ -108,117 +140,109 @@ class CausalParquetL2BookProvider(ParquetL2BookProvider):
         except (json.JSONDecodeError, KeyError, TypeError, ValueError, ArithmeticError):
             return ()
 
-    def _resolve_targets(self, coin: str, target_ns_values: Iterable[int]) -> None:
-        targets = sorted(
-            target
-            for target in set(target_ns_values)
-            if (coin, target) not in self._targeted
-        )
-        if not targets:
-            return
+    def _timestamp_candidates(
+        self,
+        coin: str,
+        targets: list[int],
+        max_age_ns: int,
+    ) -> list[int]:
+        received: set[int] = set()
+        windows_by_date = self._windows_by_date(targets, max_age_ns)
+        for date, windows in sorted(windows_by_date.items()):
+            source = self._partition_glob(date, coin)
+            if source is None:
+                continue
+            frame = (
+                pl.scan_parquet(source)
+                .filter(self._window_expr(windows))
+                .select("received_at_ns")
+                .collect(engine="streaming")
+            )
+            self.prime_candidate_rows += frame.height
+            self.prime_peak_candidate_rows = max(self.prime_peak_candidate_rows, frame.height)
+            received.update(int(value) for value in frame.get_column("received_at_ns"))
+        return sorted(received)
 
-        max_age_ns = int(self.max_age_ms * 1_000_000)
-        files = self._relevant_files(coin, targets, max_age_ns)
-        if not files:
+    def _selected_books(
+        self,
+        coin: str,
+        selected_received: set[int],
+    ) -> dict[int, TapeBook | None]:
+        selected_by_date: dict[str, list[int]] = defaultdict(list)
+        for received_ns in selected_received:
+            selected_by_date[self._date_for_ns(received_ns)].append(received_ns)
+        parsed: dict[int, TapeBook | None] = {}
+        columns = ["exchange_ts_ms", "received_at_ns", "bid_levels_json", "ask_levels_json"]
+        for date, values in sorted(selected_by_date.items()):
+            source = self._partition_glob(date, coin)
+            if source is None:
+                continue
+            frame = (
+                pl.scan_parquet(source)
+                .filter(pl.col("received_at_ns").is_in(sorted(values)))
+                .select(columns)
+                .collect(engine="streaming")
+            )
+            self.prime_book_rows += frame.height
+            for row in frame.iter_rows(named=True):
+                received_ns = int(row["received_at_ns"])
+                bids = self._levels(row.get("bid_levels_json"))
+                asks = self._levels(row.get("ask_levels_json"))
+                parsed[received_ns] = (
+                    TapeBook(
+                        coin=coin,
+                        exchange_ts_ms=int(row["exchange_ts_ms"]),
+                        received_at_ns=received_ns,
+                        bids=bids,
+                        asks=asks,
+                    )
+                    if bids and asks
+                    else None
+                )
+        return parsed
+
+    def _resolve_target_batch(self, coin: str, targets: list[int], max_age_ns: int) -> None:
+        received = self._timestamp_candidates(coin, targets, max_age_ns)
+        if not received:
             for target in targets:
                 self._targeted[(coin, target)] = None
             return
-
-        # Phase 1: scan timestamp columns only. This is intentionally cheap and lets
-        # us identify the exact causal snapshots required by the target timestamps.
-        timestamp_scans = [
-            pl.scan_parquet(path).select(["exchange_ts_ms", "received_at_ns"])
-            for path in files
-        ]
-        timestamps = (
-            pl.concat(timestamp_scans, how="diagonal_relaxed")
-            .unique(subset=["received_at_ns"], keep="last")
-            .sort("received_at_ns")
-            .collect()
-        )
-        if timestamps.is_empty():
-            for target in targets:
-                self._targeted[(coin, target)] = None
-            return
-
-        target_frame = pl.DataFrame({"target_ns": targets}).sort("target_ns")
-        joined = target_frame.join_asof(
-            timestamps,
-            left_on="target_ns",
-            right_on="received_at_ns",
-            strategy="backward",
-        )
 
         chosen_by_target: dict[int, int | None] = {}
         selected_received: set[int] = set()
-        for row in joined.iter_rows(named=True):
-            target_ns = int(row["target_ns"])
-            received = row.get("received_at_ns")
-            if received is None:
-                chosen_by_target[target_ns] = None
+        for target in targets:
+            idx = bisect_right(received, target) - 1
+            if idx < 0:
+                chosen_by_target[target] = None
                 continue
-            received_ns = int(received)
-            age_ns = target_ns - received_ns
+            received_ns = received[idx]
+            age_ns = target - received_ns
             if age_ns < 0 or age_ns > max_age_ns:
-                chosen_by_target[target_ns] = None
+                chosen_by_target[target] = None
                 continue
-            chosen_by_target[target_ns] = received_ns
+            chosen_by_target[target] = received_ns
             selected_received.add(received_ns)
 
-        if not selected_received:
-            for target in targets:
-                self._targeted[(coin, target)] = None
-            return
-
-        # Phase 2: materialize JSON book levels only for snapshots actually selected
-        # by the causal as-of join. Sparse targets therefore do not pull the entire
-        # time span between the earliest and latest event into memory.
-        columns = [
-            "exchange_ts_ms",
-            "received_at_ns",
-            "bid_levels_json",
-            "ask_levels_json",
-        ]
-        selected_values = sorted(selected_received)
-        book_scans = [
-            pl.scan_parquet(path)
-            .select(columns)
-            .filter(pl.col("received_at_ns").is_in(selected_values))
-            for path in files
-        ]
-        books_frame = (
-            pl.concat(book_scans, how="diagonal_relaxed")
-            .unique(subset=["received_at_ns"], keep="last")
-            .collect()
-        )
-
-        parsed_by_received: dict[int, TapeBook | None] = {}
-        for row in books_frame.iter_rows(named=True):
-            received_ns = int(row["received_at_ns"])
-            bids = self._levels(row.get("bid_levels_json"))
-            asks = self._levels(row.get("ask_levels_json"))
-            parsed_by_received[received_ns] = (
-                TapeBook(
-                    coin=coin,
-                    exchange_ts_ms=int(row["exchange_ts_ms"]),
-                    received_at_ns=received_ns,
-                    bids=bids,
-                    asks=asks,
-                )
-                if bids and asks
-                else None
-            )
-
+        parsed = self._selected_books(coin, selected_received)
         for target in targets:
             received_ns = chosen_by_target.get(target)
             self._targeted[(coin, target)] = (
-                parsed_by_received.get(received_ns)
-                if received_ns is not None
-                else None
+                parsed.get(received_ns) if received_ns is not None else None
             )
 
+    def _resolve_targets(self, coin: str, target_ns_values: Iterable[int]) -> None:
+        targets = [
+            target
+            for target in sorted(set(target_ns_values))
+            if (coin, target) not in self._targeted
+        ]
+        if not targets:
+            return
+        max_age_ns = int(self.max_age_ms * 1_000_000)
+        for batch in self._target_batches(targets):
+            self._resolve_target_batch(coin, batch, max_age_ns)
+
     def prime(self, events: Iterable[Any], scenarios: Iterable[LatencyScenario]) -> None:
-        """Resolve all event/scenario book timestamps once before scenario sweeps."""
         scenario_list = tuple(scenarios)
         targets_by_coin: dict[str, list[int]] = defaultdict(list)
         for event in events:
@@ -238,19 +262,17 @@ class CausalParquetL2BookProvider(ParquetL2BookProvider):
                 print(
                     "causal_book_prime "
                     f"coins={index}/{total} resolved_targets={len(self._targeted)} "
-                    f"coin={coin}",
+                    f"candidate_rows={self.prime_candidate_rows} "
+                    f"peak_candidate_rows={self.prime_peak_candidate_rows} "
+                    f"book_rows={self.prime_book_rows} coin={coin}",
                     flush=True,
                 )
 
     def first_at_or_after(self, coin: str, target_ms: float) -> TapeBook | None:
-        # Keep the historical method name because simulate_copy calls this interface.
         target_ns = self._target_ns(target_ms)
         key = (coin, target_ns)
         if key in self._targeted:
             return self._targeted[key]
-
-        # Compatibility path for unit tests and non-primed callers that explicitly
-        # populate/use the inherited full-coin cache.
         if coin in self._cache:
             books = self._load_coin(coin)
             if not books:
@@ -262,7 +284,5 @@ class CausalParquetL2BookProvider(ParquetL2BookProvider):
             book = books[idx]
             age_ms = target_ms - received_ms[idx]
             return book if 0 <= age_ms <= self.max_age_ms else None
-
-        # Safe targeted fallback: resolve only this timestamp, never the full history.
         self._resolve_targets(coin, (target_ns,))
         return self._targeted.get(key)
