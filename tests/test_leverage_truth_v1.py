@@ -11,6 +11,7 @@ def test_leverage_changes_equity_return_not_underlying_pnl() -> None:
         "wallet_address": "0xabc",
         "scenario": "LIVE_250MS",
         "notional_usd": "10000",
+        "peak_concurrent_gross_notional_usd": "10000",
         "closed_net_pnl_usd": "300",
         "realized_actions": 20,
     }
@@ -25,3 +26,24 @@ def test_leverage_changes_equity_return_not_underlying_pnl() -> None:
     assert rows[0]["research_only"] is True
     assert rows[1]["research_only"] is True
     assert rows[2]["liquidation_path_mode"] == "NOT_MODELED_BLOCKS_LIVE_APPROVAL"
+
+
+def test_leverage_fails_closed_without_portfolio_peak_exposure() -> None:
+    summary = {
+        "notional_usd": "10000",
+        "closed_net_pnl_usd": "300",
+        "realized_actions": 20,
+    }
+    assert leverage_matrix(summary, [D("5")]) == []
+
+
+def test_overlapping_portfolio_exposure_reduces_roe() -> None:
+    summary = {
+        "notional_usd": "10000",
+        "peak_concurrent_gross_notional_usd": "20000",
+        "closed_net_pnl_usd": "300",
+        "realized_actions": 20,
+    }
+    row = leverage_matrix(summary, [D("5")])[0]
+    assert D(str(row["equity_required_usd"])) == D("4000")
+    assert D(str(row["net_equity_return_pct"])) == D("7.5")
