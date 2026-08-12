@@ -13,26 +13,47 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install requests
-      - name: Query SQD Hyperliquid fills for Bones block
+      - name: Aggregate first Bones BTC close
         run: |
           python - <<'PY'
-          import json, requests
-          url='https://portal.sqd.dev/datasets/hyperliquid-fills/stream'
+          import json
+          from collections import defaultdict
+          from decimal import Decimal
+          import requests
+
+          URL='https://portal.sqd.dev/datasets/hyperliquid-fills/stream'
+          TARGET_T=1786125635908
+          TARGET_PX=Decimal('64773')
+          TARGET_SZ=Decimal('0.010092')
           payload={
-            'type':'hyperliquidFills',
-            'fromBlock':1101616818,
-            'toBlock':1101616824,
+            'type':'hyperliquidFills','fromBlock':1101616740,'toBlock':1101616900,
             'fields':{
               'block':{'number':True,'timestamp':True},
-              'fill':{
-                'user':True,'coin':True,'px':True,'sz':True,'side':True,'time':True,
-                'hash':True,'oid':True,'closedPnl':True,'crossed':True,'tid':True
-              }
-            },
-            'fills':[{}]
+              'fill':{'user':True,'coin':True,'px':True,'sz':True,'side':True,'time':True,
+                      'hash':True,'oid':True,'closedPnl':True,'crossed':True,'tid':True}
+            },'fills':[{}]
           }
-          r=requests.post(url,json=payload,timeout=30)
-          print('STATUS',r.status_code,'LEN',len(r.content))
-          print(r.text[:50000])
-          r.raise_for_status()
+          r=requests.post(URL,json=payload,timeout=45); r.raise_for_status()
+          groups=defaultdict(lambda:{'sz':Decimal('0'),'notional':Decimal('0'),'times':[],'fills':[],'crossed':False})
+          blocks=0
+          for line in r.text.splitlines():
+              if not line.strip(): continue
+              row=json.loads(line); blocks+=1
+              for f in row.get('fills',[]):
+                  if f.get('coin')!='BTC' or f.get('side')!='A': continue
+                  key=(str(f.get('user')).lower(),str(f.get('oid')))
+                  sz=Decimal(str(f['sz'])); px=Decimal(str(f['px']))
+                  g=groups[key]; g['sz']+=sz; g['notional']+=sz*px; g['times'].append(int(f['time'])); g['fills'].append(f)
+                  g['crossed']=g['crossed'] or bool(f.get('crossed'))
+          ranked=[]
+          for (user,oid),g in groups.items():
+              if g['sz']<=0: continue
+              vwap=g['notional']/g['sz']; dt=min(abs(t-TARGET_T) for t in g['times'])
+              size_rel=abs(g['sz']/TARGET_SZ-Decimal('1'))
+              px_bps=abs(vwap/TARGET_PX-Decimal('1'))*Decimal('10000')
+              score=Decimal(dt)/Decimal('1000') + size_rel*Decimal('20') + px_bps/Decimal('5')
+              ranked.append((score,dt,size_rel,px_bps,user,oid,g['sz'],vwap,g['crossed'],len(g['fills'])))
+          ranked.sort()
+          print('BLOCK_ROWS',blocks,'GROUPS',len(groups))
+          for x in ranked[:50]: print('GROUP',x)
           PY
