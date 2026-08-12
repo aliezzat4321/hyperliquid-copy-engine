@@ -7,9 +7,9 @@ from decimal import Decimal
 from hlcopy.profitability.position_copy import (
     CopyFillEvent,
     RealizedSlice,
-    _FollowerState,
     _book_for,
     _fill_price,
+    _FollowerState,
     _open_qty,
 )
 from hlcopy.shadow.evaluator import ParquetL2BookProvider
@@ -101,7 +101,10 @@ def simulate_copy_with_portfolio_capital(
         gross = sum(
             (
                 abs(state.qty)
-                * causal_marks.get(coin, state.avg_entry if state.avg_entry is not None else ZERO)
+                * causal_marks.get(
+                    coin,
+                    state.avg_entry if state.avg_entry is not None else ZERO,
+                )
                 for coin, state in states.items()
                 if state.qty != ZERO
             ),
@@ -116,8 +119,6 @@ def simulate_copy_with_portfolio_capital(
             missed += 1
             continue
 
-        # Mark existing exposure before applying this event. This captures adverse or
-        # favorable price movement at every causal wallet-event observation.
         causal_marks[event.coin] = book.mid
         update_peak()
 
