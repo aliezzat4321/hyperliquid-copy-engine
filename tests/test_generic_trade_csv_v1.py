@@ -29,11 +29,11 @@ def test_generic_loader_autodetects_bones_style_columns(tmp_path: Path) -> None:
     assert str(result.signals[1].allocation_fraction) == "0.15"
 
 
-def test_generic_loader_accepts_common_alternative_headers(tmp_path: Path) -> None:
+def test_generic_loader_accepts_explicit_position_side_header(tmp_path: Path) -> None:
     path = tmp_path / "other.csv"
     path.write_text(
-        "id,symbol,side,avg_entry_price,avg_exit_price,start_time,end_time\n"
-        "1,SOL,buy,150,155,2026-08-01T10:00:00Z,2026-08-01T10:30:00Z\n",
+        "id,symbol,position_side,avg_entry_price,avg_exit_price,start_time,end_time\n"
+        "1,SOL,LONG,150,155,2026-08-01T10:00:00Z,2026-08-01T10:30:00Z\n",
         encoding="utf-8",
     )
 
@@ -46,6 +46,18 @@ def test_generic_loader_accepts_common_alternative_headers(tmp_path: Path) -> No
     assert signal.direction == "LONG"
     assert str(signal.source_leverage) == "1"
     assert str(signal.allocation_fraction) == "1"
+
+
+def test_generic_loader_rejects_ambiguous_side_only_schema(tmp_path: Path) -> None:
+    path = tmp_path / "ambiguous.csv"
+    path.write_text(
+        "id,symbol,side,avg_entry_price,avg_exit_price,start_time,end_time\n"
+        "1,SOL,SELL,150,155,2026-08-01T10:00:00Z,2026-08-01T10:30:00Z\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(GenericTradeCsvError, match="intentionally not treated as position direction"):
+        load_generic_closed_trades(path)
 
 
 def test_generic_loader_fails_when_required_schema_cannot_be_detected(tmp_path: Path) -> None:
