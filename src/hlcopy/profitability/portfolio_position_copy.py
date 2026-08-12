@@ -1,0 +1,325 @@
+from __future__ import annotations
+
+from collections.abc import Iterable
+from dataclasses import dataclass
+from decimal import Decimal
+
+from hlcopy.profitability.position_copy import (
+    CopyFillEvent,
+    RealizedSlice,
+    _FollowerState,
+    _book_for,
+    _fill_price,
+    _open_qty,
+)
+from hlcopy.shadow.evaluator import ParquetL2BookProvider
+from hlcopy.shadow.latency import LatencyScenario
+
+D = Decimal
+ZERO = D("0")
+ONE = D("1")
+BPS = D("10000")
+
+
+@dataclass(frozen=True, slots=True)
+class PortfolioCopySimulation:
+    lane: str
+    wallet_id: str
+    wallet_address: str
+    scenario: str
+    notional_usd: Decimal
+    leader_events: int
+    executable_events: int
+    missed_events: int
+    copied_increase_events: int
+    realized_slices: tuple[RealizedSlice, ...]
+    realized_net_pnl_usd: Decimal
+    realized_gross_pnl_usd: Decimal
+    total_fees_usd: Decimal
+    open_positions: int
+    peak_concurrent_gross_notional_usd: Decimal
+
+
+def simulate_copy_with_portfolio_capital(
+    events: Iterable[CopyFillEvent],
+    *,
+    provider: ParquetL2BookProvider,
+    scenario: LatencyScenario,
+    notional_usd: Decimal,
+    taker_fee_bps: Decimal,
+    max_slippage_bps: Decimal,
+    max_book_forward_ms: int,
+) -> PortfolioCopySimulation:
+    """Run the position-copy model while tracking causal portfolio gross exposure.
+
+    ``notional_usd`` is a per-coin cap, not wallet capital. For leverage research we
+    therefore need a portfolio denominator. The peak below is marked only at causal
+    wallet-event books: the event coin receives the current causal mid while other
+    open coins retain their most recently observed causal mark. This is intentionally
+    labeled a research capital proxy; continuous MTM, funding, maintenance margin and
+    liquidation paths remain separate blocking truth layers.
+    """
+
+    ordered = sorted(
+        events,
+        key=lambda x: (x.exchange_ts_ms, x.wallet_address, x.coin, x.tid),
+    )
+    if not ordered:
+        return PortfolioCopySimulation(
+            "UNKNOWN",
+            "",
+            "",
+            scenario.name,
+            notional_usd,
+            0,
+            0,
+            0,
+            0,
+            (),
+            ZERO,
+            ZERO,
+            ZERO,
+            0,
+            ZERO,
+        )
+
+    lane = ordered[0].lane
+    wallet_id = ordered[0].wallet_id
+    wallet_address = ordered[0].wallet_address
+    states: dict[str, _FollowerState] = {}
+    causal_marks: dict[str, Decimal] = {}
+    realized: list[RealizedSlice] = []
+    executable = 0
+    missed = 0
+    copied_increases = 0
+    total_fees = ZERO
+    peak_gross = ZERO
+    fee_rate = taker_fee_bps / BPS
+
+    def update_peak() -> None:
+        nonlocal peak_gross
+        gross = sum(
+            (
+                abs(state.qty)
+                * causal_marks.get(coin, state.avg_entry if state.avg_entry is not None else ZERO)
+                for coin, state in states.items()
+                if state.qty != ZERO
+            ),
+            ZERO,
+        )
+        peak_gross = max(peak_gross, gross)
+
+    for event in ordered:
+        state = states.setdefault(event.coin, _FollowerState())
+        book, feed_ms = _book_for(provider, event, scenario, max_book_forward_ms)
+        if book is None:
+            missed += 1
+            continue
+
+        # Mark existing exposure before applying this event. This captures adverse or
+        # favorable price movement at every causal wallet-event observation.
+        causal_marks[event.coin] = book.mid
+        update_peak()
+
+        start = event.leader_start
+        after = event.leader_after
+        delta = event.leader_delta
+        same_direction_increase = (
+            after != ZERO
+            and (start == ZERO or start * after > ZERO)
+            and abs(after) > abs(start)
+        )
+        reduction = start != ZERO and (
+            after == ZERO or (start * after > ZERO and abs(after) < abs(start))
+        )
+        flip = start != ZERO and after != ZERO and start * after < ZERO
+
+        if same_direction_increase:
+            signed_qty, scale = _open_qty(
+                event=event,
+                book=book,
+                state=state,
+                notional_usd=notional_usd,
+            )
+            if signed_qty == ZERO:
+                continue
+            px = _fill_price(
+                book,
+                signed_qty=signed_qty,
+                max_slippage_bps=max_slippage_bps,
+            )
+            if px is None:
+                missed += 1
+                continue
+            executable += 1
+            copied_increases += 1
+            old_abs = abs(state.qty)
+            add_abs = abs(signed_qty)
+            if old_abs == ZERO or state.avg_entry is None or state.qty * signed_qty <= ZERO:
+                state.avg_entry = px
+                state.qty = signed_qty
+            else:
+                state.avg_entry = (
+                    state.avg_entry * old_abs + px * add_abs
+                ) / (old_abs + add_abs)
+                state.qty += signed_qty
+            state.scale = scale
+            causal_marks[event.coin] = px
+            total_fees += add_abs * px * fee_rate
+            update_peak()
+            continue
+
+        if (
+            reduction
+            and state.qty != ZERO
+            and state.avg_entry is not None
+            and state.scale is not None
+        ):
+            close_abs = min(abs(state.qty), state.scale * abs(delta))
+            signed_close = -close_abs if state.qty > ZERO else close_abs
+            px = _fill_price(
+                book,
+                signed_qty=signed_close,
+                max_slippage_bps=max_slippage_bps,
+            )
+            if px is None:
+                missed += 1
+                continue
+            executable += 1
+            direction = "LONG" if state.qty > ZERO else "SHORT"
+            sign = ONE if state.qty > ZERO else -ONE
+            gross = sign * (px - state.avg_entry) * close_abs
+            exit_fee = close_abs * px * fee_rate
+            net = gross - exit_fee
+            total_fees += exit_fee
+            realized.append(
+                RealizedSlice(
+                    lane=lane,
+                    wallet_id=wallet_id,
+                    wallet_address=wallet_address,
+                    coin=event.coin,
+                    direction=direction,
+                    exchange_ts_ms=event.exchange_ts_ms,
+                    source_tid=event.tid,
+                    feed_ms=feed_ms,
+                    action="CLOSE" if after == ZERO else "REDUCE",
+                    qty=close_abs,
+                    execution_price=px,
+                    gross_pnl_usd=gross,
+                    fee_usd=exit_fee,
+                    net_pnl_usd=net,
+                    entry_fee_usd_allocated=ZERO,
+                )
+            )
+            state.qty += signed_close
+            causal_marks[event.coin] = px
+            if abs(state.qty) <= D("1e-18") or after == ZERO:
+                state.qty = ZERO
+                state.avg_entry = None
+                state.scale = None
+            update_peak()
+            continue
+
+        if flip:
+            if state.qty != ZERO and state.avg_entry is not None:
+                close_abs = abs(state.qty)
+                signed_close = -state.qty
+                px = _fill_price(
+                    book,
+                    signed_qty=signed_close,
+                    max_slippage_bps=max_slippage_bps,
+                )
+                if px is not None:
+                    executable += 1
+                    direction = "LONG" if state.qty > ZERO else "SHORT"
+                    sign = ONE if state.qty > ZERO else -ONE
+                    gross = sign * (px - state.avg_entry) * close_abs
+                    exit_fee = close_abs * px * fee_rate
+                    net = gross - exit_fee
+                    total_fees += exit_fee
+                    realized.append(
+                        RealizedSlice(
+                            lane,
+                            wallet_id,
+                            wallet_address,
+                            event.coin,
+                            direction,
+                            event.exchange_ts_ms,
+                            event.tid,
+                            feed_ms,
+                            "FLIP_CLOSE",
+                            close_abs,
+                            px,
+                            gross,
+                            exit_fee,
+                            net,
+                            ZERO,
+                        )
+                    )
+                    causal_marks[event.coin] = px
+                else:
+                    missed += 1
+            state.qty = ZERO
+            state.avg_entry = None
+            state.scale = None
+            update_peak()
+
+            synthetic = CopyFillEvent(
+                lane=event.lane,
+                wallet_id=event.wallet_id,
+                wallet_address=event.wallet_address,
+                coin=event.coin,
+                exchange_ts_ms=event.exchange_ts_ms,
+                received_at_ns=event.received_at_ns,
+                tid=event.tid,
+                leader_start=ZERO,
+                leader_after=after,
+                leader_delta=after,
+                source_price=event.source_price,
+            )
+            signed_qty, scale = _open_qty(
+                event=synthetic,
+                book=book,
+                state=state,
+                notional_usd=notional_usd,
+            )
+            px = (
+                _fill_price(
+                    book,
+                    signed_qty=signed_qty,
+                    max_slippage_bps=max_slippage_bps,
+                )
+                if signed_qty
+                else None
+            )
+            if px is not None:
+                executable += 1
+                copied_increases += 1
+                state.qty = signed_qty
+                state.avg_entry = px
+                state.scale = scale
+                causal_marks[event.coin] = px
+                total_fees += abs(signed_qty) * px * fee_rate
+                update_peak()
+            elif signed_qty:
+                missed += 1
+
+    realized_net = sum((x.net_pnl_usd for x in realized), ZERO)
+    realized_gross = sum((x.gross_pnl_usd for x in realized), ZERO)
+    return PortfolioCopySimulation(
+        lane=lane,
+        wallet_id=wallet_id,
+        wallet_address=wallet_address,
+        scenario=scenario.name,
+        notional_usd=notional_usd,
+        leader_events=len(ordered),
+        executable_events=executable,
+        missed_events=missed,
+        copied_increase_events=copied_increases,
+        realized_slices=tuple(realized),
+        realized_net_pnl_usd=realized_net,
+        realized_gross_pnl_usd=realized_gross,
+        total_fees_usd=total_fees,
+        open_positions=sum(state.qty != ZERO for state in states.values()),
+        peak_concurrent_gross_notional_usd=peak_gross,
+    )
