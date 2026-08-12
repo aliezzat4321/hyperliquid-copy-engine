@@ -76,6 +76,43 @@ def test_evidence_and_execution_break_profitability_ties() -> None:
     assert result["ranked"][0]["wallet_address"] == "0xstrong"
 
 
+def test_weak_evidence_cannot_improve_a_negative_edge() -> None:
+    better_supported_loser = [
+        _row(
+            scenario,
+            "-3",
+            edge_bps="-300",
+            wallet="0xbetter",
+            actions=50,
+            execution="100",
+        )
+        for scenario in ("LIVE_100MS", "LIVE_250MS", "LIVE_500MS", "LIVE_1000MS")
+    ]
+    weakly_supported_worse_loser = [
+        _row(
+            scenario,
+            "-10",
+            edge_bps="-1000",
+            wallet="0xworse",
+            actions=10,
+            execution="20",
+        )
+        for scenario in ("LIVE_100MS", "LIVE_250MS", "LIVE_500MS", "LIVE_1000MS")
+    ]
+
+    result = build_tournament(better_supported_loser + weakly_supported_worse_loser)
+
+    assert result["candidate_count"] == 2
+    assert result["ranked"][0]["wallet_address"] == "0xbetter"
+
+    scores = {
+        str(row["wallet_address"]): Decimal(str(row["robust_profitability_score"]))
+        for row in result["ranked"]
+    }
+    assert scores["0xworse"] < scores["0xbetter"]
+    assert scores["0xworse"] < Decimal("-1000")
+
+
 def test_high_leverage_cannot_beat_stronger_underlying_copy_edge() -> None:
     strong_edge = [
         _row(
