@@ -13,71 +13,44 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install requests
-      - name: Identify Bones from SQD executed fills
+      - name: Verify top Bones candidate with official fills
         run: |
           python - <<'PY'
-          import json
-          from collections import defaultdict
           from datetime import datetime
           from decimal import Decimal
           import requests
 
-          URL='https://portal.sqd.dev/datasets/hyperliquid-fills/stream'
-          s=requests.Session()
+          URL='https://api.hyperliquid.xyz/info'
+          user='0x01535f0ffbf18d084366c4dc846e58bb915fdd09'
           anchors=[
-            ('a1',1101616820,'2026-08-07T18:00:35.908+00:00','LONG','64773','0.010092'),
-            ('a2',1101456526,'2026-08-07T14:50:01.743+00:00','SHORT','65049','0.010000'),
-            ('a3',1101433896,'2026-08-07T14:23:08.261+00:00','LONG','64987','0.010000'),
-            ('a4',1101414678,'2026-08-07T14:00:18.041+00:00','SHORT','64968','0.010047'),
-            ('a5',1101002609,'2026-08-07T05:50:38.289+00:00','LONG','64330','0.009646'),
-            ('a6',1100797190,'2026-08-07T01:45:57.811+00:00','LONG','64392','0.010000'),
-            ('a7',1100761508,'2026-08-07T01:03:27.710+00:00','LONG','64384','0.010000'),
-            ('a8',1100714421,'2026-08-07T00:07:22.531+00:00','LONG','64381','0.010000'),
+            ('a1','2026-08-07T18:00:35.908+00:00','LONG','64773','0.010092'),
+            ('a2','2026-08-07T14:50:01.743+00:00','SHORT','65049','0.010000'),
+            ('a3','2026-08-07T14:23:08.261+00:00','LONG','64987','0.010000'),
+            ('a4','2026-08-07T14:00:18.041+00:00','SHORT','64968','0.010047'),
+            ('a5','2026-08-07T05:50:38.289+00:00','LONG','64330','0.009646'),
+            ('a6','2026-08-07T01:45:57.811+00:00','LONG','64392','0.010000'),
+            ('a7','2026-08-07T01:03:27.710+00:00','LONG','64384','0.010000'),
+            ('a8','2026-08-07T00:07:22.531+00:00','LONG','64381','0.010000'),
           ]
-          totals=defaultdict(lambda:{'anchors':0,'quality':Decimal('0'),'details':[]})
-
-          def rows_for(center):
-            p={'type':'hyperliquidFills','fromBlock':center-1200,'toBlock':center+1200,
-               'fields':{'block':{'number':True,'timestamp':True},'fill':{
-                 'user':True,'coin':True,'px':True,'sz':True,'side':True,'time':True,
-                 'oid':True,'closedPnl':True,'crossed':True,'tid':True}},'fills':[{}]}
-            r=s.post(URL,json=p,timeout=60); r.raise_for_status()
-            return [json.loads(x) for x in r.text.splitlines() if x.strip()]
-
-          for aid,center,iso,direction,pxs,szs in anchors:
-            target=int(datetime.fromisoformat(iso).timestamp()*1000)
-            px0=Decimal(pxs); sz0=Decimal(szs); side='A' if direction=='LONG' else 'B'
-            rows=rows_for(center)
-            nearest=min((abs(int(x['header']['timestamp'])-target),x['header']['number'],x['header']['timestamp']) for x in rows)
-            print('ANCHOR',aid,'nearest_header',nearest,'stream_rows',len(rows))
-            # aggregate both by exact order and by wallet in tight time window
-            groups=defaultdict(lambda:{'sz':Decimal('0'),'notional':Decimal('0'),'times':[],'crossed':False,'fills':0})
-            for row in rows:
-              for f in row.get('fills',[]):
-                if f.get('coin')!='BTC' or f.get('side')!=side: continue
-                t=int(f['time'])
-                if abs(t-target)>7000: continue
-                user=str(f.get('user','')).lower()
-                if not user.startswith('0x'): continue
-                sz=Decimal(str(f['sz'])); px=Decimal(str(f['px'])); oid=str(f.get('oid'))
-                for kind in (oid,'*'):
-                  g=groups[(user,kind)]; g['sz']+=sz; g['notional']+=sz*px; g['times'].append(t); g['crossed']|=bool(f.get('crossed')); g['fills']+=1
-            best={}
-            for (user,kind),g in groups.items():
-              if g['sz']<=0: continue
-              vwap=g['notional']/g['sz']; dt=min(abs(t-target) for t in g['times'])
-              size_rel=abs(g['sz']/sz0-Decimal('1')); pbps=abs(vwap/px0-Decimal('1'))*Decimal('10000')
-              if dt>7000 or size_rel>Decimal('0.40') or pbps>Decimal('20'): continue
-              cost=Decimal(dt)/Decimal('1000')+size_rel*Decimal('12')+pbps/Decimal('4')
-              rec=(cost,dt,size_rel,pbps,user,kind,g['sz'],vwap,g['crossed'],g['fills'])
-              if user not in best or rec<best[user]: best[user]=rec
-            ranked=sorted(best.values())
-            print(' CANDIDATES',len(ranked))
-            for rec in ranked[:20]: print('  HIT',rec)
-            for user,rec in best.items():
-              quality=max(Decimal('0'),Decimal('12')-rec[0]); totals[user]['anchors']+=1; totals[user]['quality']+=quality; totals[user]['details'].append((aid,rec))
-
-          final=sorted(totals.items(),key=lambda kv:(kv[1]['anchors'],kv[1]['quality']),reverse=True)
-          print('FINAL_RANKING')
-          for user,d in final[:40]: print('WALLET',user,'anchors',d['anchors'],'quality',d['quality'],'ids',[x[0] for x in d['details']])
+          s=requests.Session(); total=0; strong=0
+          for aid,iso,direction,pxs,szs in anchors:
+              target=int(datetime.fromisoformat(iso).timestamp()*1000)
+              expected='Close Long' if direction=='LONG' else 'Close Short'
+              p={'type':'userFillsByTime','user':user,'startTime':target-15000,'endTime':target+15000,'aggregateByTime':True}
+              r=s.post(URL,json=p,timeout=20); r.raise_for_status(); rows=r.json()
+              best=None
+              for f in rows:
+                  if str(f.get('coin','')).upper()!='BTC': continue
+                  if str(f.get('dir','')).strip().lower()!=expected.lower(): continue
+                  try:
+                      dt=abs(int(f['time'])-target); pbps=abs(Decimal(str(f['px']))/Decimal(pxs)-Decimal('1'))*Decimal('10000'); srel=abs(Decimal(str(f['sz']))/Decimal(szs)-Decimal('1'))
+                  except Exception: continue
+                  rec=(dt,pbps,srel,f)
+                  if best is None or rec[:3]<best[:3]: best=rec
+              if best is None:
+                  print('MISS',aid,'rows',len(rows)); continue
+              dt,pbps,srel,f=best; total+=1
+              if dt<=7000 and pbps<=20 and srel<=Decimal('0.40'): strong+=1
+              print('MATCH',aid,'dt',dt,'pbps',pbps,'srel',srel,'px',f.get('px'),'sz',f.get('sz'),'dir',f.get('dir'),'oid',f.get('oid'),'tid',f.get('tid'))
+          print('SUMMARY',user,'directional_matches',total,'strong_matches',strong)
           PY
