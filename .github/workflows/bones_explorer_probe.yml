@@ -13,17 +13,26 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install requests
-      - name: Check fills mirror maximum date
+      - name: Query SQD Hyperliquid fills for Bones block
         run: |
           python - <<'PY'
-          import re, requests
-          repo='gionuibk/hyperliquid-node-fills-by-block'
-          data=requests.get(f'https://huggingface.co/api/datasets/{repo}',timeout=30).json()
-          names=[x.get('rfilename','') for x in data.get('siblings',[])]
-          dates=[]
-          for name in names:
-              m=re.search(r'(20\d{6})',name)
-              if m: dates.append(m.group(1))
-          print('FILES',len(names),'DATES',len(dates),'MIN',min(dates) if dates else None,'MAX',max(dates) if dates else None)
-          print('LAST_FILES',sorted(names)[-20:])
+          import json, requests
+          url='https://portal.sqd.dev/datasets/hyperliquid-fills/stream'
+          payload={
+            'type':'hyperliquidFills',
+            'fromBlock':1101616818,
+            'toBlock':1101616824,
+            'fields':{
+              'block':{'number':True,'timestamp':True},
+              'fill':{
+                'user':True,'coin':True,'px':True,'sz':True,'side':True,'time':True,
+                'hash':True,'oid':True,'closedPnl':True,'crossed':True,'tid':True
+              }
+            },
+            'fills':[{}]
+          }
+          r=requests.post(url,json=payload,timeout=30)
+          print('STATUS',r.status_code,'LEN',len(r.content))
+          print(r.text[:50000])
+          r.raise_for_status()
           PY
