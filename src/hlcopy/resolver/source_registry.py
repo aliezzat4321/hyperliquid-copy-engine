@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-SUPPORTED_ADAPTERS = {"invo_closed_trades_csv", "generic_closed_trades_csv"}
+SUPPORTED_ADAPTERS = {"invo_closed_trades_csv"}
 
 
 def _now() -> str:
