@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -57,51 +58,120 @@ def _registration_rows(
     return sorted(chosen.values(), key=lambda row: row.rank)
 
 
+def _scout_notes(row: UniverseRow, signals: dict[str, tuple[str, ...]]) -> str:
+    tags = ",".join(signals.get(row.address, ())) or "TOP_UNIVERSE"
+    return (
+        f"{SCOUT_MARKER}; leaderboard_rank={row.rank}; "
+        f"score={row.score}; signals={tags}"
+    )
+
+
+def _is_scout_owned_research(wallet: WalletSpec) -> bool:
+    return (
+        wallet.source_type == "hyperliquid_wallet"
+        and wallet.stage == "research"
+        and SCOUT_MARKER in wallet.notes
+    )
+
+
 def _register_research_wallets(
     registry: WalletRegistry,
     rows: list[UniverseRow],
     signals: dict[str, tuple[str, ...]],
     *,
     max_total_research: int,
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], list[str], list[str]]:
+    """Atomically reconcile the scout-owned slice of the research registry.
+
+    Manual/non-scout research entries consume capacity but are never changed. Validation,
+    approved, rejected, external, and promoted scout entries are also preserved. The
+    remaining capacity is a rotating scout pool containing the highest-priority current
+    registration rows, so stale historical scout entries cannot permanently block new
+    leaderboard leaders.
+    """
     registry.init()
-    existing = registry.load()
-    existing_addresses = {
-        wallet.source_ref.lower()
-        for wallet in existing
-        if wallet.source_type == "hyperliquid_wallet"
-    }
-    research_count = sum(
-        wallet.source_type == "hyperliquid_wallet" and wallet.stage == "research"
-        for wallet in existing
-    )
-    added: list[str] = []
-    skipped_capacity: list[str] = []
-    for row in rows:
-        if row.address in existing_addresses:
-            continue
-        if research_count >= max_total_research:
-            skipped_capacity.append(row.address)
-            continue
-        tags = ",".join(signals.get(row.address, ())) or "TOP_UNIVERSE"
-        registry.add(
-            WalletSpec(
-                id=f"hl-{row.address[2:]}",
-                label=row.display_name or row.address[:14],
-                source_type="hyperliquid_wallet",
-                source_ref=row.address,
-                stage="research",
-                enabled=True,
-                notes=(
-                    f"{SCOUT_MARKER}; leaderboard_rank={row.rank}; "
-                    f"score={row.score}; signals={tags}"
-                ),
-            )
+    now = datetime.now(UTC).isoformat()
+
+    with registry._mutation_lock():
+        existing = list(registry.load())
+        protected_research_count = sum(
+            wallet.stage == "research" and not _is_scout_owned_research(wallet)
+            for wallet in existing
         )
-        existing_addresses.add(row.address)
-        research_count += 1
-        added.append(row.address)
-    return added, skipped_capacity
+        scout_capacity = max(0, max_total_research - protected_research_count)
+        desired_rows = rows[:scout_capacity]
+        desired_by_address = {row.address.lower(): row for row in desired_rows}
+
+        existing_by_address = {
+            wallet.source_ref.lower(): wallet
+            for wallet in existing
+            if wallet.source_type == "hyperliquid_wallet"
+        }
+        protected_addresses = {
+            address
+            for address, wallet in existing_by_address.items()
+            if not _is_scout_owned_research(wallet)
+        }
+
+        added: list[str] = []
+        removed: list[str] = []
+        refreshed: list[str] = []
+        skipped_capacity = [row.address for row in rows[scout_capacity:]]
+        reconciled: list[WalletSpec] = []
+
+        for wallet in existing:
+            if not _is_scout_owned_research(wallet):
+                reconciled.append(wallet)
+                continue
+
+            address = wallet.source_ref.lower()
+            row = desired_by_address.get(address)
+            if row is None:
+                removed.append(address)
+                continue
+
+            notes = _scout_notes(row, signals)
+            label = row.display_name or row.address[:14]
+            if wallet.notes != notes or wallet.label != label or not wallet.enabled:
+                wallet = replace(
+                    wallet,
+                    label=label,
+                    enabled=True,
+                    notes=notes,
+                    updated_at=now,
+                )
+                refreshed.append(address)
+            reconciled.append(wallet)
+
+        current_addresses = {
+            wallet.source_ref.lower()
+            for wallet in reconciled
+            if wallet.source_type == "hyperliquid_wallet"
+        }
+        for row in desired_rows:
+            address = row.address.lower()
+            if address in current_addresses or address in protected_addresses:
+                continue
+            reconciled.append(
+                WalletSpec(
+                    id=f"hl-{row.address[2:]}",
+                    label=row.display_name or row.address[:14],
+                    source_type="hyperliquid_wallet",
+                    source_ref=row.address,
+                    stage="research",
+                    enabled=True,
+                    notes=_scout_notes(row, signals),
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            current_addresses.add(address)
+            added.append(address)
+
+        registry._assert_valid(reconciled)
+        registry._save(reconciled)
+
+    return added, removed, refreshed, skipped_capacity
 
 
 async def _run(args: argparse.Namespace) -> None:
@@ -124,9 +194,11 @@ async def _run(args: argparse.Namespace) -> None:
     )
 
     added: list[str] = []
+    removed: list[str] = []
+    refreshed: list[str] = []
     skipped_capacity: list[str] = []
     if args.registry is not None:
-        added, skipped_capacity = _register_research_wallets(
+        added, removed, refreshed, skipped_capacity = _register_research_wallets(
             WalletRegistry(args.registry),
             registration_rows,
             signals,
@@ -151,6 +223,8 @@ async def _run(args: argparse.Namespace) -> None:
         "screened_wallets": len(candidates),
         "eligible_wallets": len(universe),
         "registered_this_run": added,
+        "rotated_out_this_run": removed,
+        "refreshed_this_run": refreshed,
         "registration_capacity_skips": skipped_capacity,
         "wallets": wallets,
         "top": [
@@ -183,8 +257,8 @@ async def _run(args: argparse.Namespace) -> None:
     print(
         "universe_scout "
         f"screened={len(candidates)} eligible={len(universe)} "
-        f"signals={len(events)} registered={len(added)} "
-        f"capacity_skips={len(skipped_capacity)}",
+        f"signals={len(events)} registered={len(added)} rotated={len(removed)} "
+        f"refreshed={len(refreshed)} capacity_skips={len(skipped_capacity)}",
         flush=True,
     )
     for row in universe[:20]:
