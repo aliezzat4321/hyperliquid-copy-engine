@@ -19,50 +19,34 @@ jobs:
           python - <<'PY'
           from datetime import datetime
           from decimal import Decimal
+          import time
           import requests
 
           RPC = 'https://rpc.hyperliquid.xyz/explorer'
-          INFO = 'https://api.hyperliquid.xyz/info'
           TARGET = int(datetime.fromisoformat('2026-08-07T18:00:35.908+00:00').timestamp() * 1000)
           TARGET_PX = Decimal('64773')
+          CENTER = 1_101_616_821
+          BTC_ASSET = 0
           session = requests.Session()
 
           def block(height):
-              r = session.post(RPC, json={'height': int(height), 'type': 'blockDetails'}, timeout=8)
-              r.raise_for_status()
-              data = r.json()
-              d = data.get('blockDetails') if isinstance(data, dict) else None
-              if not isinstance(d, dict):
-                  raise RuntimeError(f'no blockDetails for {height}: {str(data)[:200]}')
-              return d
-
-          meta = session.post(INFO, json={'type': 'meta'}, timeout=8).json()
-          btc_asset = next(i for i, item in enumerate(meta['universe']) if item['name'] == 'BTC')
-          print('btc_asset', btc_asset)
-
-          h1, h2 = 1_075_000_000, 1_105_000_000
-          d1, d2 = block(h1), block(h2)
-          print('cal', h1, d1['blockTime'], h2, d2['blockTime'])
-          slope = (h2 - h1) / (d2['blockTime'] - d1['blockTime'])
-          est = round(h1 + (TARGET - d1['blockTime']) * slope)
-          for _ in range(4):
-              d = block(est)
-              err = TARGET - d['blockTime']
-              print('estimate', est, d['blockTime'], 'err_ms', err)
-              if abs(err) <= 100:
-                  break
-              est = round(est + err * slope)
-
-          nearest = min(
-              ((abs(block(h)['blockTime'] - TARGET), h, block(h)) for h in range(est - 2, est + 3)),
-              key=lambda x: x[0],
-          )
-          _, center, center_block = nearest
-          print('center', center, center_block['blockTime'], 'delta_ms', center_block['blockTime'] - TARGET)
+              for attempt in range(6):
+                  r = session.post(RPC, json={'height': int(height), 'type': 'blockDetails'}, timeout=8)
+                  if r.status_code != 429:
+                      r.raise_for_status()
+                      data = r.json()
+                      d = data.get('blockDetails') if isinstance(data, dict) else None
+                      if not isinstance(d, dict):
+                          raise RuntimeError(f'no blockDetails for {height}: {str(data)[:200]}')
+                      time.sleep(0.35)
+                      return d
+                  time.sleep(1.0 + attempt * 0.75)
+              raise RuntimeError(f'rate limited for height {height}')
 
           candidates = []
-          for h in range(center - 15, center + 16):
+          for h in range(CENTER - 4, CENTER + 5):
               bd = block(h)
+              print('BLOCK', h, bd['blockTime'], 'delta_ms', bd['blockTime'] - TARGET)
               for tx in bd.get('txs', []):
                   if tx.get('error') is not None:
                       continue
@@ -71,7 +55,7 @@ jobs:
                       continue
                   for order in action.get('orders', []):
                       asset = order.get('a', order.get('asset'))
-                      if asset != btc_asset:
+                      if asset != BTC_ASSET:
                           continue
                       is_buy = order.get('b', order.get('isBuy'))
                       if is_buy is not False:
@@ -79,13 +63,22 @@ jobs:
                       raw_px = order.get('p', order.get('limitPx'))
                       try:
                           px = Decimal(str(raw_px))
+                          bps = abs(px / TARGET_PX - Decimal('1')) * Decimal('10000')
                       except Exception:
-                          continue
-                      bps = abs(px / TARGET_PX - Decimal('1')) * Decimal('10000')
-                      row = (abs(int(tx.get('time', bd['blockTime'])) - TARGET), bps, tx.get('user'), h, tx.get('time'), str(px), order)
-                      candidates.append(row)
+                          px = Decimal('0')
+                          bps = Decimal('Infinity')
+                      candidates.append((
+                          abs(int(tx.get('time', bd['blockTime'])) - TARGET),
+                          bps,
+                          tx.get('user'),
+                          h,
+                          tx.get('time'),
+                          str(px),
+                          order,
+                      ))
+
           candidates.sort(key=lambda x: (x[0], x[1]))
           print('candidate_count', len(candidates))
-          for row in candidates[:40]:
+          for row in candidates[:60]:
               print('CANDIDATE', row)
           PY
