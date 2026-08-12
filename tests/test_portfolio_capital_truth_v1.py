@@ -3,7 +3,7 @@ from decimal import Decimal
 from hlcopy.copyability.slippage import BookLevel
 from hlcopy.profitability.leverage_truth import leverage_matrix
 from hlcopy.profitability.portfolio_position_copy import simulate_copy_with_portfolio_capital
-from hlcopy.profitability.position_copy import CopyFillEvent
+from hlcopy.profitability.position_copy import CopyFillEvent, simulate_copy
 from hlcopy.shadow.evaluator import TapeBook
 from hlcopy.shadow.latency import LatencyScenario
 
@@ -15,9 +15,9 @@ class Provider:
         self.books = books
 
     def first_at_or_after(self, coin, target_ms):
-        for book in self.books:
-            if book.coin == coin and book.exchange_ts_ms >= target_ms:
-                return book
+        for item in self.books:
+            if item.coin == coin and item.exchange_ts_ms >= target_ms:
+                return item
         return None
 
 
@@ -50,7 +50,32 @@ def event(coin: str, ts: int, start: str, after: str, tid: int) -> CopyFillEvent
     )
 
 
-def test_two_overlapping_coin_positions_require_two_position_capital() -> None:
+def test_portfolio_simulator_preserves_single_coin_execution_pnl() -> None:
+    events = [
+        event("BTC", 1000, "0", "1", 1),
+        event("BTC", 1200, "1", "0", 2),
+    ]
+    books = [book("BTC", 1000, "100"), book("BTC", 1200, "110")]
+    kwargs = {
+        "scenario": LatencyScenario("TEST", 0, 0, 0),
+        "notional_usd": D("1000"),
+        "taker_fee_bps": D("4.5"),
+        "max_slippage_bps": D("20"),
+        "max_book_forward_ms": 1,
+    }
+    old = simulate_copy(events, provider=Provider(books), **kwargs)
+    new = simulate_copy_with_portfolio_capital(
+        events,
+        provider=Provider(books),
+        **kwargs,
+    )
+    assert new.realized_gross_pnl_usd == old.realized_gross_pnl_usd
+    assert new.total_fees_usd == old.total_fees_usd
+    assert new.executable_events == old.executable_events
+    assert len(new.realized_slices) == len(old.realized_slices)
+
+
+def test_two_overlapping_coin_positions_require_portfolio_capital() -> None:
     sim = simulate_copy_with_portfolio_capital(
         [
             event("BTC", 1000, "0", "1", 1),
@@ -73,7 +98,10 @@ def test_two_overlapping_coin_positions_require_two_position_capital() -> None:
         max_book_forward_ms=1,
     )
 
-    assert sim.peak_concurrent_gross_notional_usd == D("2000")
+    # At BTC's close event, both positions are still open and BTC has marked from
+    # $1,000 to $1,100, so causal concurrent gross peaks at $2,100 rather than the
+    # single-coin $1,000 cap.
+    assert sim.peak_concurrent_gross_notional_usd == D("2100")
     assert sim.realized_gross_pnl_usd == D("200")
 
     summary = {
@@ -85,5 +113,5 @@ def test_two_overlapping_coin_positions_require_two_position_capital() -> None:
         "realized_actions": len(sim.realized_slices),
     }
     row = leverage_matrix(summary, [D("5")])[0]
-    assert D(str(row["equity_required_usd"])) == D("400")
-    assert D(str(row["net_equity_return_pct"])) == D("50")
+    assert D(str(row["equity_required_usd"])) == D("420")
+    assert D(str(row["net_equity_return_pct"])) == D("1000") / D("21")
