@@ -3,11 +3,11 @@ from __future__ import annotations
 import json
 import subprocess
 import tempfile
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Iterable
 
 from hlcopy.hyperliquid.http_client import HyperliquidHttpClient
 from hlcopy.market.symbols import canonical_coin
@@ -280,7 +280,10 @@ async def resolve_source_public_trades(
                     source_ref=verified_address,
                     stage="research",
                     coins=tuple(sorted({signal.coin for signal in signals})),
-                    notes="Public trade discovery + official Hyperliquid verification; research only",
+                    notes=(
+                        "Public trade discovery + official Hyperliquid verification; "
+                        "research only"
+                    ),
                 )
             )
 
