@@ -14,28 +14,20 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install requests
-      - name: Probe Chainticks public Hyperliquid index
+      - name: Inspect Hyperliquid fills mirror metadata
         run: |
           python - <<'PY'
           import json
           import requests
 
-          base = 'https://huggingface.co/datasets/Chainticks/perp-data/resolve/main'
-          for path in ('LATEST_DATE.txt', '_schema.json', '_manifest.json'):
-              r = requests.get(f'{base}/{path}', timeout=20)
-              print('FILE', path, 'status', r.status_code, 'len', len(r.content))
-              r.raise_for_status()
-              text = r.text
-              if path == 'LATEST_DATE.txt':
-                  print('LATEST_DATE', text.strip())
-              elif path == '_schema.json':
-                  data = r.json()
-                  print('SCHEMA', json.dumps(data, sort_keys=True)[:12000])
-              else:
-                  data = r.json()
-                  print('MANIFEST_GENERATED', data.get('generated_at'))
-                  print('TRADE_LATEST_KEYS', [k for k in data.get('row_counts', {}) if 'hyperliquid_chain/trades' in k][-12:])
-                  tr = data.get('time_ranges', {})
-                  keys = sorted(k for k in tr if 'hyperliquid_chain/trades' in k)
-                  print('TRADE_LAST_RANGES', [(k, tr[k]) for k in keys[-10:]])
+          repo = 'gionuibk/hyperliquid-node-fills-by-block'
+          urls = [
+              f'https://huggingface.co/api/datasets/{repo}',
+              f'https://huggingface.co/api/datasets/{repo}/parquet/default/train',
+              f'https://huggingface.co/api/datasets/{repo}/tree/refs%2Fconvert%2Fparquet?recursive=true&expand=false',
+          ]
+          for url in urls:
+              r = requests.get(url, timeout=30)
+              print('URL', url, 'STATUS', r.status_code, 'LEN', len(r.content))
+              print(r.text[:30000])
           PY
