@@ -4,7 +4,7 @@ import argparse
 import asyncio
 import json
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -17,16 +17,21 @@ ZERO = D("0")
 def _d(value: object) -> Decimal:
     try:
         return D(str(value))
-    except Exception:
+    except (InvalidOperation, TypeError, ValueError):
         return ZERO
 
 
-def parse_clearinghouse_state(address: str, state: dict[str, Any]) -> dict[str, object]:
+def parse_clearinghouse_state(
+    address: str,
+    state: dict[str, Any],
+) -> dict[str, object]:
     summary = state.get("marginSummary") or {}
     account_value = _d(summary.get("accountValue"))
     total_notional = _d(summary.get("totalNtlPos"))
     margin_used = _d(summary.get("totalMarginUsed"))
-    effective_leverage = total_notional / account_value if account_value > ZERO else None
+    effective_leverage = (
+        total_notional / account_value if account_value > ZERO else None
+    )
 
     positions: list[dict[str, object]] = []
     for item in state.get("assetPositions") or []:
@@ -38,6 +43,7 @@ def parse_clearinghouse_state(address: str, state: dict[str, Any]) -> dict[str, 
         leverage = pos.get("leverage") or {}
         if not isinstance(leverage, dict):
             leverage = {}
+        leverage_value = leverage.get("value")
         positions.append(
             {
                 "coin": str(pos.get("coin") or ""),
@@ -48,7 +54,9 @@ def parse_clearinghouse_state(address: str, state: dict[str, Any]) -> dict[str, 
                 "liquidation_px": pos.get("liquidationPx"),
                 "unrealized_pnl_usd": str(pos.get("unrealizedPnl") or "0"),
                 "leverage_type": leverage.get("type"),
-                "leverage_value": str(leverage.get("value")) if leverage.get("value") is not None else None,
+                "leverage_value": (
+                    str(leverage_value) if leverage_value is not None else None
+                ),
             }
         )
 
@@ -57,8 +65,12 @@ def parse_clearinghouse_state(address: str, state: dict[str, Any]) -> dict[str, 
         "account_value_usd": str(account_value),
         "gross_notional_usd": str(total_notional),
         "margin_used_usd": str(margin_used),
-        "effective_gross_leverage": str(effective_leverage) if effective_leverage is not None else None,
-        "cross_maintenance_margin_used_usd": str(state.get("crossMaintenanceMarginUsed") or "0"),
+        "effective_gross_leverage": (
+            str(effective_leverage) if effective_leverage is not None else None
+        ),
+        "cross_maintenance_margin_used_usd": str(
+            state.get("crossMaintenanceMarginUsed") or "0"
+        ),
         "withdrawable_usd": str(state.get("withdrawable") or "0"),
         "positions": positions,
     }
@@ -94,14 +106,20 @@ async def _run(args: argparse.Namespace) -> None:
                 row = parse_clearinghouse_state(address, state)
                 row["fetched_at_ms"] = response.fetched_at_ms
                 rows.append(row)
-            print(f"leader_leverage_snapshot {index}/{len(wallets)} wallet={address[:14]}", flush=True)
+            print(
+                f"leader_leverage_snapshot {index}/{len(wallets)} "
+                f"wallet={address[:14]}",
+                flush=True,
+            )
 
     payload = {
         "generated_at": datetime.now(UTC).isoformat(),
         "mode": "CURRENT_STATE_ONLY_NOT_HISTORICAL",
+        "scope": "DEFAULT_PERP_DEX_ONLY",
         "warning": (
-            "Current clearinghouseState cannot be backfilled as historical leverage for earlier fills. "
-            "Use these snapshots for current diagnostics and prospectively capture state near future signals."
+            "Current clearinghouseState cannot be backfilled as historical leverage "
+            "for earlier fills. This REST snapshot also covers the default perp dex "
+            "only; HIP-3 dex state must be collected separately."
         ),
         "wallets": rows,
     }
