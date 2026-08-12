@@ -13,47 +13,118 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install requests
-      - name: Aggregate first Bones BTC close
+      - name: Score multiple Bones anchors from executed fills
         run: |
           python - <<'PY'
-          import json
+          import json, time
           from collections import defaultdict
+          from datetime import datetime
           from decimal import Decimal
           import requests
 
-          URL='https://portal.sqd.dev/datasets/hyperliquid-fills/stream'
-          TARGET_T=1786125635908
-          TARGET_PX=Decimal('64773')
-          TARGET_SZ=Decimal('0.010092')
-          payload={
-            'type':'hyperliquidFills','fromBlock':1101616740,'toBlock':1101616900,
-            'fields':{
-              'block':{'number':True,'timestamp':True},
-              'fill':{'user':True,'coin':True,'px':True,'sz':True,'side':True,'time':True,
-                      'hash':True,'oid':True,'closedPnl':True,'crossed':True,'tid':True}
-            },'fills':[{}]
-          }
-          r=requests.post(URL,json=payload,timeout=45); r.raise_for_status()
-          groups=defaultdict(lambda:{'sz':Decimal('0'),'notional':Decimal('0'),'times':[],'fills':[],'crossed':False})
-          blocks=0
-          for line in r.text.splitlines():
+          EXPLORER='https://rpc.hyperliquid.xyz/explorer'
+          SQD='https://portal.sqd.dev/datasets/hyperliquid-fills/stream'
+          s=requests.Session()
+          BASE_H=1101616821
+          BASE_T=1786125635951
+          anchors=[
+            ('a1','2026-08-07T18:00:35.908+00:00','LONG','64773','0.010092'),
+            ('a2','2026-08-07T14:50:01.743+00:00','SHORT','65049','0.010000'),
+            ('a3','2026-08-07T14:23:08.261+00:00','LONG','64987','0.010000'),
+            ('a4','2026-08-07T14:00:18.041+00:00','SHORT','64968','0.010047'),
+            ('a5','2026-08-07T05:50:38.289+00:00','LONG','64330','0.009646'),
+            ('a6','2026-08-07T01:45:57.811+00:00','LONG','64392','0.010000'),
+            ('a7','2026-08-07T01:03:27.710+00:00','LONG','64384','0.010000'),
+            ('a8','2026-08-07T00:07:22.531+00:00','LONG','64381','0.010000'),
+          ]
+
+          def block(h):
+            for i in range(7):
+              r=s.post(EXPLORER,json={'height':int(h),'type':'blockDetails'},timeout=8)
+              if r.status_code==429:
+                time.sleep(0.8+i*0.7); continue
+              r.raise_for_status(); d=r.json().get('blockDetails')
+              if not isinstance(d,dict): raise RuntimeError((h,r.text[:200]))
+              time.sleep(0.32); return d
+            raise RuntimeError(f'rate limited {h}')
+
+          def locate(target):
+            # Start from the known exact a1 block. Re-estimate local block speed on two
+            # points around the target and use secant correction; avoids long scans.
+            rough=round(BASE_H+(target-BASE_T)/83.5)
+            h0=rough-2500; h1=rough+2500
+            d0=block(h0); d1=block(h1)
+            for _ in range(5):
+              t0=int(d0['blockTime']); t1=int(d1['blockTime'])
+              if t1==t0: break
+              est=round(h0+(target-t0)*(h1-h0)/(t1-t0))
+              de=block(est); te=int(de['blockTime'])
+              if abs(te-target)<=150: return est,de
+              # Keep a bracket around target when possible; otherwise replace farther point.
+              pts=sorted([(t0,h0,d0),(t1,h1,d1),(te,est,de)])
+              lows=[p for p in pts if p[0]<=target]; highs=[p for p in pts if p[0]>=target]
+              if lows and highs:
+                _,h0,d0=lows[-1]; _,h1,d1=highs[0]
+              else:
+                far=max(((abs(p[0]-target),p) for p in pts),key=lambda x:x[0])[1]
+                keep=[p for p in pts if p is not far]
+                (_,h0,d0),(_,h1,d1)=keep
+            choices=[]
+            mid=round((h0+h1)/2)
+            for h in range(mid-3,mid+4):
+              d=block(h); choices.append((abs(int(d['blockTime'])-target),h,d))
+            _,h,d=min(choices); return h,d
+
+          def query_fills(center):
+            payload={'type':'hyperliquidFills','fromBlock':center-160,'toBlock':center+160,
+              'fields':{'block':{'number':True,'timestamp':True},'fill':{
+                'user':True,'coin':True,'px':True,'sz':True,'side':True,'time':True,
+                'hash':True,'oid':True,'closedPnl':True,'crossed':True,'tid':True}},'fills':[{}]}
+            r=s.post(SQD,json=payload,timeout=45); r.raise_for_status(); return r.text.splitlines()
+
+          totals=defaultdict(lambda:{'anchors':0,'score':Decimal('0'),'details':[]})
+          per_anchor={}
+          for aid,iso,direction,pxs,szs in anchors:
+            target=int(datetime.fromisoformat(iso).timestamp()*1000)
+            px0=Decimal(pxs); sz0=Decimal(szs); expected='A' if direction=='LONG' else 'B'
+            center,bd=locate(target)
+            groups=defaultdict(lambda:{'sz':Decimal('0'),'notional':Decimal('0'),'times':[],'crossed':False,'fills':0})
+            for line in query_fills(center):
               if not line.strip(): continue
-              row=json.loads(line); blocks+=1
+              row=json.loads(line)
               for f in row.get('fills',[]):
-                  if f.get('coin')!='BTC' or f.get('side')!='A': continue
-                  key=(str(f.get('user')).lower(),str(f.get('oid')))
-                  sz=Decimal(str(f['sz'])); px=Decimal(str(f['px']))
-                  g=groups[key]; g['sz']+=sz; g['notional']+=sz*px; g['times'].append(int(f['time'])); g['fills'].append(f)
-                  g['crossed']=g['crossed'] or bool(f.get('crossed'))
-          ranked=[]
-          for (user,oid),g in groups.items():
+                if f.get('coin')!='BTC' or f.get('side')!=expected: continue
+                # Two views: exact order, plus wallet aggregate in a tight +/-5s cluster.
+                t=int(f['time'])
+                if abs(t-target)>5000: continue
+                user=str(f.get('user','')).lower(); oid=str(f.get('oid'))
+                if not user.startswith('0x'): continue
+                sz=Decimal(str(f['sz'])); px=Decimal(str(f['px']))
+                for key in ((user,oid),(user,'*')):
+                  g=groups[key]; g['sz']+=sz; g['notional']+=sz*px; g['times'].append(t); g['crossed']|=bool(f.get('crossed')); g['fills']+=1
+            best_by_user={}
+            for (user,kind),g in groups.items():
               if g['sz']<=0: continue
-              vwap=g['notional']/g['sz']; dt=min(abs(t-TARGET_T) for t in g['times'])
-              size_rel=abs(g['sz']/TARGET_SZ-Decimal('1'))
-              px_bps=abs(vwap/TARGET_PX-Decimal('1'))*Decimal('10000')
-              score=Decimal(dt)/Decimal('1000') + size_rel*Decimal('20') + px_bps/Decimal('5')
-              ranked.append((score,dt,size_rel,px_bps,user,oid,g['sz'],vwap,g['crossed'],len(g['fills'])))
-          ranked.sort()
-          print('BLOCK_ROWS',blocks,'GROUPS',len(groups))
-          for x in ranked[:50]: print('GROUP',x)
+              vwap=g['notional']/g['sz']; dt=min(abs(t-target) for t in g['times'])
+              size_rel=abs(g['sz']/sz0-Decimal('1'))
+              pbps=abs(vwap/px0-Decimal('1'))*Decimal('10000')
+              # broad candidate gate, strictness comes from recurrence + held-out official check
+              if dt>5000 or size_rel>Decimal('0.35') or pbps>Decimal('15'): continue
+              cost=Decimal(dt)/Decimal('1000') + size_rel*Decimal('10') + pbps/Decimal('3')
+              rec=(cost,dt,size_rel,pbps,user,kind,g['sz'],vwap,g['crossed'],g['fills'])
+              old=best_by_user.get(user)
+              if old is None or rec<old: best_by_user[user]=rec
+            ranked=sorted(best_by_user.values())
+            per_anchor[aid]=set(best_by_user)
+            print('ANCHOR',aid,'center',center,'block_dt',int(bd['blockTime'])-target,'candidates',len(ranked))
+            for rec in ranked[:15]: print(' HIT',rec)
+            for user,rec in best_by_user.items():
+              q=max(Decimal('0'),Decimal('10')-rec[0]); totals[user]['anchors']+=1; totals[user]['score']+=q; totals[user]['details'].append((aid,rec))
+
+          final=sorted(totals.items(),key=lambda kv:(kv[1]['anchors'],kv[1]['score']),reverse=True)
+          print('FINAL')
+          for user,data in final[:30]: print('WALLET',user,'anchors',data['anchors'],'score',data['score'],'ids',[x[0] for x in data['details']])
+          for n in (8,7,6,5,4,3):
+            common={u for u,d in totals.items() if d['anchors']>=n}
+            if common: print('AT_LEAST',n,sorted(common)); break
           PY
