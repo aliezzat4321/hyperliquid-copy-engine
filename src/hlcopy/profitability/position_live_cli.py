@@ -9,11 +9,11 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
+from hlcopy.profitability.portfolio_position_copy import simulate_copy_with_portfolio_capital
 from hlcopy.profitability.position_copy import (
     CopyFillEvent,
     load_direct_events,
     load_wide_events,
-    simulate_copy,
 )
 from hlcopy.profitability.progress import Progress
 from hlcopy.shadow.evaluator import ParquetL2BookProvider
@@ -46,6 +46,10 @@ def _summary(sim) -> dict[str, object]:
         "wallet_address": sim.wallet_address,
         "scenario": sim.scenario,
         "notional_usd": str(sim.notional_usd),
+        "peak_concurrent_gross_notional_usd": str(
+            sim.peak_concurrent_gross_notional_usd
+        ),
+        "capital_exposure_model": "CAUSAL_EVENT_TIME_PEAK_GROSS_V1",
         "signals_or_episodes": sim.leader_events,
         "leader_fill_events": sim.leader_events,
         "executed": len(realized),
@@ -53,7 +57,11 @@ def _summary(sim) -> dict[str, object]:
         "executable_events": sim.executable_events,
         "missed_events": sim.missed_events,
         "copied_increase_events": sim.copied_increase_events,
-        "execution_pct": 100.0 * sim.executable_events / sim.leader_events if sim.leader_events else 0.0,
+        "execution_pct": (
+            100.0 * sim.executable_events / sim.leader_events
+            if sim.leader_events
+            else 0.0
+        ),
         "closed_net_pnl_usd": str(net_pnl),
         "realized_gross_pnl_usd": str(sim.realized_gross_pnl_usd),
         "total_fees_usd": str(sim.total_fees_usd),
@@ -71,14 +79,20 @@ def _summary(sim) -> dict[str, object]:
         "p95_feed_ms": None,
         "open_positions": sim.open_positions,
         "evidence_tier": (
-            "STRONG" if len(realized) >= 30 else "DEVELOPING" if len(realized) >= 10 else "EARLY"
+            "STRONG"
+            if len(realized) >= 30
+            else "DEVELOPING"
+            if len(realized) >= 10
+            else "EARLY"
         ),
         "pnl_model": "PROPORTIONAL_POSITION_CHANGE_V2",
     }
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="python -m hlcopy.profitability.position_live_cli")
+    parser = argparse.ArgumentParser(
+        prog="python -m hlcopy.profitability.position_live_cli"
+    )
     parser.add_argument("--registry", required=True, type=Path)
     parser.add_argument("--shadow-dir", required=True, type=Path)
     parser.add_argument("--shadow-market-dir", required=True, type=Path)
@@ -135,9 +149,6 @@ def main() -> None:
         flush=True,
     )
 
-    # The causal production provider can resolve only the finite set of books needed
-    # by all event/scenario timestamps. Prime once before the 20 scenario/notional
-    # sweeps so notionals never trigger additional parquet scans.
     if direct_provider is wide_provider:
         _prime_provider(direct_provider, direct_events + wide_events)
     else:
@@ -153,7 +164,7 @@ def main() -> None:
                 events = direct_by_wallet[wallet.id]
                 if not events:
                     continue
-                sim = simulate_copy(
+                sim = simulate_copy_with_portfolio_capital(
                     events,
                     provider=direct_provider,
                     scenario=scenario,
@@ -169,11 +180,12 @@ def main() -> None:
                     for item in sim.realized_slices
                 )
                 progress.tick(
-                    f"lane=DIRECT wallet={wallet.id} scenario={scenario.name} notional={notional}"
+                    f"lane=DIRECT wallet={wallet.id} "
+                    f"scenario={scenario.name} notional={notional}"
                 )
 
             for address, events in wide_by_wallet.items():
-                sim = simulate_copy(
+                sim = simulate_copy_with_portfolio_capital(
                     events,
                     provider=wide_provider,
                     scenario=scenario,
@@ -189,7 +201,8 @@ def main() -> None:
                     for item in sim.realized_slices
                 )
                 progress.tick(
-                    f"lane=WIDE wallet={address[:14]} scenario={scenario.name} notional={notional}"
+                    f"lane=WIDE wallet={address[:14]} "
+                    f"scenario={scenario.name} notional={notional}"
                 )
 
     summaries.sort(
@@ -204,10 +217,18 @@ def main() -> None:
         "generated_at": datetime.now(UTC).isoformat(),
         "real_trading": False,
         "pnl_model": "PROPORTIONAL_POSITION_CHANGE_V2",
-        "model_notes": "Copies prospectively observed exposure increases. First increase on a legacy position copies only the observed fraction; subsequent deltas use a fixed leader:follower scale, capped at configured follower notional. Partial reductions realize PnL immediately.",
+        "model_notes": (
+            "Copies prospectively observed exposure increases. First increase on a "
+            "legacy position copies only the observed fraction; subsequent deltas use "
+            "a fixed leader:follower scale, capped at configured follower notional. "
+            "Partial reductions realize PnL immediately. Peak concurrent gross "
+            "notional is measured causally at wallet-event times for portfolio capital "
+            "research; continuous MTM remains unmodeled."
+        ),
         "funding_mode": "NOT_MODELED_YET",
         "liquidation_path_mode": "NOT_MODELED_YET",
         "open_position_mark_to_market": "NOT_INCLUDED_YET",
+        "capital_exposure_model": "CAUSAL_EVENT_TIME_PEAK_GROSS_V1",
         "summaries": summaries,
         "realized_slices": slices,
     }
@@ -221,7 +242,8 @@ def main() -> None:
             writer.writeheader()
             writer.writerows(summaries)
     print(
-        f"position profitability rows={len(summaries)} direct_wallets={len(direct_wallets)} "
+        f"position profitability rows={len(summaries)} "
+        f"direct_wallets={len(direct_wallets)} "
         f"wide_wallets={len(wide_by_wallet)} wide_events={len(wide_events)}"
     )
     nonempty = [row for row in summaries if int(row["realized_actions"]) > 0]
@@ -231,7 +253,8 @@ def main() -> None:
             f"{row['lane']:<6} {str(row['wallet_address'])[:12]:<12} "
             f"{row['scenario']:<11} ${row['notional_usd']:<7} "
             f"closes={row['realized_actions']:<3} net=${row['closed_net_pnl_usd']} "
-            f"return_bps={row['net_return_bps']} exec={row['execution_pct']:.1f}%"
+            f"return_bps={row['net_return_bps']} exec={row['execution_pct']:.1f}% "
+            f"peak_gross=${row['peak_concurrent_gross_notional_usd']}"
         )
 
 
