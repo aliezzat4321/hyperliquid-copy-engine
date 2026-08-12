@@ -14,80 +14,18 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install requests
-      - name: Locate Bones timestamp in Hyperliquid explorer RPC
+      - name: Probe Hyperliquid block heights
         run: |
           python - <<'PY'
-          from datetime import datetime, timezone
           import requests
-
           URL = 'https://rpc.hyperliquid.xyz/explorer'
-          TARGET = int(datetime.fromisoformat('2026-08-07T18:00:35.908+00:00').timestamp() * 1000)
-
-          def block(height):
-              r = requests.post(URL, json={'height': height, 'type': 'blockDetails'}, timeout=20)
+          session = requests.Session()
+          for h in (600_000_000, 625_000_000, 650_000_000, 675_000_000, 700_000_000, 725_000_000, 750_000_000):
               try:
+                  r = session.post(URL, json={'height': h, 'type': 'blockDetails'}, timeout=5)
                   data = r.json()
-              except Exception:
-                  return None
-              details = data.get('blockDetails') if isinstance(data, dict) else None
-              if not isinstance(details, dict) or 'blockTime' not in details:
-                  return None
-              return details
-
-          for h in (600_000_000, 650_000_000, 675_000_000, 700_000_000, 750_000_000):
-              d = block(h)
-              print('probe', h, None if d is None else d['blockTime'])
-
-          lo, hi = 416_632_723, 800_000_000
-          dlo = block(lo)
-          if dlo is None:
-              raise RuntimeError('lower bound unavailable')
-          # Find a valid upper bound later than target; shrink from hi if future/unavailable.
-          while hi > lo:
-              dhi = block(hi)
-              if dhi is not None and dhi['blockTime'] >= TARGET:
-                  break
-              if dhi is not None and dhi['blockTime'] < TARGET:
-                  lo = hi
-                  hi += 100_000_000
-              else:
-                  hi = (lo + hi) // 2
-          print('bounds', lo, hi)
-
-          # Binary search nearest block time.
-          for _ in range(40):
-              if hi - lo <= 1:
-                  break
-              mid = (lo + hi) // 2
-              d = block(mid)
-              if d is None:
-                  hi = mid
-                  continue
-              if d['blockTime'] < TARGET:
-                  lo = mid
-              else:
-                  hi = mid
-          candidates = []
-          for h in range(max(1, lo - 3), hi + 4):
-              d = block(h)
-              if d is not None:
-                  candidates.append((abs(d['blockTime'] - TARGET), h, d))
-          candidates.sort(key=lambda x: x[0])
-          delta, h, d = candidates[0]
-          print('nearest', h, d['blockTime'], 'delta_ms', delta, 'numTxs', d.get('numTxs'))
-
-          # Inspect successful order actions in a tight block window. BTC perp is asset 0.
-          for hh in range(h - 5, h + 6):
-              bd = block(hh)
-              if bd is None:
-                  continue
-              for tx in bd.get('txs', []):
-                  action = tx.get('action') or {}
-                  if action.get('type') != 'order' or tx.get('error') is not None:
-                      continue
-                  for order in action.get('orders', []):
-                      asset = order.get('a', order.get('asset'))
-                      if asset != 0:
-                          continue
-                      print('BTC_ORDER', hh, tx.get('time'), tx.get('user'), order)
+                  d = data.get('blockDetails') if isinstance(data, dict) else None
+                  print('probe', h, r.status_code, None if not isinstance(d, dict) else d.get('blockTime'))
+              except Exception as exc:
+                  print('probe', h, 'ERROR', type(exc).__name__, str(exc)[:120])
           PY
