@@ -4,6 +4,7 @@ import json
 from bisect import bisect_right
 from collections import OrderedDict, defaultdict
 from collections.abc import Iterable
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -23,9 +24,8 @@ class CausalParquetL2BookProvider(ParquetL2BookProvider):
     """Causal L2 provider optimized for event-targeted profitability sweeps.
 
     Production profitability only needs the latest book available at a finite set of
-    simulated order-arrival timestamps. ``prime`` resolves exactly those timestamps
-    with a backward as-of join and JSON-decodes only the selected rows. This avoids
-    materializing an entire coin's historical L2 tape for every market touched.
+    simulated order-arrival timestamps. ``prime`` resolves those timestamps with a
+    backward as-of join and materializes only the selected L2 snapshots.
 
     The inherited full-coin loader remains as a compatibility fallback for tests and
     ad-hoc callers that do not prime the provider first.
@@ -48,6 +48,32 @@ class CausalParquetL2BookProvider(ParquetL2BookProvider):
     @staticmethod
     def _target_ns(target_ms: float) -> int:
         return int(round(float(target_ms) * 1_000_000))
+
+    @staticmethod
+    def _date_for_ns(value_ns: int) -> str:
+        return datetime.fromtimestamp(value_ns / 1_000_000_000, UTC).date().isoformat()
+
+    def _relevant_files(
+        self,
+        coin: str,
+        targets: list[int],
+        max_age_ns: int,
+    ) -> list[Path]:
+        dates: set[str] = set()
+        for target in targets:
+            dates.add(self._date_for_ns(target))
+            dates.add(self._date_for_ns(target - max_age_ns))
+
+        files: list[Path] = []
+        for date in sorted(dates):
+            files.extend(
+                sorted(
+                    self.market_dir.glob(
+                        f"date={date}/coin={coin}/channel=l2Book/*.parquet"
+                    )
+                )
+            )
+        return files
 
     def _load_coin(self, coin: str) -> list[TapeBook]:
         cached = self._cache.get(coin)
@@ -84,74 +110,112 @@ class CausalParquetL2BookProvider(ParquetL2BookProvider):
 
     def _resolve_targets(self, coin: str, target_ns_values: Iterable[int]) -> None:
         targets = sorted(
-            target for target in set(target_ns_values)
+            target
+            for target in set(target_ns_values)
             if (coin, target) not in self._targeted
         )
         if not targets:
             return
 
-        files = sorted(self.market_dir.glob(f"date=*/coin={coin}/channel=l2Book/*.parquet"))
+        max_age_ns = int(self.max_age_ms * 1_000_000)
+        files = self._relevant_files(coin, targets, max_age_ns)
         if not files:
             for target in targets:
                 self._targeted[(coin, target)] = None
             return
 
-        max_age_ns = int(self.max_age_ms * 1_000_000)
-        lower = targets[0] - max_age_ns
-        upper = targets[-1]
-        columns = ["exchange_ts_ms", "received_at_ns", "bid_levels_json", "ask_levels_json"]
-
-        scans = [
-            pl.scan_parquet(path).select(columns).filter(
-                (pl.col("received_at_ns") >= lower)
-                & (pl.col("received_at_ns") <= upper)
-            )
+        # Phase 1: scan timestamp columns only. This is intentionally cheap and lets
+        # us identify the exact causal snapshots required by the target timestamps.
+        timestamp_scans = [
+            pl.scan_parquet(path).select(["exchange_ts_ms", "received_at_ns"])
             for path in files
         ]
-        books_frame = pl.concat(scans, how="diagonal_relaxed").sort("received_at_ns").collect()
-        if books_frame.is_empty():
+        timestamps = (
+            pl.concat(timestamp_scans, how="diagonal_relaxed")
+            .unique(subset=["received_at_ns"], keep="last")
+            .sort("received_at_ns")
+            .collect()
+        )
+        if timestamps.is_empty():
             for target in targets:
                 self._targeted[(coin, target)] = None
             return
 
         target_frame = pl.DataFrame({"target_ns": targets}).sort("target_ns")
         joined = target_frame.join_asof(
-            books_frame,
+            timestamps,
             left_on="target_ns",
             right_on="received_at_ns",
             strategy="backward",
         )
 
-        parsed_by_received: dict[int, TapeBook | None] = {}
+        chosen_by_target: dict[int, int | None] = {}
+        selected_received: set[int] = set()
         for row in joined.iter_rows(named=True):
             target_ns = int(row["target_ns"])
             received = row.get("received_at_ns")
-            exchange = row.get("exchange_ts_ms")
-            if received is None or exchange is None:
-                self._targeted[(coin, target_ns)] = None
+            if received is None:
+                chosen_by_target[target_ns] = None
                 continue
             received_ns = int(received)
-            if target_ns - received_ns > max_age_ns:
-                self._targeted[(coin, target_ns)] = None
+            age_ns = target_ns - received_ns
+            if age_ns < 0 or age_ns > max_age_ns:
+                chosen_by_target[target_ns] = None
                 continue
+            chosen_by_target[target_ns] = received_ns
+            selected_received.add(received_ns)
 
-            book = parsed_by_received.get(received_ns)
-            if received_ns not in parsed_by_received:
-                bids = self._levels(row.get("bid_levels_json"))
-                asks = self._levels(row.get("ask_levels_json"))
-                book = (
-                    TapeBook(
-                        coin=coin,
-                        exchange_ts_ms=int(exchange),
-                        received_at_ns=received_ns,
-                        bids=bids,
-                        asks=asks,
-                    )
-                    if bids and asks
-                    else None
+        if not selected_received:
+            for target in targets:
+                self._targeted[(coin, target)] = None
+            return
+
+        # Phase 2: materialize JSON book levels only for snapshots actually selected
+        # by the causal as-of join. Sparse targets therefore do not pull the entire
+        # time span between the earliest and latest event into memory.
+        columns = [
+            "exchange_ts_ms",
+            "received_at_ns",
+            "bid_levels_json",
+            "ask_levels_json",
+        ]
+        selected_values = sorted(selected_received)
+        book_scans = [
+            pl.scan_parquet(path)
+            .select(columns)
+            .filter(pl.col("received_at_ns").is_in(selected_values))
+            for path in files
+        ]
+        books_frame = (
+            pl.concat(book_scans, how="diagonal_relaxed")
+            .unique(subset=["received_at_ns"], keep="last")
+            .collect()
+        )
+
+        parsed_by_received: dict[int, TapeBook | None] = {}
+        for row in books_frame.iter_rows(named=True):
+            received_ns = int(row["received_at_ns"])
+            bids = self._levels(row.get("bid_levels_json"))
+            asks = self._levels(row.get("ask_levels_json"))
+            parsed_by_received[received_ns] = (
+                TapeBook(
+                    coin=coin,
+                    exchange_ts_ms=int(row["exchange_ts_ms"]),
+                    received_at_ns=received_ns,
+                    bids=bids,
+                    asks=asks,
                 )
-                parsed_by_received[received_ns] = book
-            self._targeted[(coin, target_ns)] = book
+                if bids and asks
+                else None
+            )
+
+        for target in targets:
+            received_ns = chosen_by_target.get(target)
+            self._targeted[(coin, target)] = (
+                parsed_by_received.get(received_ns)
+                if received_ns is not None
+                else None
+            )
 
     def prime(self, events: Iterable[Any], scenarios: Iterable[LatencyScenario]) -> None:
         """Resolve all event/scenario book timestamps once before scenario sweeps."""
