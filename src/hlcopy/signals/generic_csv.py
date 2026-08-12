@@ -18,7 +18,7 @@ FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "trade_id": ("trade_id", "id", "position_id"),
     "trader": ("username", "trader_name", "trader_id", "trader", "user"),
     "coin": ("ticker", "coin", "symbol", "asset"),
-    "direction": ("direction", "side", "position_side"),
+    "direction": ("direction", "position_side", "position_direction"),
     "leverage": ("leverage", "lev"),
     "entry_price": ("entry_price", "avg_entry_price", "open_price"),
     "exit_price": ("closing_price", "exit_price", "avg_exit_price", "close_price"),
@@ -69,8 +69,15 @@ def detect_column_map(headers: list[str]) -> dict[str, str]:
             mapping[canonical] = found
     missing = [field for field in REQUIRED_FIELDS if field not in mapping]
     if missing:
+        hint = ""
+        lowered = {header.strip().lower() for header in headers}
+        if "side" in lowered and "direction" in missing:
+            hint = (
+                "; generic 'side' is intentionally not treated as position direction "
+                "because it may describe the closing order side"
+            )
         raise GenericTradeCsvError(
-            "could not auto-detect required trade columns: " + ", ".join(missing)
+            "could not auto-detect required trade columns: " + ", ".join(missing) + hint
         )
     return mapping
 
@@ -108,11 +115,13 @@ def _timestamp_ms(value: str, *, field: str) -> int:
 
 def _direction(value: str) -> str:
     normalized = value.strip().upper()
-    if normalized in {"LONG", "BUY", "B"}:
+    if normalized == "LONG":
         return "LONG"
-    if normalized in {"SHORT", "SELL", "S"}:
+    if normalized == "SHORT":
         return "SHORT"
-    raise GenericTradeCsvError(f"unsupported direction {value!r}")
+    raise GenericTradeCsvError(
+        f"unsupported position direction {value!r}; expected explicit LONG or SHORT"
+    )
 
 
 def _bool(value: str) -> bool:
