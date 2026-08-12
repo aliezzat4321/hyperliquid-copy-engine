@@ -7,7 +7,11 @@ from decimal import Decimal
 from pathlib import Path
 
 from hlcopy.hyperliquid.http_client import HyperliquidHttpClient
-from hlcopy.resolver.public_trade_index import PublicTradeDiscoveryConfig, discover_candidates
+from hlcopy.resolver.public_trade_index import (
+    DEFAULT_PUBLIC_TRADE_CONFIG,
+    PublicTradeDiscoveryConfig,
+    discover_candidates,
+)
 from hlcopy.resolver.reverse_index import ReverseResolverConfig, verify_candidate_officially
 from hlcopy.signals.generic_csv import GenericTradeImportResult, load_generic_closed_trades
 
@@ -54,8 +58,11 @@ async def identify_wallet_from_csv(
     *,
     output_dir: Path | None = None,
     cache_dir: Path | None = None,
-    config: PublicTradeDiscoveryConfig = PublicTradeDiscoveryConfig(),
+    config: PublicTradeDiscoveryConfig | None = None,
 ) -> WalletIdentificationResult:
+    if config is None:
+        config = DEFAULT_PUBLIC_TRADE_CONFIG
+
     imported: GenericTradeImportResult = load_generic_closed_trades(evidence_path)
     signals = imported.signals
     if len(signals) < 3:
@@ -139,7 +146,10 @@ async def identify_wallet_from_csv(
                 "auto_trading_promotion": False,
             },
         }
-        report_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        report_path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
 
     return WalletIdentificationResult(
         status=status,
