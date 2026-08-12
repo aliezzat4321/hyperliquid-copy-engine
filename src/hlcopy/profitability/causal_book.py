@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 from bisect import bisect_right
 from collections import OrderedDict, defaultdict
+from collections.abc import Iterable
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import polars as pl
 
@@ -171,7 +172,9 @@ class CausalParquetL2BookProvider(ParquetL2BookProvider):
             self._resolve_targets(coin, targets)
             if index == 1 or index % 10 == 0 or index == total:
                 print(
-                    f"causal_book_prime coins={index}/{total} resolved_targets={len(self._targeted)} coin={coin}",
+                    "causal_book_prime "
+                    f"coins={index}/{total} resolved_targets={len(self._targeted)} "
+                    f"coin={coin}",
                     flush=True,
                 )
 
