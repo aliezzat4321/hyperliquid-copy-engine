@@ -2,8 +2,7 @@ name: bones-explorer-probe
 
 on:
   push:
-    branches:
-      - agent/free-public-wallet-identifier-v1
+    branches: [agent/free-public-wallet-identifier-v1]
 
 jobs:
   probe:
@@ -13,74 +12,82 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install requests
-      - name: Match Bones realized PnL fingerprints
+      - name: Verify full Bones position fingerprints
         run: |
           python - <<'PY'
-          import json
+          import json, time
           from collections import defaultdict
           from datetime import datetime
           from decimal import Decimal
           import requests
 
-          URL='https://portal.sqd.dev/datasets/hyperliquid-fills/stream'
+          SQD='https://portal.sqd.dev/datasets/hyperliquid-fills/stream'
+          INFO='https://api.hyperliquid.xyz/info'
           s=requests.Session()
           anchors=[
-            ('a1',1101616820,'2026-08-07T18:00:35.908+00:00','LONG','64721','64773','0.01009177'),
-            ('a2',1101456526,'2026-08-07T14:50:01.743+00:00','SHORT','65183','65049','0.010000'),
-            ('a3',1101433896,'2026-08-07T14:23:08.261+00:00','LONG','64895','64987','0.010000'),
-            ('a4',1101414678,'2026-08-07T14:00:18.041+00:00','SHORT','65049.1693195782','64968','0.0100470734'),
-            ('a5',1101002609,'2026-08-07T05:50:38.289+00:00','LONG','64315','64330','0.0096458346'),
-            ('a6',1100797190,'2026-08-07T01:45:57.811+00:00','LONG','64309','64392','0.010000'),
-            ('a7',1100761508,'2026-08-07T01:03:27.710+00:00','LONG','64231','64384','0.010000'),
-            ('a8',1100714421,'2026-08-07T00:07:22.531+00:00','LONG','64194','64381','0.010000'),
+            ('a1',1101616820,'2026-08-07T17:03:36.179+00:00','2026-08-07T18:00:35.908+00:00','LONG','64721','64773','0.01009177'),
+            ('a2',1101456526,'2026-08-07T14:27:50.663+00:00','2026-08-07T14:50:01.743+00:00','SHORT','65183','65049','0.010000'),
+            ('a3',1101433896,'2026-08-07T14:02:23.946+00:00','2026-08-07T14:23:08.261+00:00','LONG','64895','64987','0.010000'),
+            ('a4',1101414678,'2026-08-07T10:29:48.496+00:00','2026-08-07T14:00:18.041+00:00','SHORT','65049.1693195782','64968','0.0100470734'),
+            ('a5',1101002609,'2026-08-07T02:22:13.645+00:00','2026-08-07T05:50:38.289+00:00','LONG','64315','64330','0.0096458346'),
+            ('a6',1100797190,'2026-08-07T01:19:40.089+00:00','2026-08-07T01:45:57.811+00:00','LONG','64309','64392','0.010000'),
+            ('a7',1100761508,'2026-08-07T00:17:18.854+00:00','2026-08-07T01:03:27.710+00:00','LONG','64231','64384','0.010000'),
+            ('a8',1100714421,'2026-08-06T23:44:42.858+00:00','2026-08-07T00:07:22.531+00:00','LONG','64194','64381','0.010000'),
           ]
-          totals=defaultdict(lambda:{'anchors':0,'quality':Decimal('0'),'details':[]})
 
-          def rows_for(center):
-            p={'type':'hyperliquidFills','fromBlock':center-1300,'toBlock':center+1300,
-               'fields':{'block':{'number':True,'timestamp':True},'fill':{
-                 'user':True,'coin':True,'px':True,'sz':True,'side':True,'time':True,
-                 'oid':True,'closedPnl':True,'crossed':True,'tid':True}},'fills':[{}]}
-            r=s.post(URL,json=p,timeout=60); r.raise_for_status()
-            return [json.loads(x) for x in r.text.splitlines() if x.strip()]
+          def ts(x): return int(datetime.fromisoformat(x).timestamp()*1000)
+          def official(user, center):
+            p={'type':'userFillsByTime','user':user,'startTime':center-12000,'endTime':center+12000,'aggregateByTime':True}
+            for i in range(4):
+              r=s.post(INFO,json=p,timeout=15)
+              if r.status_code==429: time.sleep(.5+i); continue
+              r.raise_for_status(); return r.json()
+            return []
+          def find(rows, expected_dir, target, px0, sz0):
+            best=None
+            for f in rows:
+              if str(f.get('coin','')).upper()!='BTC' or str(f.get('dir','')).lower()!=expected_dir.lower(): continue
+              try:
+                dt=abs(int(f['time'])-target); pbps=abs(Decimal(str(f['px']))/px0-1)*10000; srel=abs(Decimal(str(f['sz']))/sz0-1)
+              except Exception: continue
+              rec=(dt,pbps,srel,f)
+              if best is None or rec[:3]<best[:3]: best=rec
+            return best
 
-          for aid,center,iso,direction,entrys,exits,szs in anchors:
-            target=int(datetime.fromisoformat(iso).timestamp()*1000)
-            entry=Decimal(entrys); exitpx=Decimal(exits); sz0=Decimal(szs)
-            expected_pnl=(exitpx-entry)*sz0*(Decimal('1') if direction=='LONG' else Decimal('-1'))
-            side='A' if direction=='LONG' else 'B'
-            groups=defaultdict(lambda:{'sz':Decimal('0'),'notional':Decimal('0'),'pnl':Decimal('0'),'times':[],'crossed':False,'fills':0})
-            for row in rows_for(center):
-              for f in row.get('fills',[]):
-                if f.get('coin')!='BTC' or f.get('side')!=side: continue
-                t=int(f['time'])
-                if abs(t-target)>9000: continue
-                user=str(f.get('user','')).lower()
-                if not user.startswith('0x'): continue
-                try:
-                  sz=Decimal(str(f['sz'])); px=Decimal(str(f['px'])); cp=Decimal(str(f.get('closedPnl') or '0')); oid=str(f.get('oid'))
+          winners=defaultdict(list)
+          for aid,block,opened,closed,direction,entrys,exits,szs in anchors:
+            ot,ct=ts(opened),ts(closed); entry=Decimal(entrys); exitpx=Decimal(exits); sz0=Decimal(szs)
+            pnl0=(exitpx-entry)*sz0*(1 if direction=='LONG' else -1); side='A' if direction=='LONG' else 'B'
+            p={'type':'hyperliquidFills','fromBlock':block-1400,'toBlock':block+1400,
+               'fields':{'block':{'number':True,'timestamp':True},'fill':{'user':True,'coin':True,'px':True,'sz':True,'side':True,'time':True,'oid':True,'closedPnl':True,'crossed':True}},'fills':[{}]}
+            r=s.post(SQD,json=p,timeout=60); r.raise_for_status()
+            groups=defaultdict(lambda:{'sz':Decimal(0),'n':Decimal(0),'pnl':Decimal(0),'times':[]})
+            for line in r.text.splitlines():
+              if not line.strip(): continue
+              for f in json.loads(line).get('fills',[]):
+                if f.get('coin')!='BTC' or f.get('side')!=side or abs(int(f['time'])-ct)>10000: continue
+                u=str(f.get('user','')).lower()
+                if not u.startswith('0x'): continue
+                try: z=Decimal(str(f['sz'])); px=Decimal(str(f['px'])); cp=Decimal(str(f.get('closedPnl') or 0))
                 except Exception: continue
-                # A real close should have non-zero closed PnL. Aggregate exact order and wallet cluster.
-                for kind in (oid,'*'):
-                  g=groups[(user,kind)]; g['sz']+=sz; g['notional']+=sz*px; g['pnl']+=cp; g['times'].append(t); g['crossed']|=bool(f.get('crossed')); g['fills']+=1
-            best={}
-            for (user,kind),g in groups.items():
-              if g['sz']<=0 or g['pnl']==0: continue
-              vwap=g['notional']/g['sz']; dt=min(abs(t-target) for t in g['times'])
-              srel=abs(g['sz']/sz0-Decimal('1')); pbps=abs(vwap/exitpx-Decimal('1'))*Decimal('10000')
-              prel=abs(g['pnl']/expected_pnl-Decimal('1')) if expected_pnl!=0 else Decimal('999')
-              # PnL is very discriminative but allow rounding/fees/partial-fill differences.
-              if dt>9000 or srel>Decimal('0.45') or pbps>Decimal('25') or prel>Decimal('0.60'): continue
-              cost=Decimal(dt)/Decimal('1500')+srel*Decimal('8')+pbps/Decimal('5')+prel*Decimal('10')
-              rec=(cost,dt,srel,pbps,prel,user,kind,g['sz'],vwap,g['pnl'],expected_pnl,g['crossed'],g['fills'])
-              if user not in best or rec<best[user]: best[user]=rec
-            ranked=sorted(best.values())
-            print('ANCHOR',aid,'expected_pnl',expected_pnl,'candidates',len(ranked))
-            for rec in ranked[:20]: print(' HIT',rec)
-            for user,rec in best.items():
-              totals[user]['anchors']+=1; totals[user]['quality']+=max(Decimal('0'),Decimal('15')-rec[0]); totals[user]['details'].append((aid,rec))
-
-          final=sorted(totals.items(),key=lambda kv:(kv[1]['anchors'],kv[1]['quality']),reverse=True)
-          print('FINAL_RANKING')
-          for user,d in final[:30]: print('WALLET',user,'anchors',d['anchors'],'quality',d['quality'],'ids',[x[0] for x in d['details']])
+                g=groups[u]; g['sz']+=z; g['n']+=z*px; g['pnl']+=cp; g['times'].append(int(f['time']))
+            candidates=[]
+            for u,g in groups.items():
+              if not g['times'] or g['sz']<=0 or g['pnl']==0: continue
+              v=g['n']/g['sz']; dt=min(abs(x-ct) for x in g['times']); sr=abs(g['sz']/sz0-1); pb=abs(v/exitpx-1)*10000; pr=abs(g['pnl']/pnl0-1) if pnl0 else Decimal(999)
+              if dt<=10000 and sr<=Decimal('.55') and pb<=30 and pr<=Decimal('.75'):
+                candidates.append((Decimal(dt)/1500+sr*7+pb/6+pr*8,u))
+            candidates.sort()
+            print('ANCHOR',aid,'SQD_CANDIDATES',len(candidates),candidates[:8])
+            for _,u in candidates[:8]:
+              open_rows=official(u,ot); close_rows=official(u,ct)
+              od='Open Long' if direction=='LONG' else 'Open Short'; cd='Close Long' if direction=='LONG' else 'Close Short'
+              om=find(open_rows,od,ot,entry,sz0); cm=find(close_rows,cd,ct,exitpx,sz0)
+              if om and cm:
+                odt,opb,osr,_=om; cdt,cpb,csr,_=cm
+                strong=(odt<=10000 and opb<=25 and osr<=Decimal('.5') and cdt<=10000 and cpb<=25 and csr<=Decimal('.5'))
+                print(' FULL',aid,u,'strong',strong,'open',odt,opb,osr,'close',cdt,cpb,csr)
+                if strong: winners[u].append(aid)
+          print('FINAL_FULL_POSITION')
+          for u,ids in sorted(winners.items(),key=lambda kv:len(kv[1]),reverse=True): print('WALLET',u,'trades',len(ids),'ids',ids)
           PY
