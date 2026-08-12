@@ -1,0 +1,20 @@
+[Unit]
+Description=Hyperliquid leaderboard universe scout
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/hyperliquid-copy-engine
+Environment=PYTHONUNBUFFERED=1
+Environment=REAL_TRADING_ENABLED=NO
+ExecStart=/root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.discovery.universe_watch_cli \
+  --registry /mnt/HC_Volume_106576526/hyperliquid/shadow/wallets.json \
+  --state /mnt/HC_Volume_106576526/hyperliquid/discovery/universe_state.json \
+  --events /mnt/HC_Volume_106576526/hyperliquid/discovery/universe_events.json \
+  --top-register 300 \
+  --movement-register 100 \
+  --max-total-research 600
+Nice=15
+IOSchedulingClass=idle
+NoNewPrivileges=true
