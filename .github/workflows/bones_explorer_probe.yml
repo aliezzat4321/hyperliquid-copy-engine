@@ -14,71 +14,129 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install requests
-      - name: Scan first Bones BTC fingerprint
+      - name: Intersect Bones BTC fingerprints
         run: |
           python - <<'PY'
+          from collections import defaultdict
           from datetime import datetime
           from decimal import Decimal
           import time
           import requests
 
           RPC = 'https://rpc.hyperliquid.xyz/explorer'
-          TARGET = int(datetime.fromisoformat('2026-08-07T18:00:35.908+00:00').timestamp() * 1000)
-          TARGET_PX = Decimal('64773')
-          CENTER = 1_101_616_821
           BTC_ASSET = 0
+          BASE_H = 1_101_616_821
+          BASE_T = 1_786_125_635_951
+          MS_PER_BLOCK = 83.4
           session = requests.Session()
+          cache = {}
+
+          anchors = [
+              ('a1','2026-08-07T18:00:35.908+00:00','LONG','64773','0.010092'),
+              ('a2','2026-08-07T14:50:01.743+00:00','SHORT','65049','0.010000'),
+              ('a3','2026-08-07T14:23:08.261+00:00','LONG','64987','0.010000'),
+              ('a4','2026-08-07T14:00:18.041+00:00','SHORT','64968','0.010047'),
+              ('a5','2026-08-07T05:50:38.289+00:00','LONG','64330','0.009646'),
+              ('a6','2026-08-07T01:45:57.811+00:00','LONG','64392','0.010000'),
+              ('a7','2026-08-07T01:03:27.710+00:00','LONG','64384','0.010000'),
+              ('a8','2026-08-07T00:07:22.531+00:00','LONG','64381','0.010000'),
+          ]
 
           def block(height):
-              for attempt in range(6):
-                  r = session.post(RPC, json={'height': int(height), 'type': 'blockDetails'}, timeout=8)
-                  if r.status_code != 429:
-                      r.raise_for_status()
-                      data = r.json()
-                      d = data.get('blockDetails') if isinstance(data, dict) else None
-                      if not isinstance(d, dict):
-                          raise RuntimeError(f'no blockDetails for {height}: {str(data)[:200]}')
-                      time.sleep(0.35)
-                      return d
-                  time.sleep(1.0 + attempt * 0.75)
+              height = int(height)
+              if height in cache:
+                  return cache[height]
+              for attempt in range(7):
+                  r = session.post(RPC, json={'height': height, 'type': 'blockDetails'}, timeout=8)
+                  if r.status_code == 429:
+                      time.sleep(1.0 + 0.8 * attempt)
+                      continue
+                  r.raise_for_status()
+                  data = r.json()
+                  d = data.get('blockDetails') if isinstance(data, dict) else None
+                  if not isinstance(d, dict):
+                      raise RuntimeError(f'no blockDetails for {height}: {str(data)[:160]}')
+                  cache[height] = d
+                  time.sleep(0.30)
+                  return d
               raise RuntimeError(f'rate limited for height {height}')
 
-          candidates = []
-          for h in range(CENTER - 4, CENTER + 5):
-              bd = block(h)
-              print('BLOCK', h, bd['blockTime'], 'delta_ms', bd['blockTime'] - TARGET)
-              for tx in bd.get('txs', []):
-                  if tx.get('error') is not None:
-                      continue
-                  action = tx.get('action') or {}
-                  if action.get('type') != 'order':
-                      continue
-                  for order in action.get('orders', []):
-                      asset = order.get('a', order.get('asset'))
-                      if asset != BTC_ASSET:
-                          continue
-                      is_buy = order.get('b', order.get('isBuy'))
-                      if is_buy is not False:
-                          continue
-                      raw_px = order.get('p', order.get('limitPx'))
-                      try:
-                          px = Decimal(str(raw_px))
-                          bps = abs(px / TARGET_PX - Decimal('1')) * Decimal('10000')
-                      except Exception:
-                          px = Decimal('0')
-                          bps = Decimal('Infinity')
-                      candidates.append((
-                          abs(int(tx.get('time', bd['blockTime'])) - TARGET),
-                          bps,
-                          tx.get('user'),
-                          h,
-                          tx.get('time'),
-                          str(px),
-                          order,
-                      ))
+          def center_for(target_ms):
+              est = round(BASE_H + (target_ms - BASE_T) / MS_PER_BLOCK)
+              d = block(est)
+              est += round((target_ms - int(d['blockTime'])) / MS_PER_BLOCK)
+              choices = []
+              for h in range(est - 1, est + 2):
+                  bd = block(h)
+                  choices.append((abs(int(bd['blockTime']) - target_ms), h, bd))
+              return min(choices, key=lambda x: x[0])
 
-          candidates.sort(key=lambda x: (x[0], x[1]))
-          print('candidate_count', len(candidates))
-          for row in candidates[:60]:
-              print('CANDIDATE', row)
+          per_anchor = {}
+          scores = defaultdict(lambda: {'anchors': 0, 'quality': Decimal('0'), 'hits': []})
+
+          for aid, iso, direction, px_s, size_s in anchors:
+              target = int(datetime.fromisoformat(iso).timestamp() * 1000)
+              target_px = Decimal(px_s)
+              target_size = Decimal(size_s)
+              _, center, bd_center = center_for(target)
+              # Search the exact block plus one neighbor each side. Source timestamps have proven block-level precise.
+              matches = {}
+              for h in range(center - 1, center + 2):
+                  bd = block(h)
+                  for tx in bd.get('txs', []):
+                      if tx.get('error') is not None:
+                          continue
+                      action = tx.get('action') or {}
+                      if action.get('type') != 'order':
+                          continue
+                      for order in action.get('orders', []):
+                          if order.get('a', order.get('asset')) != BTC_ASSET:
+                              continue
+                          is_buy = order.get('b', order.get('isBuy'))
+                          expected_buy = direction == 'SHORT'  # short closes BUY; long closes SELL
+                          if is_buy is not expected_buy:
+                              continue
+                          try:
+                              size = Decimal(str(order.get('s', order.get('sz'))))
+                              limit_px = Decimal(str(order.get('p', order.get('limitPx'))))
+                          except Exception:
+                              continue
+                          size_rel = abs(size / target_size - Decimal('1'))
+                          if size_rel > Decimal('0.20'):
+                              continue
+                          user = str(tx.get('user') or '').lower()
+                          if not user.startswith('0x'):
+                              continue
+                          time_ms = int(tx.get('time', bd['blockTime']))
+                          time_delta = abs(time_ms - target)
+                          price_bps = abs(limit_px / target_px - Decimal('1')) * Decimal('10000')
+                          # Size and time dominate; limit price is soft because market/IOC limits can include slippage.
+                          quality = max(Decimal('0'), Decimal('1') - Decimal(time_delta) / Decimal('500'))
+                          quality += max(Decimal('0'), Decimal('1') - size_rel / Decimal('0.20'))
+                          quality += max(Decimal('0'), Decimal('0.5') - price_bps / Decimal('200'))
+                          row = (quality, time_delta, size_rel, price_bps, size, limit_px, h)
+                          prior = matches.get(user)
+                          if prior is None or row > prior:
+                              matches[user] = row
+
+              ranked = sorted(matches.items(), key=lambda kv: kv[1], reverse=True)
+              per_anchor[aid] = set(matches)
+              print('ANCHOR', aid, direction, iso, 'center', center, 'block_delta_ms', int(bd_center['blockTime'])-target, 'matches', len(ranked))
+              for user, row in ranked[:12]:
+                  print('  HIT', aid, user, 'quality', row[0], 'dt', row[1], 'size_rel', row[2], 'price_bps', row[3], 'size', row[4], 'limit_px', row[5])
+                  scores[user]['anchors'] += 1
+                  scores[user]['quality'] += row[0]
+                  scores[user]['hits'].append((aid, row))
+              # Count every matched user once per anchor, not only printed top 12.
+              for user, row in ranked[12:]:
+                  scores[user]['anchors'] += 1
+                  scores[user]['quality'] += row[0]
+                  scores[user]['hits'].append((aid, row))
+
+          final = sorted(scores.items(), key=lambda kv: (kv[1]['anchors'], kv[1]['quality']), reverse=True)
+          print('FINAL_RANKING')
+          for user, data in final[:30]:
+              print('WALLET', user, 'anchors', data['anchors'], 'quality', data['quality'], 'hit_ids', [x[0] for x in data['hits']])
+          common = set.intersection(*(per_anchor[a[0]] for a in anchors)) if anchors else set()
+          print('STRICT_INTERSECTION', sorted(common))
           PY
