@@ -56,7 +56,10 @@ def test_generic_loader_rejects_ambiguous_side_only_schema(tmp_path: Path) -> No
         encoding="utf-8",
     )
 
-    with pytest.raises(GenericTradeCsvError, match="intentionally not treated as position direction"):
+    with pytest.raises(
+        GenericTradeCsvError,
+        match="intentionally not treated as position direction",
+    ):
         load_generic_closed_trades(path)
 
 
