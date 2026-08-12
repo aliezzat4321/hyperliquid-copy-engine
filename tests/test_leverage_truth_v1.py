@@ -19,8 +19,9 @@ def test_leverage_changes_equity_return_not_underlying_pnl() -> None:
     assert rows[0]["equity_required_usd"] == "10000"
     assert rows[1]["equity_required_usd"] == "2000"
     assert rows[2]["equity_required_usd"] == "250"
-    assert rows[0]["net_equity_return_pct"] == "3"
-    assert rows[1]["net_equity_return_pct"] == "15"
-    assert rows[2]["net_equity_return_pct"] == "120"
+    assert D(str(rows[0]["net_equity_return_pct"])) == D("3")
+    assert D(str(rows[1]["net_equity_return_pct"])) == D("15")
+    assert D(str(rows[2]["net_equity_return_pct"])) == D("120")
+    assert rows[0]["research_only"] is True
     assert rows[1]["research_only"] is True
     assert rows[2]["liquidation_path_mode"] == "NOT_MODELED_BLOCKS_LIVE_APPROVAL"
