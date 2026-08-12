@@ -153,18 +153,26 @@ async def _run(args: argparse.Namespace) -> None:
         "registered_this_run": added,
         "registration_capacity_skips": skipped_capacity,
         "wallets": wallets,
-        "top": [row.to_dict() | {"signals": list(signals.get(row.address, ()))} for row in universe[:100]],
+        "top": [
+            row.to_dict() | {"signals": list(signals.get(row.address, ()))}
+            for row in universe[:100]
+        ],
     }
     args.state.parent.mkdir(parents=True, exist_ok=True)
     tmp = args.state.with_suffix(args.state.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     tmp.replace(args.state)
 
+    movement_tags = (
+        "NEW_TO_OBSERVED_LEADERBOARD",
+        "ENTERED_TOP_100",
+        "RANK_JUMP_25",
+    )
     events = [
         row.to_dict() | {"signals": list(tags)}
         for row in universe
         if (tags := signals.get(row.address))
-        and any(tag in tags for tag in ("NEW_TO_OBSERVED_LEADERBOARD", "ENTERED_TOP_100", "RANK_JUMP_25"))
+        and any(tag in tags for tag in movement_tags)
     ]
     args.events.parent.mkdir(parents=True, exist_ok=True)
     args.events.write_text(
