@@ -10,6 +10,7 @@ from hlcopy.hyperliquid.http_client import HyperliquidHttpClient
 from hlcopy.resolver.public_trade_index import (
     DEFAULT_PUBLIC_TRADE_CONFIG,
     PublicTradeDiscoveryConfig,
+    candidate_is_unique,
     discover_candidates,
 )
 from hlcopy.resolver.reverse_index import ReverseResolverConfig, verify_candidate_officially
@@ -22,11 +23,13 @@ D = Decimal
 class WalletIdentificationResult:
     status: str
     wallet: str | None
+    candidate: str | None
     confidence: Decimal
     input_trades: int
     rejected_rows: int
     discovery_matches: int
     discovery_anchors: int
+    candidate_unique: bool
     official_matches: int
     official_attempted: int
     median_clock_offset_ms: float | None
@@ -47,7 +50,10 @@ def _confidence(
     discovery_anchors: int,
     official_matches: int,
     official_attempted: int,
+    candidate_unique: bool,
 ) -> Decimal:
+    if official_attempted == 0 or official_matches == 0 or not candidate_unique:
+        return D("0")
     discovery_ratio = D(discovery_matches) / D(max(1, discovery_anchors))
     official_ratio = D(official_matches) / D(max(1, official_attempted))
     return min(D("0.999"), discovery_ratio * D("0.35") + official_ratio * D("0.65"))
@@ -75,13 +81,15 @@ async def identify_wallet_from_csv(
 
     ranked = discover_candidates(signals, cache_dir=cache_dir, config=config)
     best = ranked[0] if ranked else None
+    unique = candidate_is_unique(ranked, min_score_gap=config.min_runner_up_score_gap)
     discovery_anchors = min(max(3, config.anchor_trades), len(signals))
     official_matches = 0
     official_attempted = 0
     status = "UNRESOLVED"
     wallet: str | None = None
+    candidate = best.address if best else None
 
-    if best is not None and best.matched_anchors >= config.min_discovery_matches:
+    if best is not None and best.matched_anchors >= config.min_discovery_matches and unique:
         reverse_config = ReverseResolverConfig(
             anchor_trades=config.anchor_trades,
             primary_window_ms=config.window_seconds * 1000,
@@ -110,15 +118,13 @@ async def identify_wallet_from_csv(
         ):
             status = "VERIFIED"
             wallet = best.address
-        else:
-            status = "LIKELY"
-            wallet = best.address
 
     confidence = _confidence(
         discovery_matches=best.matched_anchors if best else 0,
         discovery_anchors=discovery_anchors,
         official_matches=official_matches,
         official_attempted=official_attempted,
+        candidate_unique=unique,
     )
 
     report_path: Path | None = None
@@ -134,6 +140,8 @@ async def identify_wallet_from_csv(
             "rejected_rows": list(imported.rejected_rows),
             "status": status,
             "wallet": wallet,
+            "candidate": candidate,
+            "candidate_unique": unique,
             "confidence": str(confidence),
             "best_candidate": best.to_dict() if best else None,
             "ranked_candidates": [item.to_dict() for item in ranked[:25]],
@@ -144,6 +152,7 @@ async def identify_wallet_from_csv(
             "safety": {
                 "auto_validation_promotion": False,
                 "auto_trading_promotion": False,
+                "unverified_candidate_exposed_as_wallet": False,
             },
         }
         report_path.write_text(
@@ -154,11 +163,13 @@ async def identify_wallet_from_csv(
     return WalletIdentificationResult(
         status=status,
         wallet=wallet,
+        candidate=candidate,
         confidence=confidence,
         input_trades=len(signals),
         rejected_rows=len(imported.rejected_rows),
         discovery_matches=best.matched_anchors if best else 0,
         discovery_anchors=discovery_anchors,
+        candidate_unique=unique,
         official_matches=official_matches,
         official_attempted=official_attempted,
         median_clock_offset_ms=best.median_clock_offset_ms if best else None,
