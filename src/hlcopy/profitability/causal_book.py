@@ -21,12 +21,10 @@ ZERO = D("0")
 
 
 class CausalParquetL2BookProvider(ParquetL2BookProvider):
-    """Causal L2 provider optimized for event-targeted profitability sweeps.
+    """Causal L2 provider optimized for event-targeted profitability sweeps."""
 
-    Production profitability only needs the latest book available at a finite set of
-    simulated order-arrival timestamps. Priming scans only narrow causal windows around
-    those targets and materializes only the selected L2 snapshots.
-    """
+    MAX_TARGET_BATCH = 128
+    MAX_TARGET_SPAN_NS = 30_000_000_000
 
     def __init__(
         self,
@@ -43,6 +41,7 @@ class CausalParquetL2BookProvider(ParquetL2BookProvider):
         self._targeted: dict[tuple[str, int], TapeBook | None] = {}
         self.prime_candidate_rows = 0
         self.prime_book_rows = 0
+        self.prime_peak_candidate_rows = 0
 
     @staticmethod
     def _target_ns(target_ms: float) -> int:
@@ -65,6 +64,22 @@ class CausalParquetL2BookProvider(ParquetL2BookProvider):
         return windows
 
     @classmethod
+    def _target_batches(cls, targets: Iterable[int]) -> list[list[int]]:
+        batches: list[list[int]] = []
+        current: list[int] = []
+        for target in sorted(set(targets)):
+            if current and (
+                len(current) >= cls.MAX_TARGET_BATCH
+                or target - current[0] > cls.MAX_TARGET_SPAN_NS
+            ):
+                batches.append(current)
+                current = []
+            current.append(target)
+        if current:
+            batches.append(current)
+        return batches
+
+    @classmethod
     def _windows_by_date(
         cls,
         targets: Iterable[int],
@@ -72,9 +87,10 @@ class CausalParquetL2BookProvider(ParquetL2BookProvider):
     ) -> dict[str, list[tuple[int, int]]]:
         grouped: dict[str, list[tuple[int, int]]] = defaultdict(list)
         for start, end in cls._merge_windows(targets, max_age_ns):
-            grouped[cls._date_for_ns(start)].append((start, end))
+            start_date = cls._date_for_ns(start)
+            grouped[start_date].append((start, end))
             end_date = cls._date_for_ns(end)
-            if end_date != cls._date_for_ns(start):
+            if end_date != start_date:
                 grouped[end_date].append((start, end))
         return grouped
 
@@ -90,16 +106,13 @@ class CausalParquetL2BookProvider(ParquetL2BookProvider):
         for start, end in windows:
             current = pl.col("received_at_ns").is_between(start, end, closed="both")
             expr = current if expr is None else (expr | current)
-        if expr is None:
-            return pl.lit(False)
-        return expr
+        return expr if expr is not None else pl.lit(False)
 
     def _load_coin(self, coin: str) -> list[TapeBook]:
         cached = self._cache.get(coin)
         if cached is not None:
             self._cache.move_to_end(coin)
             return cached
-
         books = super()._load_coin(coin)
         self._cache.move_to_end(coin)
         while len(self._cache) > self.max_cached_coins:
@@ -132,10 +145,9 @@ class CausalParquetL2BookProvider(ParquetL2BookProvider):
         coin: str,
         targets: list[int],
         max_age_ns: int,
-    ) -> tuple[list[int], dict[int, int]]:
-        received_to_exchange: dict[int, int] = {}
+    ) -> list[int]:
+        received: set[int] = set()
         windows_by_date = self._windows_by_date(targets, max_age_ns)
-
         for date, windows in sorted(windows_by_date.items()):
             source = self._partition_glob(date, coin)
             if source is None:
@@ -143,15 +155,13 @@ class CausalParquetL2BookProvider(ParquetL2BookProvider):
             frame = (
                 pl.scan_parquet(source)
                 .filter(self._window_expr(windows))
-                .select(["exchange_ts_ms", "received_at_ns"])
+                .select("received_at_ns")
                 .collect(engine="streaming")
             )
             self.prime_candidate_rows += frame.height
-            for exchange_ts_ms, received_at_ns in frame.iter_rows():
-                received_to_exchange[int(received_at_ns)] = int(exchange_ts_ms)
-
-        received = sorted(received_to_exchange)
-        return received, received_to_exchange
+            self.prime_peak_candidate_rows = max(self.prime_peak_candidate_rows, frame.height)
+            received.update(int(value) for value in frame.get_column("received_at_ns"))
+        return sorted(received)
 
     def _selected_books(
         self,
@@ -161,14 +171,8 @@ class CausalParquetL2BookProvider(ParquetL2BookProvider):
         selected_by_date: dict[str, list[int]] = defaultdict(list)
         for received_ns in selected_received:
             selected_by_date[self._date_for_ns(received_ns)].append(received_ns)
-
         parsed: dict[int, TapeBook | None] = {}
-        columns = [
-            "exchange_ts_ms",
-            "received_at_ns",
-            "bid_levels_json",
-            "ask_levels_json",
-        ]
+        columns = ["exchange_ts_ms", "received_at_ns", "bid_levels_json", "ask_levels_json"]
         for date, values in sorted(selected_by_date.items()):
             source = self._partition_glob(date, coin)
             if source is None:
@@ -197,17 +201,8 @@ class CausalParquetL2BookProvider(ParquetL2BookProvider):
                 )
         return parsed
 
-    def _resolve_targets(self, coin: str, target_ns_values: Iterable[int]) -> None:
-        targets = sorted(
-            target
-            for target in set(target_ns_values)
-            if (coin, target) not in self._targeted
-        )
-        if not targets:
-            return
-
-        max_age_ns = int(self.max_age_ms * 1_000_000)
-        received, _ = self._timestamp_candidates(coin, targets, max_age_ns)
+    def _resolve_target_batch(self, coin: str, targets: list[int], max_age_ns: int) -> None:
+        received = self._timestamp_candidates(coin, targets, max_age_ns)
         if not received:
             for target in targets:
                 self._targeted[(coin, target)] = None
@@ -235,8 +230,19 @@ class CausalParquetL2BookProvider(ParquetL2BookProvider):
                 parsed.get(received_ns) if received_ns is not None else None
             )
 
+    def _resolve_targets(self, coin: str, target_ns_values: Iterable[int]) -> None:
+        targets = [
+            target
+            for target in sorted(set(target_ns_values))
+            if (coin, target) not in self._targeted
+        ]
+        if not targets:
+            return
+        max_age_ns = int(self.max_age_ms * 1_000_000)
+        for batch in self._target_batches(targets):
+            self._resolve_target_batch(coin, batch, max_age_ns)
+
     def prime(self, events: Iterable[Any], scenarios: Iterable[LatencyScenario]) -> None:
-        """Resolve all event/scenario book timestamps once before scenario sweeps."""
         scenario_list = tuple(scenarios)
         targets_by_coin: dict[str, list[int]] = defaultdict(list)
         for event in events:
@@ -257,6 +263,7 @@ class CausalParquetL2BookProvider(ParquetL2BookProvider):
                     "causal_book_prime "
                     f"coins={index}/{total} resolved_targets={len(self._targeted)} "
                     f"candidate_rows={self.prime_candidate_rows} "
+                    f"peak_candidate_rows={self.prime_peak_candidate_rows} "
                     f"book_rows={self.prime_book_rows} coin={coin}",
                     flush=True,
                 )
@@ -266,7 +273,6 @@ class CausalParquetL2BookProvider(ParquetL2BookProvider):
         key = (coin, target_ns)
         if key in self._targeted:
             return self._targeted[key]
-
         if coin in self._cache:
             books = self._load_coin(coin)
             if not books:
@@ -278,6 +284,5 @@ class CausalParquetL2BookProvider(ParquetL2BookProvider):
             book = books[idx]
             age_ms = target_ms - received_ms[idx]
             return book if 0 <= age_ms <= self.max_age_ms else None
-
         self._resolve_targets(coin, (target_ns,))
         return self._targeted.get(key)
