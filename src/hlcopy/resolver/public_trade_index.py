@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 from collections.abc import Iterable
@@ -33,6 +34,7 @@ class PublicTradeDiscoveryConfig:
     window_seconds: int = 120
     max_price_bps: Decimal = D("25")
     min_discovery_matches: int = 3
+    min_runner_up_score_gap: Decimal = D("15")
     official_verify_trades: int = 6
     official_time_tolerance_ms: int = 12_000
     official_price_tolerance_bps: Decimal = D("12")
@@ -70,15 +72,21 @@ def _hours_for_window(center_ms: int, window_seconds: int) -> tuple[tuple[str, i
 
 
 def _aws_cp(uri: str, destination: Path) -> None:
+    if os.getenv("HLCOPY_ALLOW_REQUESTER_PAYS", "NO").strip().upper() != "YES":
+        raise RuntimeError(
+            "historical Hyperliquid node_trades are requester-pays; cold-cache download is "
+            "disabled by default. Pre-populate the cache from a free/local capture or set "
+            "HLCOPY_ALLOW_REQUESTER_PAYS=YES to explicitly opt into authenticated AWS charges."
+        )
     completed = subprocess.run(
-        ["aws", "s3", "cp", uri, str(destination), "--no-sign-request"],
+        ["aws", "s3", "cp", uri, str(destination), "--request-payer", "requester"],
         capture_output=True,
         text=True,
         check=False,
     )
     if completed.returncode != 0:
         raise RuntimeError(
-            f"failed to fetch public Hyperliquid trade file {uri}: "
+            f"failed to fetch requester-pays Hyperliquid trade file {uri}: "
             f"{completed.stderr.strip() or completed.stdout.strip()}"
         )
 
@@ -196,6 +204,21 @@ def discover_candidates(
     return rank_candidates(matches_by_anchor, total_anchors=len(anchors))
 
 
+def candidate_is_unique(
+    ranked: tuple[CandidateFingerprint, ...],
+    *,
+    min_score_gap: Decimal,
+) -> bool:
+    if not ranked:
+        return False
+    if len(ranked) == 1:
+        return True
+    best, runner_up = ranked[0], ranked[1]
+    if best.matched_anchors <= runner_up.matched_anchors:
+        return False
+    return best.score - runner_up.score >= min_score_gap
+
+
 async def resolve_source_public_trades(
     *,
     source: ExternalSourceSpec,
@@ -211,11 +234,12 @@ async def resolve_source_public_trades(
         cache_dir = Path(tempfile.gettempdir()) / "hlcopy-public-trades"
     ranked = discover_candidates(signals, cache_dir=cache_dir, config=config)
     best = ranked[0] if ranked else None
+    unique = candidate_is_unique(ranked, min_score_gap=config.min_runner_up_score_gap)
     status = "UNRESOLVED"
     verified_address: str | None = None
     official_payload: dict[str, object] | None = None
 
-    if best is not None and best.matched_anchors >= config.min_discovery_matches:
+    if best is not None and best.matched_anchors >= config.min_discovery_matches and unique:
         reverse_config = ReverseResolverConfig(
             anchor_trades=config.anchor_trades,
             primary_window_ms=config.window_seconds * 1000,
@@ -252,11 +276,15 @@ async def resolve_source_public_trades(
         "source": source.to_dict(),
         "status": status,
         "verified_address": verified_address,
+        "candidate_unique": unique,
         "best_candidate": best.to_dict() if best else None,
         "official_verification": official_payload,
         "ranked_candidates": [item.to_dict() for item in ranked[:25]],
-        "discovery_source": "public Hyperliquid node_trades hourly files",
-        "cost_model": "public unauthenticated dataset; no paid reverse-index API",
+        "discovery_source": "cached Hyperliquid node_trades hourly files",
+        "cost_model": (
+            "zero incremental cost when cache is pre-populated; requester-pays AWS fallback "
+            "requires explicit opt-in"
+        ),
         "safety": {
             "auto_validation_promotion": False,
             "auto_trading_promotion": False,
@@ -292,5 +320,6 @@ async def resolve_source_public_trades(
         "status": status,
         "verified_address": verified_address,
         "best_discovery_matches": best.matched_anchors if best else 0,
+        "candidate_unique": unique,
         "report_path": str(report_path),
     }
