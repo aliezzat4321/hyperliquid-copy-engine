@@ -1,0 +1,31 @@
+name: bones-explorer-probe
+
+on:
+  push:
+    branches:
+      - agent/free-public-wallet-identifier-v1
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install requests
+      - name: Probe Hyperliquid explorer RPC
+        run: |
+          python - <<'PY'
+          import json
+          import requests
+
+          url = 'https://rpc.hyperliquid.xyz/explorer'
+          payload = {'height': 416632723, 'type': 'blockDetails'}
+          r = requests.post(url, json=payload, timeout=20)
+          print('status', r.status_code)
+          print(r.text[:12000])
+          r.raise_for_status()
+          data = r.json()
+          print('top_keys', sorted(data) if isinstance(data, dict) else type(data).__name__)
+          PY
