@@ -8,6 +8,7 @@ from typing import Any
 D = Decimal
 ZERO = D("0")
 ONE = D("1")
+DEFAULT_MIN_EXECUTION_PCT = D("10")
 
 
 def _dec(value: object, default: str = "0") -> Decimal:
@@ -30,7 +31,7 @@ def build_tournament(
     leverage_rows: list[dict[str, Any]],
     *,
     min_realized_actions: int = 10,
-    min_execution_pct: Decimal = D("10"),
+    min_execution_pct: Decimal = DEFAULT_MIN_EXECUTION_PCT,
     required_latencies_ms: tuple[int, ...] = (100, 250, 500, 1000),
 ) -> dict[str, object]:
     """Rank copy configurations by robust prospective return on equity.
