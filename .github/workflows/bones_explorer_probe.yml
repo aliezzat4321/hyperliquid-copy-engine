@@ -14,100 +14,77 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install requests
-      - name: Verify candidate wallets against official Hyperliquid fills
+      - name: Inspect exact Bones block executions
         run: |
           python - <<'PY'
-          from datetime import datetime
-          from decimal import Decimal
-          import requests
+          import json
           import time
+          import requests
+          from decimal import Decimal
 
-          INFO = 'https://api.hyperliquid.xyz/info'
+          RPC = 'https://rpc.hyperliquid.xyz/explorer'
+          CENTER = 1_101_616_821
+          TARGET_PX = Decimal('64773')
+          TARGET_SIZE = Decimal('0.010092')
           session = requests.Session()
-          candidates = [
-              '0x2ca4927174ba283d8a57f60ef3589844035a2930',
-              '0x6bd572af5cf71fdde43020f1a1c04bd643e12c07',
-              '0x5eaac7c475b1fad85701f02c4e9e796a53f94bd5',
-              '0x5bcbbb10358ddb623593e51f499568ea54c2aeed',
-              '0xb9758e0fadd7556e91980d8e5fa7cb8252615360',
-          ]
-          anchors = [
-              ('a1','2026-08-07T18:00:35.908+00:00','LONG','64773','0.010092'),
-              ('a2','2026-08-07T14:50:01.743+00:00','SHORT','65049','0.010000'),
-              ('a3','2026-08-07T14:23:08.261+00:00','LONG','64987','0.010000'),
-              ('a4','2026-08-07T14:00:18.041+00:00','SHORT','64968','0.010047'),
-              ('a5','2026-08-07T05:50:38.289+00:00','LONG','64330','0.009646'),
-              ('a6','2026-08-07T01:45:57.811+00:00','LONG','64392','0.010000'),
-              ('a7','2026-08-07T01:03:27.710+00:00','LONG','64384','0.010000'),
-              ('a8','2026-08-07T00:07:22.531+00:00','LONG','64381','0.010000'),
-          ]
 
-          def fills(user, target):
-              payload = {
-                  'type': 'userFillsByTime',
-                  'user': user,
-                  'startTime': target - 15_000,
-                  'endTime': target + 15_000,
-                  'aggregateByTime': True,
-              }
-              for attempt in range(5):
-                  r = session.post(INFO, json=payload, timeout=10)
+          def explorer(payload):
+              for attempt in range(7):
+                  r = session.post(RPC, json=payload, timeout=10)
                   if r.status_code == 429:
-                      time.sleep(1 + attempt)
+                      time.sleep(1.0 + attempt * 0.8)
                       continue
                   r.raise_for_status()
+                  time.sleep(0.35)
                   return r.json()
-              return []
+              raise RuntimeError('explorer rate limit')
 
-          ranking = []
-          for user in candidates:
-              matched = 0
-              exactish = 0
-              total_quality = Decimal('0')
-              print('CANDIDATE_WALLET', user)
-              for aid, iso, direction, px_s, size_s in anchors:
-                  target = int(datetime.fromisoformat(iso).timestamp() * 1000)
-                  px0 = Decimal(px_s)
-                  sz0 = Decimal(size_s)
-                  rows = fills(user, target)
-                  expected_dir = 'close long' if direction == 'LONG' else 'close short'
-                  best = None
-                  for row in rows if isinstance(rows, list) else []:
-                      if str(row.get('coin','')).upper() != 'BTC':
-                          continue
-                      if str(row.get('dir','')).strip().lower() != expected_dir:
-                          continue
-                      try:
-                          t = int(row['time'])
-                          px = Decimal(str(row['px']))
-                          sz = Decimal(str(row['sz']))
-                      except Exception:
-                          continue
-                      dt = abs(t - target)
-                      price_bps = abs(px / px0 - Decimal('1')) * Decimal('10000')
-                      size_rel = abs(sz / sz0 - Decimal('1'))
-                      key = (dt, price_bps, size_rel)
-                      if best is None or key < best[0]:
-                          best = (key, row)
-                  if best is None:
-                      print('  MISS', aid, 'rows', len(rows) if isinstance(rows,list) else 'non-list')
-                  else:
-                      (dt, price_bps, size_rel), row = best
-                      quality = max(Decimal('0'), Decimal('1') - Decimal(dt) / Decimal('5000'))
-                      quality += max(Decimal('0'), Decimal('1') - price_bps / Decimal('20'))
-                      quality += max(Decimal('0'), Decimal('1') - size_rel / Decimal('0.25'))
-                      total_quality += quality
-                      if dt <= 10_000 and price_bps <= 20:
-                          matched += 1
-                      if dt <= 2_000 and price_bps <= 5 and size_rel <= Decimal('0.25'):
-                          exactish += 1
-                      print('  MATCH', aid, 'dt', dt, 'price_bps', price_bps, 'size_rel', size_rel,
-                            'fill_px', row.get('px'), 'fill_sz', row.get('sz'), 'dir', row.get('dir'), 'tid', row.get('tid'))
-              ranking.append((exactish, matched, total_quality, user))
-              print('SUMMARY', user, 'exactish', exactish, 'matched', matched, 'quality', total_quality)
+          block = explorer({'height': CENTER, 'type': 'blockDetails'})['blockDetails']
+          print('BLOCK', CENTER, block['blockTime'], 'txs', len(block.get('txs', [])))
 
-          ranking.sort(reverse=True)
-          print('OFFICIAL_RANKING')
-          for row in ranking:
-              print('OFFICIAL', row)
+          chosen = []
+          for tx in block.get('txs', []):
+              if tx.get('error') is not None:
+                  continue
+              action = tx.get('action') or {}
+              if action.get('type') != 'order':
+                  continue
+              for order in action.get('orders', []):
+                  if order.get('a', order.get('asset')) != 0:
+                      continue
+                  if order.get('b', order.get('isBuy')) is not False:
+                      continue
+                  try:
+                      size = Decimal(str(order.get('s', order.get('sz'))))
+                      px = Decimal(str(order.get('p', order.get('limitPx'))))
+                  except Exception:
+                      continue
+                  t = order.get('t') or {}
+                  limit = t.get('limit') if isinstance(t, dict) else None
+                  tif = limit.get('tif') if isinstance(limit, dict) else None
+                  size_rel = abs(size / TARGET_SIZE - Decimal('1'))
+                  price_bps = abs(px / TARGET_PX - Decimal('1')) * Decimal('10000')
+                  if tif != 'Alo' or size_rel <= Decimal('0.20'):
+                      chosen.append((
+                          size_rel, price_bps, tif, bool(order.get('r', order.get('reduceOnly'))),
+                          tx.get('user'), tx.get('hash'), size, px, order,
+                      ))
+
+          chosen.sort(key=lambda x: (x[2] == 'Alo', x[0], x[1]))
+          print('CHOSEN_COUNT', len(chosen))
+          seen_hashes = set()
+          for row in chosen[:40]:
+              print('ORDER_CANDIDATE', row)
+              tx_hash = row[5]
+              if not tx_hash or tx_hash in seen_hashes:
+                  continue
+              seen_hashes.add(tx_hash)
+              try:
+                  details = explorer({'type': 'txDetails', 'hash': tx_hash})
+              except Exception as exc:
+                  print('TXDETAIL_ERROR', tx_hash, type(exc).__name__, str(exc)[:180])
+                  continue
+              print('TXDETAIL', tx_hash, json.dumps(details, sort_keys=True)[:10000])
+              if len(seen_hashes) >= 12:
+                  break
           PY
