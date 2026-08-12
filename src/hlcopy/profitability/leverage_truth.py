@@ -46,8 +46,8 @@ def leverage_matrix(
 
     The base copy simulator already fixes follower notional and execution prices. Leverage
     changes the margin/equity required to support that same notional; it does not multiply
-    the underlying dollar PnL. Until path-dependent maintenance margin/liquidation is
-    modeled, every leveraged row is research-only.
+    the underlying dollar PnL. Every row remains research-only because the current base
+    scorer still lacks funding, open-position MTM, and path-dependent liquidation truth.
     """
 
     notional = D(str(summary.get("notional_usd", "0")))
@@ -71,9 +71,11 @@ def leverage_matrix(
                 net_pnl_usd=net_pnl,
                 net_notional_return_bps=notional_bps,
                 net_equity_return_bps=equity_bps,
-                research_only=leverage > D("1"),
+                research_only=True,
                 liquidation_path_mode=(
-                    "UNLEVERED" if leverage == D("1") else "NOT_MODELED_BLOCKS_LIVE_APPROVAL"
+                    "UNMODELED_BASE_TRUTH_BLOCKS_LIVE_APPROVAL"
+                    if leverage == D("1")
+                    else "NOT_MODELED_BLOCKS_LIVE_APPROVAL"
                 ),
             ).to_dict()
         )
