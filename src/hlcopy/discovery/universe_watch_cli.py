@@ -83,25 +83,17 @@ def _register_research_wallets(
 ) -> tuple[list[str], list[str], list[str], list[str]]:
     """Atomically reconcile the scout-owned slice of the research registry.
 
-    Manual/non-scout research entries consume capacity but are never changed. Validation,
-    approved, rejected, external, and promoted scout entries are also preserved. The
-    remaining capacity is a rotating scout pool containing the highest-priority current
-    registration rows, so stale historical scout entries cannot permanently block new
-    leaderboard leaders.
+    Manual/non-scout Hyperliquid research entries consume capacity but are never
+    changed. Validation, approved, rejected, external, and promoted scout entries are
+    also preserved. Remaining capacity is a rotating scout pool containing the
+    highest-priority current registration rows, so stale historical scout entries
+    cannot permanently block new leaderboard leaders.
     """
     registry.init()
     now = datetime.now(UTC).isoformat()
 
     with registry._mutation_lock():
         existing = list(registry.load())
-        protected_research_count = sum(
-            wallet.stage == "research" and not _is_scout_owned_research(wallet)
-            for wallet in existing
-        )
-        scout_capacity = max(0, max_total_research - protected_research_count)
-        desired_rows = rows[:scout_capacity]
-        desired_by_address = {row.address.lower(): row for row in desired_rows}
-
         existing_by_address = {
             wallet.source_ref.lower(): wallet
             for wallet in existing
@@ -112,11 +104,23 @@ def _register_research_wallets(
             for address, wallet in existing_by_address.items()
             if not _is_scout_owned_research(wallet)
         }
+        protected_research_count = sum(
+            wallet.source_type == "hyperliquid_wallet"
+            and wallet.stage == "research"
+            and not _is_scout_owned_research(wallet)
+            for wallet in existing
+        )
+        scout_capacity = max(0, max_total_research - protected_research_count)
+        scout_candidates = [
+            row for row in rows if row.address.lower() not in protected_addresses
+        ]
+        desired_rows = scout_candidates[:scout_capacity]
+        desired_by_address = {row.address.lower(): row for row in desired_rows}
 
         added: list[str] = []
         removed: list[str] = []
         refreshed: list[str] = []
-        skipped_capacity = [row.address for row in rows[scout_capacity:]]
+        skipped_capacity = [row.address for row in scout_candidates[scout_capacity:]]
         reconciled: list[WalletSpec] = []
 
         for wallet in existing:
@@ -150,7 +154,7 @@ def _register_research_wallets(
         }
         for row in desired_rows:
             address = row.address.lower()
-            if address in current_addresses or address in protected_addresses:
+            if address in current_addresses:
                 continue
             reconciled.append(
                 WalletSpec(
