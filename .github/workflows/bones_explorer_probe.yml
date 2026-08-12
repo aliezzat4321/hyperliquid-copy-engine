@@ -9,25 +9,21 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: pip install requests
-      - name: Inspect Hyperliquid fills mirror metadata
+      - name: Check fills mirror maximum date
         run: |
           python - <<'PY'
-          import json
-          import requests
-
-          repo = 'gionuibk/hyperliquid-node-fills-by-block'
-          urls = [
-              f'https://huggingface.co/api/datasets/{repo}',
-              f'https://huggingface.co/api/datasets/{repo}/parquet/default/train',
-              f'https://huggingface.co/api/datasets/{repo}/tree/refs%2Fconvert%2Fparquet?recursive=true&expand=false',
-          ]
-          for url in urls:
-              r = requests.get(url, timeout=30)
-              print('URL', url, 'STATUS', r.status_code, 'LEN', len(r.content))
-              print(r.text[:30000])
+          import re, requests
+          repo='gionuibk/hyperliquid-node-fills-by-block'
+          data=requests.get(f'https://huggingface.co/api/datasets/{repo}',timeout=30).json()
+          names=[x.get('rfilename','') for x in data.get('siblings',[])]
+          dates=[]
+          for name in names:
+              m=re.search(r'(20\d{6})',name)
+              if m: dates.append(m.group(1))
+          print('FILES',len(names),'DATES',len(dates),'MIN',min(dates) if dates else None,'MAX',max(dates) if dates else None)
+          print('LAST_FILES',sorted(names)[-20:])
           PY
