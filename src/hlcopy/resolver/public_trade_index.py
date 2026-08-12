@@ -9,9 +9,11 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Iterable
 
+from hlcopy.hyperliquid.http_client import HyperliquidHttpClient
 from hlcopy.market.symbols import canonical_coin
 from hlcopy.resolver.matcher import select_anchor_trades
 from hlcopy.resolver.reverse_index import (
+    AnchorMatch,
     CandidateFingerprint,
     ReverseResolverConfig,
     _best_matches_for_anchor,
@@ -21,7 +23,6 @@ from hlcopy.resolver.reverse_index import (
 from hlcopy.resolver.source_registry import ExternalSourceSpec
 from hlcopy.shadow.registry import WalletRegistry, WalletSpec
 from hlcopy.signals.invo import CopySignal, load_invo_closed_trades
-from hlcopy.hyperliquid.http_client import HyperliquidHttpClient
 
 D = Decimal
 
@@ -125,10 +126,7 @@ def _public_trade_matches(
     *,
     window_ms: int,
     max_price_bps: Decimal,
-) -> dict[str, object]:
-    # Reuse the strict reverse-index matcher by expanding each public trade into
-    # lightweight completed-trade-shaped rows around the external close event.
-    # Each side of a public Hyperliquid trade includes the actual user address.
+) -> dict[str, AnchorMatch]:
     from hlcopy.resolver.reverse_index import IndexedCompletedTrade
 
     candidates: list[IndexedCompletedTrade] = []
@@ -146,8 +144,6 @@ def _public_trade_matches(
         side_info = row.get("side_info")
         if not isinstance(side_info, list) or len(side_info) != 2:
             continue
-        # For the trade itself, side_info[0] is buyer and side_info[1] seller.
-        # Closing a LONG is a sell; closing a SHORT is a buy.
         chosen = side_info[1] if signal.direction == "LONG" else side_info[0]
         if not isinstance(chosen, dict):
             continue
@@ -182,7 +178,7 @@ def discover_candidates(
     config: PublicTradeDiscoveryConfig = DEFAULT_PUBLIC_TRADE_CONFIG,
 ) -> tuple[CandidateFingerprint, ...]:
     anchors = select_anchor_trades(signals, max_trades=max(3, config.anchor_trades))
-    matches_by_anchor: dict[str, dict[str, object]] = {}
+    matches_by_anchor: dict[str, dict[str, AnchorMatch]] = {}
     loaded: dict[tuple[str, int], list[dict[str, object]]] = {}
     window_ms = max(1, config.window_seconds) * 1000
     for signal in anchors:
@@ -260,7 +256,7 @@ async def resolve_source_public_trades(
         "official_verification": official_payload,
         "ranked_candidates": [item.to_dict() for item in ranked[:25]],
         "discovery_source": "public Hyperliquid node_trades hourly files",
-        "cost_model": "public unauthenticated S3 request; no paid reverse-index API",
+        "cost_model": "public unauthenticated dataset; no paid reverse-index API",
         "safety": {
             "auto_validation_promotion": False,
             "auto_trading_promotion": False,
