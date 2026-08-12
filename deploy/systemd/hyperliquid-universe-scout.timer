@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Hyperliquid leaderboard universe scout every fifteen minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+AccuracySec=1min
+Persistent=true
+Unit=hyperliquid-universe-scout.service
+
+[Install]
+WantedBy=timers.target
