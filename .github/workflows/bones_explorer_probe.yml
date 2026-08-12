@@ -14,77 +14,28 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install requests
-      - name: Inspect exact Bones block executions
+      - name: Probe Chainticks public Hyperliquid index
         run: |
           python - <<'PY'
           import json
-          import time
           import requests
-          from decimal import Decimal
 
-          RPC = 'https://rpc.hyperliquid.xyz/explorer'
-          CENTER = 1_101_616_821
-          TARGET_PX = Decimal('64773')
-          TARGET_SIZE = Decimal('0.010092')
-          session = requests.Session()
-
-          def explorer(payload):
-              for attempt in range(7):
-                  r = session.post(RPC, json=payload, timeout=10)
-                  if r.status_code == 429:
-                      time.sleep(1.0 + attempt * 0.8)
-                      continue
-                  r.raise_for_status()
-                  time.sleep(0.35)
-                  return r.json()
-              raise RuntimeError('explorer rate limit')
-
-          block = explorer({'height': CENTER, 'type': 'blockDetails'})['blockDetails']
-          print('BLOCK', CENTER, block['blockTime'], 'txs', len(block.get('txs', [])))
-
-          chosen = []
-          for tx in block.get('txs', []):
-              if tx.get('error') is not None:
-                  continue
-              action = tx.get('action') or {}
-              if action.get('type') != 'order':
-                  continue
-              for order in action.get('orders', []):
-                  if order.get('a', order.get('asset')) != 0:
-                      continue
-                  if order.get('b', order.get('isBuy')) is not False:
-                      continue
-                  try:
-                      size = Decimal(str(order.get('s', order.get('sz'))))
-                      px = Decimal(str(order.get('p', order.get('limitPx'))))
-                  except Exception:
-                      continue
-                  t = order.get('t') or {}
-                  limit = t.get('limit') if isinstance(t, dict) else None
-                  tif = limit.get('tif') if isinstance(limit, dict) else None
-                  size_rel = abs(size / TARGET_SIZE - Decimal('1'))
-                  price_bps = abs(px / TARGET_PX - Decimal('1')) * Decimal('10000')
-                  if tif != 'Alo' or size_rel <= Decimal('0.20'):
-                      chosen.append((
-                          size_rel, price_bps, tif, bool(order.get('r', order.get('reduceOnly'))),
-                          tx.get('user'), tx.get('hash'), size, px, order,
-                      ))
-
-          chosen.sort(key=lambda x: (x[2] == 'Alo', x[0], x[1]))
-          print('CHOSEN_COUNT', len(chosen))
-          seen_hashes = set()
-          for row in chosen[:40]:
-              print('ORDER_CANDIDATE', row)
-              tx_hash = row[5]
-              if not tx_hash or tx_hash in seen_hashes:
-                  continue
-              seen_hashes.add(tx_hash)
-              try:
-                  details = explorer({'type': 'txDetails', 'hash': tx_hash})
-              except Exception as exc:
-                  print('TXDETAIL_ERROR', tx_hash, type(exc).__name__, str(exc)[:180])
-                  continue
-              print('TXDETAIL', tx_hash, json.dumps(details, sort_keys=True)[:10000])
-              if len(seen_hashes) >= 12:
-                  break
+          base = 'https://huggingface.co/datasets/Chainticks/perp-data/resolve/main'
+          for path in ('LATEST_DATE.txt', '_schema.json', '_manifest.json'):
+              r = requests.get(f'{base}/{path}', timeout=20)
+              print('FILE', path, 'status', r.status_code, 'len', len(r.content))
+              r.raise_for_status()
+              text = r.text
+              if path == 'LATEST_DATE.txt':
+                  print('LATEST_DATE', text.strip())
+              elif path == '_schema.json':
+                  data = r.json()
+                  print('SCHEMA', json.dumps(data, sort_keys=True)[:12000])
+              else:
+                  data = r.json()
+                  print('MANIFEST_GENERATED', data.get('generated_at'))
+                  print('TRADE_LATEST_KEYS', [k for k in data.get('row_counts', {}) if 'hyperliquid_chain/trades' in k][-12:])
+                  tr = data.get('time_ranges', {})
+                  keys = sorted(k for k in tr if 'hyperliquid_chain/trades' in k)
+                  print('TRADE_LAST_RANGES', [(k, tr[k]) for k in keys[-10:]])
           PY
