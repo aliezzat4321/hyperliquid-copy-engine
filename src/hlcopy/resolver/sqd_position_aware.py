@@ -64,11 +64,15 @@ class SqdFill:
 @dataclass(frozen=True, slots=True)
 class LifecycleEpisodeEvidence(EpisodeEvidence):
     lifecycle_id: str | None = None
+    boundary_execution_id: str | None = None
+    final_execution_id: str | None = None
     rejection_reason: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         row = EpisodeEvidence.to_dict(self)
         row["lifecycle_id"] = self.lifecycle_id
+        row["boundary_execution_id"] = self.boundary_execution_id
+        row["final_execution_id"] = self.final_execution_id
         row["rejection_reason"] = self.rejection_reason
         return row
 
@@ -143,7 +147,7 @@ def _price_bps(left: Decimal, right: Decimal) -> Decimal:
     return abs(right / left - D("1")) * BPS
 
 
-def _fill_identity(fill: SqdFill) -> str:
+def fill_execution_id(fill: SqdFill) -> str:
     if fill.tid:
         return f"tid:{fill.tid}"
     return f"oid:{fill.oid}:t:{fill.time_ms}:sz:{fill.sz}:px:{fill.px}"
@@ -161,6 +165,8 @@ def _failed(
     reconstructed_entry: Decimal | None = None,
     reconstructed_size: Decimal | None = None,
     lifecycle_id: str | None = None,
+    boundary_execution_id: str | None = None,
+    final_execution_id: str | None = None,
     rejection_reason: str | None = None,
 ) -> LifecycleEpisodeEvidence:
     return LifecycleEpisodeEvidence(
@@ -175,12 +181,16 @@ def _failed(
         reconstructed_entry=reconstructed_entry,
         reconstructed_size=reconstructed_size,
         lifecycle_id=lifecycle_id,
+        boundary_execution_id=boundary_execution_id,
+        final_execution_id=final_execution_id,
         rejection_reason=rejection_reason,
     )
 
 
-def reject_duplicate_lifecycle(
+def reject_lifecycle(
     evidence: LifecycleEpisodeEvidence,
+    *,
+    reason: str,
 ) -> LifecycleEpisodeEvidence:
     return LifecycleEpisodeEvidence(
         signal_id=evidence.signal_id,
@@ -194,8 +204,16 @@ def reject_duplicate_lifecycle(
         reconstructed_entry=evidence.reconstructed_entry,
         reconstructed_size=evidence.reconstructed_size,
         lifecycle_id=evidence.lifecycle_id,
-        rejection_reason="duplicate_lifecycle_reuse",
+        boundary_execution_id=evidence.boundary_execution_id,
+        final_execution_id=evidence.final_execution_id,
+        rejection_reason=reason,
     )
+
+
+def reject_duplicate_lifecycle(
+    evidence: LifecycleEpisodeEvidence,
+) -> LifecycleEpisodeEvidence:
+    return reject_lifecycle(evidence, reason="duplicate_lifecycle_reuse")
 
 
 def _direction_names(direction: str) -> tuple[str, str, str, str, str]:
@@ -209,6 +227,22 @@ def _start_position_matches(fill: SqdFill, current_size: Decimal) -> bool:
         return True
     tolerance = max(POSITION_EPSILON, abs(current_size) * D("0.000000001"))
     return abs(abs(fill.start_position) - current_size) <= tolerance
+
+
+def _ordered_wallet_coin_fills(
+    fills: list[SqdFill],
+    *,
+    user: str,
+    coin: str,
+    end_ms: int,
+) -> list[tuple[int, SqdFill]]:
+    indexed = [
+        (index, row)
+        for index, row in enumerate(fills)
+        if row.user == user and row.coin == coin and row.time_ms <= end_ms
+    ]
+    indexed.sort(key=lambda item: (item[1].time_ms, item[1].block_number, item[0]))
+    return indexed
 
 
 def _match_from_boundary(
@@ -227,6 +261,26 @@ def _match_from_boundary(
     )
     entry_time_error = abs(boundary.time_ms - signal.opened_at_ms)
     source_size = signal_position_size(signal)
+    boundary_execution_id = fill_execution_id(boundary)
+
+    ordered = _ordered_wallet_coin_fills(
+        fills,
+        user=boundary.user,
+        coin=boundary.coin,
+        end_ms=signal.closed_at_ms + close_time_tolerance_ms,
+    )
+    boundary_position = next(
+        (position for position, (_, row) in enumerate(ordered) if row is boundary),
+        None,
+    )
+    if boundary_position is None:
+        return _failed(
+            signal.signal_id,
+            entry_time_error_ms=entry_time_error,
+            boundary_execution_id=boundary_execution_id,
+            rejection_reason="boundary_not_in_ordered_stream",
+        )
+    rows = [row for _, row in ordered[boundary_position:]]
 
     current_size = D("0")
     current_entry_notional = D("0")
@@ -235,19 +289,6 @@ def _match_from_boundary(
     close_size = D("0")
     close_notional = D("0")
     close_last_ms: int | None = None
-
-    rows = [
-        row
-        for row in fills
-        if row.user == boundary.user
-        and row.coin == boundary.coin
-        and boundary.time_ms <= row.time_ms
-        and row.time_ms <= signal.closed_at_ms + close_time_tolerance_ms
-    ]
-    # SQD emits fills in execution order. Keep that order for fills sharing the
-    # same millisecond/block; lexical transaction-id ordering can reverse split
-    # fills and fabricate a startPosition continuity failure.
-    rows.sort(key=lambda row: (row.time_ms, row.block_number))
 
     for fill in rows:
         text = fill.direction.lower()
@@ -264,6 +305,7 @@ def _match_from_boundary(
                 signal.signal_id,
                 entry_time_error_ms=entry_time_error,
                 reconstructed_size=gross_entry_size or None,
+                boundary_execution_id=boundary_execution_id,
                 rejection_reason="position_continuity_mismatch",
             )
 
@@ -273,6 +315,7 @@ def _match_from_boundary(
                     signal.signal_id,
                     entry_time_error_ms=entry_time_error,
                     reconstructed_size=gross_entry_size or None,
+                    boundary_execution_id=boundary_execution_id,
                     rejection_reason="unexpected_reopen",
                 )
             current_size += fill.sz
@@ -286,6 +329,7 @@ def _match_from_boundary(
                 signal.signal_id,
                 entry_time_error_ms=entry_time_error,
                 reconstructed_size=gross_entry_size or None,
+                boundary_execution_id=boundary_execution_id,
                 rejection_reason="position_flip_before_expected_close",
             )
 
@@ -294,6 +338,7 @@ def _match_from_boundary(
                 signal.signal_id,
                 entry_time_error_ms=entry_time_error,
                 reconstructed_size=gross_entry_size or None,
+                boundary_execution_id=boundary_execution_id,
                 rejection_reason="invalid_reduction_size",
             )
 
@@ -308,15 +353,18 @@ def _match_from_boundary(
             continue
 
         current_size = D("0")
+        final_execution_id = fill_execution_id(fill)
         lifecycle_id = (
             f"{boundary.user}:{boundary.coin}:{signal.direction}:"
-            f"{_fill_identity(boundary)}->{_fill_identity(fill)}"
+            f"{boundary_execution_id}->{final_execution_id}"
         )
         if close_size <= 0 or gross_entry_size <= 0 or close_last_ms is None:
             return _failed(
                 signal.signal_id,
                 entry_time_error_ms=entry_time_error,
                 lifecycle_id=lifecycle_id,
+                boundary_execution_id=boundary_execution_id,
+                final_execution_id=final_execution_id,
             )
 
         close_time_error = abs(close_last_ms - signal.closed_at_ms)
@@ -350,6 +398,8 @@ def _match_from_boundary(
             reconstructed_entry=reconstructed_entry,
             reconstructed_size=gross_entry_size,
             lifecycle_id=lifecycle_id,
+            boundary_execution_id=boundary_execution_id,
+            final_execution_id=final_execution_id,
             rejection_reason=None if matched else "lifecycle_tolerance_mismatch",
         )
 
@@ -357,6 +407,7 @@ def _match_from_boundary(
         signal.signal_id,
         entry_time_error_ms=entry_time_error,
         reconstructed_size=gross_entry_size or None,
+        boundary_execution_id=boundary_execution_id,
         rejection_reason="no_final_flatten",
     )
 
@@ -372,6 +423,7 @@ def match_episode(
     entry_price_tolerance_bps: Decimal,
 ) -> LifecycleEpisodeEvidence:
     open_name, _, _, _, _ = _direction_names(signal.direction)
+    order_index = {id(fill): index for index, fill in enumerate(fills)}
     boundaries = [
         fill
         for fill in fills
@@ -384,7 +436,12 @@ def match_episode(
         return _failed(signal.signal_id, rejection_reason="no_flat_to_open_boundary")
 
     boundaries.sort(
-        key=lambda fill: (abs(fill.time_ms - signal.opened_at_ms), fill.time_ms, fill.tid)
+        key=lambda fill: (
+            abs(fill.time_ms - signal.opened_at_ms),
+            fill.time_ms,
+            fill.block_number,
+            order_index.get(id(fill), 0),
+        )
     )
     best_failure: LifecycleEpisodeEvidence | None = None
     for boundary in boundaries:
