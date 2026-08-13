@@ -13,7 +13,8 @@ from hlcopy.resolver.public_trade_index import (
     verify_candidate_shortlist,
 )
 from hlcopy.resolver.reverse_index import CandidateFingerprint
-from hlcopy.resolver.sqd_fills import SqdFill, aggregate_close_fills, match_episode
+from hlcopy.resolver.sqd_fills import aggregate_close_fills, match_episode
+from hlcopy.resolver.sqd_position_aware import SqdFill
 from hlcopy.signals.invo import CopySignal
 
 D = Decimal
@@ -72,6 +73,7 @@ def _fill(
         oid=oid,
         closed_pnl=D("0"),
         tid=f"tid-{time_ms}",
+        start_position=None,
     )
 
 
@@ -328,12 +330,13 @@ def test_all_threshold_reaching_finalists_are_verified() -> None:
         _candidate(f"0x{index:040x}", 3, str(100 - index))
         for index in range(1, 8)
     )
-    signals = (_signal(signal_id="held-out"),)
+    signals = (_signal(signal_id="held-out", opened_at_ms=900_000),)
     client = _FakeSqdClient()
     config = PublicTradeDiscoveryConfig(
         min_discovery_matches=3,
         max_candidates_to_verify=6,
         historical_verify_trades=1,
+        historical_entry_time_tolerance_ms=300_000,
     )
     results = asyncio.run(
         verify_candidate_shortlist(
@@ -367,7 +370,7 @@ def test_historical_verification_excludes_entry_before_coverage() -> None:
     client = _FakeSqdClient(start_ms=900_000, end_ms=2_500_000)
     signals = (
         _signal(signal_id="uncovered", opened_at_ms=800_000, closed_at_ms=1_500_000),
-        _signal(signal_id="covered", opened_at_ms=1_000_000, closed_at_ms=1_800_000),
+        _signal(signal_id="covered", opened_at_ms=1_300_000, closed_at_ms=1_800_000),
     )
     result = asyncio.run(
         verify_candidate_historically(
