@@ -38,6 +38,8 @@ class PublicTradeDiscoveryConfig:
     max_size_ratio_error: Decimal = DEFAULT_MAX_SIZE_RATIO_ERROR
     min_discovery_matches: int = 3
     min_runner_up_score_gap: Decimal = D("15")
+    # Retained for config compatibility only. Correctness requires every
+    # threshold-reaching finalist to be verified before uniqueness is claimed.
     max_candidates_to_verify: int = 6
     historical_verify_trades: int = 12
     historical_lookback_hours: int = 6
@@ -58,6 +60,7 @@ class PublicTradeDiscoveryResult:
     ranked: tuple[CandidateFingerprint, ...]
     anchors: tuple[CopySignal, ...]
     coverage_start_ms: int
+    coverage_end_ms: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,9 +168,14 @@ async def discover_candidates(
     config: PublicTradeDiscoveryConfig = DEFAULT_PUBLIC_TRADE_CONFIG,
 ) -> PublicTradeDiscoveryResult:
     coverage_start_ms = await client.coverage_start_ms()
-    eligible = tuple(signal for signal in signals if signal.closed_at_ms >= coverage_start_ms)
+    coverage_end_ms = await client.coverage_end_ms()
+    eligible = tuple(
+        signal
+        for signal in signals
+        if coverage_start_ms <= signal.closed_at_ms <= coverage_end_ms
+    )
     if len(eligible) < 3:
-        return PublicTradeDiscoveryResult((), (), coverage_start_ms)
+        return PublicTradeDiscoveryResult((), (), coverage_start_ms, coverage_end_ms)
     anchors = select_anchor_trades(eligible, max_trades=max(3, config.anchor_trades))
     matches_by_anchor: dict[str, dict[str, AnchorMatch]] = {}
     window_ms = max(1, config.window_seconds) * 1000
@@ -185,7 +193,12 @@ async def discover_candidates(
             max_size_ratio_error=config.max_size_ratio_error,
         )
     ranked = rank_candidates(matches_by_anchor, total_anchors=len(anchors))
-    return PublicTradeDiscoveryResult(ranked, anchors, coverage_start_ms)
+    return PublicTradeDiscoveryResult(
+        ranked,
+        anchors,
+        coverage_start_ms,
+        coverage_end_ms,
+    )
 
 
 def candidate_is_unique(
@@ -212,11 +225,12 @@ async def verify_candidate_historically(
     client: SqdHyperliquidFillsClient,
     config: PublicTradeDiscoveryConfig = DEFAULT_PUBLIC_TRADE_CONFIG,
 ) -> HistoricalVerification:
+    coverage_end_ms = await client.coverage_end_ms()
     eligible = [
         signal
         for signal in signals
         if signal.signal_id not in excluded_signal_ids
-        and signal.closed_at_ms >= coverage_start_ms
+        and coverage_start_ms <= signal.closed_at_ms <= coverage_end_ms
     ]
     eligible.sort(key=lambda item: (item.closed_at_ms, item.signal_id), reverse=True)
     selected = eligible[: config.historical_verify_trades]
@@ -225,7 +239,12 @@ async def verify_candidate_historically(
     lookback_ms = max(1, config.historical_lookback_hours) * 60 * 60 * 1000
     for signal in selected:
         start_ms = max(coverage_start_ms, signal.opened_at_ms - lookback_ms)
-        end_ms = signal.closed_at_ms + config.historical_time_tolerance_ms
+        end_ms = min(
+            coverage_end_ms,
+            signal.closed_at_ms + config.historical_time_tolerance_ms,
+        )
+        if end_ms < start_ms:
+            continue
         fills = await client.fills_between_times(
             start_ms=start_ms,
             end_ms=end_ms,
@@ -243,7 +262,7 @@ async def verify_candidate_historically(
         evidence.append(item)
         if item.matched:
             matched_ids.append(signal.signal_id)
-    attempted = len(selected)
+    attempted = len(evidence)
     matched = len(matched_ids)
     ratio = D(matched) / D(attempted) if attempted else D("0")
     return HistoricalVerification(
@@ -264,11 +283,13 @@ async def verify_candidate_shortlist(
     client: SqdHyperliquidFillsClient,
     config: PublicTradeDiscoveryConfig = DEFAULT_PUBLIC_TRADE_CONFIG,
 ) -> tuple[HistoricalCandidateVerification, ...]:
+    # Do not truncate the qualifying set. A uniqueness claim is invalid if a
+    # threshold-reaching seventh (or later) candidate was never held-out tested.
     shortlist = [
         candidate
         for candidate in ranked
         if candidate.matched_anchors >= config.min_discovery_matches
-    ][: max(1, config.max_candidates_to_verify)]
+    ]
     results: list[HistoricalCandidateVerification] = []
     for candidate in shortlist:
         verification = await verify_candidate_historically(
@@ -308,20 +329,22 @@ def select_historical_winner(
     min_ratio: Decimal,
     min_match_gap: int,
 ) -> HistoricalCandidateVerification | None:
-    qualified = [
-        item
-        for item in results
-        if item.verification.matched >= min_matches
-        and item.verification.ratio >= min_ratio
-    ]
-    if not qualified:
+    if not results:
         return None
-    best = qualified[0]
-    if len(qualified) == 1:
-        return best
-    runner_up = qualified[1]
-    if best.verification.matched - runner_up.verification.matched < min_match_gap:
+    best = results[0]
+    if (
+        best.verification.matched < min_matches
+        or best.verification.ratio < min_ratio
+    ):
         return None
+
+    # Uniqueness is measured against the strongest tested runner-up before
+    # threshold filtering. Otherwise a 3-vs-2 result can incorrectly become a
+    # unique winner merely because the runner-up failed min_matches.
+    if len(results) > 1:
+        runner_up = results[1]
+        if best.verification.matched - runner_up.verification.matched < min_match_gap:
+            return None
     return best
 
 
@@ -361,13 +384,14 @@ async def resolve_source_public_trades(
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / f"public_trade_resolution_{source.id}.json"
     report = {
-        "version": 3,
-        "resolver_rule_version": "sqd-fill-wallet-identity-v3",
+        "version": 4,
+        "resolver_rule_version": "sqd-fill-wallet-identity-v4",
         "source": source.to_dict(),
         "status": status,
         "verified_address": verified_address,
         "candidate_unique": winner is not None,
         "coverage_start_ms": discovery.coverage_start_ms,
+        "coverage_end_ms": discovery.coverage_end_ms,
         "discovery_anchor_ids": [signal.signal_id for signal in discovery.anchors],
         "best_discovery_candidate": discovery_best.to_dict() if discovery_best else None,
         "historical_candidate_verifications": [
@@ -381,6 +405,8 @@ async def resolve_source_public_trades(
             "auto_trading_promotion": False,
             "held_out_verification_required": True,
             "discovery_only_candidate_can_verify": False,
+            "all_threshold_finalists_verified": True,
+            "coverage_fail_closed": True,
         },
     }
     report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
