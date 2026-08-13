@@ -50,6 +50,7 @@ class GenericTradeImportResult:
     signals: tuple[CopySignal, ...]
     rejected_rows: tuple[dict[str, Any], ...]
     column_map: dict[str, str]
+    duplicate_rows: tuple[dict[str, Any], ...] = ()
 
 
 def _lookup_header(headers: list[str], aliases: tuple[str, ...]) -> str | None:
@@ -128,6 +129,18 @@ def _bool(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "y"}
 
 
+def _episode_fingerprint(signal: CopySignal) -> tuple[object, ...]:
+    """Identity evidence must represent distinct position episodes, not CSV rows."""
+    return (
+        signal.coin.upper(),
+        signal.direction,
+        signal.opened_at_ms,
+        signal.closed_at_ms,
+        signal.entry_price,
+        signal.exit_price,
+    )
+
+
 def normalize_generic_row(
     row: dict[str, str],
     *,
@@ -195,11 +208,24 @@ def load_generic_closed_trades(path: Path) -> GenericTradeImportResult:
         mapping = detect_column_map(headers)
         signals: list[CopySignal] = []
         rejected: list[dict[str, Any]] = []
+        duplicates: list[dict[str, Any]] = []
+        first_row_by_episode: dict[tuple[object, ...], int] = {}
         for row_number, row in enumerate(reader, start=2):
             try:
-                signals.append(
-                    normalize_generic_row(row, mapping=mapping, row_number=row_number)
-                )
+                signal = normalize_generic_row(row, mapping=mapping, row_number=row_number)
+                fingerprint = _episode_fingerprint(signal)
+                first_row = first_row_by_episode.get(fingerprint)
+                if first_row is not None:
+                    duplicates.append(
+                        {
+                            "row": row_number,
+                            "duplicate_of_row": first_row,
+                            "signal_id": signal.signal_id,
+                        }
+                    )
+                    continue
+                first_row_by_episode[fingerprint] = row_number
+                signals.append(signal)
             except GenericTradeCsvError as exc:
                 rejected.append({"row": row_number, "error": str(exc)})
 
@@ -208,4 +234,5 @@ def load_generic_closed_trades(path: Path) -> GenericTradeImportResult:
         signals=tuple(signals),
         rejected_rows=tuple(rejected),
         column_map=mapping,
+        duplicate_rows=tuple(duplicates),
     )
