@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+from hlcopy.resolver.public_trade_index import _public_trade_matches
 from hlcopy.resolver.sqd_position_aware import SqdFill, match_episode
 from hlcopy.signals.invo import CopySignal
 
@@ -96,6 +97,31 @@ def test_exit_vwap_spans_separate_close_orders_until_final_flatten() -> None:
     assert evidence.close_price_bps == 0
     assert evidence.reconstructed_entry == D("100")
     assert evidence.reconstructed_size == D("1.0")
+
+
+def test_discovery_keeps_final_flatten_when_export_uses_lifecycle_vwap() -> None:
+    # The first partial reduction happened outside the close discovery window.
+    # The remaining final fill is 740+ bps away from the exported lifecycle VWAP
+    # and only 60% of the exported size, so strict single-cluster matching fails.
+    final_fill = _fill(
+        px="100",
+        sz="0.6",
+        time_ms=2_000_000,
+        direction="Close Long",
+        oid="close-b",
+        start_position="0.6",
+    )
+
+    matches = _public_trade_matches(
+        _signal(),
+        [final_fill],
+        window_ms=5_000,
+        max_price_bps=D("5"),
+        max_size_ratio_error=D("0.05"),
+    )
+
+    assert set(matches) == {USER}
+    assert matches[USER].trade_id.startswith("final-flatten:")
 
 
 def test_partial_reduction_does_not_end_episode_before_later_add_and_flatten() -> None:
