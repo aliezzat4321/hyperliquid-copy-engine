@@ -23,7 +23,6 @@ from hlcopy.resolver.sqd_fills import (
     signal_position_size,
 )
 from hlcopy.resolver.sqd_position_aware import (
-    LifecycleEpisodeEvidence,
     SqdFill,
     SqdHyperliquidFillsClient,
     fill_execution_id,
