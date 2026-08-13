@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from bisect import bisect_right
+from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Iterable
 
 from hlcopy.profitability.margin_tables import MarginMetadataSnapshot, snapshot_table_at
 from hlcopy.profitability.path_risk import EquityCheckpoint, OpenPositionMark
@@ -46,8 +46,14 @@ def _indexes(rows: tuple[AssetContextMark, ...]):
     grouped: dict[str, list[AssetContextMark]] = {}
     for row in rows:
         grouped.setdefault(row.coin, []).append(row)
-    by_coin = {coin: tuple(sorted(items, key=lambda x: x.received_at_ns)) for coin, items in grouped.items()}
-    times = {coin: tuple(x.received_at_ns for x in items) for coin, items in by_coin.items()}
+    by_coin = {
+        coin: tuple(sorted(items, key=lambda x: x.received_at_ns))
+        for coin, items in grouped.items()
+    }
+    times = {
+        coin: tuple(x.received_at_ns for x in items)
+        for coin, items in by_coin.items()
+    }
     return by_coin, times
 
 
@@ -70,10 +76,25 @@ def build_continuous_path(
     max_funding_gap_ns: int = 3_900_000_000_000,
 ) -> ContinuousPath:
     """Strict prospective follower MTM replay; no interpolated marks or margin truth."""
-    states = tuple(sorted(state_events, key=lambda x: (x.execution_received_at_ns, x.source_tid, x.action)))
-    marks = tuple(sorted(asset_contexts, key=lambda x: (x.received_at_ns, x.coin)))
-    funding = tuple(sorted(funding_rates, key=lambda x: (x.payment_ts_ms, x.coin)))
-    snapshots = tuple(sorted(margin_snapshots, key=lambda x: x.fetched_at_ns))
+    states = tuple(
+        sorted(
+            state_events,
+            key=lambda x: (
+                x.execution_received_at_ns,
+                x.source_tid,
+                x.action,
+            ),
+        )
+    )
+    marks = tuple(
+        sorted(asset_contexts, key=lambda x: (x.received_at_ns, x.coin))
+    )
+    funding = tuple(
+        sorted(funding_rates, key=lambda x: (x.payment_ts_ms, x.coin))
+    )
+    snapshots = tuple(
+        sorted(margin_snapshots, key=lambda x: x.fetched_at_ns)
+    )
     blockers: set[str] = set()
     if not states:
         blockers.add("NO_FOLLOWER_STATE_EVENTS")
@@ -82,7 +103,10 @@ def build_continuous_path(
     if not snapshots:
         blockers.add("NO_MARGIN_METADATA_SNAPSHOTS")
     if blockers:
-        return ContinuousPath((), PathCoverage(False, tuple(sorted(blockers)), 0, 0))
+        return ContinuousPath(
+            (),
+            PathCoverage(False, tuple(sorted(blockers)), 0, 0),
+        )
 
     first_ns = states[0].execution_received_at_ns
     last_ns = marks[-1].received_at_ns
@@ -107,7 +131,8 @@ def build_continuous_path(
     open_since: dict[str, int] = {}
     last_funding: dict[str, int] = {}
     latest_mark = {
-        coin: row for coin in by_coin
+        coin: row
+        for coin in by_coin
         if (row := _ctx(coin, first_ns, by_coin, mark_times)) is not None
     }
     realized = ZERO
@@ -146,7 +171,9 @@ def build_continuous_path(
         if not tick:
             continue
 
-        open_coins = sorted(coin for coin, position in qty.items() if position != ZERO)
+        open_coins = sorted(
+            coin for coin, position in qty.items() if position != ZERO
+        )
         if not open_coins:
             continue
         positions: list[OpenPositionMark] = []
@@ -161,7 +188,12 @@ def build_continuous_path(
                 blockers.add(f"MARK_GAP:{coin}")
                 continue
             table = snapshot_table_at(snapshots, coin, now_ns)
-            snap_times = [s.fetched_at_ns for s in snapshots if s.fetched_at_ns <= now_ns and coin in s.by_coin()]
+            snap_times = [
+                snapshot.fetched_at_ns
+                for snapshot in snapshots
+                if snapshot.fetched_at_ns <= now_ns
+                and coin in snapshot.by_coin()
+            ]
             if table is None or not snap_times:
                 blockers.add(f"MISSING_MARGIN_TABLE:{coin}")
                 continue
@@ -173,30 +205,44 @@ def build_continuous_path(
                 blockers.add(f"MISSING_ENTRY:{coin}")
                 continue
             tier = table.tier_for_notional(abs(qty[coin] * mark.mark_price))
-            positions.append(OpenPositionMark(
-                coin=coin,
-                qty=qty[coin],
-                avg_entry=avg,
-                mark_price=mark.mark_price,
-                maintenance_margin_rate=tier.maintenance_margin_rate,
-                maintenance_margin_deduction_usd=tier.maintenance_margin_deduction_usd,
-            ))
+            positions.append(
+                OpenPositionMark(
+                    coin=coin,
+                    qty=qty[coin],
+                    avg_entry=avg,
+                    mark_price=mark.mark_price,
+                    maintenance_margin_rate=tier.maintenance_margin_rate,
+                    maintenance_margin_deduction_usd=(
+                        tier.maintenance_margin_deduction_usd
+                    ),
+                )
+            )
             if now_ns - last_funding.get(coin, opened) > max_funding_gap_ns:
                 blockers.add(f"FUNDING_GAP:{coin}")
 
         if len(positions) != len(open_coins):
             continue
-        adjusted_realized = realized - sum((fee_remaining.get(coin, ZERO) for coin in open_coins), ZERO)
-        checkpoints.append(EquityCheckpoint(
-            exchange_ts_ms=now_ns // 1_000_000,
-            realized_net_pnl_usd=adjusted_realized,
-            funding_pnl_usd=funding_pnl,
-            positions=tuple(positions),
-        ))
+        adjusted_realized = realized - sum(
+            (fee_remaining.get(coin, ZERO) for coin in open_coins),
+            ZERO,
+        )
+        checkpoints.append(
+            EquityCheckpoint(
+                exchange_ts_ms=now_ns // 1_000_000,
+                realized_net_pnl_usd=adjusted_realized,
+                funding_pnl_usd=funding_pnl,
+                positions=tuple(positions),
+            )
+        )
 
     if states[-1].execution_received_at_ns > last_ns:
         blockers.add("FOLLOWER_STATE_AFTER_LAST_MARK")
     return ContinuousPath(
         tuple(checkpoints),
-        PathCoverage(bool(checkpoints) and not blockers, tuple(sorted(blockers)), len(checkpoints), applied),
+        PathCoverage(
+            bool(checkpoints) and not blockers,
+            tuple(sorted(blockers)),
+            len(checkpoints),
+            applied,
+        ),
     )
