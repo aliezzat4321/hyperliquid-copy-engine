@@ -7,6 +7,7 @@ from pathlib import Path
 
 import polars as pl
 
+from hlcopy.market.symbols import canonical_coin
 from hlcopy.profitability.continuous_path_v2 import AssetContextMark, FundingRate
 from hlcopy.profitability.margin_tables import (
     MarginMetadataSnapshot,
@@ -33,7 +34,7 @@ def load_asset_context_marks(
     end_ns: int | None = None,
 ) -> tuple[AssetContextMark, ...]:
     """Load captured activeAssetCtx rows without substituting L2 mids."""
-    wanted = {str(coin) for coin in coins} if coins is not None else None
+    wanted = {canonical_coin(coin) for coin in coins} if coins is not None else None
     rows: list[AssetContextMark] = []
     for path in sorted(
         market_dir.glob("date=*/coin=*/channel=activeAssetCtx/*.parquet")
@@ -43,7 +44,7 @@ def load_asset_context_marks(
             columns=["coin", "received_at_ns", "mark_px", "oracle_px"],
         )
         for row in frame.iter_rows(named=True):
-            coin = str(row.get("coin") or "")
+            coin = canonical_coin(row.get("coin") or "")
             if wanted is not None and coin not in wanted:
                 continue
             try:
@@ -78,7 +79,7 @@ def load_funding_history_jsonl(
     end_ms: int | None = None,
 ) -> tuple[FundingRate, ...]:
     """Load normalized or raw official fundingHistory rows from an append-only JSONL."""
-    wanted = {str(coin) for coin in coins} if coins is not None else None
+    wanted = {canonical_coin(coin) for coin in coins} if coins is not None else None
     out: list[FundingRate] = []
     seen: set[tuple[str, int, str]] = set()
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -96,7 +97,7 @@ def load_funding_history_jsonl(
         for raw in candidates:
             if not isinstance(raw, dict):
                 continue
-            coin = str(raw.get("coin") or "")
+            coin = canonical_coin(raw.get("coin") or "")
             if wanted is not None and coin not in wanted:
                 continue
             try:
