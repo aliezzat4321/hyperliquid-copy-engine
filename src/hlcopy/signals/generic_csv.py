@@ -13,6 +13,11 @@ from hlcopy.signals.invo import CopySignal
 D = Decimal
 ZERO = D("0")
 HUNDRED = D("100")
+BPS = D("10000")
+DEFAULT_NEAR_DUPLICATE_ENTRY_TIME_MS = 300_000
+DEFAULT_NEAR_DUPLICATE_CLOSE_TIME_MS = 30_000
+DEFAULT_NEAR_DUPLICATE_ENTRY_PRICE_BPS = D("15")
+DEFAULT_NEAR_DUPLICATE_EXIT_PRICE_BPS = D("35")
 
 
 FIELD_ALIASES: dict[str, tuple[str, ...]] = {
@@ -148,10 +153,46 @@ def _representative_key(row: tuple[int, CopySignal]) -> tuple[int, int, int, str
     return (-duration, signal.opened_at_ms, row_number, signal.signal_id)
 
 
+def _price_bps(left: Decimal, right: Decimal) -> Decimal:
+    if left <= ZERO or right <= ZERO:
+        return D("Infinity")
+    return abs(right / left - D("1")) * BPS
+
+
+def _intervals_overlap(left: CopySignal, right: CopySignal) -> bool:
+    return max(left.opened_at_ms, right.opened_at_ms) < min(
+        left.closed_at_ms,
+        right.closed_at_ms,
+    )
+
+
+def _near_equivalent_source_episode(
+    left: CopySignal,
+    right: CopySignal,
+    *,
+    entry_time_tolerance_ms: int,
+    close_time_tolerance_ms: int,
+    entry_price_tolerance_bps: Decimal,
+    exit_price_tolerance_bps: Decimal,
+) -> bool:
+    return (
+        left.direction == right.direction
+        and abs(left.opened_at_ms - right.opened_at_ms) <= entry_time_tolerance_ms
+        and abs(left.closed_at_ms - right.closed_at_ms) <= close_time_tolerance_ms
+        and _price_bps(left.entry_price, right.entry_price) <= entry_price_tolerance_bps
+        and _price_bps(left.exit_price, right.exit_price) <= exit_price_tolerance_bps
+    )
+
+
 def _collapse_overlapping_source_evidence(
     rows: list[tuple[int, CopySignal]],
+    *,
+    entry_time_tolerance_ms: int,
+    close_time_tolerance_ms: int,
+    entry_price_tolerance_bps: Decimal,
+    exit_price_tolerance_bps: Decimal,
 ) -> tuple[list[CopySignal], list[dict[str, Any]]]:
-    """One Hyperliquid coin has one net position, so overlapping source rows are one unit."""
+    """Collapse evidence that cannot safely be treated as independent positions."""
     by_coin: dict[str, list[tuple[int, CopySignal]]] = {}
     for row in rows:
         by_coin.setdefault(row[1].coin.upper(), []).append(row)
@@ -159,24 +200,43 @@ def _collapse_overlapping_source_evidence(
     representatives: list[CopySignal] = []
     collapsed: list[dict[str, Any]] = []
     for coin_rows in by_coin.values():
-        ordered = sorted(
-            coin_rows,
-            key=lambda row: (
-                row[1].opened_at_ms,
-                row[1].closed_at_ms,
-                row[0],
-            ),
-        )
-        cluster: list[tuple[int, CopySignal]] = []
-        cluster_end = -1
+        count = len(coin_rows)
+        parent = list(range(count))
 
-        def flush() -> None:
-            nonlocal cluster, cluster_end
-            if not cluster:
-                return
-            representative_row, representative = min(cluster, key=_representative_key)
+        def find(index: int) -> int:
+            while parent[index] != index:
+                parent[index] = parent[parent[index]]
+                index = parent[index]
+            return index
+
+        def union(left_index: int, right_index: int) -> None:
+            left_root = find(left_index)
+            right_root = find(right_index)
+            if left_root != right_root:
+                parent[right_root] = left_root
+
+        for left_index in range(count):
+            left = coin_rows[left_index][1]
+            for right_index in range(left_index + 1, count):
+                right = coin_rows[right_index][1]
+                if _intervals_overlap(left, right) or _near_equivalent_source_episode(
+                    left,
+                    right,
+                    entry_time_tolerance_ms=entry_time_tolerance_ms,
+                    close_time_tolerance_ms=close_time_tolerance_ms,
+                    entry_price_tolerance_bps=entry_price_tolerance_bps,
+                    exit_price_tolerance_bps=exit_price_tolerance_bps,
+                ):
+                    union(left_index, right_index)
+
+        components: dict[int, list[tuple[int, CopySignal]]] = {}
+        for index, row in enumerate(coin_rows):
+            components.setdefault(find(index), []).append(row)
+
+        for component in components.values():
+            representative_row, representative = min(component, key=_representative_key)
             representatives.append(representative)
-            for row_number, signal in cluster:
+            for row_number, signal in component:
                 if row_number == representative_row:
                     continue
                 collapsed.append(
@@ -186,19 +246,9 @@ def _collapse_overlapping_source_evidence(
                         "representative_row": representative_row,
                         "representative_signal_id": representative.signal_id,
                         "coin": signal.coin,
-                        "reason": "overlapping_source_position_evidence",
+                        "reason": "overlapping_or_near_equivalent_source_position_evidence",
                     }
                 )
-            cluster = []
-            cluster_end = -1
-
-        for row in ordered:
-            signal = row[1]
-            if cluster and signal.opened_at_ms >= cluster_end:
-                flush()
-            cluster.append(row)
-            cluster_end = max(cluster_end, signal.closed_at_ms)
-        flush()
 
     representatives.sort(key=lambda item: (item.opened_at_ms, item.signal_id))
     collapsed.sort(key=lambda item: int(item["row"]))
@@ -263,7 +313,14 @@ def normalize_generic_row(
     )
 
 
-def _load_generic_closed_trades_text(text: str) -> GenericTradeImportResult:
+def _load_generic_closed_trades_text(
+    text: str,
+    *,
+    near_duplicate_entry_time_ms: int,
+    near_duplicate_close_time_ms: int,
+    near_duplicate_entry_price_bps: Decimal,
+    near_duplicate_exit_price_bps: Decimal,
+) -> GenericTradeImportResult:
     reader = csv.DictReader(io.StringIO(text))
     headers = list(reader.fieldnames or [])
     if not headers:
@@ -293,7 +350,13 @@ def _load_generic_closed_trades_text(text: str) -> GenericTradeImportResult:
         except GenericTradeCsvError as exc:
             rejected.append({"row": row_number, "error": str(exc)})
 
-    signals, overlapping = _collapse_overlapping_source_evidence(parsed)
+    signals, overlapping = _collapse_overlapping_source_evidence(
+        parsed,
+        entry_time_tolerance_ms=max(0, near_duplicate_entry_time_ms),
+        close_time_tolerance_ms=max(0, near_duplicate_close_time_ms),
+        entry_price_tolerance_bps=max(ZERO, near_duplicate_entry_price_bps),
+        exit_price_tolerance_bps=max(ZERO, near_duplicate_exit_price_bps),
+    )
     return GenericTradeImportResult(
         signals=tuple(signals),
         rejected_rows=tuple(rejected),
@@ -303,13 +366,39 @@ def _load_generic_closed_trades_text(text: str) -> GenericTradeImportResult:
     )
 
 
-def load_generic_closed_trades_bytes(data: bytes) -> GenericTradeImportResult:
+def load_generic_closed_trades_bytes(
+    data: bytes,
+    *,
+    near_duplicate_entry_time_ms: int = DEFAULT_NEAR_DUPLICATE_ENTRY_TIME_MS,
+    near_duplicate_close_time_ms: int = DEFAULT_NEAR_DUPLICATE_CLOSE_TIME_MS,
+    near_duplicate_entry_price_bps: Decimal = DEFAULT_NEAR_DUPLICATE_ENTRY_PRICE_BPS,
+    near_duplicate_exit_price_bps: Decimal = DEFAULT_NEAR_DUPLICATE_EXIT_PRICE_BPS,
+) -> GenericTradeImportResult:
     try:
         text = data.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
         raise GenericTradeCsvError("CSV is not valid UTF-8") from exc
-    return _load_generic_closed_trades_text(text)
+    return _load_generic_closed_trades_text(
+        text,
+        near_duplicate_entry_time_ms=near_duplicate_entry_time_ms,
+        near_duplicate_close_time_ms=near_duplicate_close_time_ms,
+        near_duplicate_entry_price_bps=near_duplicate_entry_price_bps,
+        near_duplicate_exit_price_bps=near_duplicate_exit_price_bps,
+    )
 
 
-def load_generic_closed_trades(path: Path) -> GenericTradeImportResult:
-    return load_generic_closed_trades_bytes(path.read_bytes())
+def load_generic_closed_trades(
+    path: Path,
+    *,
+    near_duplicate_entry_time_ms: int = DEFAULT_NEAR_DUPLICATE_ENTRY_TIME_MS,
+    near_duplicate_close_time_ms: int = DEFAULT_NEAR_DUPLICATE_CLOSE_TIME_MS,
+    near_duplicate_entry_price_bps: Decimal = DEFAULT_NEAR_DUPLICATE_ENTRY_PRICE_BPS,
+    near_duplicate_exit_price_bps: Decimal = DEFAULT_NEAR_DUPLICATE_EXIT_PRICE_BPS,
+) -> GenericTradeImportResult:
+    return load_generic_closed_trades_bytes(
+        path.read_bytes(),
+        near_duplicate_entry_time_ms=near_duplicate_entry_time_ms,
+        near_duplicate_close_time_ms=near_duplicate_close_time_ms,
+        near_duplicate_entry_price_bps=near_duplicate_entry_price_bps,
+        near_duplicate_exit_price_bps=near_duplicate_exit_price_bps,
+    )
