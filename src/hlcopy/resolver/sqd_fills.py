@@ -214,7 +214,7 @@ def match_episode(
     max_size_ratio_error: Decimal,
     entry_price_tolerance_bps: Decimal,
 ) -> EpisodeEvidence:
-    target_size = signal_position_size(signal)
+    source_size = signal_position_size(signal)
     closes = aggregate_close_fills(fills, direction=signal.direction)
     close_options: list[tuple[Decimal, AggregatedClose, Decimal | None]] = []
     for close in closes:
@@ -226,8 +226,8 @@ def match_episode(
         if time_error > close_time_tolerance_ms or price_bps > close_price_tolerance_bps:
             continue
         size_error = None
-        if target_size is not None:
-            size_error = abs(close.size / target_size - D("1"))
+        if source_size is not None:
+            size_error = abs(close.size / source_size - D("1"))
             if size_error > max_size_ratio_error:
                 continue
         cost = D(time_error) / D("1000") + price_bps
@@ -255,18 +255,10 @@ def match_episode(
     )
     close_price_bps = _price_bps(signal.exit_price, close.avg_price)
 
-    if target_size is None:
-        return EpisodeEvidence(
-            signal_id=signal.signal_id,
-            matched=True,
-            close_time_error_ms=close_time_error,
-            close_price_bps=close_price_bps,
-            close_size_ratio_error=None,
-            entry_price_bps=None,
-            entry_size_ratio_error=None,
-            reconstructed_entry=None,
-            reconstructed_size=None,
-        )
+    # A generic export may omit quantity. In that case the executed close itself
+    # supplies the only defensible size target; entry reconstruction is still
+    # mandatory. Never promote a close-only coincidence to a matched episode.
+    target_size = source_size if source_size is not None else close.size
 
     open_names = (
         {"open long", "long > long"}
@@ -279,11 +271,9 @@ def match_episode(
         if fill.time_ms < close.first_time_ms and fill.direction.lower() in open_names
     ]
     candidates.sort(key=lambda item: item.time_ms, reverse=True)
-    selected: list[SqdFill] = []
     total = D("0")
     notional = D("0")
     for fill in candidates:
-        selected.append(fill)
         total += fill.sz
         notional += fill.sz * fill.px
         if total >= target_size * D("0.90"):
@@ -432,6 +422,10 @@ class SqdHyperliquidFillsClient:
         bounds = await self._coverage_bounds()
         return bounds[0][1]
 
+    async def coverage_end_ms(self) -> int:
+        bounds = await self._coverage_bounds()
+        return bounds[1][1]
+
     async def locate_block(self, timestamp_ms: int) -> int:
         (low_n, low_t), (high_n, high_t) = await self._coverage_bounds()
         if timestamp_ms < low_t or timestamp_ms > high_t:
@@ -525,8 +519,10 @@ class SqdHyperliquidFillsClient:
         window_ms: int,
         user: str | None = None,
     ) -> list[SqdFill]:
-        center = await self.locate_block(timestamp_ms)
         (low_n, low_t), (high_n, high_t) = await self._coverage_bounds()
+        if timestamp_ms < low_t or timestamp_ms > high_t:
+            return []
+        center = await self.locate_block(timestamp_ms)
         ms_per_block = (high_t - low_t) / max(1, high_n - low_n)
         ms_per_block = max(50.0, min(1_000.0, ms_per_block))
         block_padding = max(20, math.ceil(window_ms / ms_per_block) + 40)
@@ -553,10 +549,16 @@ class SqdHyperliquidFillsClient:
     ) -> list[SqdFill]:
         if end_ms < start_ms:
             raise ValueError("end_ms cannot precede start_ms")
-        low_block = await self.locate_block(start_ms)
-        high_block = await self.locate_block(end_ms)
+        (coverage_low, coverage_low_ts), (coverage_high, coverage_high_ts) = (
+            await self._coverage_bounds()
+        )
+        bounded_start = max(start_ms, coverage_low_ts)
+        bounded_end = min(end_ms, coverage_high_ts)
+        if bounded_end < bounded_start:
+            return []
+        low_block = await self.locate_block(bounded_start)
+        high_block = await self.locate_block(bounded_end)
         padding = 50
-        (coverage_low, _), (coverage_high, _) = await self._coverage_bounds()
         rows = await self._stream_range(
             from_block=max(coverage_low, low_block - padding),
             to_block=min(coverage_high, high_block + padding),
@@ -569,5 +571,5 @@ class SqdHyperliquidFillsClient:
             for fill in rows
             if fill.user == user.lower()
             and fill.coin == canonical
-            and start_ms <= fill.time_ms <= end_ms
+            and bounded_start <= fill.time_ms <= bounded_end
         ]
