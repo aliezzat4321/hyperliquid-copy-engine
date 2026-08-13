@@ -9,6 +9,7 @@ from hlcopy.resolver.public_trade_index import (
     candidate_is_unique,
     discover_candidates,
     select_historical_winner,
+    verify_candidate_historically,
     verify_candidate_shortlist,
 )
 from hlcopy.resolver.reverse_index import CandidateFingerprint
@@ -194,9 +195,11 @@ def test_full_position_episode_reconstructs_from_partial_fills() -> None:
         close_time_tolerance_ms=5_000,
         close_price_tolerance_bps=D("5"),
         max_size_ratio_error=D("0.10"),
+        entry_time_tolerance_ms=5_000,
         entry_price_tolerance_bps=D("5"),
     )
     assert evidence.matched
+    assert evidence.entry_time_error_ms == 0
     assert evidence.reconstructed_size == D("1.0")
     assert evidence.reconstructed_entry == D("100")
 
@@ -214,6 +217,7 @@ def test_no_source_size_still_requires_entry_reconstruction() -> None:
         close_time_tolerance_ms=5_000,
         close_price_tolerance_bps=D("5"),
         max_size_ratio_error=D("0.10"),
+        entry_time_tolerance_ms=5_000,
         entry_price_tolerance_bps=D("5"),
     )
     assert evidence.matched
@@ -226,10 +230,29 @@ def test_no_source_size_still_requires_entry_reconstruction() -> None:
         close_time_tolerance_ms=5_000,
         close_price_tolerance_bps=D("5"),
         max_size_ratio_error=D("0.10"),
+        entry_time_tolerance_ms=5_000,
         entry_price_tolerance_bps=D("5"),
     )
     assert not wrong_entry.matched
     assert wrong_entry.entry_price_bps is not None
+
+
+def test_episode_rejects_right_price_at_wrong_entry_time() -> None:
+    fills = [
+        _fill(px="100", sz="1", time_ms=600_000, direction="Open Long", oid="1"),
+        _fill(px="110", sz="1", time_ms=2_000_000, direction="Close Long", oid="7"),
+    ]
+    evidence = match_episode(
+        _signal(opened_at_ms=1_000_000),
+        fills,
+        close_time_tolerance_ms=5_000,
+        close_price_tolerance_bps=D("5"),
+        max_size_ratio_error=D("0.10"),
+        entry_time_tolerance_ms=30_000,
+        entry_price_tolerance_bps=D("5"),
+    )
+    assert not evidence.matched
+    assert evidence.entry_time_error_ms is None
 
 
 def test_candidate_must_beat_runner_up_on_matches_and_score() -> None:
@@ -338,3 +361,23 @@ def test_discovery_excludes_evidence_beyond_finalized_head() -> None:
     assert result.coverage_end_ms == 2_500_000
     assert {signal.signal_id for signal in result.anchors} == {"a", "b", "c"}
     assert all(timestamp <= result.coverage_end_ms for timestamp in client.around_calls)
+
+
+def test_historical_verification_excludes_entry_before_coverage() -> None:
+    client = _FakeSqdClient(start_ms=900_000, end_ms=2_500_000)
+    signals = (
+        _signal(signal_id="uncovered", opened_at_ms=800_000, closed_at_ms=1_500_000),
+        _signal(signal_id="covered", opened_at_ms=1_000_000, closed_at_ms=1_800_000),
+    )
+    result = asyncio.run(
+        verify_candidate_historically(
+            address=USER,
+            signals=signals,
+            excluded_signal_ids=set(),
+            coverage_start_ms=client.start_ms,
+            client=client,
+            config=PublicTradeDiscoveryConfig(historical_verify_trades=10),
+        )
+    )
+    assert result.attempted == 1
+    assert result.evidence[0].signal_id == "covered"
