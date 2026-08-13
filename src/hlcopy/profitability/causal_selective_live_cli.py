@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
+import sys
+from dataclasses import asdict
 from decimal import Decimal
 from pathlib import Path
 
@@ -42,10 +45,6 @@ def _event_direction(event) -> str:
 
 
 def _allowed(store: EffectivePolicyStore, event) -> bool:
-    # The v1 research publisher emits wallet+coin lifecycle rules. Pass notional=0
-    # intentionally so the selective scorer evaluates capacity across every configured
-    # notional; max_notional_usd remains a research hint until prospective capacity is
-    # measured by this exact execution path.
     decision = store.decide(
         decision_time_ns=event.received_at_ns,
         wallet_address=event.wallet_address,
@@ -55,6 +54,18 @@ def _allowed(store: EffectivePolicyStore, event) -> bool:
         notional_usd=D("0"),
     )
     return decision.state in {"SHADOW_ONLY", "COPY"}
+
+
+def _output_dir(argv: list[str]) -> Path:
+    try:
+        index = argv.index("--output-dir")
+        return Path(argv[index + 1])
+    except (ValueError, IndexError) as exc:
+        raise SystemExit("selective shadow requires --output-dir") from exc
+
+
+def _jsonable(row: dict[str, object]) -> dict[str, object]:
+    return {key: str(value) if isinstance(value, Decimal) else value for key, value in row.items()}
 
 
 def main() -> None:
@@ -72,6 +83,8 @@ def main() -> None:
 
     original_direct = position_live_cli.load_direct_events
     original_wide = position_live_cli.load_wide_events
+    original_simulate = position_live_cli.simulate_copy_with_portfolio_capital
+    state_rows: list[dict[str, object]] = []
 
     def selective_direct(shadow_dir: Path, wallet_id: str):
         return tuple(event for event in original_direct(shadow_dir, wallet_id) if _allowed(store, event))
@@ -79,8 +92,25 @@ def main() -> None:
     def selective_wide(enriched_dir: Path, *, cutoff_ns: int):
         return tuple(event for event in original_wide(enriched_dir, cutoff_ns=cutoff_ns) if _allowed(store, event))
 
+    def capture_simulation(*args, **kwargs):
+        sim = original_simulate(*args, **kwargs)
+        for event in sim.state_events:
+            row = asdict(event)
+            row.update(
+                {
+                    "lane": sim.lane,
+                    "wallet_id": sim.wallet_id,
+                    "wallet_address": sim.wallet_address,
+                    "scenario": sim.scenario,
+                    "notional_usd": sim.notional_usd,
+                }
+            )
+            state_rows.append(_jsonable(row))
+        return sim
+
     position_live_cli.load_direct_events = selective_direct
     position_live_cli.load_wide_events = selective_wide
+    position_live_cli.simulate_copy_with_portfolio_capital = capture_simulation
     position_live_cli.ParquetL2BookProvider = _shared_causal_provider
     print(
         f"selective_shadow policy_count={len(store.policies)} "
@@ -88,6 +118,21 @@ def main() -> None:
         flush=True,
     )
     position_live_cli.main()
+
+    output_dir = _output_dir(sys.argv)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    state_path = output_dir / "selective_state_events.json"
+    payload = {
+        "real_trading": False,
+        "policy_store": str(policy_path),
+        "latest_policy_id": store.policies[-1].policy_id,
+        "fee_accounting_mode": "ALLOCATED_ENTRY_PLUS_EXIT_FEES_V1",
+        "state_events": state_rows,
+    }
+    tmp = state_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(state_path)
+    print(f"selective_state_events rows={len(state_rows)} output={state_path}", flush=True)
 
 
 if __name__ == "__main__":
