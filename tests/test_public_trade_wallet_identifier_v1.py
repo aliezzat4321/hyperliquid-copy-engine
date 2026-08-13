@@ -1,6 +1,12 @@
 from decimal import Decimal
 
-from hlcopy.resolver.public_trade_index import _public_trade_matches, candidate_is_unique
+from hlcopy.resolver.public_trade_index import (
+    HistoricalCandidateVerification,
+    HistoricalVerification,
+    _public_trade_matches,
+    candidate_is_unique,
+    select_historical_winner,
+)
 from hlcopy.resolver.reverse_index import CandidateFingerprint
 from hlcopy.resolver.sqd_fills import SqdFill, aggregate_close_fills, match_episode
 from hlcopy.signals.invo import CopySignal
@@ -70,6 +76,29 @@ def _candidate(address: str, matches: int, score: str) -> CandidateFingerprint:
     )
 
 
+def _historical(
+    address: str,
+    *,
+    discovery_matches: int,
+    discovery_score: str,
+    matched: int,
+    attempted: int = 12,
+) -> HistoricalCandidateVerification:
+    verification = HistoricalVerification(
+        attempted=attempted,
+        matched=matched,
+        ratio=D(matched) / D(attempted),
+        matched_signal_ids=tuple(f"s{i}" for i in range(matched)),
+        evidence=(),
+    )
+    return HistoricalCandidateVerification(
+        address=address,
+        discovery_matches=discovery_matches,
+        discovery_score=D(discovery_score),
+        verification=verification,
+    )
+
+
 def test_partial_close_fills_are_aggregated_before_price_matching() -> None:
     fills = [
         _fill(px="109", sz="0.5", time_ms=1_999_900, direction="Close Long", oid="7"),
@@ -129,3 +158,46 @@ def test_candidate_must_beat_runner_up_on_matches_and_score() -> None:
     assert not candidate_is_unique((best, tied), min_score_gap=D("15"))
     assert not candidate_is_unique((best, close), min_score_gap=D("15"))
     assert candidate_is_unique((best, clear), min_score_gap=D("15"))
+
+
+def test_held_out_episodes_can_overrule_close_only_discovery_leader() -> None:
+    close_only_leader = _historical(
+        USER,
+        discovery_matches=5,
+        discovery_score="90",
+        matched=0,
+    )
+    episode_winner = _historical(
+        OTHER,
+        discovery_matches=4,
+        discovery_score="70",
+        matched=4,
+    )
+    runner_up = _historical(
+        "0x3333333333333333333333333333333333333333",
+        discovery_matches=4,
+        discovery_score="65",
+        matched=1,
+    )
+    winner = select_historical_winner(
+        (episode_winner, close_only_leader, runner_up),
+        min_matches=3,
+        min_ratio=D("0.20"),
+        min_match_gap=2,
+    )
+    assert winner is not None
+    assert winner.address == OTHER
+
+
+def test_historical_winner_must_be_unique() -> None:
+    first = _historical(USER, discovery_matches=5, discovery_score="90", matched=4)
+    second = _historical(OTHER, discovery_matches=4, discovery_score="80", matched=3)
+    assert (
+        select_historical_winner(
+            (first, second),
+            min_matches=3,
+            min_ratio=D("0.20"),
+            min_match_gap=2,
+        )
+        is None
+    )
