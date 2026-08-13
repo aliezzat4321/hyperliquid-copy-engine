@@ -118,7 +118,12 @@ def _source_signals(source: ExternalSourceSpec) -> tuple[CopySignal, ...]:
     return signals
 
 
-def _episode_is_covered(signal: CopySignal, *, coverage_start_ms: int, coverage_end_ms: int) -> bool:
+def _episode_is_covered(
+    signal: CopySignal,
+    *,
+    coverage_start_ms: int,
+    coverage_end_ms: int,
+) -> bool:
     return (
         coverage_start_ms <= signal.opened_at_ms
         and signal.closed_at_ms <= coverage_end_ms
@@ -179,8 +184,6 @@ async def discover_candidates(
 ) -> PublicTradeDiscoveryResult:
     coverage_start_ms = await client.coverage_start_ms()
     coverage_end_ms = await client.coverage_end_ms()
-    # Discovery is close-only by design, so only close coverage is required here.
-    # Full entry+close coverage is enforced separately for held-out verification.
     eligible = tuple(
         signal
         for signal in signals
