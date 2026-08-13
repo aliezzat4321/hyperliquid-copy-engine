@@ -119,19 +119,30 @@ async def identify_wallet_from_csv(
         historical_attempted=historical_attempted,
         candidate_unique=candidate_unique,
     )
+    uncovered_signal_ids = [
+        signal.signal_id
+        for signal in signals
+        if not (
+            discovery.coverage_start_ms
+            <= signal.closed_at_ms
+            <= discovery.coverage_end_ms
+        )
+    ]
 
     report_path: Path | None = None
     if output_dir is not None:
         output_dir.mkdir(parents=True, exist_ok=True)
         report_path = output_dir / f"wallet_identification_{evidence_path.stem}.json"
         payload = {
-            "version": 3,
-            "resolver_rule_version": "generic-sqd-fill-wallet-identity-v3",
+            "version": 4,
+            "resolver_rule_version": "generic-sqd-fill-wallet-identity-v4",
             "input_file": str(evidence_path),
             "detected_columns": imported.column_map,
             "accepted_trades": len(signals),
             "rejected_rows": list(imported.rejected_rows),
             "coverage_start_ms": discovery.coverage_start_ms,
+            "coverage_end_ms": discovery.coverage_end_ms,
+            "uncovered_signal_ids": uncovered_signal_ids,
             "discovery_anchor_ids": [signal.signal_id for signal in discovery.anchors],
             "status": status,
             "wallet": wallet,
@@ -155,6 +166,8 @@ async def identify_wallet_from_csv(
                 "unverified_candidate_exposed_as_wallet": False,
                 "held_out_verification_required": True,
                 "discovery_only_candidate_can_verify": False,
+                "all_threshold_finalists_verified": True,
+                "coverage_fail_closed": True,
             },
         }
         report_path.write_text(
