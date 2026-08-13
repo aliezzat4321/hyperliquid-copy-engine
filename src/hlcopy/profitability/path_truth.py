@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Iterable
 
 from hlcopy.profitability.champion_truth import ChampionTruth, evaluate_champion_truth
 from hlcopy.profitability.continuous_path_v2 import (
@@ -16,6 +16,7 @@ from hlcopy.profitability.portfolio_position_copy import FollowerStateEvent
 from hlcopy.profitability.safe_leverage import SafeLeverageSummary, evaluate_safe_leverage
 
 D = Decimal
+ZERO = D("0")
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,7 +46,7 @@ def evaluate_candidate_path_truth(
     margin_snapshots: Iterable[MarginMetadataSnapshot],
     leverages: Iterable[Decimal],
     round_trip_fee_accounting: bool,
-    minimum_liquidation_buffer_usd: Decimal = D("0"),
+    minimum_liquidation_buffer_usd: Decimal = ZERO,
     max_mark_age_ns: int = 15_000_000_000,
     max_margin_snapshot_age_ns: int = 7_200_000_000_000,
     max_funding_gap_ns: int = 3_900_000_000_000,
@@ -63,8 +64,6 @@ def evaluate_candidate_path_truth(
 
     safe: SafeLeverageSummary | None = None
     if path.coverage.complete and path.checkpoints:
-        # Exchange maximum leverage for a tier is exactly 1/(2*MMR). Filter the
-        # research grid by the tightest maximum seen anywhere on the path.
         exchange_max = min(
             D("1") / (D("2") * position.maintenance_margin_rate)
             for checkpoint in path.checkpoints
