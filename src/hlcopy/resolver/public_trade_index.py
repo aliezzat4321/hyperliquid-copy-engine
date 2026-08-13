@@ -42,9 +42,12 @@ class PublicTradeDiscoveryConfig:
     # threshold-reaching finalist to be verified before uniqueness is claimed.
     max_candidates_to_verify: int = 6
     historical_verify_trades: int = 12
+    # Retained for config compatibility; the entry-time gate below now bounds
+    # the pre-entry query instead of an unconstrained multi-hour lookback.
     historical_lookback_hours: int = 6
     historical_time_tolerance_ms: int = 25_000
     historical_price_tolerance_bps: Decimal = D("35")
+    historical_entry_time_tolerance_ms: int = 300_000
     historical_entry_price_tolerance_bps: Decimal = D("15")
     historical_max_size_ratio_error: Decimal = D("0.45")
     min_historical_matches: int = 3
@@ -115,6 +118,13 @@ def _source_signals(source: ExternalSourceSpec) -> tuple[CopySignal, ...]:
     return signals
 
 
+def _episode_is_covered(signal: CopySignal, *, coverage_start_ms: int, coverage_end_ms: int) -> bool:
+    return (
+        coverage_start_ms <= signal.opened_at_ms
+        and signal.closed_at_ms <= coverage_end_ms
+    )
+
+
 def _public_trade_matches(
     signal: CopySignal,
     fills: list[SqdFill],
@@ -169,6 +179,8 @@ async def discover_candidates(
 ) -> PublicTradeDiscoveryResult:
     coverage_start_ms = await client.coverage_start_ms()
     coverage_end_ms = await client.coverage_end_ms()
+    # Discovery is close-only by design, so only close coverage is required here.
+    # Full entry+close coverage is enforced separately for held-out verification.
     eligible = tuple(
         signal
         for signal in signals
@@ -230,15 +242,19 @@ async def verify_candidate_historically(
         signal
         for signal in signals
         if signal.signal_id not in excluded_signal_ids
-        and coverage_start_ms <= signal.closed_at_ms <= coverage_end_ms
+        and _episode_is_covered(
+            signal,
+            coverage_start_ms=coverage_start_ms,
+            coverage_end_ms=coverage_end_ms,
+        )
     ]
     eligible.sort(key=lambda item: (item.closed_at_ms, item.signal_id), reverse=True)
     selected = eligible[: config.historical_verify_trades]
     evidence: list[EpisodeEvidence] = []
     matched_ids: list[str] = []
-    lookback_ms = max(1, config.historical_lookback_hours) * 60 * 60 * 1000
+    entry_tolerance_ms = max(1, config.historical_entry_time_tolerance_ms)
     for signal in selected:
-        start_ms = max(coverage_start_ms, signal.opened_at_ms - lookback_ms)
+        start_ms = max(coverage_start_ms, signal.opened_at_ms - entry_tolerance_ms)
         end_ms = min(
             coverage_end_ms,
             signal.closed_at_ms + config.historical_time_tolerance_ms,
@@ -257,6 +273,7 @@ async def verify_candidate_historically(
             close_time_tolerance_ms=config.historical_time_tolerance_ms,
             close_price_tolerance_bps=config.historical_price_tolerance_bps,
             max_size_ratio_error=config.historical_max_size_ratio_error,
+            entry_time_tolerance_ms=entry_tolerance_ms,
             entry_price_tolerance_bps=config.historical_entry_price_tolerance_bps,
         )
         evidence.append(item)
@@ -283,8 +300,6 @@ async def verify_candidate_shortlist(
     client: SqdHyperliquidFillsClient,
     config: PublicTradeDiscoveryConfig = DEFAULT_PUBLIC_TRADE_CONFIG,
 ) -> tuple[HistoricalCandidateVerification, ...]:
-    # Do not truncate the qualifying set. A uniqueness claim is invalid if a
-    # threshold-reaching seventh (or later) candidate was never held-out tested.
     shortlist = [
         candidate
         for candidate in ranked
@@ -337,10 +352,6 @@ def select_historical_winner(
         or best.verification.ratio < min_ratio
     ):
         return None
-
-    # Uniqueness is measured against the strongest tested runner-up before
-    # threshold filtering. Otherwise a 3-vs-2 result can incorrectly become a
-    # unique winner merely because the runner-up failed min_matches.
     if len(results) > 1:
         runner_up = results[1]
         if best.verification.matched - runner_up.verification.matched < min_match_gap:
@@ -381,17 +392,27 @@ async def resolve_source_public_trades(
     verified_address = winner.address if winner else None
     status = "VERIFIED" if verified_address else "UNRESOLVED"
     discovery_best = discovery.ranked[0] if discovery.ranked else None
+    uncovered_signal_ids = [
+        signal.signal_id
+        for signal in signals
+        if not _episode_is_covered(
+            signal,
+            coverage_start_ms=discovery.coverage_start_ms,
+            coverage_end_ms=discovery.coverage_end_ms,
+        )
+    ]
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / f"public_trade_resolution_{source.id}.json"
     report = {
-        "version": 4,
-        "resolver_rule_version": "sqd-fill-wallet-identity-v4",
+        "version": 5,
+        "resolver_rule_version": "sqd-fill-wallet-identity-v5",
         "source": source.to_dict(),
         "status": status,
         "verified_address": verified_address,
         "candidate_unique": winner is not None,
         "coverage_start_ms": discovery.coverage_start_ms,
         "coverage_end_ms": discovery.coverage_end_ms,
+        "uncovered_signal_ids": uncovered_signal_ids,
         "discovery_anchor_ids": [signal.signal_id for signal in discovery.anchors],
         "best_discovery_candidate": discovery_best.to_dict() if discovery_best else None,
         "historical_candidate_verifications": [
@@ -404,6 +425,7 @@ async def resolve_source_public_trades(
             "auto_validation_promotion": False,
             "auto_trading_promotion": False,
             "held_out_verification_required": True,
+            "entry_time_verification_required": True,
             "discovery_only_candidate_can_verify": False,
             "all_threshold_finalists_verified": True,
             "coverage_fail_closed": True,
