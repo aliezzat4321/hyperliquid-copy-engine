@@ -8,6 +8,7 @@ from pathlib import Path
 from hlcopy.config import Settings
 from hlcopy.pipeline import run as run_pipeline
 from hlcopy.research.publisher import publish_ranked_candidates
+from hlcopy.research.selective_policy_publisher import publish_policy_from_attribution
 from hlcopy.shadow.registry import WalletRegistry
 
 
@@ -18,6 +19,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-candidates", type=int)
     parser.add_argument("--max-publish", type=int, default=25)
     parser.add_argument("--min-composite-score", type=float, default=0.0)
+    parser.add_argument("--attribution", type=Path)
+    parser.add_argument("--policy-store", type=Path)
     parser.add_argument("run", nargs="?")
     return parser
 
@@ -42,6 +45,22 @@ def main() -> None:
         f"observed={result.observed} newly_registered={result.newly_registered} "
         f"existing={result.skipped_existing} fingerprint={result.artifact_fingerprint[:16]} "
         f"artifact={artifact}",
+        flush=True,
+    )
+    if args.attribution is None and args.policy_store is None:
+        return
+    if args.attribution is None or args.policy_store is None:
+        raise SystemExit("--attribution and --policy-store must be supplied together")
+    if not args.attribution.exists():
+        print("policy_publish skipped reason=ATTRIBUTION_MISSING", flush=True)
+        return
+    policy = publish_policy_from_attribution(
+        attribution_path=args.attribution,
+        policy_store_path=args.policy_store,
+    )
+    print(
+        f"policy_publish published={policy.published} policy_id={policy.policy_id} "
+        f"rules={policy.rules} newly_added={policy.newly_added_rules} reason={policy.reason}",
         flush=True,
     )
 

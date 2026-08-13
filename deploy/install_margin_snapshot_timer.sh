@@ -14,7 +14,7 @@ if [[ ! -x "$python_bin" ]]; then
 fi
 
 sed \
-  -e "s|^ExecStart=.*|ExecStart=$python_bin -m hlcopy.profitability.margin_snapshot_cli --output $repo_dir/data/research/margin_metadata.jsonl|" \
+  -e "s|^ExecStart=.*|ExecStart=$python_bin -m hlcopy.profitability.margin_snapshot_cli --all-dexes --output $repo_dir/data/research/margin_metadata.jsonl|" \
   -e "/^Type=oneshot/a WorkingDirectory=$repo_dir\nEnvironmentFile=-$repo_dir/.env" \
   "$service_src" > "$service_dst"
 install -m 0644 "$timer_src" "$timer_dst"

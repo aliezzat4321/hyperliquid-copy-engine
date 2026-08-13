@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from hlcopy.market.symbols import canonical_coin
+
 D = Decimal
 ZERO = D("0")
 TWO = D("2")
@@ -122,6 +124,13 @@ def _extract_meta_objects(payload: object) -> list[dict[str, Any]]:
     return found
 
 
+def _canonical_margin_coin(name: str, dex: str) -> str:
+    normalized_dex = dex.strip()
+    if normalized_dex:
+        return canonical_coin(f"{normalized_dex}:{name}")
+    return canonical_coin(name)
+
+
 def parse_margin_metadata(
     payload: object,
     *,
@@ -154,7 +163,10 @@ def parse_margin_metadata(
         for asset in meta.get("universe") or []:
             if not isinstance(asset, dict):
                 continue
-            coin = str(asset.get("name") or "").strip()
+            raw_coin = str(asset.get("name") or "").strip()
+            if not raw_coin:
+                continue
+            coin = _canonical_margin_coin(raw_coin, dex)
             if not coin or coin in seen:
                 continue
             raw_id = asset.get("marginTableId")
@@ -204,12 +216,13 @@ def snapshot_table_at(
     coin: str,
     at_ns: int,
 ) -> CoinMarginTable | None:
+    wanted = canonical_coin(coin)
     chosen: CoinMarginTable | None = None
     chosen_ts = -1
     for snapshot in snapshots:
         if snapshot.fetched_at_ns > at_ns or snapshot.fetched_at_ns < chosen_ts:
             continue
-        table = snapshot.by_coin().get(coin)
+        table = snapshot.by_coin().get(wanted)
         if table is not None:
             chosen = table
             chosen_ts = snapshot.fetched_at_ns

@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh Hyperliquid effective-policy selective shadow evidence
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=15min
+AccuracySec=30s
+Persistent=true
+Unit=hyperliquid-selective-shadow.service
+
+[Install]
+WantedBy=timers.target
