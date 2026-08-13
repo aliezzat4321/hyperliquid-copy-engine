@@ -38,6 +38,7 @@ class PublicTradeDiscoveryConfig:
     max_size_ratio_error: Decimal = DEFAULT_MAX_SIZE_RATIO_ERROR
     min_discovery_matches: int = 3
     min_runner_up_score_gap: Decimal = D("15")
+    max_candidates_to_verify: int = 6
     historical_verify_trades: int = 12
     historical_lookback_hours: int = 6
     historical_time_tolerance_ms: int = 25_000
@@ -46,6 +47,7 @@ class PublicTradeDiscoveryConfig:
     historical_max_size_ratio_error: Decimal = D("0.45")
     min_historical_matches: int = 3
     min_historical_ratio: Decimal = D("0.20")
+    min_historical_winner_match_gap: int = 2
 
 
 DEFAULT_PUBLIC_TRADE_CONFIG = PublicTradeDiscoveryConfig()
@@ -73,6 +75,22 @@ class HistoricalVerification:
             "ratio": str(self.ratio),
             "matched_signal_ids": list(self.matched_signal_ids),
             "evidence": [item.to_dict() for item in self.evidence],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalCandidateVerification:
+    address: str
+    discovery_matches: int
+    discovery_score: Decimal
+    verification: HistoricalVerification
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "address": self.address,
+            "discovery_matches": self.discovery_matches,
+            "discovery_score": str(self.discovery_score),
+            "verification": self.verification.to_dict(),
         }
 
 
@@ -237,6 +255,76 @@ async def verify_candidate_historically(
     )
 
 
+async def verify_candidate_shortlist(
+    *,
+    ranked: tuple[CandidateFingerprint, ...],
+    signals: tuple[CopySignal, ...],
+    excluded_signal_ids: set[str],
+    coverage_start_ms: int,
+    client: SqdHyperliquidFillsClient,
+    config: PublicTradeDiscoveryConfig = DEFAULT_PUBLIC_TRADE_CONFIG,
+) -> tuple[HistoricalCandidateVerification, ...]:
+    shortlist = [
+        candidate
+        for candidate in ranked
+        if candidate.matched_anchors >= config.min_discovery_matches
+    ][: max(1, config.max_candidates_to_verify)]
+    results: list[HistoricalCandidateVerification] = []
+    for candidate in shortlist:
+        verification = await verify_candidate_historically(
+            address=candidate.address,
+            signals=signals,
+            excluded_signal_ids=excluded_signal_ids,
+            coverage_start_ms=coverage_start_ms,
+            client=client,
+            config=config,
+        )
+        results.append(
+            HistoricalCandidateVerification(
+                address=candidate.address,
+                discovery_matches=candidate.matched_anchors,
+                discovery_score=candidate.score,
+                verification=verification,
+            )
+        )
+    return tuple(
+        sorted(
+            results,
+            key=lambda item: (
+                item.verification.matched,
+                item.verification.ratio,
+                item.discovery_matches,
+                item.discovery_score,
+            ),
+            reverse=True,
+        )
+    )
+
+
+def select_historical_winner(
+    results: tuple[HistoricalCandidateVerification, ...],
+    *,
+    min_matches: int,
+    min_ratio: Decimal,
+    min_match_gap: int,
+) -> HistoricalCandidateVerification | None:
+    qualified = [
+        item
+        for item in results
+        if item.verification.matched >= min_matches
+        and item.verification.ratio >= min_ratio
+    ]
+    if not qualified:
+        return None
+    best = qualified[0]
+    if len(qualified) == 1:
+        return best
+    runner_up = qualified[1]
+    if best.verification.matched - runner_up.verification.matched < min_match_gap:
+        return None
+    return best
+
+
 async def resolve_source_public_trades(
     *,
     source: ExternalSourceSpec,
@@ -252,47 +340,47 @@ async def resolve_source_public_trades(
 
     async with SqdHyperliquidFillsClient() as client:
         discovery = await discover_candidates(signals, client=client, config=config)
-        ranked = discovery.ranked
-        best = ranked[0] if ranked else None
-        unique = candidate_is_unique(ranked, min_score_gap=config.min_runner_up_score_gap)
-        historical: HistoricalVerification | None = None
-        verified_address: str | None = None
-        if best is not None and best.matched_anchors >= config.min_discovery_matches and unique:
-            historical = await verify_candidate_historically(
-                address=best.address,
-                signals=signals,
-                excluded_signal_ids={signal.signal_id for signal in discovery.anchors},
-                coverage_start_ms=discovery.coverage_start_ms,
-                client=client,
-                config=config,
-            )
-            if (
-                historical.matched >= config.min_historical_matches
-                and historical.ratio >= config.min_historical_ratio
-            ):
-                verified_address = best.address
+        historical_results = await verify_candidate_shortlist(
+            ranked=discovery.ranked,
+            signals=signals,
+            excluded_signal_ids={signal.signal_id for signal in discovery.anchors},
+            coverage_start_ms=discovery.coverage_start_ms,
+            client=client,
+            config=config,
+        )
+        winner = select_historical_winner(
+            historical_results,
+            min_matches=config.min_historical_matches,
+            min_ratio=config.min_historical_ratio,
+            min_match_gap=config.min_historical_winner_match_gap,
+        )
 
+    verified_address = winner.address if winner else None
     status = "VERIFIED" if verified_address else "UNRESOLVED"
+    discovery_best = discovery.ranked[0] if discovery.ranked else None
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / f"public_trade_resolution_{source.id}.json"
     report = {
-        "version": 2,
-        "resolver_rule_version": "sqd-fill-wallet-identity-v2",
+        "version": 3,
+        "resolver_rule_version": "sqd-fill-wallet-identity-v3",
         "source": source.to_dict(),
         "status": status,
         "verified_address": verified_address,
-        "candidate_unique": unique,
+        "candidate_unique": winner is not None,
         "coverage_start_ms": discovery.coverage_start_ms,
         "discovery_anchor_ids": [signal.signal_id for signal in discovery.anchors],
-        "best_candidate": best.to_dict() if best else None,
-        "historical_verification": historical.to_dict() if historical else None,
-        "ranked_candidates": [item.to_dict() for item in ranked[:25]],
+        "best_discovery_candidate": discovery_best.to_dict() if discovery_best else None,
+        "historical_candidate_verifications": [
+            item.to_dict() for item in historical_results
+        ],
+        "ranked_candidates": [item.to_dict() for item in discovery.ranked[:25]],
         "discovery_source": "SQD finalized Hyperliquid fills tape",
         "cost_model": "public SQD Portal endpoint; no requester-pays archive dependency",
         "safety": {
             "auto_validation_promotion": False,
             "auto_trading_promotion": False,
             "held_out_verification_required": True,
+            "discovery_only_candidate_can_verify": False,
         },
     }
     report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -321,9 +409,9 @@ async def resolve_source_public_trades(
         "source_id": source.id,
         "status": status,
         "verified_address": verified_address,
-        "best_discovery_matches": best.matched_anchors if best else 0,
-        "candidate_unique": unique,
-        "historical_matches": historical.matched if historical else 0,
-        "historical_attempted": historical.attempted if historical else 0,
+        "best_discovery_matches": discovery_best.matched_anchors if discovery_best else 0,
+        "candidate_unique": winner is not None,
+        "historical_matches": winner.verification.matched if winner else 0,
+        "historical_attempted": winner.verification.attempted if winner else 0,
         "report_path": str(report_path),
     }
