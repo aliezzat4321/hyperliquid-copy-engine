@@ -1,0 +1,23 @@
+[Unit]
+Description=Hyperliquid effective-policy live-parity selective shadow scorer
+After=hyperliquid-shadow-validation.service hyperliquid-wide-trade-watch-live.service hyperliquid-wide-fill-enrichment-live.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/hyperliquid-copy-engine
+EnvironmentFile=/root/hyperliquid-copy-engine/.env
+Environment=REAL_TRADING_ENABLED=NO
+Environment=HLCOPY_SELECTIVE_POLICY_STORE=/mnt/HC_Volume_106576526/hyperliquid/shadow/selective_policies.json
+ExecStart=/root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.profitability.causal_selective_live_cli \
+  --registry /mnt/HC_Volume_106576526/hyperliquid/shadow/wallets.json \
+  --shadow-dir /mnt/HC_Volume_106576526/hyperliquid/shadow \
+  --shadow-market-dir /mnt/HC_Volume_106576526/hyperliquid/market-shadow \
+  --wide-enriched-dir /mnt/HC_Volume_106576526/hyperliquid/shadow/wide-enriched-live \
+  --wide-cutoff-ns-file /mnt/HC_Volume_106576526/hyperliquid/shadow/wide_clean_cutoff_ns.txt \
+  --wide-market-dir /mnt/HC_Volume_106576526/hyperliquid/market-shadow \
+  --output-dir /mnt/HC_Volume_106576526/hyperliquid/selective-shadow
+Nice=15
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
