@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass
 from decimal import Decimal
 from pathlib import Path
 
+from hlcopy.resolver.provenance import jsonable_config, sha256_file
 from hlcopy.resolver.public_trade_index import (
     DEFAULT_PUBLIC_TRADE_CONFIG,
     PublicTradeDiscoveryConfig,
@@ -12,7 +13,7 @@ from hlcopy.resolver.public_trade_index import (
     select_historical_winner,
     verify_candidate_shortlist,
 )
-from hlcopy.resolver.sqd_fills import SqdHyperliquidFillsClient
+from hlcopy.resolver.sqd_position_aware import SqdHyperliquidFillsClient
 from hlcopy.signals.generic_csv import GenericTradeImportResult, load_generic_closed_trades
 
 D = Decimal
@@ -133,9 +134,12 @@ async def identify_wallet_from_csv(
         output_dir.mkdir(parents=True, exist_ok=True)
         report_path = output_dir / f"wallet_identification_{evidence_path.stem}.json"
         payload = {
-            "version": 5,
-            "resolver_rule_version": "generic-sqd-fill-wallet-identity-v5",
+            "version": 6,
+            "resolver_rule_version": "generic-sqd-fill-wallet-identity-v6",
             "input_file": str(evidence_path),
+            "input_sha256": sha256_file(evidence_path),
+            "input_bytes": evidence_path.stat().st_size,
+            "effective_config": jsonable_config(config),
             "detected_columns": imported.column_map,
             "accepted_trades": len(signals),
             "rejected_rows": list(imported.rejected_rows),
@@ -164,6 +168,7 @@ async def identify_wallet_from_csv(
                 "auto_trading_promotion": False,
                 "unverified_candidate_exposed_as_wallet": False,
                 "held_out_verification_required": True,
+                "flat_to_open_boundary_required": True,
                 "entry_time_verification_required": True,
                 "discovery_only_candidate_can_verify": False,
                 "all_threshold_finalists_verified": True,
