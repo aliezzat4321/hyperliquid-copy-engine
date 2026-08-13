@@ -29,6 +29,16 @@ async def _run(output: Path, dex: str) -> None:
     if os.getenv("REAL_TRADING_ENABLED", "NO").strip().upper() == "YES":
         raise SystemExit("margin metadata collector refuses REAL_TRADING_ENABLED=YES")
 
+    # HyperliquidHttpClient.meta() currently issues exactly {"type": "meta"}, which
+    # is default-perp metadata. Until the client has a tested DEX-aware metadata
+    # request, accepting a non-empty --dex would persist default metadata under
+    # false DEX provenance. Fail before creating a client or making any request.
+    normalized_dex = dex.strip()
+    if normalized_dex:
+        raise SystemExit(
+            "non-default --dex is unsupported: collector only fetches default-perp meta"
+        )
+
     settings = Settings.from_env()
     async with HyperliquidHttpClient(
         settings.api_url,
@@ -42,16 +52,22 @@ async def _run(output: Path, dex: str) -> None:
     parsed = parse_margin_metadata(
         response.response_payload,
         fetched_at_ns=fetched_at_ns,
-        dex=dex,
+        dex="",
     )
     if not parsed.margin_tables:
         raise SystemExit("official meta response contained no parseable margin tables")
+
+    # Persist the exact request provenance so downstream research can distinguish
+    # default-perp metadata from any future DEX-aware transport unambiguously.
+    if response.request_payload != {"type": "meta"}:
+        raise SystemExit("unexpected meta request provenance; refusing snapshot persistence")
 
     record = {
         "fetched_at_ns": fetched_at_ns,
         "fetched_at_ms": response.fetched_at_ms,
         "network": settings.network,
-        "dex": dex,
+        "dex": "",
+        "request_payload": response.request_payload,
         "payload": response.response_payload,
     }
     output.parent.mkdir(parents=True, exist_ok=True)
