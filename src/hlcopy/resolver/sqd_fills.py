@@ -299,6 +299,21 @@ def match_episode(
         key=lambda fill: (abs(fill.time_ms - signal.opened_at_ms), fill.time_ms, fill.tid),
     )
     entry_time_error = abs(seed.time_ms - signal.opened_at_ms)
+    seed_group = {
+        id(fill)
+        for fill in fills
+        if fill.direction.lower() == open_name
+        and fill.time_ms < close.first_time_ms
+        and abs(fill.time_ms - signal.opened_at_ms) <= entry_time_tolerance_ms
+        and (
+            (seed.oid and fill.oid == seed.oid)
+            or (
+                not seed.oid
+                and not fill.oid
+                and abs(fill.time_ms - seed.time_ms) <= 2_500
+            )
+        )
+    }
 
     total = D("0")
     notional = D("0")
@@ -313,7 +328,7 @@ def match_episode(
     )
     for fill in rows:
         text = fill.direction.lower()
-        if fill is seed or text == add_name:
+        if id(fill) in seed_group or text == add_name:
             total += fill.sz
             notional += fill.sz * fill.px
             continue
