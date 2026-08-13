@@ -65,7 +65,10 @@ def _output_dir(argv: list[str]) -> Path:
 
 
 def _jsonable(row: dict[str, object]) -> dict[str, object]:
-    return {key: str(value) if isinstance(value, Decimal) else value for key, value in row.items()}
+    return {
+        key: str(value) if isinstance(value, Decimal) else value
+        for key, value in row.items()
+    }
 
 
 def main() -> None:
@@ -87,10 +90,18 @@ def main() -> None:
     state_rows: list[dict[str, object]] = []
 
     def selective_direct(shadow_dir: Path, wallet_id: str):
-        return tuple(event for event in original_direct(shadow_dir, wallet_id) if _allowed(store, event))
+        return tuple(
+            event
+            for event in original_direct(shadow_dir, wallet_id)
+            if _allowed(store, event)
+        )
 
     def selective_wide(enriched_dir: Path, *, cutoff_ns: int):
-        return tuple(event for event in original_wide(enriched_dir, cutoff_ns=cutoff_ns) if _allowed(store, event))
+        return tuple(
+            event
+            for event in original_wide(enriched_dir, cutoff_ns=cutoff_ns)
+            if _allowed(store, event)
+        )
 
     def capture_simulation(*args, **kwargs):
         sim = original_simulate(*args, **kwargs)
@@ -132,7 +143,10 @@ def main() -> None:
     tmp = state_path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     tmp.replace(state_path)
-    print(f"selective_state_events rows={len(state_rows)} output={state_path}", flush=True)
+    print(
+        f"selective_state_events rows={len(state_rows)} output={state_path}",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":
