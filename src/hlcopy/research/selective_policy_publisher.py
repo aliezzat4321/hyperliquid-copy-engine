@@ -70,8 +70,22 @@ def _canonical_rules(rules: list[dict[str, object]]) -> list[dict[str, object]]:
     )
 
 
+def _fingerprint_rule(rule: dict[str, object]) -> dict[str, object]:
+    """Return only stable policy semantics, excluding publication metadata."""
+    return {
+        "wallet_address": str(rule.get("wallet_address") or "").lower(),
+        "state": rule.get("state"),
+        "coin": rule.get("coin"),
+        "direction": rule.get("direction"),
+        "action": rule.get("action"),
+        "max_notional_usd": rule.get("max_notional_usd"),
+        "reason_codes": rule.get("reason_codes") or [],
+    }
+
+
 def _fingerprint(rules: list[dict[str, object]]) -> str:
-    raw = json.dumps(_canonical_rules(rules), sort_keys=True, separators=(",", ":"))
+    semantic_rules = [_fingerprint_rule(rule) for rule in _canonical_rules(rules)]
+    raw = json.dumps(semantic_rules, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
