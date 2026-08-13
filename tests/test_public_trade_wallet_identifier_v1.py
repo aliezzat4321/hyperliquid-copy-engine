@@ -1,11 +1,15 @@
+import asyncio
 from decimal import Decimal
 
 from hlcopy.resolver.public_trade_index import (
     HistoricalCandidateVerification,
     HistoricalVerification,
+    PublicTradeDiscoveryConfig,
     _public_trade_matches,
     candidate_is_unique,
+    discover_candidates,
     select_historical_winner,
+    verify_candidate_shortlist,
 )
 from hlcopy.resolver.reverse_index import CandidateFingerprint
 from hlcopy.resolver.sqd_fills import SqdFill, aggregate_close_fills, match_episode
@@ -16,24 +20,33 @@ USER = "0x1111111111111111111111111111111111111111"
 OTHER = "0x2222222222222222222222222222222222222222"
 
 
-def _signal(direction: str = "LONG") -> CopySignal:
+def _signal(
+    direction: str = "LONG",
+    *,
+    signal_id: str = "s1",
+    entry_price: str = "100",
+    exit_price: str = "110",
+    opened_at_ms: int = 1_000_000,
+    closed_at_ms: int = 2_000_000,
+    raw: dict[str, str] | None = None,
+) -> CopySignal:
     return CopySignal(
-        signal_id="s1",
+        signal_id=signal_id,
         source="generic_closed_trades_csv",
         trader="alice",
         coin="BTC",
         direction=direction,
         source_leverage=D("2"),
         allocation_fraction=D("0.25"),
-        entry_price=D("100"),
-        exit_price=D("110"),
-        opened_at_ms=1_000_000,
-        closed_at_ms=2_000_000,
+        entry_price=D(entry_price),
+        exit_price=D(exit_price),
+        opened_at_ms=opened_at_ms,
+        closed_at_ms=closed_at_ms,
         entry_sim=None,
         last_sim=None,
         reason_closed="",
         liquidated=False,
-        raw={"position_size": "1.0"},
+        raw={"position_size": "1.0"} if raw is None else raw,
     )
 
 
@@ -99,6 +112,45 @@ def _historical(
     )
 
 
+class _FakeSqdClient:
+    def __init__(self, *, start_ms: int = 500_000, end_ms: int = 2_500_000) -> None:
+        self.start_ms = start_ms
+        self.end_ms = end_ms
+        self.around_calls: list[int] = []
+
+    async def coverage_start_ms(self) -> int:
+        return self.start_ms
+
+    async def coverage_end_ms(self) -> int:
+        return self.end_ms
+
+    async def fills_around(
+        self,
+        *,
+        timestamp_ms: int,
+        coin: str,
+        window_ms: int,
+        user: str | None = None,
+    ) -> list[SqdFill]:
+        del coin, window_ms, user
+        assert self.start_ms <= timestamp_ms <= self.end_ms
+        self.around_calls.append(timestamp_ms)
+        return []
+
+    async def fills_between_times(
+        self,
+        *,
+        start_ms: int,
+        end_ms: int,
+        coin: str,
+        user: str,
+    ) -> list[SqdFill]:
+        del coin, user
+        assert self.start_ms <= start_ms <= self.end_ms
+        assert self.start_ms <= end_ms <= self.end_ms
+        return []
+
+
 def test_partial_close_fills_are_aggregated_before_price_matching() -> None:
     fills = [
         _fill(px="109", sz="0.5", time_ms=1_999_900, direction="Close Long", oid="7"),
@@ -147,6 +199,37 @@ def test_full_position_episode_reconstructs_from_partial_fills() -> None:
     assert evidence.matched
     assert evidence.reconstructed_size == D("1.0")
     assert evidence.reconstructed_entry == D("100")
+
+
+def test_no_source_size_still_requires_entry_reconstruction() -> None:
+    fills = [
+        _fill(px="99", sz="0.5", time_ms=1_000_000, direction="Open Long", oid="1"),
+        _fill(px="101", sz="0.5", time_ms=1_000_100, direction="Long > Long", oid="2"),
+        _fill(px="109", sz="0.5", time_ms=1_999_900, direction="Close Long", oid="7"),
+        _fill(px="111", sz="0.5", time_ms=2_000_000, direction="Close Long", oid="7"),
+    ]
+    evidence = match_episode(
+        _signal(raw={}),
+        fills,
+        close_time_tolerance_ms=5_000,
+        close_price_tolerance_bps=D("5"),
+        max_size_ratio_error=D("0.10"),
+        entry_price_tolerance_bps=D("5"),
+    )
+    assert evidence.matched
+    assert evidence.reconstructed_size == D("1.0")
+    assert evidence.reconstructed_entry == D("100")
+
+    wrong_entry = match_episode(
+        _signal(entry_price="105", raw={}),
+        fills,
+        close_time_tolerance_ms=5_000,
+        close_price_tolerance_bps=D("5"),
+        max_size_ratio_error=D("0.10"),
+        entry_price_tolerance_bps=D("5"),
+    )
+    assert not wrong_entry.matched
+    assert wrong_entry.entry_price_bps is not None
 
 
 def test_candidate_must_beat_runner_up_on_matches_and_score() -> None:
@@ -201,3 +284,57 @@ def test_historical_winner_must_be_unique() -> None:
         )
         is None
     )
+
+
+def test_winner_gap_is_applied_before_runner_up_threshold_filtering() -> None:
+    first = _historical(USER, discovery_matches=5, discovery_score="90", matched=3)
+    second = _historical(OTHER, discovery_matches=4, discovery_score="80", matched=2)
+    assert (
+        select_historical_winner(
+            (first, second),
+            min_matches=3,
+            min_ratio=D("0.20"),
+            min_match_gap=2,
+        )
+        is None
+    )
+
+
+def test_all_threshold_reaching_finalists_are_verified() -> None:
+    ranked = tuple(
+        _candidate(f"0x{index:040x}", 3, str(100 - index))
+        for index in range(1, 8)
+    )
+    signals = (_signal(signal_id="held-out"),)
+    client = _FakeSqdClient()
+    config = PublicTradeDiscoveryConfig(
+        min_discovery_matches=3,
+        max_candidates_to_verify=6,
+        historical_verify_trades=1,
+    )
+    results = asyncio.run(
+        verify_candidate_shortlist(
+            ranked=ranked,
+            signals=signals,
+            excluded_signal_ids=set(),
+            coverage_start_ms=client.start_ms,
+            client=client,
+            config=config,
+        )
+    )
+    assert len(results) == 7
+    assert {item.address for item in results} == {item.address for item in ranked}
+
+
+def test_discovery_excludes_evidence_beyond_finalized_head() -> None:
+    client = _FakeSqdClient(end_ms=2_500_000)
+    signals = (
+        _signal(signal_id="a", opened_at_ms=900_000, closed_at_ms=1_500_000),
+        _signal(signal_id="b", opened_at_ms=1_000_000, closed_at_ms=1_800_000),
+        _signal(signal_id="c", opened_at_ms=1_100_000, closed_at_ms=2_000_000),
+        _signal(signal_id="future", opened_at_ms=2_600_000, closed_at_ms=3_000_000),
+    )
+    result = asyncio.run(discover_candidates(signals, client=client))
+    assert result.coverage_end_ms == 2_500_000
+    assert {signal.signal_id for signal in result.anchors} == {"a", "b", "c"}
+    assert all(timestamp <= result.coverage_end_ms for timestamp in client.around_calls)
