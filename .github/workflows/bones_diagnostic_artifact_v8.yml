@@ -1,0 +1,65 @@
+name: bones-diagnostic-artifact-v8
+
+on:
+  push:
+    branches: [agent/bones-acceptance-v8-temp]
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e .
+      - name: Generate compact evidence
+        run: |
+          python -m hlcopy.resolver.identify_cli tmp/bones_acceptance_v8.csv --output-dir /tmp/bones-resolution || true
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          report_path = Path('/tmp/bones-resolution/wallet_identification_bones_acceptance_v8.json')
+          if not report_path.exists():
+              Path('/tmp/bones-diagnostic.json').write_text(json.dumps({'report_missing': True}, indent=2))
+              raise SystemExit(0)
+          r = json.loads(report_path.read_text())
+          rows = sorted(r['historical_candidate_verifications'], key=lambda x: (x['verification']['matched'], x['verification']['ratio']), reverse=True)
+          compact = {
+              'status': r['status'],
+              'wallet': r['wallet'],
+              'candidate': r['candidate'],
+              'candidate_unique': r['candidate_unique'],
+              'discovery_anchor_ids': r['discovery_anchor_ids'],
+              'uncovered_signal_ids': r['uncovered_signal_ids'],
+              'duplicate_rows': r['duplicate_rows'],
+              'finalists': [],
+          }
+          for row in rows:
+              v = row['verification']
+              compact['finalists'].append({
+                  'address': row['address'],
+                  'discovery_matches': row['discovery_matches'],
+                  'matched': v['matched'],
+                  'attempted': v['attempted'],
+                  'ratio': v['ratio'],
+                  'evidence': [
+                      {
+                          'signal_id': e['signal_id'],
+                          'matched': e['matched'],
+                          'lifecycle_id': e.get('lifecycle_id'),
+                          'rejection_reason': e.get('rejection_reason'),
+                          'entry_time_error_ms': e.get('entry_time_error_ms'),
+                          'entry_price_bps': e.get('entry_price_bps'),
+                          'close_time_error_ms': e.get('close_time_error_ms'),
+                          'close_price_bps': e.get('close_price_bps'),
+                      }
+                      for e in v['evidence']
+                  ],
+              })
+          Path('/tmp/bones-diagnostic.json').write_text(json.dumps(compact, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bones-diagnostic-v8
+          path: /tmp/bones-diagnostic.json
