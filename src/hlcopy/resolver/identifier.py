@@ -76,7 +76,8 @@ async def identify_wallet_from_csv(
     if len(signals) < 3:
         raise ValueError(
             f"insufficient usable trade evidence: {len(signals)} accepted, "
-            f"{len(imported.rejected_rows)} rejected"
+            f"{len(imported.rejected_rows)} rejected, "
+            f"{len(imported.duplicate_rows)} duplicates removed"
         )
 
     async with SqdHyperliquidFillsClient() as sqd:
@@ -134,8 +135,8 @@ async def identify_wallet_from_csv(
         output_dir.mkdir(parents=True, exist_ok=True)
         report_path = output_dir / f"wallet_identification_{evidence_path.stem}.json"
         payload = {
-            "version": 6,
-            "resolver_rule_version": "generic-sqd-fill-wallet-identity-v6",
+            "version": 7,
+            "resolver_rule_version": "generic-sqd-fill-wallet-identity-v7",
             "input_file": str(evidence_path),
             "input_sha256": sha256_file(evidence_path),
             "input_bytes": evidence_path.stat().st_size,
@@ -143,6 +144,7 @@ async def identify_wallet_from_csv(
             "detected_columns": imported.column_map,
             "accepted_trades": len(signals),
             "rejected_rows": list(imported.rejected_rows),
+            "duplicate_rows": list(imported.duplicate_rows),
             "coverage_start_ms": discovery.coverage_start_ms,
             "coverage_end_ms": discovery.coverage_end_ms,
             "uncovered_signal_ids": uncovered_signal_ids,
@@ -170,6 +172,8 @@ async def identify_wallet_from_csv(
                 "held_out_verification_required": True,
                 "flat_to_open_boundary_required": True,
                 "entry_time_verification_required": True,
+                "duplicate_episode_evidence_deduplicated": True,
+                "full_lifecycle_exit_aggregation_required": True,
                 "discovery_only_candidate_can_verify": False,
                 "all_threshold_finalists_verified": True,
                 "coverage_fail_closed": True,
