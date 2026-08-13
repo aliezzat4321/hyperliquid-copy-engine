@@ -16,6 +16,15 @@ class OpenPositionMark:
     avg_entry: Decimal
     mark_price: Decimal
     maintenance_margin_rate: Decimal
+    maintenance_margin_deduction_usd: Decimal = ZERO
+
+    def __post_init__(self) -> None:
+        if self.mark_price <= ZERO:
+            raise ValueError("mark_price must be positive")
+        if self.maintenance_margin_rate < ZERO:
+            raise ValueError("maintenance_margin_rate cannot be negative")
+        if self.maintenance_margin_deduction_usd < ZERO:
+            raise ValueError("maintenance_margin_deduction_usd cannot be negative")
 
     @property
     def unrealized_pnl_usd(self) -> Decimal:
@@ -27,7 +36,13 @@ class OpenPositionMark:
 
     @property
     def maintenance_margin_usd(self) -> Decimal:
-        return self.gross_notional_usd * self.maintenance_margin_rate
+        # Hyperliquid tiered margin formula:
+        # maintenance = notional * MMR - maintenance deduction.
+        return max(
+            ZERO,
+            self.gross_notional_usd * self.maintenance_margin_rate
+            - self.maintenance_margin_deduction_usd,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +86,7 @@ class PathRiskSummary:
     max_equity_usd: Decimal
     max_drawdown_usd: Decimal
     max_drawdown_pct: Decimal
+    min_free_collateral_usd: Decimal
     min_liquidation_buffer_usd: Decimal
     liquidated: bool
     first_liquidation_ts_ms: int | None
@@ -83,6 +99,7 @@ class PathRiskSummary:
             "max_equity_usd": str(self.max_equity_usd),
             "max_drawdown_usd": str(self.max_drawdown_usd),
             "max_drawdown_pct": str(self.max_drawdown_pct),
+            "min_free_collateral_usd": str(self.min_free_collateral_usd),
             "min_liquidation_buffer_usd": str(self.min_liquidation_buffer_usd),
             "liquidated": self.liquidated,
             "first_liquidation_ts_ms": self.first_liquidation_ts_ms,
@@ -98,11 +115,11 @@ def evaluate_cross_margin_path(
 ) -> PathRiskSummary:
     """Evaluate a causal cross-margin MTM path at supplied historical checkpoints.
 
-    This primitive deliberately does not invent marks, funding, or maintenance rates. The
-    caller must supply values available for each historical checkpoint. It therefore fails
-    closed: path-risk truth is only as complete as the supplied checkpoint series.
+    Marks must be actual historical *mark prices* (not L2 mids), funding must be
+    cumulative follower funding through the checkpoint, and each position must carry
+    the contemporaneous maintenance rate and deduction from the exchange margin table.
+    The evaluator deliberately fails closed rather than inventing any of those inputs.
     """
-
     if starting_equity_usd <= ZERO:
         raise ValueError("starting_equity_usd must be positive")
     if leverage <= ZERO:
@@ -118,22 +135,14 @@ def evaluate_cross_margin_path(
     max_equity = starting_equity_usd
     max_drawdown = ZERO
     max_drawdown_pct = ZERO
+    min_free_collateral: Decimal | None = None
     min_liquidation_buffer: Decimal | None = None
     first_liquidation: int | None = None
 
     for checkpoint in ordered:
-        unrealized = sum(
-            (position.unrealized_pnl_usd for position in checkpoint.positions),
-            ZERO,
-        )
-        gross = sum(
-            (position.gross_notional_usd for position in checkpoint.positions),
-            ZERO,
-        )
-        maintenance = sum(
-            (position.maintenance_margin_usd for position in checkpoint.positions),
-            ZERO,
-        )
+        unrealized = sum((position.unrealized_pnl_usd for position in checkpoint.positions), ZERO)
+        gross = sum((position.gross_notional_usd for position in checkpoint.positions), ZERO)
+        maintenance = sum((position.maintenance_margin_usd for position in checkpoint.positions), ZERO)
         initial_margin = gross / leverage
         equity = (
             starting_equity_usd
@@ -150,6 +159,11 @@ def evaluate_cross_margin_path(
         max_drawdown_pct = max(max_drawdown_pct, drawdown_pct)
         free_collateral = equity - initial_margin
         liquidation_buffer = equity - maintenance
+        min_free_collateral = (
+            free_collateral
+            if min_free_collateral is None
+            else min(min_free_collateral, free_collateral)
+        )
         min_liquidation_buffer = (
             liquidation_buffer
             if min_liquidation_buffer is None
@@ -185,7 +199,10 @@ def evaluate_cross_margin_path(
         max_equity_usd=max_equity,
         max_drawdown_usd=max_drawdown,
         max_drawdown_pct=max_drawdown_pct,
-        min_liquidation_buffer_usd=min_liquidation_buffer or ZERO,
+        min_free_collateral_usd=min_free_collateral if min_free_collateral is not None else ZERO,
+        min_liquidation_buffer_usd=(
+            min_liquidation_buffer if min_liquidation_buffer is not None else ZERO
+        ),
         liquidated=first_liquidation is not None,
         first_liquidation_ts_ms=first_liquidation,
     )

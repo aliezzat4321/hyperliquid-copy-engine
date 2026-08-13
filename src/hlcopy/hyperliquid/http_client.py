@@ -120,6 +120,10 @@ class HyperliquidHttpClient:
             await self._limiter.consume(math.ceil(len(data) / 20))
         return ApiResponse("info", payload, data, int(time.time() * 1000))
 
+    async def meta(self) -> ApiResponse:
+        """Fetch current perp metadata, including margin tables/tier ids."""
+        return await self.info({"type": "meta"})
+
     async def user_fills(self, user: str) -> ApiResponse:
         return await self.info({"type": "userFills", "user": user, "aggregateByTime": False})
 
@@ -182,7 +186,7 @@ class HyperliquidHttpClient:
         *,
         max_pages: int = 200,
     ) -> list[ApiResponse]:
-        """Paginate funding history; time-range info responses are capped per page."""
+        """Paginate user funding ledger history."""
         pages: list[ApiResponse] = []
         cursor = start_time_ms
         seen: set[tuple[int, str, str, str]] = set()
@@ -219,6 +223,68 @@ class HyperliquidHttpClient:
             if last_time < cursor:
                 raise HyperliquidError("userFunding pagination moved backwards")
             cursor = last_time
+        return pages
+
+    async def funding_history(
+        self,
+        coin: str,
+        start_time_ms: int,
+        end_time_ms: int | None = None,
+    ) -> ApiResponse:
+        """Fetch official historical market funding rates for a perp coin."""
+        payload: dict[str, Any] = {
+            "type": "fundingHistory",
+            "coin": coin,
+            "startTime": start_time_ms,
+        }
+        if end_time_ms is not None:
+            payload["endTime"] = end_time_ms
+        return await self.info(payload)
+
+    async def funding_history_by_time(
+        self,
+        coin: str,
+        start_time_ms: int,
+        end_time_ms: int | None = None,
+        *,
+        max_pages: int = 200,
+    ) -> list[ApiResponse]:
+        """Paginate official fundingHistory without silently truncating at 500 rows."""
+        pages: list[ApiResponse] = []
+        cursor = start_time_ms
+        seen: set[tuple[int, str, str, str]] = set()
+        for _ in range(max_pages):
+            page = await self.funding_history(coin, cursor, end_time_ms)
+            pages.append(page)
+            rows = page.response_payload
+            if not isinstance(rows, list) or not rows:
+                break
+            fresh = 0
+            times: list[int] = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                ts = int(row.get("time", 0))
+                times.append(ts)
+                key = (
+                    ts,
+                    str(row.get("coin", coin)),
+                    str(row.get("fundingRate", "")),
+                    str(row.get("premium", "")),
+                )
+                if key not in seen:
+                    seen.add(key)
+                    fresh += 1
+            if fresh == 0 or not times:
+                break
+            last_time = max(times)
+            if end_time_ms is not None and last_time >= end_time_ms:
+                break
+            if last_time < cursor:
+                raise HyperliquidError("fundingHistory pagination moved backwards")
+            # funding timestamps are discrete hourly records; move past the last row
+            # because startTime is inclusive.
+            cursor = last_time + 1
         return pages
 
     async def clearinghouse_state(self, user: str) -> ApiResponse:
