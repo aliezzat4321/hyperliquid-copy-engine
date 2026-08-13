@@ -1,0 +1,46 @@
+name: bones-trace-57a-v8
+
+on:
+  push:
+    branches: [agent/bones-acceptance-v8-temp]
+
+jobs:
+  trace:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e .
+      - name: Trace target lifecycle
+        run: |
+          python - <<'PY'
+          import asyncio, json
+          from datetime import datetime
+          from pathlib import Path
+          from hlcopy.resolver.sqd_position_aware import SqdHyperliquidFillsClient
+
+          USER='0x565590f4d2b00b567a564f56b13f898392aef180'
+          def ms(s): return int(datetime.fromisoformat(s.replace('Z','+00:00')).timestamp()*1000)
+          start=ms('2026-08-04T18:05:41.416Z')
+          end=ms('2026-08-04T23:28:22.378Z')
+          async def main():
+              async with SqdHyperliquidFillsClient() as c:
+                  fills=await c.fills_between_times(start_ms=start,end_ms=end,coin='BTC',user=USER)
+              rows=[]
+              for f in fills:
+                  d=f.direction.lower()
+                  if any(k in d for k in ('short','long')):
+                      rows.append({
+                          'time_ms':f.time_ms,'direction':f.direction,'oid':f.oid,'tid':f.tid,
+                          'start_position':str(f.start_position),'px':str(f.px),'sz':str(f.sz),
+                          'side':f.side,'block':f.block_number,
+                      })
+              Path('/tmp/trace-57a.json').write_text(json.dumps(rows,indent=2))
+          asyncio.run(main())
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bones-trace-57a-v8
+          path: /tmp/trace-57a.json
