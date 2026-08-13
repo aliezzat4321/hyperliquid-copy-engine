@@ -25,6 +25,7 @@ BPS = D("10000")
 class FollowerStateEvent:
     coin: str
     execution_ts_ms: int
+    execution_received_at_ns: int
     source_tid: int
     action: str
     qty_after: Decimal
@@ -85,10 +86,11 @@ def simulate_copy_with_portfolio_capital(
     allocates the entire remainder. Every realized slice therefore contains round-trip
     PnL after allocated entry and exit fees.
 
-    ``state_events`` records the follower position immediately after each successful
-    simulated execution at the execution book timestamp. It is the source of truth for
-    continuous mark-to-market replay. A failed reduction or flip close never mutates
-    follower state.
+    ``state_events`` records follower state after each successful simulated execution.
+    Both exchange time and local market-receipt time are retained. Continuous MTM replay
+    should order state changes against ``activeAssetCtx.received_at_ns`` using the local
+    receipt clock, so a future mark can never be applied before the execution book was
+    actually available to the follower. Failed reductions/flips never mutate state.
     """
     ordered = sorted(
         events,
@@ -148,6 +150,7 @@ def simulate_copy_with_portfolio_capital(
         *,
         event: CopyFillEvent,
         book_ts_ms: int,
+        book_received_at_ns: int,
         action: str,
         state: _FollowerState,
     ) -> None:
@@ -155,6 +158,7 @@ def simulate_copy_with_portfolio_capital(
             FollowerStateEvent(
                 coin=event.coin,
                 execution_ts_ms=book_ts_ms,
+                execution_received_at_ns=book_received_at_ns,
                 source_tid=event.tid,
                 action=action,
                 qty_after=state.qty,
@@ -197,11 +201,7 @@ def simulate_copy_with_portfolio_capital(
             )
             if signed_qty == ZERO:
                 continue
-            px = _fill_price(
-                book,
-                signed_qty=signed_qty,
-                max_slippage_bps=max_slippage_bps,
-            )
+            px = _fill_price(book, signed_qty=signed_qty, max_slippage_bps=max_slippage_bps)
             if px is None:
                 missed += 1
                 continue
@@ -220,24 +220,21 @@ def simulate_copy_with_portfolio_capital(
             state.scale = scale
             causal_marks[event.coin] = px
             add_entry_fee(event.coin, signed_qty, px)
-            record_state(event=event, book_ts_ms=book.exchange_ts_ms, action="INCREASE", state=state)
+            record_state(
+                event=event,
+                book_ts_ms=book.exchange_ts_ms,
+                book_received_at_ns=book.received_at_ns,
+                action="INCREASE",
+                state=state,
+            )
             update_peak()
             continue
 
-        if (
-            reduction
-            and state.qty != ZERO
-            and state.avg_entry is not None
-            and state.scale is not None
-        ):
+        if reduction and state.qty != ZERO and state.avg_entry is not None and state.scale is not None:
             position_abs_before = abs(state.qty)
             close_abs = min(position_abs_before, state.scale * abs(delta))
             signed_close = -close_abs if state.qty > ZERO else close_abs
-            px = _fill_price(
-                book,
-                signed_qty=signed_close,
-                max_slippage_bps=max_slippage_bps,
-            )
+            px = _fill_price(book, signed_qty=signed_close, max_slippage_bps=max_slippage_bps)
             if px is None:
                 missed += 1
                 continue
@@ -279,22 +276,21 @@ def simulate_copy_with_portfolio_capital(
             action = "CLOSE" if after == ZERO else "REDUCE"
             if abs(state.qty) <= D("1e-18") or after == ZERO:
                 reset_position(event.coin, state)
-            record_state(event=event, book_ts_ms=book.exchange_ts_ms, action=action, state=state)
+            record_state(
+                event=event,
+                book_ts_ms=book.exchange_ts_ms,
+                book_received_at_ns=book.received_at_ns,
+                action=action,
+                state=state,
+            )
             update_peak()
             continue
 
         if flip:
-            # A flip is modeled as close-then-open. If the close cannot execute, the
-            # follower remains in its existing position and no opposite-side open is
-            # attempted. This mirrors a safe live sequencer and avoids synthetic flips.
             if state.qty != ZERO and state.avg_entry is not None:
                 close_abs = abs(state.qty)
                 signed_close = -state.qty
-                px = _fill_price(
-                    book,
-                    signed_qty=signed_close,
-                    max_slippage_bps=max_slippage_bps,
-                )
+                px = _fill_price(book, signed_qty=signed_close, max_slippage_bps=max_slippage_bps)
                 if px is None:
                     missed += 1
                     continue
@@ -331,6 +327,7 @@ def simulate_copy_with_portfolio_capital(
                 record_state(
                     event=event,
                     book_ts_ms=book.exchange_ts_ms,
+                    book_received_at_ns=book.received_at_ns,
                     action="FLIP_CLOSE",
                     state=state,
                 )
@@ -357,15 +354,7 @@ def simulate_copy_with_portfolio_capital(
                 state=state,
                 notional_usd=notional_usd,
             )
-            px = (
-                _fill_price(
-                    book,
-                    signed_qty=signed_qty,
-                    max_slippage_bps=max_slippage_bps,
-                )
-                if signed_qty
-                else None
-            )
+            px = _fill_price(book, signed_qty=signed_qty, max_slippage_bps=max_slippage_bps) if signed_qty else None
             if px is not None:
                 executable += 1
                 copied_increases += 1
@@ -377,6 +366,7 @@ def simulate_copy_with_portfolio_capital(
                 record_state(
                     event=event,
                     book_ts_ms=book.exchange_ts_ms,
+                    book_received_at_ns=book.received_at_ns,
                     action="FLIP_OPEN",
                     state=state,
                 )
