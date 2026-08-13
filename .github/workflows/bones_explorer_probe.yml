@@ -12,77 +12,71 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install requests
-      - name: Verify finalists on 12 unseen Bones trades
+      - name: Reconstruct four held-out Bones episodes for leader
         run: |
           python - <<'PY'
           import time
-          from collections import defaultdict
           from datetime import datetime
           from decimal import Decimal
           import requests
 
           D=Decimal; INFO='https://api.hyperliquid.xyz/info'; s=requests.Session()
-          wallets=[
-            '0x565590f4d2b00b567a564f56b13f898392aef180',
-            '0x02b07e1ee50dd45b7d8a5fde4648e3eb9fb3ff70',
-            '0xe87b977b4ae6ec5c9b22c6f6bee105da22f73a9e',
-            '0x63bc5c38ff82708383d2d880f326a5aac41244cc',
-            '0x3df29dbe4435d438766d020662cb63b6911778f2',
-          ]
-          # Held out from discovery: CSV rows 8-18 and 20, never used in a1-a8.
+          user='0x565590f4d2b00b567a564f56b13f898392aef180'
           trades=[
-            ('h8','2026-08-06T18:03:25.337Z','SHORT','64773.0','64487.0','0.0108589873'),
-            ('h9','2026-08-06T14:11:47.792Z','LONG','64345.14479771915','64529.0','0.0102058937'),
-            ('h10','2026-08-06T09:45:55.014Z','SHORT','64801.00958013068','64609.0','0.0102628505'),
-            ('h11','2026-08-05T13:40:29.920Z','LONG','64115.0','64260.0','0.01'),
-            ('h12','2026-08-05T11:38:54.683Z','LONG','64011.0','64082.0','0.0102412122'),
-            ('h13','2026-08-05T06:16:34.362Z','SHORT','64380.0','64266.0','0.0104027252'),
-            ('h14','2026-08-05T02:18:20.752Z','SHORT','64467.0','64304.0','0.01'),
-            ('h15','2026-08-05T01:57:57.071Z','LONG','64157.0','64291.0','0.0094750713'),
-            ('h16','2026-08-04T23:27:57.378Z','SHORT','64299.31981009927','64184.0','0.011'),
-            ('h17','2026-08-04T17:41:49.608Z','LONG','64021.0','64103.0','0.0098453391'),
-            ('h18','2026-08-04T10:45:32.165Z','LONG','63660.5543156555','63772.0','0.01'),
-            ('h20','2026-08-03T13:35:44.697Z','LONG','62717.0','62798.0','0.0200472539'),
+            ('h13','2026-08-05T05:24:33.796Z','2026-08-05T06:16:34.362Z','SHORT','64380.0','64266.0','0.0104027252'),
+            ('h14','2026-08-05T02:04:11.600Z','2026-08-05T02:18:20.752Z','SHORT','64467.0','64304.0','0.01'),
+            ('h15','2026-08-04T23:29:22.613Z','2026-08-05T01:57:57.071Z','LONG','64157.0','64291.0','0.0094750713'),
+            ('h16','2026-08-04T18:10:41.416Z','2026-08-04T23:27:57.378Z','SHORT','64299.31981009927','64184.0','0.011'),
           ]
           def ts(x): return int(datetime.fromisoformat(x.replace('Z','+00:00')).timestamp()*1000)
-          def get(user,center):
-            p={'type':'userFillsByTime','user':user,'startTime':center-20000,'endTime':center+20000,'aggregateByTime':False}
-            for i in range(6):
-              r=s.post(INFO,json=p,timeout=20)
+          def post(payload):
+            for i in range(7):
+              r=s.post(INFO,json=payload,timeout=20)
               if r.status_code in (429,500,502,503,504): time.sleep(.5+i); continue
               r.raise_for_status(); return r.json()
             return []
-          def best_match(rows,center,direction,entry,exitpx,sz0):
-            close_dir='Close Long' if direction=='LONG' else 'Close Short'
-            pnl0=(exitpx-entry)*sz0*(D(1) if direction=='LONG' else D(-1))
-            groups=defaultdict(lambda:{'sz':D(0),'n':D(0),'pnl':D(0),'times':[]})
-            for f in rows:
-              if str(f.get('coin','')).upper()!='BTC' or str(f.get('dir','')).lower()!=close_dir.lower(): continue
-              try: z=D(str(f['sz'])); px=D(str(f['px'])); cp=D(str(f.get('closedPnl') or 0)); t=int(f['time'])
+          def fills(start,end):
+            out=[]; cur=start; step=20*60*1000
+            while cur<=end:
+              stop=min(end,cur+step-1)
+              out.extend(post({'type':'userFillsByTime','user':user,'startTime':cur,'endTime':stop,'aggregateByTime':False}))
+              cur=stop+1
+            uniq={}
+            for f in out:
+              k=(f.get('tid'),f.get('oid'),f.get('time'),f.get('px'),f.get('sz'),f.get('dir'))
+              uniq[k]=f
+            return sorted(uniq.values(),key=lambda f:int(f.get('time',0)))
+          def reconstruct(row):
+            aid,opened,closed,direction,entrys,exits,szs=row
+            ot,ct=ts(opened),ts(closed); entry=D(entrys); exitpx=D(exits); target=D(szs)
+            fs=[f for f in fills(ot-60*60*1000,ct+20000) if str(f.get('coin','')).upper()=='BTC']
+            close_name='Close Long' if direction=='LONG' else 'Close Short'
+            close=[]
+            for f in fs:
+              if str(f.get('dir','')).lower()!=close_name.lower(): continue
+              try: t=int(f['time']); px=D(str(f['px'])); z=D(str(f['sz'])); cp=D(str(f.get('closedPnl') or 0))
               except Exception: continue
-              if abs(t-center)>20000: continue
-              for key in (str(f.get('oid')),'*'):
-                g=groups[key]; g['sz']+=z; g['n']+=z*px; g['pnl']+=cp; g['times'].append(t)
-            best=None
-            for key,g in groups.items():
-              if g['sz']<=0: continue
-              v=g['n']/g['sz']; dt=min(abs(t-center) for t in g['times']); sr=abs(g['sz']/sz0-1); pb=abs(v/exitpx-1)*D(10000)
-              pr=abs(g['pnl']/pnl0-1) if pnl0 and g['pnl'] else D(999)
-              cost=D(dt)/D(2000)+sr*D(8)+pb/D(5)+(pr*D(4) if pr<999 else D(8))
-              rec=(cost,dt,sr,pb,pr,key,g['sz'],v,g['pnl'])
-              if best is None or rec<best: best=rec
-            return best
-          scores={u:[] for u in wallets}
-          for aid,closed,direction,entrys,exits,szs in trades:
-            center=ts(closed); entry=D(entrys); exitpx=D(exits); sz0=D(szs)
-            print('TRADE',aid,direction,'target',exitpx,sz0)
-            for u in wallets:
-              m=best_match(get(u,center),center,direction,entry,exitpx,sz0)
-              ok=bool(m and m[1]<=20000 and m[2]<=D('.45') and m[3]<=D('35') and (m[4]<=D('1.0') or m[4]==D(999)))
-              if ok: scores[u].append((aid,m))
-              print(' CAND',u,'ok',ok,'match',None if not m else tuple(str(x) for x in m[:6]))
-          print('HELDOUT_SUMMARY')
-          ranked=sorted(scores.items(),key=lambda kv:(len(kv[1]),-sum(float(x[1][0]) for x in kv[1])),reverse=True)
-          for u,hits in ranked:
-            print('WALLET',u,'heldout_matches',len(hits),'ids',[x[0] for x in hits],'costs',[str(x[1][0]) for x in hits])
+              if abs(t-ct)<=20000: close.append((t,px,z,cp,f))
+            if not close: return {'aid':aid,'ok':False,'reason':'no_close'}
+            close_best=min(close,key=lambda x:(abs(x[0]-ct),abs(x[1]/exitpx-1)))
+            names={'Open Long','Long > Long'} if direction=='LONG' else {'Open Short','Short > Short'}
+            selected=[]; total=D(0); notional=D(0)
+            for f in reversed(fs):
+              try: t=int(f['time']); px=D(str(f['px'])); z=D(str(f['sz'])); d=str(f.get('dir',''))
+              except Exception: continue
+              if t>=close_best[0] or d not in names: continue
+              selected.append((t,px,z,d)); total+=z; notional+=z*px
+              if total>=target*D('.90'): break
+            if total<=0: return {'aid':aid,'ok':False,'reason':'no_open'}
+            avg=notional/total; sr=abs(total/target-1); eb=abs(avg/entry-1)*D(10000)
+            cdt=abs(close_best[0]-ct); cpb=abs(close_best[1]/exitpx-1)*D(10000)
+            ok=sr<=D('.35') and eb<=D('30') and cdt<=20000 and cpb<=D('35')
+            return {'aid':aid,'ok':ok,'size_err':sr,'entry_bps':eb,'recon_size':total,'recon_entry':avg,
+                    'open_fills':len(selected),'close_dt_ms':cdt,'close_px_bps':cpb,'close_sz':close_best[2],
+                    'close_pnl':close_best[3],'first_open_ms':min(x[0] for x in selected)}
+          passed=[]
+          for row in trades:
+            r=reconstruct(row); print('EPISODE_RESULT',r)
+            if r['ok']: passed.append(r['aid'])
+          print('HELDOUT_EPISODE_SUMMARY','wallet',user,'passed',len(passed),'of',len(trades),'ids',passed)
           PY
