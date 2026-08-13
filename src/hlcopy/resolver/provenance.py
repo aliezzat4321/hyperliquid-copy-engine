@@ -1,10 +1,22 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceSnapshot:
+    data: bytes
+    sha256: str
+    size: int
+
+    @classmethod
+    def from_path(cls, path: Path) -> EvidenceSnapshot:
+        data = path.read_bytes()
+        return cls(data=data, sha256=sha256_bytes(data), size=len(data))
 
 
 def sha256_bytes(data: bytes) -> str:
