@@ -1,9 +1,9 @@
 [Unit]
-Description=Periodic Hyperliquid wallet research timer
+Description=Periodic Hyperliquid wallet research and policy refresh
 
 [Timer]
 OnBootSec=10min
-OnUnitActiveSec=6h
+OnUnitInactiveSec=1h
 RandomizedDelaySec=5min
 Persistent=true
 Unit=hyperliquid-wallet-research.service
