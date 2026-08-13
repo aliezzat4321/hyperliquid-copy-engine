@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 
 from hlcopy.resolver.matcher import select_anchor_trades
-from hlcopy.resolver.provenance import jsonable_config, sha256_file
+from hlcopy.resolver.provenance import EvidenceSnapshot, jsonable_config
 from hlcopy.resolver.reverse_index import (
     AnchorMatch,
     CandidateFingerprint,
@@ -17,12 +18,14 @@ from hlcopy.resolver.reverse_index import (
 from hlcopy.resolver.source_registry import ExternalSourceSpec
 from hlcopy.resolver.sqd_fills import EpisodeEvidence, aggregate_close_fills, signal_position_size
 from hlcopy.resolver.sqd_position_aware import (
+    LifecycleEpisodeEvidence,
     SqdFill,
     SqdHyperliquidFillsClient,
     match_episode,
+    reject_duplicate_lifecycle,
 )
 from hlcopy.shadow.registry import WalletRegistry, WalletSpec
-from hlcopy.signals.generic_csv import load_generic_closed_trades
+from hlcopy.signals.generic_csv import load_generic_closed_trades_bytes
 from hlcopy.signals.invo import CopySignal, load_invo_closed_trades
 
 D = Decimal
@@ -97,11 +100,18 @@ class HistoricalCandidateVerification:
         }
 
 
-def _source_signals(source: ExternalSourceSpec) -> tuple[CopySignal, ...]:
-    if source.adapter == "invo_closed_trades_csv":
-        result = load_invo_closed_trades(Path(source.evidence_path))
-    elif source.adapter == "generic_closed_trades_csv":
-        result = load_generic_closed_trades(Path(source.evidence_path))
+def _source_signals(
+    source: ExternalSourceSpec,
+    *,
+    snapshot: EvidenceSnapshot,
+) -> tuple[CopySignal, ...]:
+    if source.adapter == "generic_closed_trades_csv":
+        result = load_generic_closed_trades_bytes(snapshot.data)
+    elif source.adapter == "invo_closed_trades_csv":
+        with tempfile.TemporaryDirectory(prefix="hlcopy-evidence-") as temp_dir:
+            snapshot_path = Path(temp_dir) / "evidence.csv"
+            snapshot_path.write_bytes(snapshot.data)
+            result = load_invo_closed_trades(snapshot_path)
     else:
         raise ValueError(f"unsupported public trade resolver adapter: {source.adapter}")
     if result.rejected_rows:
@@ -116,10 +126,25 @@ def _episode_is_covered(
     *,
     coverage_start_ms: int,
     coverage_end_ms: int,
+    entry_margin_ms: int = 0,
+    close_margin_ms: int = 0,
 ) -> bool:
     return (
-        coverage_start_ms <= signal.opened_at_ms
-        and signal.closed_at_ms <= coverage_end_ms
+        signal.opened_at_ms - max(0, entry_margin_ms) >= coverage_start_ms
+        and signal.closed_at_ms + max(0, close_margin_ms) <= coverage_end_ms
+    )
+
+
+def _close_window_is_covered(
+    signal: CopySignal,
+    *,
+    coverage_start_ms: int,
+    coverage_end_ms: int,
+    window_ms: int,
+) -> bool:
+    return (
+        signal.closed_at_ms - window_ms >= coverage_start_ms
+        and signal.closed_at_ms + window_ms <= coverage_end_ms
     )
 
 
@@ -127,6 +152,12 @@ def _price_bps(left: Decimal, right: Decimal) -> Decimal:
     if left <= 0 or right <= 0:
         return D("Infinity")
     return abs(right / left - D("1")) * BPS
+
+
+def _fill_execution_id(fill: SqdFill) -> str:
+    if fill.tid:
+        return f"tid:{fill.tid}"
+    return f"oid:{fill.oid}:t:{fill.time_ms}:sz:{fill.sz}:px:{fill.px}"
 
 
 def _is_final_flatten(fill: SqdFill, *, direction: str) -> bool:
@@ -138,6 +169,52 @@ def _is_final_flatten(fill: SqdFill, *, direction: str) -> bool:
         return False
     tolerance = max(POSITION_EPSILON, abs(start_position) * D("0.000000001"))
     return abs(abs(start_position) - fill.sz) <= tolerance
+
+
+def _close_execution_id(
+    close: object,
+    fills: list[SqdFill],
+    *,
+    direction: str,
+) -> str:
+    user = str(getattr(close, "user"))
+    last_time_ms = int(getattr(close, "last_time_ms"))
+    final_flattens = [
+        fill
+        for fill in fills
+        if fill.user == user
+        and _is_final_flatten(fill, direction=direction)
+        and abs(fill.time_ms - last_time_ms) <= 2_500
+    ]
+    if final_flattens:
+        fill = min(final_flattens, key=lambda row: abs(row.time_ms - last_time_ms))
+        return f"final-flatten:{_fill_execution_id(fill)}"
+    return (
+        f"close:{user}:{getattr(close, 'coin')}:{direction}:"
+        f"{getattr(close, 'first_time_ms')}:{last_time_ms}:"
+        f"{getattr(close, 'size')}:{getattr(close, 'avg_price')}"
+    )
+
+
+def _dedupe_reused_execution_matches(
+    matches_by_anchor: dict[str, dict[str, AnchorMatch]],
+) -> dict[str, dict[str, AnchorMatch]]:
+    """One concrete SQD close/final-flatten may contribute only one anchor vote per wallet."""
+    rows: list[tuple[str, str, AnchorMatch]] = []
+    for signal_id, matches in matches_by_anchor.items():
+        rows.extend((signal_id, address, match) for address, match in matches.items())
+    rows.sort(key=lambda row: (row[2].quality, row[0]), reverse=True)
+    used: set[tuple[str, str]] = set()
+    output: dict[str, dict[str, AnchorMatch]] = {
+        signal_id: {} for signal_id in matches_by_anchor
+    }
+    for signal_id, address, match in rows:
+        identity = (address, match.trade_id)
+        if identity in used:
+            continue
+        used.add(identity)
+        output[signal_id][address] = match
+    return output
 
 
 def _public_trade_matches(
@@ -170,7 +247,7 @@ def _public_trade_matches(
                 end_ms=close.last_time_ms,
                 entry_price=signal.entry_price,
                 exit_price=close.avg_price,
-                trade_id=close.group_id,
+                trade_id=_close_execution_id(close, fills, direction=signal.direction),
                 raw={
                     "aggregated_close_size": str(close.size),
                     "fill_count": close.fill_count,
@@ -185,12 +262,6 @@ def _public_trade_matches(
         max_price_bps=max_price_bps,
     )
 
-    # An external avg_exit_price can span reductions from multiple orders over
-    # the whole position lifecycle. In that case the final flatten price/size
-    # may be far from the aggregate export and the strict close cluster above
-    # would incorrectly drop the correct wallet before historical verification.
-    # Keep observed final-flatten wallets as discovery-only fallbacks; the full
-    # lifecycle VWAP/size/entry is still required by held-out match_episode().
     for fill in fills:
         if not _is_final_flatten(fill, direction=signal.direction):
             continue
@@ -204,7 +275,7 @@ def _public_trade_matches(
         matches[fill.user] = AnchorMatch(
             signal_id=signal.signal_id,
             user=fill.user,
-            trade_id=f"final-flatten:{fill.tid or fill.oid}",
+            trade_id=f"final-flatten:{_fill_execution_id(fill)}",
             open_offset_ms=0,
             close_offset_ms=close_offset,
             offset_gap_ms=abs(close_offset),
@@ -223,16 +294,21 @@ async def discover_candidates(
 ) -> PublicTradeDiscoveryResult:
     coverage_start_ms = await client.coverage_start_ms()
     coverage_end_ms = await client.coverage_end_ms()
+    window_ms = max(1, config.window_seconds) * 1000
     eligible = tuple(
         signal
         for signal in signals
-        if coverage_start_ms <= signal.closed_at_ms <= coverage_end_ms
+        if _close_window_is_covered(
+            signal,
+            coverage_start_ms=coverage_start_ms,
+            coverage_end_ms=coverage_end_ms,
+            window_ms=window_ms,
+        )
     )
     if len(eligible) < 3:
         return PublicTradeDiscoveryResult((), (), coverage_start_ms, coverage_end_ms)
     anchors = select_anchor_trades(eligible, max_trades=max(3, config.anchor_trades))
     matches_by_anchor: dict[str, dict[str, AnchorMatch]] = {}
-    window_ms = max(1, config.window_seconds) * 1000
     for signal in anchors:
         fills = await client.fills_around(
             timestamp_ms=signal.closed_at_ms,
@@ -246,8 +322,9 @@ async def discover_candidates(
             max_price_bps=config.max_price_bps,
             max_size_ratio_error=config.max_size_ratio_error,
         )
+    unique_matches = _dedupe_reused_execution_matches(matches_by_anchor)
     return PublicTradeDiscoveryResult(
-        rank_candidates(matches_by_anchor, total_anchors=len(anchors)),
+        rank_candidates(unique_matches, total_anchors=len(anchors)),
         anchors,
         coverage_start_ms,
         coverage_end_ms,
@@ -280,6 +357,8 @@ async def verify_candidate_historically(
     config: PublicTradeDiscoveryConfig = DEFAULT_PUBLIC_TRADE_CONFIG,
 ) -> HistoricalVerification:
     coverage_end_ms = await client.coverage_end_ms()
+    entry_tolerance_ms = max(1, config.historical_entry_time_tolerance_ms)
+    close_tolerance_ms = max(0, config.historical_time_tolerance_ms)
     eligible = [
         signal
         for signal in signals
@@ -288,32 +367,51 @@ async def verify_candidate_historically(
             signal,
             coverage_start_ms=coverage_start_ms,
             coverage_end_ms=coverage_end_ms,
+            entry_margin_ms=entry_tolerance_ms,
+            close_margin_ms=close_tolerance_ms,
         )
     ]
     eligible.sort(key=lambda item: (item.closed_at_ms, item.signal_id), reverse=True)
     selected = eligible[: config.historical_verify_trades]
     evidence: list[EpisodeEvidence] = []
     matched_ids: list[str] = []
-    entry_tolerance_ms = max(1, config.historical_entry_time_tolerance_ms)
+    used_lifecycle_ids: set[str] = set()
     for signal in selected:
         fills = await client.fills_between_times(
-            start_ms=max(coverage_start_ms, signal.opened_at_ms - entry_tolerance_ms),
-            end_ms=min(
-                coverage_end_ms,
-                signal.closed_at_ms + config.historical_time_tolerance_ms,
-            ),
+            start_ms=signal.opened_at_ms - entry_tolerance_ms,
+            end_ms=signal.closed_at_ms + close_tolerance_ms,
             coin=signal.coin,
             user=address,
         )
         item = match_episode(
             signal,
             fills,
-            close_time_tolerance_ms=config.historical_time_tolerance_ms,
+            close_time_tolerance_ms=close_tolerance_ms,
             close_price_tolerance_bps=config.historical_price_tolerance_bps,
             max_size_ratio_error=config.historical_max_size_ratio_error,
             entry_time_tolerance_ms=entry_tolerance_ms,
             entry_price_tolerance_bps=config.historical_entry_price_tolerance_bps,
         )
+        if item.matched:
+            if not item.lifecycle_id:
+                item = LifecycleEpisodeEvidence(
+                    signal_id=item.signal_id,
+                    matched=False,
+                    close_time_error_ms=item.close_time_error_ms,
+                    close_price_bps=item.close_price_bps,
+                    close_size_ratio_error=item.close_size_ratio_error,
+                    entry_time_error_ms=item.entry_time_error_ms,
+                    entry_price_bps=item.entry_price_bps,
+                    entry_size_ratio_error=item.entry_size_ratio_error,
+                    reconstructed_entry=item.reconstructed_entry,
+                    reconstructed_size=item.reconstructed_size,
+                    lifecycle_id=None,
+                    rejection_reason="missing_lifecycle_identity",
+                )
+            elif item.lifecycle_id in used_lifecycle_ids:
+                item = reject_duplicate_lifecycle(item)
+            else:
+                used_lifecycle_ids.add(item.lifecycle_id)
         evidence.append(item)
         if item.matched:
             matched_ids.append(signal.signal_id)
@@ -402,10 +500,11 @@ async def resolve_source_public_trades(
     config: PublicTradeDiscoveryConfig = DEFAULT_PUBLIC_TRADE_CONFIG,
 ) -> dict[str, object]:
     del cache_dir
-    signals = _source_signals(source)
+    evidence_path = Path(source.evidence_path)
+    snapshot = EvidenceSnapshot.from_path(evidence_path)
+    signals = _source_signals(source, snapshot=snapshot)
     if len(signals) < 3:
         raise ValueError("insufficient external evidence")
-    evidence_path = Path(source.evidence_path)
 
     async with SqdHyperliquidFillsClient() as client:
         discovery = await discover_candidates(signals, client=client, config=config)
@@ -434,16 +533,18 @@ async def resolve_source_public_trades(
             signal,
             coverage_start_ms=discovery.coverage_start_ms,
             coverage_end_ms=discovery.coverage_end_ms,
+            entry_margin_ms=config.historical_entry_time_tolerance_ms,
+            close_margin_ms=config.historical_time_tolerance_ms,
         )
     ]
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / f"public_trade_resolution_{source.id}.json"
     report = {
-        "version": 7,
-        "resolver_rule_version": "sqd-fill-wallet-identity-v7",
+        "version": 8,
+        "resolver_rule_version": "sqd-fill-wallet-identity-v8",
         "source": source.to_dict(),
-        "input_sha256": sha256_file(evidence_path),
-        "input_bytes": evidence_path.stat().st_size,
+        "input_sha256": snapshot.sha256,
+        "input_bytes": snapshot.size,
         "effective_config": jsonable_config(config),
         "status": status,
         "verified_address": verified_address,
@@ -463,8 +564,12 @@ async def resolve_source_public_trades(
             "held_out_verification_required": True,
             "flat_to_open_boundary_required": True,
             "entry_time_verification_required": True,
-            "duplicate_episode_evidence_deduplicated": True,
+            "exact_duplicate_rows_removed": True,
+            "one_vote_per_sqd_execution_in_discovery": True,
+            "one_vote_per_sqd_lifecycle_in_verification": True,
             "full_lifecycle_exit_aggregation_required": True,
+            "complete_tolerance_windows_required_in_coverage": True,
+            "immutable_input_snapshot_required": True,
             "discovery_only_candidate_can_verify": False,
             "all_threshold_finalists_verified": True,
             "coverage_fail_closed": True,
