@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from decimal import Decimal
-from typing import Iterable
 
 D = Decimal
 ZERO = D("0")
@@ -56,7 +56,10 @@ class PathPoint:
 
     def to_dict(self) -> dict[str, object]:
         row = asdict(self)
-        return {key: str(value) if isinstance(value, Decimal) else value for key, value in row.items()}
+        return {
+            key: str(value) if isinstance(value, Decimal) else value
+            for key, value in row.items()
+        }
 
 
 @dataclass(frozen=True, slots=True)
