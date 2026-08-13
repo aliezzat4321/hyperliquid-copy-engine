@@ -20,6 +20,7 @@ def test_generic_loader_autodetects_bones_style_columns(tmp_path: Path) -> None:
 
     assert len(result.signals) == 2
     assert result.rejected_rows == ()
+    assert result.duplicate_rows == ()
     assert result.column_map["coin"] == "ticker"
     assert result.column_map["exit_price"] == "closing_price"
     assert result.signals[0].source == "generic_closed_trades_csv"
@@ -46,6 +47,42 @@ def test_generic_loader_accepts_explicit_position_side_header(tmp_path: Path) ->
     assert signal.direction == "LONG"
     assert str(signal.source_leverage) == "1"
     assert str(signal.allocation_fraction) == "1"
+
+
+def test_generic_loader_deduplicates_same_episode_without_trade_id(tmp_path: Path) -> None:
+    path = tmp_path / "duplicates.csv"
+    path.write_text(
+        "symbol,position_side,avg_entry_price,avg_exit_price,start_time,end_time\n"
+        "BTC,LONG,100,110,2026-08-01T10:00:00Z,2026-08-01T11:00:00Z\n"
+        "BTC,LONG,100,110,2026-08-01T10:00:00Z,2026-08-01T11:00:00Z\n"
+        "BTC,LONG,100,110,2026-08-01T10:00:00Z,2026-08-01T11:00:00Z\n",
+        encoding="utf-8",
+    )
+
+    result = load_generic_closed_trades(path)
+
+    assert len(result.signals) == 1
+    assert result.signals[0].signal_id == "row-2"
+    assert result.rejected_rows == ()
+    assert len(result.duplicate_rows) == 2
+    assert result.duplicate_rows[0]["duplicate_of_row"] == 2
+    assert result.duplicate_rows[1]["duplicate_of_row"] == 2
+
+
+def test_generic_loader_deduplicates_episode_even_with_different_row_ids(tmp_path: Path) -> None:
+    path = tmp_path / "duplicate_ids.csv"
+    path.write_text(
+        "id,symbol,position_side,avg_entry_price,avg_exit_price,start_time,end_time\n"
+        "a,BTC,LONG,100,110,2026-08-01T10:00:00Z,2026-08-01T11:00:00Z\n"
+        "b,BTC,LONG,100,110,2026-08-01T10:00:00Z,2026-08-01T11:00:00Z\n",
+        encoding="utf-8",
+    )
+
+    result = load_generic_closed_trades(path)
+
+    assert [signal.signal_id for signal in result.signals] == ["a"]
+    assert len(result.duplicate_rows) == 1
+    assert result.duplicate_rows[0]["signal_id"] == "b"
 
 
 def test_generic_loader_rejects_ambiguous_side_only_schema(tmp_path: Path) -> None:
