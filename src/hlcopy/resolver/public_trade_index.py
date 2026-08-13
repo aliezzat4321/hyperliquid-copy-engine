@@ -26,8 +26,10 @@ from hlcopy.resolver.sqd_position_aware import (
     LifecycleEpisodeEvidence,
     SqdFill,
     SqdHyperliquidFillsClient,
+    fill_execution_id,
     match_episode,
     reject_duplicate_lifecycle,
+    reject_lifecycle,
 )
 from hlcopy.shadow.registry import WalletRegistry, WalletSpec
 from hlcopy.signals.generic_csv import load_generic_closed_trades_bytes
@@ -37,6 +39,7 @@ D = Decimal
 BPS = D("10000")
 POSITION_EPSILON = D("0.000000000001")
 DEFAULT_MAX_SIZE_RATIO_ERROR = D("0.60")
+FINAL_FLATTEN_PREFIX = "final-flatten:"
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,12 +162,6 @@ def _price_bps(left: Decimal, right: Decimal) -> Decimal:
     return abs(right / left - D("1")) * BPS
 
 
-def _fill_execution_id(fill: SqdFill) -> str:
-    if fill.tid:
-        return f"tid:{fill.tid}"
-    return f"oid:{fill.oid}:t:{fill.time_ms}:sz:{fill.sz}:px:{fill.px}"
-
-
 def _is_final_flatten(fill: SqdFill, *, direction: str) -> bool:
     close_name = "close long" if direction == "LONG" else "close short"
     if fill.direction.lower() != close_name:
@@ -181,29 +178,40 @@ def _close_execution_id(
     fills: list[SqdFill],
     *,
     direction: str,
-) -> str:
-    user = close.user
-    last_time_ms = close.last_time_ms
+) -> str | None:
     final_flattens = [
         fill
         for fill in fills
-        if fill.user == user
+        if fill.user == close.user
         and _is_final_flatten(fill, direction=direction)
-        and abs(fill.time_ms - last_time_ms) <= 2_500
+        and abs(fill.time_ms - close.last_time_ms) <= 2_500
     ]
-    if final_flattens:
-        fill = min(final_flattens, key=lambda row: abs(row.time_ms - last_time_ms))
-        return f"final-flatten:{_fill_execution_id(fill)}"
-    return (
-        f"close:{user}:{close.coin}:{direction}:"
-        f"{close.first_time_ms}:{last_time_ms}:{close.size}:{close.avg_price}"
-    )
+    if not final_flattens:
+        return None
+    fill = min(final_flattens, key=lambda row: abs(row.time_ms - close.last_time_ms))
+    return f"{FINAL_FLATTEN_PREFIX}{fill_execution_id(fill)}"
+
+
+def _final_execution_id_from_trade_id(trade_id: str) -> str | None:
+    if not trade_id.startswith(FINAL_FLATTEN_PREFIX):
+        return None
+    execution_id = trade_id.removeprefix(FINAL_FLATTEN_PREFIX)
+    return execution_id or None
+
+
+def _candidate_discovery_final_execution_ids(
+    candidate: CandidateFingerprint,
+) -> set[str]:
+    return {
+        execution_id
+        for match in candidate.matches
+        if (execution_id := _final_execution_id_from_trade_id(match.trade_id)) is not None
+    }
 
 
 def _dedupe_reused_execution_matches(
     matches_by_anchor: dict[str, dict[str, AnchorMatch]],
 ) -> dict[str, dict[str, AnchorMatch]]:
-    """One concrete SQD close/final-flatten may contribute only one anchor vote per wallet."""
     rows: list[tuple[str, str, AnchorMatch]] = []
     for signal_id, matches in matches_by_anchor.items():
         rows.extend((signal_id, address, match) for address, match in matches.items())
@@ -213,7 +221,10 @@ def _dedupe_reused_execution_matches(
         signal_id: {} for signal_id in matches_by_anchor
     }
     for signal_id, address, match in rows:
-        identity = (address, match.trade_id)
+        execution_id = _final_execution_id_from_trade_id(match.trade_id)
+        if execution_id is None:
+            continue
+        identity = (address, execution_id)
         if identity in used:
             continue
         used.add(identity)
@@ -242,6 +253,9 @@ def _public_trade_matches(
             size_error = abs(close.size / target_size - D("1"))
             if size_error > max_size_ratio_error:
                 continue
+        trade_id = _close_execution_id(close, fills, direction=signal.direction)
+        if trade_id is None:
+            continue
         candidates.append(
             IndexedCompletedTrade(
                 user=close.user,
@@ -251,7 +265,7 @@ def _public_trade_matches(
                 end_ms=close.last_time_ms,
                 entry_price=signal.entry_price,
                 exit_price=close.avg_price,
-                trade_id=_close_execution_id(close, fills, direction=signal.direction),
+                trade_id=trade_id,
                 raw={
                     "aggregated_close_size": str(close.size),
                     "fill_count": close.fill_count,
@@ -279,7 +293,7 @@ def _public_trade_matches(
         matches[fill.user] = AnchorMatch(
             signal_id=signal.signal_id,
             user=fill.user,
-            trade_id=f"final-flatten:{_fill_execution_id(fill)}",
+            trade_id=f"{FINAL_FLATTEN_PREFIX}{fill_execution_id(fill)}",
             open_offset_ms=0,
             close_offset_ms=close_offset,
             offset_gap_ms=abs(close_offset),
@@ -356,10 +370,12 @@ async def verify_candidate_historically(
     address: str,
     signals: tuple[CopySignal, ...],
     excluded_signal_ids: set[str],
+    forbidden_final_execution_ids: set[str] | None = None,
     coverage_start_ms: int,
     client: SqdHyperliquidFillsClient,
     config: PublicTradeDiscoveryConfig = DEFAULT_PUBLIC_TRADE_CONFIG,
 ) -> HistoricalVerification:
+    forbidden = forbidden_final_execution_ids or set()
     coverage_end_ms = await client.coverage_end_ms()
     entry_tolerance_ms = max(1, config.historical_entry_time_tolerance_ms)
     close_tolerance_ms = max(0, config.historical_time_tolerance_ms)
@@ -397,21 +413,10 @@ async def verify_candidate_historically(
             entry_price_tolerance_bps=config.historical_entry_price_tolerance_bps,
         )
         if item.matched:
-            if not item.lifecycle_id:
-                item = LifecycleEpisodeEvidence(
-                    signal_id=item.signal_id,
-                    matched=False,
-                    close_time_error_ms=item.close_time_error_ms,
-                    close_price_bps=item.close_price_bps,
-                    close_size_ratio_error=item.close_size_ratio_error,
-                    entry_time_error_ms=item.entry_time_error_ms,
-                    entry_price_bps=item.entry_price_bps,
-                    entry_size_ratio_error=item.entry_size_ratio_error,
-                    reconstructed_entry=item.reconstructed_entry,
-                    reconstructed_size=item.reconstructed_size,
-                    lifecycle_id=None,
-                    rejection_reason="missing_lifecycle_identity",
-                )
+            if not item.lifecycle_id or not item.final_execution_id:
+                item = reject_lifecycle(item, reason="missing_lifecycle_identity")
+            elif item.final_execution_id in forbidden:
+                item = reject_lifecycle(item, reason="discovery_lifecycle_reuse")
             elif item.lifecycle_id in used_lifecycle_ids:
                 item = reject_duplicate_lifecycle(item)
             else:
@@ -446,10 +451,14 @@ async def verify_candidate_shortlist(
     ]
     results: list[HistoricalCandidateVerification] = []
     for candidate in shortlist:
+        discovery_execution_ids = _candidate_discovery_final_execution_ids(candidate)
+        if len(discovery_execution_ids) != candidate.matched_anchors:
+            continue
         verification = await verify_candidate_historically(
             address=candidate.address,
             signals=signals,
             excluded_signal_ids=excluded_signal_ids,
+            forbidden_final_execution_ids=discovery_execution_ids,
             coverage_start_ms=coverage_start_ms,
             client=client,
             config=config,
@@ -508,7 +517,7 @@ async def resolve_source_public_trades(
     snapshot = EvidenceSnapshot.from_path(evidence_path)
     signals = _source_signals(source, snapshot=snapshot)
     if len(signals) < 3:
-        raise ValueError("insufficient external evidence")
+        raise ValueError("insufficient independent external evidence")
 
     async with SqdHyperliquidFillsClient() as client:
         discovery = await discover_candidates(signals, client=client, config=config)
@@ -544,8 +553,8 @@ async def resolve_source_public_trades(
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / f"public_trade_resolution_{source.id}.json"
     report = {
-        "version": 8,
-        "resolver_rule_version": "sqd-fill-wallet-identity-v8",
+        "version": 9,
+        "resolver_rule_version": "sqd-fill-wallet-identity-v9",
         "source": source.to_dict(),
         "input_sha256": snapshot.sha256,
         "input_bytes": snapshot.size,
@@ -566,9 +575,11 @@ async def resolve_source_public_trades(
             "auto_validation_promotion": False,
             "auto_trading_promotion": False,
             "held_out_verification_required": True,
+            "discovery_held_out_execution_disjointness_required": True,
             "flat_to_open_boundary_required": True,
+            "exact_boundary_sequence_replay_required": True,
             "entry_time_verification_required": True,
-            "exact_duplicate_rows_removed": True,
+            "overlapping_source_positions_collapsed": True,
             "one_vote_per_sqd_execution_in_discovery": True,
             "one_vote_per_sqd_lifecycle_in_verification": True,
             "full_lifecycle_exit_aggregation_required": True,
