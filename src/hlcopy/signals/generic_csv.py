@@ -201,39 +201,38 @@ def _collapse_overlapping_source_evidence(
     collapsed: list[dict[str, Any]] = []
     for coin_rows in by_coin.values():
         count = len(coin_rows)
-        parent = list(range(count))
-
-        def find(index: int) -> int:
-            while parent[index] != index:
-                parent[index] = parent[parent[index]]
-                index = parent[index]
-            return index
-
-        def union(left_index: int, right_index: int) -> None:
-            left_root = find(left_index)
-            right_root = find(right_index)
-            if left_root != right_root:
-                parent[right_root] = left_root
-
+        neighbors: list[set[int]] = [set() for _ in range(count)]
         for left_index in range(count):
             left = coin_rows[left_index][1]
             for right_index in range(left_index + 1, count):
                 right = coin_rows[right_index][1]
-                if _intervals_overlap(left, right) or _near_equivalent_source_episode(
+                related = _intervals_overlap(left, right) or _near_equivalent_source_episode(
                     left,
                     right,
                     entry_time_tolerance_ms=entry_time_tolerance_ms,
                     close_time_tolerance_ms=close_time_tolerance_ms,
                     entry_price_tolerance_bps=entry_price_tolerance_bps,
                     exit_price_tolerance_bps=exit_price_tolerance_bps,
-                ):
-                    union(left_index, right_index)
+                )
+                if related:
+                    neighbors[left_index].add(right_index)
+                    neighbors[right_index].add(left_index)
 
-        components: dict[int, list[tuple[int, CopySignal]]] = {}
-        for index, row in enumerate(coin_rows):
-            components.setdefault(find(index), []).append(row)
+        visited: set[int] = set()
+        for start_index in range(count):
+            if start_index in visited:
+                continue
+            stack = [start_index]
+            component_indexes: list[int] = []
+            while stack:
+                index = stack.pop()
+                if index in visited:
+                    continue
+                visited.add(index)
+                component_indexes.append(index)
+                stack.extend(neighbors[index] - visited)
 
-        for component in components.values():
+            component = [coin_rows[index] for index in component_indexes]
             representative_row, representative = min(component, key=_representative_key)
             representatives.append(representative)
             for row_number, signal in component:
