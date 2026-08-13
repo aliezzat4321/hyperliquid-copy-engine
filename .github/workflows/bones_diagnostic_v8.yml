@@ -1,0 +1,37 @@
+name: bones-diagnostic-v8
+
+on:
+  push:
+    branches: [agent/bones-acceptance-v8-temp]
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e .
+      - name: Run identifier and print compact evidence
+        run: |
+          python -m hlcopy.resolver.identify_cli tmp/bones_acceptance_v8.csv --output-dir /tmp/bones-resolution
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path('/tmp/bones-resolution/wallet_identification_bones_acceptance_v8.json')
+          r = json.loads(p.read_text())
+          print('STATUS', r['status'])
+          print('WALLET', r['wallet'])
+          print('CANDIDATE', r['candidate'])
+          print('DISCOVERY_ANCHORS', r['discovery_anchor_ids'])
+          print('UNCOVERED', r['uncovered_signal_ids'])
+          print('DUPLICATE_ROWS', r['duplicate_rows'])
+          rows = sorted(r['historical_candidate_verifications'], key=lambda x: (x['verification']['matched'], x['verification']['ratio']), reverse=True)
+          for row in rows[:12]:
+              v = row['verification']
+              print('FINALIST', row['address'], 'disc', row['discovery_matches'], 'held', v['matched'], '/', v['attempted'], 'ratio', v['ratio'])
+              for e in v['evidence']:
+                  if e['matched'] or e.get('rejection_reason') == 'duplicate_lifecycle_reuse':
+                      print(' EVID', e['signal_id'], 'matched', e['matched'], 'life', e.get('lifecycle_id'), 'reason', e.get('rejection_reason'), 'entry_ms', e.get('entry_time_error_ms'), 'entry_bps', e.get('entry_price_bps'), 'close_ms', e.get('close_time_error_ms'), 'close_bps', e.get('close_price_bps'))
+          PY
