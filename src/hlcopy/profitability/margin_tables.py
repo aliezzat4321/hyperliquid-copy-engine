@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Any, Iterable
+from typing import Any
 
 D = Decimal
 ZERO = D("0")
@@ -102,12 +103,13 @@ def _tier_rows(raw: object) -> tuple[MarginTier, ...]:
 
 
 def _extract_meta_objects(payload: object) -> list[dict[str, Any]]:
-    """Find perp metadata objects in meta/perpDexStatus/allPerpMetas responses."""
     found: list[dict[str, Any]] = []
 
     def visit(value: object) -> None:
         if isinstance(value, dict):
-            if isinstance(value.get("universe"), list) and isinstance(value.get("marginTables"), list):
+            has_universe = isinstance(value.get("universe"), list)
+            has_tables = isinstance(value.get("marginTables"), list)
+            if has_universe and has_tables:
                 found.append(value)
                 return
             for child in value.values():
@@ -126,13 +128,6 @@ def parse_margin_metadata(
     fetched_at_ns: int,
     dex: str = "",
 ) -> MarginMetadataSnapshot:
-    """Parse an official Hyperliquid perp metadata response into exact margin tiers.
-
-    The parser is intentionally strict. Assets without an unambiguous table id or
-    leverage are omitted rather than guessed. For table ids below 50 Hyperliquid defines
-    a single tier whose max leverage equals the id; for explicit marginTables we derive
-    maintenance deductions using the exchange's continuous tier formula.
-    """
     metas = _extract_meta_objects(payload)
     if not metas:
         raise ValueError("no perp metadata object with universe and marginTables found")
@@ -197,7 +192,11 @@ def parse_margin_metadata(
     if not tables_out:
         raise ValueError("no usable coin margin tables found")
     tables_out.sort(key=lambda table: table.coin)
-    return MarginMetadataSnapshot(fetched_at_ns=fetched_at_ns, tables=tuple(tables_out), dex=dex)
+    return MarginMetadataSnapshot(
+        fetched_at_ns=fetched_at_ns,
+        tables=tuple(tables_out),
+        dex=dex,
+    )
 
 
 def snapshot_table_at(
