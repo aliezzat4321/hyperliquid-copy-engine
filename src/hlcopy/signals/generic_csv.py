@@ -52,6 +52,7 @@ class GenericTradeImportResult:
     rejected_rows: tuple[dict[str, Any], ...]
     column_map: dict[str, str]
     duplicate_rows: tuple[dict[str, Any], ...] = ()
+    overlapping_rows: tuple[dict[str, Any], ...] = ()
 
 
 def _lookup_header(headers: list[str], aliases: tuple[str, ...]) -> str | None:
@@ -131,7 +132,6 @@ def _bool(value: str) -> bool:
 
 
 def _episode_fingerprint(signal: CopySignal) -> tuple[object, ...]:
-    """Remove exact export duplicates; real lifecycle reuse is gated downstream."""
     return (
         signal.coin.upper(),
         signal.direction,
@@ -140,6 +140,69 @@ def _episode_fingerprint(signal: CopySignal) -> tuple[object, ...]:
         signal.entry_price,
         signal.exit_price,
     )
+
+
+def _representative_key(row: tuple[int, CopySignal]) -> tuple[int, int, int, str]:
+    row_number, signal = row
+    duration = signal.closed_at_ms - signal.opened_at_ms
+    return (-duration, signal.opened_at_ms, row_number, signal.signal_id)
+
+
+def _collapse_overlapping_source_evidence(
+    rows: list[tuple[int, CopySignal]],
+) -> tuple[list[CopySignal], list[dict[str, Any]]]:
+    """One Hyperliquid coin has one net position, so overlapping source rows are one unit."""
+    by_coin: dict[str, list[tuple[int, CopySignal]]] = {}
+    for row in rows:
+        by_coin.setdefault(row[1].coin.upper(), []).append(row)
+
+    representatives: list[CopySignal] = []
+    collapsed: list[dict[str, Any]] = []
+    for coin_rows in by_coin.values():
+        ordered = sorted(
+            coin_rows,
+            key=lambda row: (
+                row[1].opened_at_ms,
+                row[1].closed_at_ms,
+                row[0],
+            ),
+        )
+        cluster: list[tuple[int, CopySignal]] = []
+        cluster_end = -1
+
+        def flush() -> None:
+            nonlocal cluster, cluster_end
+            if not cluster:
+                return
+            representative_row, representative = min(cluster, key=_representative_key)
+            representatives.append(representative)
+            for row_number, signal in cluster:
+                if row_number == representative_row:
+                    continue
+                collapsed.append(
+                    {
+                        "row": row_number,
+                        "signal_id": signal.signal_id,
+                        "representative_row": representative_row,
+                        "representative_signal_id": representative.signal_id,
+                        "coin": signal.coin,
+                        "reason": "overlapping_source_position_evidence",
+                    }
+                )
+            cluster = []
+            cluster_end = -1
+
+        for row in ordered:
+            signal = row[1]
+            if cluster and signal.opened_at_ms >= cluster_end:
+                flush()
+            cluster.append(row)
+            cluster_end = max(cluster_end, signal.closed_at_ms)
+        flush()
+
+    representatives.sort(key=lambda item: (item.opened_at_ms, item.signal_id))
+    collapsed.sort(key=lambda item: int(item["row"]))
+    return representatives, collapsed
 
 
 def normalize_generic_row(
@@ -206,7 +269,7 @@ def _load_generic_closed_trades_text(text: str) -> GenericTradeImportResult:
     if not headers:
         raise GenericTradeCsvError("CSV has no header row")
     mapping = detect_column_map(headers)
-    signals: list[CopySignal] = []
+    parsed: list[tuple[int, CopySignal]] = []
     rejected: list[dict[str, Any]] = []
     duplicates: list[dict[str, Any]] = []
     first_row_by_episode: dict[tuple[object, ...], int] = {}
@@ -226,16 +289,17 @@ def _load_generic_closed_trades_text(text: str) -> GenericTradeImportResult:
                 )
                 continue
             first_row_by_episode[fingerprint] = row_number
-            signals.append(signal)
+            parsed.append((row_number, signal))
         except GenericTradeCsvError as exc:
             rejected.append({"row": row_number, "error": str(exc)})
 
-    signals.sort(key=lambda item: (item.opened_at_ms, item.signal_id))
+    signals, overlapping = _collapse_overlapping_source_evidence(parsed)
     return GenericTradeImportResult(
         signals=tuple(signals),
         rejected_rows=tuple(rejected),
         column_map=mapping,
         duplicate_rows=tuple(duplicates),
+        overlapping_rows=tuple(overlapping),
     )
 
 
