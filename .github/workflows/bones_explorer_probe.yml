@@ -12,71 +12,115 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install requests
-      - name: Reconstruct four held-out Bones episodes for leader
+      - name: Falsify Bones identity across 40 unseen multi-asset trades
         run: |
           python - <<'PY'
           import time
+          from collections import defaultdict
           from datetime import datetime
           from decimal import Decimal
           import requests
 
           D=Decimal; INFO='https://api.hyperliquid.xyz/info'; s=requests.Session()
-          user='0x565590f4d2b00b567a564f56b13f898392aef180'
+          wallets=[
+            '0x565590f4d2b00b567a564f56b13f898392aef180',
+            '0x02b07e1ee50dd45b7d8a5fde4648e3eb9fb3ff70',
+            '0xe87b977b4ae6ec5c9b22c6f6bee105da22f73a9e',
+            '0x63bc5c38ff82708383d2d880f326a5aac41244cc',
+            '0x3df29dbe4435d438766d020662cb63b6911778f2',
+          ]
           trades=[
-            ('h13','2026-08-05T05:24:33.796Z','2026-08-05T06:16:34.362Z','SHORT','64380.0','64266.0','0.0104027252'),
-            ('h14','2026-08-05T02:04:11.600Z','2026-08-05T02:18:20.752Z','SHORT','64467.0','64304.0','0.01'),
-            ('h15','2026-08-04T23:29:22.613Z','2026-08-05T01:57:57.071Z','LONG','64157.0','64291.0','0.0094750713'),
-            ('h16','2026-08-04T18:10:41.416Z','2026-08-04T23:27:57.378Z','SHORT','64299.31981009927','64184.0','0.011'),
+            ('v1', 'NEAR', '2026-06-01T22:34:11.351000Z', '2026-06-01T22:38:50.659000Z', 'SHORT', '2.647', '2.6197', '1.0022304466489556'),
+            ('v2', 'NEAR', '2026-06-04T09:23:36.282000Z', '2026-06-04T09:24:27.757000Z', 'LONG', '2.3118', '2.3318', '1.9948563708018456'),
+            ('v3', 'NEAR', '2026-06-04T12:05:10.639000Z', '2026-06-04T12:21:40.072000Z', 'SHORT', '2.2774', '2.2494', '1.999736508904012'),
+            ('v4', 'NEAR', '2026-06-06T15:46:09.750000Z', '2026-06-06T15:50:07.557000Z', 'SHORT', '2.3186', '2.3048', '1.9980839092124564'),
+            ('v5', 'NEAR', '2026-06-08T15:43:51.346000Z', '2026-06-08T15:53:07.821000Z', 'LONG', '2.3373', '2.363', '1.9987367886621312'),
+            ('v6', 'NEAR', '2026-06-10T11:04:25.135000Z', '2026-06-10T11:14:48.434000Z', 'SHORT', '2.4399', '2.4185', '1.998034345907619'),
+            ('v7', 'NEAR', '2026-06-12T07:07:49.458000Z', '2026-06-12T07:38:39.847000Z', 'LONG', '2.2578', '2.2795', '1.9984064133223452'),
+            ('v8', 'NEAR', '2026-06-13T07:59:38.219000Z', '2026-06-13T08:24:28.473000Z', 'SHORT', '2.2163', '2.1963', '1.9981947037846861'),
+            ('v9', 'NEAR', '2026-06-16T10:50:10.186000Z', '2026-06-16T11:10:50.221000Z', 'LONG', '2.1467', '2.1763', '1.9983845058459863'),
+            ('v10', 'NEAR', '2026-06-20T10:45:18.640000Z', '2026-06-20T10:48:55.568000Z', 'LONG', '2.1751', '2.2035', '1.9982713431068353'),
+            ('v11', 'NEAR', '2026-06-23T15:15:42.511000Z', '2026-06-23T15:29:27.668000Z', 'SHORT', '2.1753', '2.1471', '1.9981543692583787'),
+            ('v12', 'NEAR', '2026-06-26T11:20:59.378000Z', '2026-06-26T11:32:28.353000Z', 'LONG', '2.1609', '2.1847', '1.997268267101215'),
+            ('v13', 'NEAR', '2026-06-28T11:30:45.648000Z', '2026-06-28T11:34:22.181000Z', 'SHORT', '2.058', '2.0437', '1.9995431545189507'),
+            ('v14', 'BTC', '2026-07-01T13:42:43.922000Z', '2026-07-01T14:02:37.118000Z', 'LONG', '62108.0', '62289.0', '0.01'),
+            ('v15', 'BTC', '2026-07-02T10:35:50.232000Z', '2026-07-02T10:44:42.688000Z', 'SHORT', '62717.0', '62578.0', '0.01'),
+            ('v16', 'BTC', '2026-07-03T06:11:44.911000Z', '2026-07-03T06:21:13.417000Z', 'SHORT', '62588.0', '62461.0', '0.01'),
+            ('v17', 'BTC', '2026-07-04T07:59:54.924000Z', '2026-07-04T08:12:35.453000Z', 'LONG', '62654.0', '62748.0', '0.01'),
+            ('v18', 'BTC', '2026-07-05T05:57:29.825000Z', '2026-07-05T06:18:12.541000Z', 'SHORT', '62843.0', '62728.0', '0.01'),
+            ('v19', 'BTC', '2026-07-06T00:45:52.519000Z', '2026-07-06T01:15:34.292000Z', 'LONG', '62547.0', '62635.0', '0.01'),
+            ('v20', 'BTC', '2026-07-07T09:38:58.635000Z', '2026-07-07T09:55:13.337000Z', 'SHORT', '62997.0', '62862.0', '0.01'),
+            ('v21', 'BTC', '2026-07-08T14:21:24.974000Z', '2026-07-08T14:29:41.541000Z', 'LONG', '63191.0', '63328.0', '0.01'),
+            ('v22', 'BTC', '2026-07-09T15:27:05.094000Z', '2026-07-09T15:41:41.576000Z', 'SHORT', '63079.0', '62972.0', '0.01'),
+            ('v23', 'BTC', '2026-07-11T05:07:57.458000Z', '2026-07-11T05:21:18.347000Z', 'LONG', '63771.0', '63848.0', '0.01'),
+            ('v24', 'BTC', '2026-07-12T07:52:16.360000Z', '2026-07-12T08:02:10.682000Z', 'SHORT', '63854.0', '63776.0', '0.01'),
+            ('v25', 'BTC', '2026-07-13T09:30:31.886000Z', '2026-07-13T09:41:44.709000Z', 'LONG', '64018.0', '64121.0', '0.01'),
+            ('v26', 'BTC', '2026-07-14T09:11:34.806000Z', '2026-07-14T09:19:11.935000Z', 'SHORT', '64194.0', '64095.0', '0.01'),
+            ('v27', 'BTC', '2026-07-15T10:35:57.176000Z', '2026-07-15T10:45:04.510000Z', 'LONG', '64254.0', '64345.0', '0.01'),
+            ('v28', 'ETH', '2026-07-17T13:08:02.720000Z', '2026-07-17T13:23:38.906000Z', 'LONG', '3255.0', '3278.6', '0.178'),
+            ('v29', 'BTC', '2026-07-19T11:44:43.676000Z', '2026-07-19T11:52:12.311000Z', 'LONG', '64821.0', '64915.0', '0.01'),
+            ('v30', 'BTC', '2026-07-21T07:28:09.733000Z', '2026-07-21T07:35:47.594000Z', 'SHORT', '64892.0', '64786.0', '0.01'),
+            ('v31', 'BTC', '2026-07-23T09:29:59.008000Z', '2026-07-23T09:42:21.208000Z', 'LONG', '65042.0', '65119.0', '0.01'),
+            ('v32', 'BTC', '2026-07-24T16:03:30.013000Z', '2026-07-24T16:16:41.580000Z', 'SHORT', '65221.0', '65102.0', '0.01'),
+            ('v33', 'BTC', '2026-07-26T11:10:54.264000Z', '2026-07-26T11:22:27.960000Z', 'LONG', '65319.0', '65407.0', '0.01'),
+            ('v34', 'DOGE', '2026-07-27T11:32:50.818000Z', '2026-07-27T11:45:32.430000Z', 'LONG', '0.17398', '0.17513', '23.75'),
+            ('v35', 'BTC', '2026-07-28T10:45:50.817000Z', '2026-07-28T11:02:13.426000Z', 'SHORT', '65511.0', '65407.0', '0.01'),
+            ('v36', 'BTC', '2026-07-29T10:17:43.733000Z', '2026-07-29T10:27:36.272000Z', 'LONG', '65483.0', '65565.0', '0.01'),
+            ('v37', 'BTC', '2026-07-30T10:07:35.369000Z', '2026-07-30T10:22:26.702000Z', 'SHORT', '65626.0', '65488.0', '0.01'),
+            ('v38', 'BTC', '2026-07-31T13:00:46.932000Z', '2026-07-31T13:13:58.557000Z', 'LONG', '65492.0', '65580.0', '0.01'),
+            ('v39', 'ETH', '2026-08-01T18:01:07.090000Z', '2026-08-01T18:18:34.884000Z', 'SHORT', '3276.8', '3257.4', '0.178'),
+            ('v40', 'BTC', '2026-08-02T18:29:08.594000Z', '2026-08-02T18:41:42.138000Z', 'LONG', '63120.0', '63209.0', '0.01'),
           ]
           def ts(x): return int(datetime.fromisoformat(x.replace('Z','+00:00')).timestamp()*1000)
           def post(payload):
             for i in range(7):
               r=s.post(INFO,json=payload,timeout=20)
-              if r.status_code in (429,500,502,503,504): time.sleep(.5+i); continue
+              if r.status_code in (429,500,502,503,504):
+                time.sleep(.35+i*.6); continue
               r.raise_for_status(); return r.json()
             return []
-          def fills(start,end):
-            out=[]; cur=start; step=20*60*1000
-            while cur<=end:
-              stop=min(end,cur+step-1)
-              out.extend(post({'type':'userFillsByTime','user':user,'startTime':cur,'endTime':stop,'aggregateByTime':False}))
-              cur=stop+1
-            uniq={}
-            for f in out:
-              k=(f.get('tid'),f.get('oid'),f.get('time'),f.get('px'),f.get('sz'),f.get('dir'))
-              uniq[k]=f
-            return sorted(uniq.values(),key=lambda f:int(f.get('time',0)))
-          def reconstruct(row):
-            aid,opened,closed,direction,entrys,exits,szs=row
-            ot,ct=ts(opened),ts(closed); entry=D(entrys); exitpx=D(exits); target=D(szs)
-            fs=[f for f in fills(ot-60*60*1000,ct+20000) if str(f.get('coin','')).upper()=='BTC']
-            close_name='Close Long' if direction=='LONG' else 'Close Short'
-            close=[]
-            for f in fs:
-              if str(f.get('dir','')).lower()!=close_name.lower(): continue
-              try: t=int(f['time']); px=D(str(f['px'])); z=D(str(f['sz'])); cp=D(str(f.get('closedPnl') or 0))
+          def get(user,center):
+            return post({'type':'userFillsByTime','user':user,'startTime':center-25000,'endTime':center+25000,'aggregateByTime':False})
+          def match(rows,coin,center,direction,entry,exitpx,target):
+            close_dir='Close Long' if direction=='LONG' else 'Close Short'
+            groups=defaultdict(lambda:{'sz':D(0),'n':D(0),'pnl':D(0),'times':[]})
+            for f in rows:
+              if str(f.get('coin','')).upper()!=coin.upper() or str(f.get('dir','')).lower()!=close_dir.lower(): continue
+              try: z=D(str(f['sz'])); px=D(str(f['px'])); cp=D(str(f.get('closedPnl') or 0)); t=int(f['time'])
               except Exception: continue
-              if abs(t-ct)<=20000: close.append((t,px,z,cp,f))
-            if not close: return {'aid':aid,'ok':False,'reason':'no_close'}
-            close_best=min(close,key=lambda x:(abs(x[0]-ct),abs(x[1]/exitpx-1)))
-            names={'Open Long','Long > Long'} if direction=='LONG' else {'Open Short','Short > Short'}
-            selected=[]; total=D(0); notional=D(0)
-            for f in reversed(fs):
-              try: t=int(f['time']); px=D(str(f['px'])); z=D(str(f['sz'])); d=str(f.get('dir',''))
-              except Exception: continue
-              if t>=close_best[0] or d not in names: continue
-              selected.append((t,px,z,d)); total+=z; notional+=z*px
-              if total>=target*D('.90'): break
-            if total<=0: return {'aid':aid,'ok':False,'reason':'no_open'}
-            avg=notional/total; sr=abs(total/target-1); eb=abs(avg/entry-1)*D(10000)
-            cdt=abs(close_best[0]-ct); cpb=abs(close_best[1]/exitpx-1)*D(10000)
-            ok=sr<=D('.35') and eb<=D('30') and cdt<=20000 and cpb<=D('35')
-            return {'aid':aid,'ok':ok,'size_err':sr,'entry_bps':eb,'recon_size':total,'recon_entry':avg,
-                    'open_fills':len(selected),'close_dt_ms':cdt,'close_px_bps':cpb,'close_sz':close_best[2],
-                    'close_pnl':close_best[3],'first_open_ms':min(x[0] for x in selected)}
-          passed=[]
-          for row in trades:
-            r=reconstruct(row); print('EPISODE_RESULT',r)
-            if r['ok']: passed.append(r['aid'])
-          print('HELDOUT_EPISODE_SUMMARY','wallet',user,'passed',len(passed),'of',len(trades),'ids',passed)
+              if abs(t-center)>25000: continue
+              for key in (str(f.get('oid')),'*'):
+                g=groups[key]; g['sz']+=z; g['n']+=z*px; g['pnl']+=cp; g['times'].append(t)
+            pnl0=(exitpx-entry)*target*(D(1) if direction=='LONG' else D(-1))
+            best=None
+            for key,g in groups.items():
+              if g['sz']<=0: continue
+              v=g['n']/g['sz']; dt=min(abs(t-center) for t in g['times'])
+              sr=abs(g['sz']/target-1); pb=abs(v/exitpx-1)*D(10000)
+              pr=abs(g['pnl']/pnl0-1) if pnl0 and g['pnl'] else D(999)
+              cost=D(dt)/D(2000)+sr*D(8)+pb/D(5)+(pr*D(4) if pr<999 else D(8))
+              rec=(cost,dt,sr,pb,pr,key,g['sz'],v,g['pnl'])
+              if best is None or rec<best: best=rec
+            if best is None: return None
+            ok=best[1]<=25000 and best[2]<=D('.45') and best[3]<=D('35') and (best[4]<=D('1.0') or best[4]==D(999))
+            return (ok,best)
+
+          scores={u:[] for u in wallets}
+          anydata={u:0 for u in wallets}
+          for aid,coin,opened,closed,direction,entrys,exits,szs in trades:
+            center=ts(closed); entry=D(entrys); exitpx=D(exits); target=D(szs)
+            print('TRADE',aid,coin,direction,closed,'target',exitpx,target)
+            for u in wallets:
+              rows=get(u,center)
+              if rows: anydata[u]+=1
+              m=match(rows,coin,center,direction,entry,exitpx,target)
+              ok=bool(m and m[0])
+              if ok: scores[u].append((aid,coin,m[1]))
+              print(' CAND',u,'rows',len(rows),'ok',ok,'match',None if not m else tuple(str(x) for x in m[1][:6]))
+          print('FALSIFICATION_SUMMARY')
+          ranked=sorted(scores.items(),key=lambda kv:(len(kv[1]),-sum(float(x[2][0]) for x in kv[1])),reverse=True)
+          for u,hits in ranked:
+            print('WALLET',u,'matches',len(hits),'of',len(trades),'api_nonempty_windows',anydata[u],
+                  'ids',[x[0] for x in hits],'coins',[x[1] for x in hits],
+                  'costs',[str(x[2][0]) for x in hits])
           PY
