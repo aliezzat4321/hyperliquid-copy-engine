@@ -1,0 +1,9 @@
+[Unit]
+Description=Hyperliquid prospective margin metadata snapshot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=REAL_TRADING_ENABLED=NO
+ExecStart=python -m hlcopy.profitability.margin_snapshot_cli
