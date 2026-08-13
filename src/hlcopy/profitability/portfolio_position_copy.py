@@ -22,6 +22,18 @@ BPS = D("10000")
 
 
 @dataclass(frozen=True, slots=True)
+class FollowerStateEvent:
+    coin: str
+    execution_ts_ms: int
+    source_tid: int
+    action: str
+    qty_after: Decimal
+    avg_entry_after: Decimal | None
+    realized_net_pnl_cumulative_usd: Decimal
+    entry_fee_remaining_usd: Decimal
+
+
+@dataclass(frozen=True, slots=True)
 class PortfolioCopySimulation:
     lane: str
     wallet_id: str
@@ -38,6 +50,7 @@ class PortfolioCopySimulation:
     total_fees_usd: Decimal
     open_positions: int
     peak_concurrent_gross_notional_usd: Decimal
+    state_events: tuple[FollowerStateEvent, ...] = ()
 
 
 def _allocate_entry_fee(
@@ -65,39 +78,26 @@ def simulate_copy_with_portfolio_capital(
     max_slippage_bps: Decimal,
     max_book_forward_ms: int,
 ) -> PortfolioCopySimulation:
-    """Run the position-copy model while tracking causal portfolio gross exposure.
+    """Run causal follower execution while tracking fees, exposure and state history.
 
     Entry fees are paid when an increase executes and carried as a per-coin fee pool.
     Reductions allocate that pool pro-rata to the quantity realized; a full close/flip
-    allocates the entire remainder. Therefore every ``RealizedSlice.net_pnl_usd`` is
-    true round-trip realized PnL after both allocated entry fees and exit fees.
+    allocates the entire remainder. Every realized slice therefore contains round-trip
+    PnL after allocated entry and exit fees.
 
-    ``notional_usd`` is a per-coin cap, not wallet capital. The peak below is marked
-    only at causal wallet-event books and remains a research capital proxy. Continuous
-    MTM, funding, maintenance margin and liquidation paths remain separate blockers.
+    ``state_events`` records the follower position immediately after each successful
+    simulated execution at the execution book timestamp. It is the source of truth for
+    continuous mark-to-market replay. A failed reduction or flip close never mutates
+    follower state.
     """
-
     ordered = sorted(
         events,
         key=lambda x: (x.exchange_ts_ms, x.wallet_address, x.coin, x.tid),
     )
     if not ordered:
         return PortfolioCopySimulation(
-            "UNKNOWN",
-            "",
-            "",
-            scenario.name,
-            notional_usd,
-            0,
-            0,
-            0,
-            0,
-            (),
-            ZERO,
-            ZERO,
-            ZERO,
-            0,
-            ZERO,
+            "UNKNOWN", "", "", scenario.name, notional_usd,
+            0, 0, 0, 0, (), ZERO, ZERO, ZERO, 0, ZERO, (),
         )
 
     lane = ordered[0].lane
@@ -106,11 +106,13 @@ def simulate_copy_with_portfolio_capital(
     states: dict[str, _FollowerState] = {}
     causal_marks: dict[str, Decimal] = {}
     entry_fee_remaining: dict[str, Decimal] = {}
+    state_events: list[FollowerStateEvent] = []
     realized: list[RealizedSlice] = []
     executable = 0
     missed = 0
     copied_increases = 0
     total_fees = ZERO
+    realized_net_cumulative = ZERO
     peak_gross = ZERO
     fee_rate = taker_fee_bps / BPS
 
@@ -141,6 +143,26 @@ def simulate_copy_with_portfolio_capital(
         state.avg_entry = None
         state.scale = None
         entry_fee_remaining[coin] = ZERO
+
+    def record_state(
+        *,
+        event: CopyFillEvent,
+        book_ts_ms: int,
+        action: str,
+        state: _FollowerState,
+    ) -> None:
+        state_events.append(
+            FollowerStateEvent(
+                coin=event.coin,
+                execution_ts_ms=book_ts_ms,
+                source_tid=event.tid,
+                action=action,
+                qty_after=state.qty,
+                avg_entry_after=state.avg_entry,
+                realized_net_pnl_cumulative_usd=realized_net_cumulative,
+                entry_fee_remaining_usd=entry_fee_remaining.get(event.coin, ZERO),
+            )
+        )
 
     for event in ordered:
         state = states.setdefault(event.coin, _FollowerState())
@@ -198,6 +220,7 @@ def simulate_copy_with_portfolio_capital(
             state.scale = scale
             causal_marks[event.coin] = px
             add_entry_fee(event.coin, signed_qty, px)
+            record_state(event=event, book_ts_ms=book.exchange_ts_ms, action="INCREASE", state=state)
             update_peak()
             continue
 
@@ -230,6 +253,7 @@ def simulate_copy_with_portfolio_capital(
             )
             entry_fee_remaining[event.coin] = entry_left
             net = gross - exit_fee - entry_alloc
+            realized_net_cumulative += net
             total_fees += exit_fee
             realized.append(
                 RealizedSlice(
@@ -252,12 +276,17 @@ def simulate_copy_with_portfolio_capital(
             )
             state.qty += signed_close
             causal_marks[event.coin] = px
+            action = "CLOSE" if after == ZERO else "REDUCE"
             if abs(state.qty) <= D("1e-18") or after == ZERO:
                 reset_position(event.coin, state)
+            record_state(event=event, book_ts_ms=book.exchange_ts_ms, action=action, state=state)
             update_peak()
             continue
 
         if flip:
+            # A flip is modeled as close-then-open. If the close cannot execute, the
+            # follower remains in its existing position and no opposite-side open is
+            # attempted. This mirrors a safe live sequencer and avoids synthetic flips.
             if state.qty != ZERO and state.avg_entry is not None:
                 close_abs = abs(state.qty)
                 signed_close = -state.qty
@@ -266,39 +295,48 @@ def simulate_copy_with_portfolio_capital(
                     signed_qty=signed_close,
                     max_slippage_bps=max_slippage_bps,
                 )
-                if px is not None:
-                    executable += 1
-                    direction = "LONG" if state.qty > ZERO else "SHORT"
-                    sign = ONE if state.qty > ZERO else -ONE
-                    gross = sign * (px - state.avg_entry) * close_abs
-                    exit_fee = close_abs * px * fee_rate
-                    entry_alloc = entry_fee_remaining[event.coin]
-                    net = gross - exit_fee - entry_alloc
-                    total_fees += exit_fee
-                    realized.append(
-                        RealizedSlice(
-                            lane=lane,
-                            wallet_id=wallet_id,
-                            wallet_address=wallet_address,
-                            coin=event.coin,
-                            direction=direction,
-                            exchange_ts_ms=event.exchange_ts_ms,
-                            source_tid=event.tid,
-                            feed_ms=feed_ms,
-                            action="FLIP_CLOSE",
-                            qty=close_abs,
-                            execution_price=px,
-                            gross_pnl_usd=gross,
-                            fee_usd=exit_fee,
-                            net_pnl_usd=net,
-                            entry_fee_usd_allocated=entry_alloc,
-                        )
-                    )
-                    causal_marks[event.coin] = px
-                else:
+                if px is None:
                     missed += 1
-            reset_position(event.coin, state)
-            update_peak()
+                    continue
+                executable += 1
+                direction = "LONG" if state.qty > ZERO else "SHORT"
+                sign = ONE if state.qty > ZERO else -ONE
+                gross = sign * (px - state.avg_entry) * close_abs
+                exit_fee = close_abs * px * fee_rate
+                entry_alloc = entry_fee_remaining[event.coin]
+                net = gross - exit_fee - entry_alloc
+                realized_net_cumulative += net
+                total_fees += exit_fee
+                realized.append(
+                    RealizedSlice(
+                        lane=lane,
+                        wallet_id=wallet_id,
+                        wallet_address=wallet_address,
+                        coin=event.coin,
+                        direction=direction,
+                        exchange_ts_ms=event.exchange_ts_ms,
+                        source_tid=event.tid,
+                        feed_ms=feed_ms,
+                        action="FLIP_CLOSE",
+                        qty=close_abs,
+                        execution_price=px,
+                        gross_pnl_usd=gross,
+                        fee_usd=exit_fee,
+                        net_pnl_usd=net,
+                        entry_fee_usd_allocated=entry_alloc,
+                    )
+                )
+                causal_marks[event.coin] = px
+                reset_position(event.coin, state)
+                record_state(
+                    event=event,
+                    book_ts_ms=book.exchange_ts_ms,
+                    action="FLIP_CLOSE",
+                    state=state,
+                )
+                update_peak()
+            else:
+                reset_position(event.coin, state)
 
             synthetic = CopyFillEvent(
                 lane=event.lane,
@@ -336,6 +374,12 @@ def simulate_copy_with_portfolio_capital(
                 state.scale = scale
                 causal_marks[event.coin] = px
                 add_entry_fee(event.coin, signed_qty, px)
+                record_state(
+                    event=event,
+                    book_ts_ms=book.exchange_ts_ms,
+                    action="FLIP_OPEN",
+                    state=state,
+                )
                 update_peak()
             elif signed_qty:
                 missed += 1
@@ -358,4 +402,5 @@ def simulate_copy_with_portfolio_capital(
         total_fees_usd=total_fees,
         open_positions=sum(state.qty != ZERO for state in states.values()),
         peak_concurrent_gross_notional_usd=peak_gross,
+        state_events=tuple(state_events),
     )
