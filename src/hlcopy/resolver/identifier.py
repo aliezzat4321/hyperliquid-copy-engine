@@ -7,11 +7,10 @@ from pathlib import Path
 
 from hlcopy.resolver.public_trade_index import (
     DEFAULT_PUBLIC_TRADE_CONFIG,
-    HistoricalVerification,
     PublicTradeDiscoveryConfig,
-    candidate_is_unique,
     discover_candidates,
-    verify_candidate_historically,
+    select_historical_winner,
+    verify_candidate_shortlist,
 )
 from hlcopy.resolver.sqd_fills import SqdHyperliquidFillsClient
 from hlcopy.signals.generic_csv import GenericTradeImportResult, load_generic_closed_trades
@@ -79,44 +78,46 @@ async def identify_wallet_from_csv(
             f"{len(imported.rejected_rows)} rejected"
         )
 
-    historical: HistoricalVerification | None = None
     async with SqdHyperliquidFillsClient() as sqd:
         discovery = await discover_candidates(signals, client=sqd, config=config)
-        ranked = discovery.ranked
-        best = ranked[0] if ranked else None
-        unique = candidate_is_unique(ranked, min_score_gap=config.min_runner_up_score_gap)
-        if best is not None and best.matched_anchors >= config.min_discovery_matches and unique:
-            historical = await verify_candidate_historically(
-                address=best.address,
-                signals=signals,
-                excluded_signal_ids={signal.signal_id for signal in discovery.anchors},
-                coverage_start_ms=discovery.coverage_start_ms,
-                client=sqd,
-                config=config,
-            )
+        historical_results = await verify_candidate_shortlist(
+            ranked=discovery.ranked,
+            signals=signals,
+            excluded_signal_ids={signal.signal_id for signal in discovery.anchors},
+            coverage_start_ms=discovery.coverage_start_ms,
+            client=sqd,
+            config=config,
+        )
+        winner = select_historical_winner(
+            historical_results,
+            min_matches=config.min_historical_matches,
+            min_ratio=config.min_historical_ratio,
+            min_match_gap=config.min_historical_winner_match_gap,
+        )
 
-    best = discovery.ranked[0] if discovery.ranked else None
-    status = "UNRESOLVED"
-    wallet: str | None = None
-    candidate = best.address if best else None
-    if historical is not None and (
-        historical.matched >= config.min_historical_matches
-        and historical.ratio >= config.min_historical_ratio
-    ):
-        status = "VERIFIED"
-        wallet = candidate
-
-    historical_matches = historical.matched if historical else 0
-    historical_attempted = historical.attempted if historical else 0
+    discovery_best = discovery.ranked[0] if discovery.ranked else None
+    winner_discovery = next(
+        (
+            item
+            for item in discovery.ranked
+            if winner is not None and item.address == winner.address
+        ),
+        None,
+    )
+    evidence_candidate = winner_discovery or discovery_best
+    wallet = winner.address if winner else None
+    status = "VERIFIED" if wallet else "UNRESOLVED"
+    candidate = wallet or (discovery_best.address if discovery_best else None)
+    historical_matches = winner.verification.matched if winner else 0
+    historical_attempted = winner.verification.attempted if winner else 0
+    discovery_matches = evidence_candidate.matched_anchors if evidence_candidate else 0
+    candidate_unique = winner is not None
     confidence = _confidence(
-        discovery_matches=best.matched_anchors if best else 0,
+        discovery_matches=discovery_matches,
         discovery_anchors=len(discovery.anchors),
         historical_matches=historical_matches,
         historical_attempted=historical_attempted,
-        candidate_unique=candidate_is_unique(
-            discovery.ranked,
-            min_score_gap=config.min_runner_up_score_gap,
-        ),
+        candidate_unique=candidate_unique,
     )
 
     report_path: Path | None = None
@@ -124,8 +125,8 @@ async def identify_wallet_from_csv(
         output_dir.mkdir(parents=True, exist_ok=True)
         report_path = output_dir / f"wallet_identification_{evidence_path.stem}.json"
         payload = {
-            "version": 2,
-            "resolver_rule_version": "generic-sqd-fill-wallet-identity-v2",
+            "version": 3,
+            "resolver_rule_version": "generic-sqd-fill-wallet-identity-v3",
             "input_file": str(evidence_path),
             "detected_columns": imported.column_map,
             "accepted_trades": len(signals),
@@ -135,20 +136,25 @@ async def identify_wallet_from_csv(
             "status": status,
             "wallet": wallet,
             "candidate": candidate,
-            "candidate_unique": candidate_is_unique(
-                discovery.ranked,
-                min_score_gap=config.min_runner_up_score_gap,
-            ),
+            "candidate_unique": candidate_unique,
             "confidence": str(confidence),
-            "best_candidate": best.to_dict() if best else None,
+            "best_discovery_candidate": (
+                discovery_best.to_dict() if discovery_best else None
+            ),
+            "winning_discovery_candidate": (
+                winner_discovery.to_dict() if winner_discovery else None
+            ),
             "ranked_candidates": [item.to_dict() for item in discovery.ranked[:25]],
-            "historical_verification": historical.to_dict() if historical else None,
+            "historical_candidate_verifications": [
+                item.to_dict() for item in historical_results
+            ],
             "verification_source": "SQD finalized Hyperliquid fills tape",
             "safety": {
                 "auto_validation_promotion": False,
                 "auto_trading_promotion": False,
                 "unverified_candidate_exposed_as_wallet": False,
                 "held_out_verification_required": True,
+                "discovery_only_candidate_can_verify": False,
             },
         }
         report_path.write_text(
@@ -163,16 +169,17 @@ async def identify_wallet_from_csv(
         confidence=confidence,
         input_trades=len(signals),
         rejected_rows=len(imported.rejected_rows),
-        discovery_matches=best.matched_anchors if best else 0,
+        discovery_matches=discovery_matches,
         discovery_anchors=len(discovery.anchors),
-        candidate_unique=candidate_is_unique(
-            discovery.ranked,
-            min_score_gap=config.min_runner_up_score_gap,
-        ),
+        candidate_unique=candidate_unique,
         historical_matches=historical_matches,
         historical_attempted=historical_attempted,
         verification_source="sqd_finalized_fills",
-        median_clock_offset_ms=best.median_clock_offset_ms if best else None,
-        median_price_bps=best.median_price_bps if best else None,
+        median_clock_offset_ms=(
+            evidence_candidate.median_clock_offset_ms if evidence_candidate else None
+        ),
+        median_price_bps=(
+            evidence_candidate.median_price_bps if evidence_candidate else None
+        ),
         report_path=str(report_path) if report_path else None,
     )
