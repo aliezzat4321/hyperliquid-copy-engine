@@ -1,5 +1,5 @@
 [Unit]
-Description=Hyperliquid point-in-time wallet research
+Description=Hyperliquid point-in-time wallet research and shadow-policy publisher
 After=network-online.target
 Wants=network-online.target
 OnSuccess=hyperliquid-validation-cohort.service
@@ -13,6 +13,8 @@ ExecStart=/usr/bin/flock --wait 1800 /run/hyperliquid-rest-research.lock \
   /root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.research.cli \
   --registry /mnt/HC_Volume_106576526/hyperliquid/shadow/wallets.json \
   --ledger /mnt/HC_Volume_106576526/hyperliquid/research/candidate_observations.jsonl \
+  --attribution /mnt/HC_Volume_106576526/hyperliquid/profitability/trade_attribution.json \
+  --policy-store /mnt/HC_Volume_106576526/hyperliquid/shadow/selective_policies.json \
   --max-candidates 100 \
   --max-publish 50 \
   --min-composite-score 0 \
