@@ -64,7 +64,10 @@ def _rule_key(rule: dict[str, object]) -> tuple[str, str]:
 
 
 def _canonical_rules(rules: list[dict[str, object]]) -> list[dict[str, object]]:
-    return sorted(rules, key=lambda row: (_rule_key(row), str(row.get("max_notional_usd") or "")))
+    return sorted(
+        rules,
+        key=lambda row: (_rule_key(row), str(row.get("max_notional_usd") or "")),
+    )
 
 
 def _fingerprint(rules: list[dict[str, object]]) -> str:
@@ -81,7 +84,9 @@ def _load_store(path: Path) -> dict[str, Any]:
     return payload
 
 
-def _existing_rules(store: dict[str, Any]) -> dict[tuple[str, str], dict[str, object]]:
+def _existing_rules(
+    store: dict[str, Any],
+) -> dict[tuple[str, str], dict[str, object]]:
     policies = store.get("policies") or []
     if not policies:
         return {}
@@ -91,7 +96,11 @@ def _existing_rules(store: dict[str, Any]) -> dict[tuple[str, str], dict[str, ob
         return {}
     out: dict[tuple[str, str], dict[str, object]] = {}
     for raw in rows:
-        if not isinstance(raw, dict) or raw.get("wallet_address") is None or raw.get("coin") is None:
+        if (
+            not isinstance(raw, dict)
+            or raw.get("wallet_address") is None
+            or raw.get("coin") is None
+        ):
             continue
         rule = dict(raw)
         out[_rule_key(rule)] = rule
@@ -122,9 +131,12 @@ def _candidate_coin_rules(
         ]
         if not evidenced:
             continue
-        # Do not promote a coin hypothesis when the same wallet/coin already has
-        # materially negative evidence in another direction/action at adequate size.
-        if any(_decimal(row.get("robust_return_bps")) <= config.negative_block_bps for row in evidenced):
+        # A coin hypothesis must not hide a materially negative direction/action.
+        conflicted = any(
+            _decimal(row.get("robust_return_bps")) <= config.negative_block_bps
+            for row in evidenced
+        )
+        if conflicted:
             continue
         positive = [
             row
@@ -179,9 +191,10 @@ def publish_policy_from_attribution(
     *,
     attribution_path: Path,
     policy_store_path: Path,
-    config: PolicyPublishConfig = PolicyPublishConfig(),
+    config: PolicyPublishConfig | None = None,
     now_ns: int | None = None,
 ) -> PolicyPublishResult:
+    config = config or PolicyPublishConfig()
     attribution = json.loads(attribution_path.read_text(encoding="utf-8"))
     if attribution.get("real_trading") is not False:
         raise ValueError("attribution must be research-only")
@@ -210,7 +223,15 @@ def publish_policy_from_attribution(
     rules = _canonical_rules(list(cumulative.values()))
     added = len(cumulative) - before
     if not rules:
-        return PolicyPublishResult(False, None, 0, 0, training_end_ns, None, "NO_QUALIFYING_RULES")
+        return PolicyPublishResult(
+            False,
+            None,
+            0,
+            0,
+            training_end_ns,
+            None,
+            "NO_QUALIFYING_RULES",
+        )
 
     latest = (store.get("policies") or [])[-1] if store.get("policies") else None
     fingerprint = _fingerprint(rules)
