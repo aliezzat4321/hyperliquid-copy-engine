@@ -6,6 +6,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from hlcopy.resolver.matcher import select_anchor_trades
+from hlcopy.resolver.provenance import jsonable_config, sha256_file
 from hlcopy.resolver.reverse_index import (
     AnchorMatch,
     CandidateFingerprint,
@@ -14,13 +15,11 @@ from hlcopy.resolver.reverse_index import (
     rank_candidates,
 )
 from hlcopy.resolver.source_registry import ExternalSourceSpec
-from hlcopy.resolver.sqd_fills import (
-    EpisodeEvidence,
+from hlcopy.resolver.sqd_fills import EpisodeEvidence, aggregate_close_fills, signal_position_size
+from hlcopy.resolver.sqd_position_aware import (
     SqdFill,
     SqdHyperliquidFillsClient,
-    aggregate_close_fills,
     match_episode,
-    signal_position_size,
 )
 from hlcopy.shadow.registry import WalletRegistry, WalletSpec
 from hlcopy.signals.generic_csv import load_generic_closed_trades
@@ -38,12 +37,8 @@ class PublicTradeDiscoveryConfig:
     max_size_ratio_error: Decimal = DEFAULT_MAX_SIZE_RATIO_ERROR
     min_discovery_matches: int = 3
     min_runner_up_score_gap: Decimal = D("15")
-    # Retained for config compatibility only. Correctness requires every
-    # threshold-reaching finalist to be verified before uniqueness is claimed.
     max_candidates_to_verify: int = 6
     historical_verify_trades: int = 12
-    # Retained for config compatibility; the entry-time gate below now bounds
-    # the pre-entry query instead of an unconstrained multi-hour lookback.
     historical_lookback_hours: int = 6
     historical_time_tolerance_ms: int = 25_000
     historical_price_tolerance_bps: Decimal = D("35")
@@ -103,19 +98,15 @@ class HistoricalCandidateVerification:
 def _source_signals(source: ExternalSourceSpec) -> tuple[CopySignal, ...]:
     if source.adapter == "invo_closed_trades_csv":
         result = load_invo_closed_trades(Path(source.evidence_path))
-        rejected = result.rejected_rows
-        signals = result.signals
     elif source.adapter == "generic_closed_trades_csv":
         result = load_generic_closed_trades(Path(source.evidence_path))
-        rejected = result.rejected_rows
-        signals = result.signals
     else:
         raise ValueError(f"unsupported public trade resolver adapter: {source.adapter}")
-    if rejected:
+    if result.rejected_rows:
         raise ValueError(
-            f"external evidence contains {len(rejected)} malformed rows; fail closed"
+            f"external evidence contains {len(result.rejected_rows)} malformed rows; fail closed"
         )
-    return signals
+    return result.signals
 
 
 def _episode_is_covered(
@@ -207,9 +198,8 @@ async def discover_candidates(
             max_price_bps=config.max_price_bps,
             max_size_ratio_error=config.max_size_ratio_error,
         )
-    ranked = rank_candidates(matches_by_anchor, total_anchors=len(anchors))
     return PublicTradeDiscoveryResult(
-        ranked,
+        rank_candidates(matches_by_anchor, total_anchors=len(anchors)),
         anchors,
         coverage_start_ms,
         coverage_end_ms,
@@ -226,9 +216,10 @@ def candidate_is_unique(
     if len(ranked) == 1:
         return True
     best, runner_up = ranked[0], ranked[1]
-    if best.matched_anchors <= runner_up.matched_anchors:
-        return False
-    return best.score - runner_up.score >= min_score_gap
+    return (
+        best.matched_anchors > runner_up.matched_anchors
+        and best.score - runner_up.score >= min_score_gap
+    )
 
 
 async def verify_candidate_historically(
@@ -257,16 +248,12 @@ async def verify_candidate_historically(
     matched_ids: list[str] = []
     entry_tolerance_ms = max(1, config.historical_entry_time_tolerance_ms)
     for signal in selected:
-        start_ms = max(coverage_start_ms, signal.opened_at_ms - entry_tolerance_ms)
-        end_ms = min(
-            coverage_end_ms,
-            signal.closed_at_ms + config.historical_time_tolerance_ms,
-        )
-        if end_ms < start_ms:
-            continue
         fills = await client.fills_between_times(
-            start_ms=start_ms,
-            end_ms=end_ms,
+            start_ms=max(coverage_start_ms, signal.opened_at_ms - entry_tolerance_ms),
+            end_ms=min(
+                coverage_end_ms,
+                signal.closed_at_ms + config.historical_time_tolerance_ms,
+            ),
             coin=signal.coin,
             user=address,
         )
@@ -284,11 +271,10 @@ async def verify_candidate_historically(
             matched_ids.append(signal.signal_id)
     attempted = len(evidence)
     matched = len(matched_ids)
-    ratio = D(matched) / D(attempted) if attempted else D("0")
     return HistoricalVerification(
         attempted=attempted,
         matched=matched,
-        ratio=ratio,
+        ratio=D(matched) / D(attempted) if attempted else D("0"),
         matched_signal_ids=tuple(matched_ids),
         evidence=tuple(evidence),
     )
@@ -350,10 +336,7 @@ def select_historical_winner(
     if not results:
         return None
     best = results[0]
-    if (
-        best.verification.matched < min_matches
-        or best.verification.ratio < min_ratio
-    ):
+    if best.verification.matched < min_matches or best.verification.ratio < min_ratio:
         return None
     if len(results) > 1:
         runner_up = results[1]
@@ -374,6 +357,7 @@ async def resolve_source_public_trades(
     signals = _source_signals(source)
     if len(signals) < 3:
         raise ValueError("insufficient external evidence")
+    evidence_path = Path(source.evidence_path)
 
     async with SqdHyperliquidFillsClient() as client:
         discovery = await discover_candidates(signals, client=client, config=config)
@@ -407,9 +391,12 @@ async def resolve_source_public_trades(
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / f"public_trade_resolution_{source.id}.json"
     report = {
-        "version": 5,
-        "resolver_rule_version": "sqd-fill-wallet-identity-v5",
+        "version": 6,
+        "resolver_rule_version": "sqd-fill-wallet-identity-v6",
         "source": source.to_dict(),
+        "input_sha256": sha256_file(evidence_path),
+        "input_bytes": evidence_path.stat().st_size,
+        "effective_config": jsonable_config(config),
         "status": status,
         "verified_address": verified_address,
         "candidate_unique": winner is not None,
@@ -418,9 +405,7 @@ async def resolve_source_public_trades(
         "uncovered_signal_ids": uncovered_signal_ids,
         "discovery_anchor_ids": [signal.signal_id for signal in discovery.anchors],
         "best_discovery_candidate": discovery_best.to_dict() if discovery_best else None,
-        "historical_candidate_verifications": [
-            item.to_dict() for item in historical_results
-        ],
+        "historical_candidate_verifications": [item.to_dict() for item in historical_results],
         "ranked_candidates": [item.to_dict() for item in discovery.ranked[:25]],
         "discovery_source": "SQD finalized Hyperliquid fills tape",
         "cost_model": "public SQD Portal endpoint; no requester-pays archive dependency",
@@ -428,6 +413,7 @@ async def resolve_source_public_trades(
             "auto_validation_promotion": False,
             "auto_trading_promotion": False,
             "held_out_verification_required": True,
+            "flat_to_open_boundary_required": True,
             "entry_time_verification_required": True,
             "discovery_only_candidate_can_verify": False,
             "all_threshold_finalists_verified": True,
