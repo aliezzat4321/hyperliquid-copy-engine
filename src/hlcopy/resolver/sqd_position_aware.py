@@ -7,9 +7,11 @@ from typing import Any
 from hlcopy.market.symbols import canonical_coin, wire_coin
 from hlcopy.resolver.sqd_fills import (
     EpisodeEvidence,
-    SqdHyperliquidFillsClient as BaseSqdHyperliquidFillsClient,
     aggregate_close_fills,
     signal_position_size,
+)
+from hlcopy.resolver.sqd_fills import (
+    SqdHyperliquidFillsClient as BaseSqdHyperliquidFillsClient,
 )
 
 D = Decimal
@@ -206,10 +208,6 @@ def match_episode(
         open_name, add_name, reduce_name = "open short", "short > short", "close short"
         opposite_open_name, flip_name = "open long", "short > long"
 
-    # The identity gate is anchored to an observed flat -> open transition.
-    # startPosition is the actual position immediately before this fill. A later
-    # same-direction add has a non-zero startPosition and can never become the
-    # episode boundary merely because it is closer to the exported opened_at.
     boundaries = [
         fill
         for fill in fills
