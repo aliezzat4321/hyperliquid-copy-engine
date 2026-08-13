@@ -253,8 +253,14 @@ def _match_from_boundary(
         average_entry = current_entry_notional / current_size
         close_size += fill.sz
         close_notional += fill.sz * fill.px
-        close_first_ms = fill.time_ms if close_first_ms is None else min(close_first_ms, fill.time_ms)
-        close_last_ms = fill.time_ms if close_last_ms is None else max(close_last_ms, fill.time_ms)
+        close_first_ms = (
+            fill.time_ms
+            if close_first_ms is None
+            else min(close_first_ms, fill.time_ms)
+        )
+        close_last_ms = (
+            fill.time_ms if close_last_ms is None else max(close_last_ms, fill.time_ms)
+        )
         current_size = max(D("0"), current_size - fill.sz)
         current_entry_notional = average_entry * current_size
 
