@@ -268,10 +268,14 @@ def match_episode(
         open_name = "open long"
         add_name = "long > long"
         reduce_name = "close long"
+        opposite_open_name = "open short"
+        flip_name = "long > short"
     else:
         open_name = "open short"
         add_name = "short > short"
         reduce_name = "close short"
+        opposite_open_name = "open long"
+        flip_name = "short > long"
 
     seed_options = [
         fill
@@ -299,8 +303,8 @@ def match_episode(
         key=lambda fill: (abs(fill.time_ms - signal.opened_at_ms), fill.time_ms, fill.tid),
     )
     entry_time_error = abs(seed.time_ms - signal.opened_at_ms)
-    seed_group = {
-        id(fill)
+    seed_group = [
+        fill
         for fill in fills
         if fill.direction.lower() == open_name
         and fill.time_ms < close.first_time_ms
@@ -313,7 +317,9 @@ def match_episode(
                 and abs(fill.time_ms - seed.time_ms) <= 2_500
             )
         )
-    }
+    ]
+    seed_group_ids = {id(fill) for fill in seed_group}
+    episode_start_ms = min((fill.time_ms for fill in seed_group), default=seed.time_ms)
 
     total = D("0")
     notional = D("0")
@@ -322,17 +328,21 @@ def match_episode(
         (
             fill
             for fill in fills
-            if seed.time_ms <= fill.time_ms < close.first_time_ms
+            if episode_start_ms <= fill.time_ms < close.first_time_ms
         ),
         key=lambda fill: (fill.time_ms, fill.tid),
     )
     for fill in rows:
         text = fill.direction.lower()
-        if id(fill) in seed_group or text == add_name:
+        # Hyperliquid can emit repeated same-direction Open Long/Short fills for
+        # multiple orders that build one continuous position. Treat them as adds
+        # until the position actually flattens or flips; do not infer a reset
+        # merely because the OID changed.
+        if id(fill) in seed_group_ids or text in {open_name, add_name}:
             total += fill.sz
             notional += fill.sz * fill.px
             continue
-        if text == open_name:
+        if text in {opposite_open_name, flip_name}:
             episode_ended_early = True
             break
         if text == reduce_name and total > 0:
