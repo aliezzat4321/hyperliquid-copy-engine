@@ -43,7 +43,7 @@ class PublicTradeDiscoveryConfig:
     historical_lookback_hours: int = 6
     historical_time_tolerance_ms: int = 25_000
     historical_price_tolerance_bps: Decimal = D("35")
-    historical_entry_price_tolerance_bps: Decimal = D("35")
+    historical_entry_price_tolerance_bps: Decimal = D("15")
     historical_max_size_ratio_error: Decimal = D("0.45")
     min_historical_matches: int = 3
     min_historical_ratio: Decimal = D("0.20")
