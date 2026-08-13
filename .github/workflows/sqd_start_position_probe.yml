@@ -1,0 +1,55 @@
+name: sqd-start-position-probe
+
+on:
+  push:
+    branches: [agent/sqd-start-position-probe]
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e .
+      - name: Probe startPosition
+        run: |
+          python - <<'PY'
+          import asyncio, json
+          from datetime import datetime
+          from hlcopy.resolver.sqd_fills import SqdHyperliquidFillsClient
+
+          TARGET='0x565590f4d2b00b567a564f56b13f898392aef180'
+          ts=int(datetime.fromisoformat('2026-08-04T23:29:22.613+00:00').timestamp()*1000)
+
+          async def main():
+              async with SqdHyperliquidFillsClient() as c:
+                  center=await c.locate_block(ts)
+                  payload={
+                      'type':'hyperliquidFills',
+                      'fromBlock':center-1200,
+                      'toBlock':center+1200,
+                      'fields':{
+                          'block':{'number':True,'timestamp':True},
+                          'fill':{
+                              'user':True,'coin':True,'px':True,'sz':True,'side':True,
+                              'dir':True,'time':True,'oid':True,'closedPnl':True,'tid':True,
+                              'startPosition':True,
+                          },
+                      },
+                      'fills':[{'coin':['BTC'],'user':[TARGET]}],
+                  }
+                  rows=await c._stream(payload)
+                  found=[]
+                  for block in rows:
+                      for f in block.get('fills',[]):
+                          if abs(int(f.get('time',0))-ts) <= 120000:
+                              found.append(f)
+                  print('FOUND', len(found))
+                  for f in found:
+                      print(json.dumps(f, sort_keys=True))
+                  assert found
+                  assert all('startPosition' in f for f in found)
+          asyncio.run(main())
+          PY
