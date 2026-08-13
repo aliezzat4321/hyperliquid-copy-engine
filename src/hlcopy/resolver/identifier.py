@@ -123,9 +123,8 @@ async def identify_wallet_from_csv(
         signal.signal_id
         for signal in signals
         if not (
-            discovery.coverage_start_ms
-            <= signal.closed_at_ms
-            <= discovery.coverage_end_ms
+            discovery.coverage_start_ms <= signal.opened_at_ms
+            and signal.closed_at_ms <= discovery.coverage_end_ms
         )
     ]
 
@@ -134,8 +133,8 @@ async def identify_wallet_from_csv(
         output_dir.mkdir(parents=True, exist_ok=True)
         report_path = output_dir / f"wallet_identification_{evidence_path.stem}.json"
         payload = {
-            "version": 4,
-            "resolver_rule_version": "generic-sqd-fill-wallet-identity-v4",
+            "version": 5,
+            "resolver_rule_version": "generic-sqd-fill-wallet-identity-v5",
             "input_file": str(evidence_path),
             "detected_columns": imported.column_map,
             "accepted_trades": len(signals),
@@ -165,6 +164,7 @@ async def identify_wallet_from_csv(
                 "auto_trading_promotion": False,
                 "unverified_candidate_exposed_as_wallet": False,
                 "held_out_verification_required": True,
+                "entry_time_verification_required": True,
                 "discovery_only_candidate_can_verify": False,
                 "all_threshold_finalists_verified": True,
                 "coverage_fail_closed": True,
