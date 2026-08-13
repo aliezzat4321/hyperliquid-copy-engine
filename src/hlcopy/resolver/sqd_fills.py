@@ -83,6 +83,7 @@ class EpisodeEvidence:
     close_time_error_ms: int | None
     close_price_bps: Decimal | None
     close_size_ratio_error: Decimal | None
+    entry_time_error_ms: int | None
     entry_price_bps: Decimal | None
     entry_size_ratio_error: Decimal | None
     reconstructed_entry: Decimal | None
@@ -101,6 +102,7 @@ class EpisodeEvidence:
                 if self.close_size_ratio_error is not None
                 else None
             ),
+            "entry_time_error_ms": self.entry_time_error_ms,
             "entry_price_bps": (
                 str(self.entry_price_bps) if self.entry_price_bps is not None else None
             ),
@@ -205,6 +207,21 @@ def aggregate_close_fills(
     return tuple(output)
 
 
+def _empty_episode(signal_id: str) -> EpisodeEvidence:
+    return EpisodeEvidence(
+        signal_id=signal_id,
+        matched=False,
+        close_time_error_ms=None,
+        close_price_bps=None,
+        close_size_ratio_error=None,
+        entry_time_error_ms=None,
+        entry_price_bps=None,
+        entry_size_ratio_error=None,
+        reconstructed_entry=None,
+        reconstructed_size=None,
+    )
+
+
 def match_episode(
     signal: Any,
     fills: list[SqdFill],
@@ -212,6 +229,7 @@ def match_episode(
     close_time_tolerance_ms: int,
     close_price_tolerance_bps: Decimal,
     max_size_ratio_error: Decimal,
+    entry_time_tolerance_ms: int,
     entry_price_tolerance_bps: Decimal,
 ) -> EpisodeEvidence:
     source_size = signal_position_size(signal)
@@ -236,17 +254,7 @@ def match_episode(
         close_options.append((cost, close, size_error))
 
     if not close_options:
-        return EpisodeEvidence(
-            signal_id=signal.signal_id,
-            matched=False,
-            close_time_error_ms=None,
-            close_price_bps=None,
-            close_size_ratio_error=None,
-            entry_price_bps=None,
-            entry_size_ratio_error=None,
-            reconstructed_entry=None,
-            reconstructed_size=None,
-        )
+        return _empty_episode(signal.signal_id)
 
     _, close, close_size_error = min(close_options, key=lambda item: item[0])
     close_time_error = min(
@@ -254,49 +262,92 @@ def match_episode(
         abs(close.last_time_ms - signal.closed_at_ms),
     )
     close_price_bps = _price_bps(signal.exit_price, close.avg_price)
-
-    # A generic export may omit quantity. In that case the executed close itself
-    # supplies the only defensible size target; entry reconstruction is still
-    # mandatory. Never promote a close-only coincidence to a matched episode.
     target_size = source_size if source_size is not None else close.size
 
-    open_names = (
-        {"open long", "long > long"}
-        if signal.direction == "LONG"
-        else {"open short", "short > short"}
-    )
-    candidates = [
+    if signal.direction == "LONG":
+        open_name = "open long"
+        add_name = "long > long"
+        reduce_name = "close long"
+    else:
+        open_name = "open short"
+        add_name = "short > short"
+        reduce_name = "close short"
+
+    seed_options = [
         fill
         for fill in fills
-        if fill.time_ms < close.first_time_ms and fill.direction.lower() in open_names
+        if fill.time_ms < close.first_time_ms
+        and fill.direction.lower() == open_name
+        and abs(fill.time_ms - signal.opened_at_ms) <= entry_time_tolerance_ms
     ]
-    candidates.sort(key=lambda item: item.time_ms, reverse=True)
-    total = D("0")
-    notional = D("0")
-    for fill in candidates:
-        total += fill.sz
-        notional += fill.sz * fill.px
-        if total >= target_size * D("0.90"):
-            break
-
-    if total <= 0:
+    if not seed_options:
         return EpisodeEvidence(
             signal_id=signal.signal_id,
             matched=False,
             close_time_error_ms=close_time_error,
             close_price_bps=close_price_bps,
             close_size_ratio_error=close_size_error,
+            entry_time_error_ms=None,
             entry_price_bps=None,
             entry_size_ratio_error=None,
             reconstructed_entry=None,
             reconstructed_size=None,
         )
 
+    seed = min(
+        seed_options,
+        key=lambda fill: (abs(fill.time_ms - signal.opened_at_ms), fill.time_ms, fill.tid),
+    )
+    entry_time_error = abs(seed.time_ms - signal.opened_at_ms)
+
+    total = D("0")
+    notional = D("0")
+    episode_ended_early = False
+    rows = sorted(
+        (
+            fill
+            for fill in fills
+            if seed.time_ms <= fill.time_ms < close.first_time_ms
+        ),
+        key=lambda fill: (fill.time_ms, fill.tid),
+    )
+    for fill in rows:
+        text = fill.direction.lower()
+        if fill is seed or text == add_name:
+            total += fill.sz
+            notional += fill.sz * fill.px
+            continue
+        if text == open_name:
+            episode_ended_early = True
+            break
+        if text == reduce_name and total > 0:
+            average_entry = notional / total
+            total = max(D("0"), total - fill.sz)
+            notional = average_entry * total
+            if total == 0:
+                episode_ended_early = True
+                break
+
+    if total <= 0 or episode_ended_early:
+        return EpisodeEvidence(
+            signal_id=signal.signal_id,
+            matched=False,
+            close_time_error_ms=close_time_error,
+            close_price_bps=close_price_bps,
+            close_size_ratio_error=close_size_error,
+            entry_time_error_ms=entry_time_error,
+            entry_price_bps=None,
+            entry_size_ratio_error=None,
+            reconstructed_entry=None,
+            reconstructed_size=total if total > 0 else None,
+        )
+
     reconstructed_entry = notional / total
     entry_bps = _price_bps(signal.entry_price, reconstructed_entry)
     entry_size_error = abs(total / target_size - D("1"))
     matched = (
-        entry_bps <= entry_price_tolerance_bps
+        entry_time_error <= entry_time_tolerance_ms
+        and entry_bps <= entry_price_tolerance_bps
         and entry_size_error <= max_size_ratio_error
     )
     return EpisodeEvidence(
@@ -305,6 +356,7 @@ def match_episode(
         close_time_error_ms=close_time_error,
         close_price_bps=close_price_bps,
         close_size_ratio_error=close_size_error,
+        entry_time_error_ms=entry_time_error,
         entry_price_bps=entry_bps,
         entry_size_ratio_error=entry_size_error,
         reconstructed_entry=reconstructed_entry,
