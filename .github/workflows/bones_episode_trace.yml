@@ -1,0 +1,63 @@
+name: bones-episode-trace
+
+on:
+  push:
+    branches: [agent/bones-episode-trace-temp]
+
+jobs:
+  trace:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e .
+      - name: Trace target wallet episodes
+        run: |
+          python - <<'PY'
+          import asyncio
+          from datetime import datetime
+          from hlcopy.resolver.sqd_fills import SqdHyperliquidFillsClient
+
+          TARGET = '0x565590f4d2b00b567a564f56b13f898392aef180'
+          CASES = [
+              ('c64', 'LONG', '2026-08-04T23:29:22.613Z', '2026-08-05T01:57:57.071Z'),
+              ('57a', 'SHORT', '2026-08-04T18:10:41.416Z', '2026-08-04T23:27:57.378Z'),
+          ]
+
+          def ms(value: str) -> int:
+              return int(datetime.fromisoformat(value.replace('Z', '+00:00')).timestamp() * 1000)
+
+          async def main():
+              async with SqdHyperliquidFillsClient() as client:
+                  for label, direction, opened, closed in CASES:
+                      opened_ms = ms(opened)
+                      closed_ms = ms(closed)
+                      fills = await client.fills_between_times(
+                          start_ms=opened_ms - 300_000,
+                          end_ms=closed_ms + 30_000,
+                          coin='BTC',
+                          user=TARGET,
+                      )
+                      print('CASE', label, direction, 'FILLS', len(fills))
+                      open_name = 'open long' if direction == 'LONG' else 'open short'
+                      seed = [f for f in fills if f.direction.lower() == open_name and abs(f.time_ms-opened_ms) <= 300_000]
+                      print('SEEDS', [(f.time_ms-opened_ms, str(f.px), str(f.sz), f.oid, f.direction) for f in seed])
+                      if not seed:
+                          continue
+                      chosen = min(seed, key=lambda f: abs(f.time_ms-opened_ms))
+                      relevant = []
+                      for f in fills:
+                          if f.time_ms < min(x.time_ms for x in seed) or f.time_ms > closed_ms + 30_000:
+                              continue
+                          text = f.direction.lower()
+                          if ('long' in text or 'short' in text):
+                              relevant.append(f)
+                      for f in relevant[:160]:
+                          print('EV', label, 'dt_open=', f.time_ms-opened_ms, 'dt_close=', f.time_ms-closed_ms,
+                                'dir=', f.direction, 'px=', f.px, 'sz=', f.sz, 'oid=', f.oid, 'tid=', f.tid,
+                                'seed_oid=', chosen.oid)
+                      print('ENDCASE', label)
+          asyncio.run(main())
+          PY
