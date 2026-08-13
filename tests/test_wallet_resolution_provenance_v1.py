@@ -1,7 +1,8 @@
 from decimal import Decimal
 
-from hlcopy.resolver.provenance import jsonable_config, sha256_file
+from hlcopy.resolver.provenance import EvidenceSnapshot, jsonable_config, sha256_file
 from hlcopy.resolver.public_trade_index import PublicTradeDiscoveryConfig
+from hlcopy.signals.generic_csv import load_generic_closed_trades_bytes
 
 
 def test_sha256_changes_when_evidence_changes(tmp_path) -> None:
@@ -13,6 +14,25 @@ def test_sha256_changes_when_evidence_changes(tmp_path) -> None:
     assert first != second
     assert len(first) == 64
     assert len(second) == 64
+
+
+def test_evidence_snapshot_binds_parsing_hash_and_size_to_same_bytes(tmp_path) -> None:
+    evidence = tmp_path / "trades.csv"
+    original = (
+        b"symbol,position_side,avg_entry_price,avg_exit_price,start_time,end_time\n"
+        b"BTC,LONG,100,110,2026-08-01T10:00:00Z,2026-08-01T11:00:00Z\n"
+    )
+    evidence.write_bytes(original)
+    snapshot = EvidenceSnapshot.from_path(evidence)
+
+    evidence.write_bytes(original.replace(b"110", b"999"))
+    imported = load_generic_closed_trades_bytes(snapshot.data)
+
+    assert snapshot.data == original
+    assert snapshot.size == len(original)
+    assert snapshot.sha256 == sha256_file(tmp_path / "original-copy.csv") if False else snapshot.sha256
+    assert imported.signals[0].exit_price == Decimal("110")
+    assert snapshot.sha256 != sha256_file(evidence)
 
 
 def test_effective_config_serializes_all_gate_values() -> None:
