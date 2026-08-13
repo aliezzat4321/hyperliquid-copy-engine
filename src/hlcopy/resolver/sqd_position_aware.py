@@ -5,17 +5,14 @@ from decimal import Decimal
 from typing import Any
 
 from hlcopy.market.symbols import canonical_coin, wire_coin
-from hlcopy.resolver.sqd_fills import (
-    EpisodeEvidence,
-    aggregate_close_fills,
-    signal_position_size,
-)
+from hlcopy.resolver.sqd_fills import EpisodeEvidence, signal_position_size
 from hlcopy.resolver.sqd_fills import (
     SqdHyperliquidFillsClient as BaseSqdHyperliquidFillsClient,
 )
 
 D = Decimal
 BPS = D("10000")
+POSITION_EPSILON = D("0.000000000001")
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +157,153 @@ def _failed(
     )
 
 
+def _direction_names(direction: str) -> tuple[str, str, str, str, str]:
+    if direction == "LONG":
+        return "open long", "long > long", "close long", "open short", "long > short"
+    return "open short", "short > short", "close short", "open long", "short > long"
+
+
+def _start_position_matches(fill: SqdFill, current_size: Decimal) -> bool:
+    if fill.start_position is None:
+        return True
+    tolerance = max(POSITION_EPSILON, abs(current_size) * D("0.000000001"))
+    return abs(abs(fill.start_position) - current_size) <= tolerance
+
+
+def _match_from_boundary(
+    signal: Any,
+    fills: list[SqdFill],
+    *,
+    boundary: SqdFill,
+    close_time_tolerance_ms: int,
+    close_price_tolerance_bps: Decimal,
+    max_size_ratio_error: Decimal,
+    entry_time_tolerance_ms: int,
+    entry_price_tolerance_bps: Decimal,
+) -> EpisodeEvidence:
+    open_name, add_name, reduce_name, opposite_open_name, flip_name = _direction_names(
+        signal.direction
+    )
+    entry_time_error = abs(boundary.time_ms - signal.opened_at_ms)
+    source_size = signal_position_size(signal)
+
+    current_size = D("0")
+    current_entry_notional = D("0")
+    gross_entry_size = D("0")
+    gross_entry_notional = D("0")
+    close_size = D("0")
+    close_notional = D("0")
+    close_first_ms: int | None = None
+    close_last_ms: int | None = None
+
+    rows = [
+        row
+        for row in fills
+        if row.user == boundary.user
+        and row.coin == boundary.coin
+        and boundary.time_ms <= row.time_ms
+        and row.time_ms <= signal.closed_at_ms + close_time_tolerance_ms
+    ]
+    rows.sort(key=lambda row: (row.time_ms, row.block_number))
+
+    for fill in rows:
+        text = fill.direction.lower()
+        if text not in {
+            open_name,
+            add_name,
+            reduce_name,
+            opposite_open_name,
+            flip_name,
+        }:
+            continue
+        if not _start_position_matches(fill, current_size):
+            return _failed(
+                signal.signal_id,
+                entry_time_error_ms=entry_time_error,
+                reconstructed_size=gross_entry_size or None,
+            )
+
+        if text in {open_name, add_name}:
+            if current_size == 0 and fill is not boundary:
+                return _failed(
+                    signal.signal_id,
+                    entry_time_error_ms=entry_time_error,
+                    reconstructed_size=gross_entry_size or None,
+                )
+            current_size += fill.sz
+            current_entry_notional += fill.sz * fill.px
+            gross_entry_size += fill.sz
+            gross_entry_notional += fill.sz * fill.px
+            continue
+
+        if text in {opposite_open_name, flip_name}:
+            return _failed(
+                signal.signal_id,
+                entry_time_error_ms=entry_time_error,
+                reconstructed_size=gross_entry_size or None,
+            )
+
+        if current_size <= 0 or fill.sz > current_size + POSITION_EPSILON:
+            return _failed(
+                signal.signal_id,
+                entry_time_error_ms=entry_time_error,
+                reconstructed_size=gross_entry_size or None,
+            )
+
+        average_entry = current_entry_notional / current_size
+        close_size += fill.sz
+        close_notional += fill.sz * fill.px
+        close_first_ms = fill.time_ms if close_first_ms is None else min(close_first_ms, fill.time_ms)
+        close_last_ms = fill.time_ms if close_last_ms is None else max(close_last_ms, fill.time_ms)
+        current_size = max(D("0"), current_size - fill.sz)
+        current_entry_notional = average_entry * current_size
+
+        if current_size > POSITION_EPSILON:
+            continue
+
+        current_size = D("0")
+        if close_size <= 0 or gross_entry_size <= 0 or close_last_ms is None:
+            return _failed(signal.signal_id, entry_time_error_ms=entry_time_error)
+
+        close_time_error = abs(close_last_ms - signal.closed_at_ms)
+        reconstructed_exit = close_notional / close_size
+        close_price_bps = _price_bps(signal.exit_price, reconstructed_exit)
+        reconstructed_entry = gross_entry_notional / gross_entry_size
+        entry_price_bps = _price_bps(signal.entry_price, reconstructed_entry)
+        target_size = source_size if source_size is not None else close_size
+        close_size_error = abs(close_size / target_size - D("1"))
+        entry_size_error = abs(gross_entry_size / target_size - D("1"))
+        lifecycle_balance_error = abs(gross_entry_size - close_size) / gross_entry_size
+
+        matched = (
+            entry_time_error <= entry_time_tolerance_ms
+            and close_time_error <= close_time_tolerance_ms
+            and entry_price_bps <= entry_price_tolerance_bps
+            and close_price_bps <= close_price_tolerance_bps
+            and close_size_error <= max_size_ratio_error
+            and entry_size_error <= max_size_ratio_error
+            and lifecycle_balance_error <= POSITION_EPSILON
+        )
+        return EpisodeEvidence(
+            signal_id=signal.signal_id,
+            matched=matched,
+            close_time_error_ms=close_time_error,
+            close_price_bps=close_price_bps,
+            close_size_ratio_error=close_size_error,
+            entry_time_error_ms=entry_time_error,
+            entry_price_bps=entry_price_bps,
+            entry_size_ratio_error=entry_size_error,
+            reconstructed_entry=reconstructed_entry,
+            reconstructed_size=gross_entry_size,
+        )
+
+    return _failed(
+        signal.signal_id,
+        entry_time_error_ms=entry_time_error,
+        reconstructed_size=gross_entry_size or None,
+    )
+
+
 def match_episode(
     signal: Any,
     fills: list[SqdFill],
@@ -170,126 +314,35 @@ def match_episode(
     entry_time_tolerance_ms: int,
     entry_price_tolerance_bps: Decimal,
 ) -> EpisodeEvidence:
-    source_size = signal_position_size(signal)
-    closes = aggregate_close_fills(fills, direction=signal.direction)
-    close_options: list[tuple[Decimal, Any, Decimal | None]] = []
-    for close in closes:
-        time_error = min(
-            abs(close.first_time_ms - signal.closed_at_ms),
-            abs(close.last_time_ms - signal.closed_at_ms),
-        )
-        price_bps = _price_bps(signal.exit_price, close.avg_price)
-        if time_error > close_time_tolerance_ms or price_bps > close_price_tolerance_bps:
-            continue
-        size_error = None
-        if source_size is not None:
-            size_error = abs(close.size / source_size - D("1"))
-            if size_error > max_size_ratio_error:
-                continue
-        cost = D(time_error) / D("1000") + price_bps
-        if size_error is not None:
-            cost += size_error * D("10")
-        close_options.append((cost, close, size_error))
-    if not close_options:
-        return _failed(signal.signal_id)
-
-    _, close, close_size_error = min(close_options, key=lambda item: item[0])
-    close_time_error = min(
-        abs(close.first_time_ms - signal.closed_at_ms),
-        abs(close.last_time_ms - signal.closed_at_ms),
-    )
-    close_price_bps = _price_bps(signal.exit_price, close.avg_price)
-    target_size = source_size if source_size is not None else close.size
-
-    if signal.direction == "LONG":
-        open_name, add_name, reduce_name = "open long", "long > long", "close long"
-        opposite_open_name, flip_name = "open short", "long > short"
-    else:
-        open_name, add_name, reduce_name = "open short", "short > short", "close short"
-        opposite_open_name, flip_name = "open long", "short > long"
-
+    open_name, _, _, _, _ = _direction_names(signal.direction)
     boundaries = [
         fill
         for fill in fills
-        if fill.time_ms < close.first_time_ms
-        and fill.direction.lower() == open_name
+        if fill.direction.lower() == open_name
         and fill.start_position == D("0")
+        and fill.time_ms <= signal.closed_at_ms + close_time_tolerance_ms
         and abs(fill.time_ms - signal.opened_at_ms) <= entry_time_tolerance_ms
     ]
     if not boundaries:
-        return _failed(
-            signal.signal_id,
-            close_time_error_ms=close_time_error,
-            close_price_bps=close_price_bps,
-            close_size_ratio_error=close_size_error,
-        )
-    boundary = min(
-        boundaries,
-        key=lambda fill: (abs(fill.time_ms - signal.opened_at_ms), fill.time_ms, fill.tid),
-    )
-    entry_time_error = abs(boundary.time_ms - signal.opened_at_ms)
+        return _failed(signal.signal_id)
 
-    total = D("0")
-    notional = D("0")
-    for fill in sorted(
-        (
-            row
-            for row in fills
-            if boundary.time_ms <= row.time_ms < close.first_time_ms
-        ),
-        key=lambda row: (row.time_ms, row.tid),
-    ):
-        text = fill.direction.lower()
-        if text in {open_name, add_name}:
-            total += fill.sz
-            notional += fill.sz * fill.px
-            continue
-        if text in {opposite_open_name, flip_name}:
-            return _failed(
-                signal.signal_id,
-                close_time_error_ms=close_time_error,
-                close_price_bps=close_price_bps,
-                close_size_ratio_error=close_size_error,
-                entry_time_error_ms=entry_time_error,
-            )
-        if text == reduce_name and total > 0:
-            average_entry = notional / total
-            total = max(D("0"), total - fill.sz)
-            notional = average_entry * total
-            if total == 0:
-                return _failed(
-                    signal.signal_id,
-                    close_time_error_ms=close_time_error,
-                    close_price_bps=close_price_bps,
-                    close_size_ratio_error=close_size_error,
-                    entry_time_error_ms=entry_time_error,
-                )
-
-    if total <= 0:
-        return _failed(
-            signal.signal_id,
-            close_time_error_ms=close_time_error,
-            close_price_bps=close_price_bps,
-            close_size_ratio_error=close_size_error,
-            entry_time_error_ms=entry_time_error,
+    boundaries.sort(
+        key=lambda fill: (abs(fill.time_ms - signal.opened_at_ms), fill.time_ms, fill.tid)
+    )
+    best_failure: EpisodeEvidence | None = None
+    for boundary in boundaries:
+        evidence = _match_from_boundary(
+            signal,
+            fills,
+            boundary=boundary,
+            close_time_tolerance_ms=close_time_tolerance_ms,
+            close_price_tolerance_bps=close_price_tolerance_bps,
+            max_size_ratio_error=max_size_ratio_error,
+            entry_time_tolerance_ms=entry_time_tolerance_ms,
+            entry_price_tolerance_bps=entry_price_tolerance_bps,
         )
-    reconstructed_entry = notional / total
-    entry_bps = _price_bps(signal.entry_price, reconstructed_entry)
-    entry_size_error = abs(total / target_size - D("1"))
-    matched = (
-        entry_time_error <= entry_time_tolerance_ms
-        and entry_bps <= entry_price_tolerance_bps
-        and entry_size_error <= max_size_ratio_error
-    )
-    return EpisodeEvidence(
-        signal_id=signal.signal_id,
-        matched=matched,
-        close_time_error_ms=close_time_error,
-        close_price_bps=close_price_bps,
-        close_size_ratio_error=close_size_error,
-        entry_time_error_ms=entry_time_error,
-        entry_price_bps=entry_bps,
-        entry_size_ratio_error=entry_size_error,
-        reconstructed_entry=reconstructed_entry,
-        reconstructed_size=total,
-    )
+        if evidence.matched:
+            return evidence
+        if best_failure is None:
+            best_failure = evidence
+    return best_failure or _failed(signal.signal_id)
