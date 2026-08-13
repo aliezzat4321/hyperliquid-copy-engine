@@ -5,16 +5,20 @@ from dataclasses import asdict, dataclass
 from decimal import Decimal
 from pathlib import Path
 
-from hlcopy.resolver.provenance import jsonable_config, sha256_file
+from hlcopy.resolver.provenance import EvidenceSnapshot, jsonable_config
 from hlcopy.resolver.public_trade_index import (
     DEFAULT_PUBLIC_TRADE_CONFIG,
     PublicTradeDiscoveryConfig,
+    _episode_is_covered,
     discover_candidates,
     select_historical_winner,
     verify_candidate_shortlist,
 )
 from hlcopy.resolver.sqd_position_aware import SqdHyperliquidFillsClient
-from hlcopy.signals.generic_csv import GenericTradeImportResult, load_generic_closed_trades
+from hlcopy.signals.generic_csv import (
+    GenericTradeImportResult,
+    load_generic_closed_trades_bytes,
+)
 
 D = Decimal
 
@@ -71,7 +75,8 @@ async def identify_wallet_from_csv(
     if config is None:
         config = DEFAULT_PUBLIC_TRADE_CONFIG
 
-    imported: GenericTradeImportResult = load_generic_closed_trades(evidence_path)
+    snapshot = EvidenceSnapshot.from_path(evidence_path)
+    imported: GenericTradeImportResult = load_generic_closed_trades_bytes(snapshot.data)
     signals = imported.signals
     if len(signals) < 3:
         raise ValueError(
@@ -124,9 +129,12 @@ async def identify_wallet_from_csv(
     uncovered_signal_ids = [
         signal.signal_id
         for signal in signals
-        if not (
-            discovery.coverage_start_ms <= signal.opened_at_ms
-            and signal.closed_at_ms <= discovery.coverage_end_ms
+        if not _episode_is_covered(
+            signal,
+            coverage_start_ms=discovery.coverage_start_ms,
+            coverage_end_ms=discovery.coverage_end_ms,
+            entry_margin_ms=config.historical_entry_time_tolerance_ms,
+            close_margin_ms=config.historical_time_tolerance_ms,
         )
     ]
 
@@ -135,11 +143,11 @@ async def identify_wallet_from_csv(
         output_dir.mkdir(parents=True, exist_ok=True)
         report_path = output_dir / f"wallet_identification_{evidence_path.stem}.json"
         payload = {
-            "version": 7,
-            "resolver_rule_version": "generic-sqd-fill-wallet-identity-v7",
+            "version": 8,
+            "resolver_rule_version": "generic-sqd-fill-wallet-identity-v8",
             "input_file": str(evidence_path),
-            "input_sha256": sha256_file(evidence_path),
-            "input_bytes": evidence_path.stat().st_size,
+            "input_sha256": snapshot.sha256,
+            "input_bytes": snapshot.size,
             "effective_config": jsonable_config(config),
             "detected_columns": imported.column_map,
             "accepted_trades": len(signals),
@@ -172,8 +180,12 @@ async def identify_wallet_from_csv(
                 "held_out_verification_required": True,
                 "flat_to_open_boundary_required": True,
                 "entry_time_verification_required": True,
-                "duplicate_episode_evidence_deduplicated": True,
+                "exact_duplicate_rows_removed": True,
+                "one_vote_per_sqd_execution_in_discovery": True,
+                "one_vote_per_sqd_lifecycle_in_verification": True,
                 "full_lifecycle_exit_aggregation_required": True,
+                "complete_tolerance_windows_required_in_coverage": True,
+                "immutable_input_snapshot_required": True,
                 "discovery_only_candidate_can_verify": False,
                 "all_threshold_finalists_verified": True,
                 "coverage_fail_closed": True,
