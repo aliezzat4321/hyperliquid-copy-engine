@@ -1,11 +1,12 @@
 [Unit]
-Description=Run Hyperliquid unified profitability scoring every two minutes
+Description=Run Hyperliquid unified profitability research hourly
 
 [Timer]
-OnBootSec=60s
-OnUnitActiveSec=120s
-AccuracySec=1s
-Persistent=false
+OnBootSec=15min
+OnUnitInactiveSec=1h
+RandomizedDelaySec=5min
+AccuracySec=30s
+Persistent=true
 Unit=hyperliquid-profitability.service
 
 [Install]
