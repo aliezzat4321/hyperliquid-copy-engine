@@ -16,9 +16,11 @@ def _fill(
     direction: str,
     oid: str,
     start_position: str,
+    tid: str | None = None,
+    block_number: int = 1,
 ) -> SqdFill:
     return SqdFill(
-        block_number=1,
+        block_number=block_number,
         user=USER,
         coin="BTC",
         px=D(px),
@@ -28,7 +30,7 @@ def _fill(
         time_ms=time_ms,
         oid=oid,
         closed_pnl=D("0"),
-        tid=f"tid-{time_ms}",
+        tid=tid or f"tid-{time_ms}",
         start_position=D(start_position),
     )
 
@@ -97,6 +99,83 @@ def test_exit_vwap_spans_separate_close_orders_until_final_flatten() -> None:
     assert evidence.close_price_bps == 0
     assert evidence.reconstructed_entry == D("100")
     assert evidence.reconstructed_size == D("1.0")
+
+
+def test_same_block_split_closes_keep_sqd_execution_order_not_tid_order() -> None:
+    signal = CopySignal(
+        signal_id="split-close",
+        source="generic_closed_trades_csv",
+        trader="alice",
+        coin="BTC",
+        direction="SHORT",
+        source_leverage=D("40"),
+        allocation_fraction=D("1"),
+        entry_price=D("64229.16484375"),
+        exit_price=D("64193"),
+        opened_at_ms=1_000_000,
+        closed_at_ms=2_000_000,
+        entry_sim=None,
+        last_sim=None,
+        reason_closed="",
+        liquidated=False,
+        raw={"position_size": "0.0128"},
+    )
+    fills = [
+        _fill(
+            px="64079",
+            sz="0.00637",
+            time_ms=1_000_000,
+            direction="Open Short",
+            oid="open-a",
+            start_position="0",
+            tid="100",
+        ),
+        _fill(
+            px="64378",
+            sz="0.00643",
+            time_ms=1_500_000,
+            direction="Open Short",
+            oid="open-b",
+            start_position="-0.00637",
+            tid="200",
+        ),
+        # These are deliberately supplied in execution order but with tids that
+        # sort in the opposite lexical order. startPosition proves the sequence.
+        _fill(
+            px="64193",
+            sz="0.00689",
+            time_ms=2_000_000,
+            direction="Close Short",
+            oid="close",
+            start_position="-0.0128",
+            tid="900",
+            block_number=2,
+        ),
+        _fill(
+            px="64193",
+            sz="0.00591",
+            time_ms=2_000_000,
+            direction="Close Short",
+            oid="close",
+            start_position="-0.00591",
+            tid="100",
+            block_number=2,
+        ),
+    ]
+
+    evidence = match_episode(
+        signal,
+        fills,
+        close_time_tolerance_ms=5_000,
+        close_price_tolerance_bps=D("5"),
+        max_size_ratio_error=D("0.05"),
+        entry_time_tolerance_ms=5_000,
+        entry_price_tolerance_bps=D("5"),
+    )
+
+    assert evidence.matched
+    assert evidence.rejection_reason is None
+    assert evidence.reconstructed_size == D("0.0128")
 
 
 def test_discovery_keeps_final_flatten_when_export_uses_lifecycle_vwap() -> None:
