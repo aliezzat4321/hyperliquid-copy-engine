@@ -1,0 +1,53 @@
+name: bones-target-diagnostic-v8
+
+on:
+  push:
+    branches: [agent/bones-acceptance-v8-temp]
+
+jobs:
+  target:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e .
+      - name: Verify target only
+        run: |
+          python - <<'PY'
+          import asyncio, json
+          from pathlib import Path
+          from hlcopy.resolver.public_trade_index import DEFAULT_PUBLIC_TRADE_CONFIG, discover_candidates, verify_candidate_historically
+          from hlcopy.resolver.sqd_position_aware import SqdHyperliquidFillsClient
+          from hlcopy.signals.generic_csv import load_generic_closed_trades
+
+          TARGET='0x565590f4d2b00b567a564f56b13f898392aef180'
+          signals=load_generic_closed_trades(Path('tmp/bones_acceptance_v8.csv')).signals
+          async def main():
+              async with SqdHyperliquidFillsClient() as c:
+                  d=await discover_candidates(signals, client=c, config=DEFAULT_PUBLIC_TRADE_CONFIG)
+                  v=await verify_candidate_historically(
+                      address=TARGET,
+                      signals=signals,
+                      excluded_signal_ids={s.signal_id for s in d.anchors},
+                      coverage_start_ms=d.coverage_start_ms,
+                      client=c,
+                      config=DEFAULT_PUBLIC_TRADE_CONFIG,
+                  )
+              out={
+                  'target': TARGET,
+                  'discovery_anchors':[s.signal_id for s in d.anchors],
+                  'target_discovery': next((x.to_dict() for x in d.ranked if x.address==TARGET), None),
+                  'attempted':v.attempted,
+                  'matched':v.matched,
+                  'matched_signal_ids':list(v.matched_signal_ids),
+                  'evidence':[e.to_dict() for e in v.evidence],
+              }
+              Path('/tmp/target-diagnostic.json').write_text(json.dumps(out, indent=2))
+          asyncio.run(main())
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bones-target-diagnostic-v8
+          path: /tmp/target-diagnostic.json
