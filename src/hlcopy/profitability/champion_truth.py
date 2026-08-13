@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Mapping
 
 REQUIRED_TRUTH_LAYERS = (
     "round_trip_fee_accounting",
