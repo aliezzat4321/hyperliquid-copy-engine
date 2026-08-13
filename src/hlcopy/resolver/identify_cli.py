@@ -27,7 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--historical-price-tolerance-bps", type=Decimal, default=Decimal("35")
     )
     parser.add_argument(
-        "--historical-entry-price-tolerance-bps", type=Decimal, default=Decimal("35")
+        "--historical-entry-price-tolerance-bps", type=Decimal, default=Decimal("15")
     )
     parser.add_argument(
         "--historical-max-size-ratio-error", type=Decimal, default=Decimal("0.45")
