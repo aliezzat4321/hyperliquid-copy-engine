@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import io
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -130,7 +131,7 @@ def _bool(value: str) -> bool:
 
 
 def _episode_fingerprint(signal: CopySignal) -> tuple[object, ...]:
-    """Identity evidence must represent distinct position episodes, not CSV rows."""
+    """Remove exact export duplicates; real lifecycle reuse is gated downstream."""
     return (
         signal.coin.upper(),
         signal.direction,
@@ -199,35 +200,35 @@ def normalize_generic_row(
     )
 
 
-def load_generic_closed_trades(path: Path) -> GenericTradeImportResult:
-    with path.open(newline="", encoding="utf-8-sig") as handle:
-        reader = csv.DictReader(handle)
-        headers = list(reader.fieldnames or [])
-        if not headers:
-            raise GenericTradeCsvError("CSV has no header row")
-        mapping = detect_column_map(headers)
-        signals: list[CopySignal] = []
-        rejected: list[dict[str, Any]] = []
-        duplicates: list[dict[str, Any]] = []
-        first_row_by_episode: dict[tuple[object, ...], int] = {}
-        for row_number, row in enumerate(reader, start=2):
-            try:
-                signal = normalize_generic_row(row, mapping=mapping, row_number=row_number)
-                fingerprint = _episode_fingerprint(signal)
-                first_row = first_row_by_episode.get(fingerprint)
-                if first_row is not None:
-                    duplicates.append(
-                        {
-                            "row": row_number,
-                            "duplicate_of_row": first_row,
-                            "signal_id": signal.signal_id,
-                        }
-                    )
-                    continue
-                first_row_by_episode[fingerprint] = row_number
-                signals.append(signal)
-            except GenericTradeCsvError as exc:
-                rejected.append({"row": row_number, "error": str(exc)})
+def _load_generic_closed_trades_text(text: str) -> GenericTradeImportResult:
+    reader = csv.DictReader(io.StringIO(text))
+    headers = list(reader.fieldnames or [])
+    if not headers:
+        raise GenericTradeCsvError("CSV has no header row")
+    mapping = detect_column_map(headers)
+    signals: list[CopySignal] = []
+    rejected: list[dict[str, Any]] = []
+    duplicates: list[dict[str, Any]] = []
+    first_row_by_episode: dict[tuple[object, ...], int] = {}
+    for row_number, row in enumerate(reader, start=2):
+        try:
+            signal = normalize_generic_row(row, mapping=mapping, row_number=row_number)
+            fingerprint = _episode_fingerprint(signal)
+            first_row = first_row_by_episode.get(fingerprint)
+            if first_row is not None:
+                duplicates.append(
+                    {
+                        "row": row_number,
+                        "duplicate_of_row": first_row,
+                        "signal_id": signal.signal_id,
+                        "reason": "exact_normalized_episode_duplicate",
+                    }
+                )
+                continue
+            first_row_by_episode[fingerprint] = row_number
+            signals.append(signal)
+        except GenericTradeCsvError as exc:
+            rejected.append({"row": row_number, "error": str(exc)})
 
     signals.sort(key=lambda item: (item.opened_at_ms, item.signal_id))
     return GenericTradeImportResult(
@@ -236,3 +237,15 @@ def load_generic_closed_trades(path: Path) -> GenericTradeImportResult:
         column_map=mapping,
         duplicate_rows=tuple(duplicates),
     )
+
+
+def load_generic_closed_trades_bytes(data: bytes) -> GenericTradeImportResult:
+    try:
+        text = data.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise GenericTradeCsvError("CSV is not valid UTF-8") from exc
+    return _load_generic_closed_trades_text(text)
+
+
+def load_generic_closed_trades(path: Path) -> GenericTradeImportResult:
+    return load_generic_closed_trades_bytes(path.read_bytes())
