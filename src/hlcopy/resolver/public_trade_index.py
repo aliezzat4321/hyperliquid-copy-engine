@@ -27,6 +27,7 @@ from hlcopy.signals.generic_csv import load_generic_closed_trades
 from hlcopy.signals.invo import CopySignal, load_invo_closed_trades
 
 D = Decimal
+DEFAULT_MAX_SIZE_RATIO_ERROR = D("0.60")
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,7 +35,7 @@ class PublicTradeDiscoveryConfig:
     anchor_trades: int = 8
     window_seconds: int = 30
     max_price_bps: Decimal = D("25")
-    max_size_ratio_error: Decimal = D("0.60")
+    max_size_ratio_error: Decimal = DEFAULT_MAX_SIZE_RATIO_ERROR
     min_discovery_matches: int = 3
     min_runner_up_score_gap: Decimal = D("15")
     historical_verify_trades: int = 12
@@ -99,7 +100,7 @@ def _public_trade_matches(
     *,
     window_ms: int,
     max_price_bps: Decimal,
-    max_size_ratio_error: Decimal = D("0.60"),
+    max_size_ratio_error: Decimal = DEFAULT_MAX_SIZE_RATIO_ERROR,
 ) -> dict[str, AnchorMatch]:
     target_size = signal_position_size(signal)
     candidates: list[IndexedCompletedTrade] = []
