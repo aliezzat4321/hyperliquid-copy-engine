@@ -14,16 +14,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m hlcopy.resolver.identify_cli")
     parser.add_argument("evidence", type=Path)
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/resolver"))
-    parser.add_argument("--cache-dir", type=Path)
     parser.add_argument("--anchor-trades", type=int, default=8)
-    parser.add_argument("--window-seconds", type=int, default=120)
+    parser.add_argument("--window-seconds", type=int, default=30)
     parser.add_argument("--max-price-bps", type=Decimal, default=Decimal("25"))
+    parser.add_argument("--max-size-ratio-error", type=Decimal, default=Decimal("0.60"))
     parser.add_argument("--min-discovery-matches", type=int, default=3)
-    parser.add_argument("--official-verify-trades", type=int, default=6)
-    parser.add_argument("--official-time-tolerance-ms", type=int, default=12_000)
-    parser.add_argument("--official-price-tolerance-bps", type=Decimal, default=Decimal("12"))
-    parser.add_argument("--min-official-matches", type=int, default=3)
-    parser.add_argument("--min-official-ratio", type=Decimal, default=Decimal("0.60"))
+    parser.add_argument("--historical-verify-trades", type=int, default=12)
+    parser.add_argument("--historical-lookback-hours", type=int, default=6)
+    parser.add_argument("--historical-time-tolerance-ms", type=int, default=25_000)
+    parser.add_argument(
+        "--historical-price-tolerance-bps", type=Decimal, default=Decimal("35")
+    )
+    parser.add_argument(
+        "--historical-entry-price-tolerance-bps", type=Decimal, default=Decimal("35")
+    )
+    parser.add_argument(
+        "--historical-max-size-ratio-error", type=Decimal, default=Decimal("0.45")
+    )
+    parser.add_argument("--min-historical-matches", type=int, default=3)
+    parser.add_argument("--min-historical-ratio", type=Decimal, default=Decimal("0.20"))
     return parser
 
 
@@ -32,17 +41,22 @@ async def _run(args: argparse.Namespace) -> None:
         anchor_trades=max(3, args.anchor_trades),
         window_seconds=max(1, args.window_seconds),
         max_price_bps=args.max_price_bps,
+        max_size_ratio_error=args.max_size_ratio_error,
         min_discovery_matches=max(1, args.min_discovery_matches),
-        official_verify_trades=max(1, args.official_verify_trades),
-        official_time_tolerance_ms=max(1, args.official_time_tolerance_ms),
-        official_price_tolerance_bps=args.official_price_tolerance_bps,
-        min_official_matches=max(1, args.min_official_matches),
-        min_official_ratio=args.min_official_ratio,
+        historical_verify_trades=max(1, args.historical_verify_trades),
+        historical_lookback_hours=max(1, args.historical_lookback_hours),
+        historical_time_tolerance_ms=max(1, args.historical_time_tolerance_ms),
+        historical_price_tolerance_bps=args.historical_price_tolerance_bps,
+        historical_entry_price_tolerance_bps=(
+            args.historical_entry_price_tolerance_bps
+        ),
+        historical_max_size_ratio_error=args.historical_max_size_ratio_error,
+        min_historical_matches=max(1, args.min_historical_matches),
+        min_historical_ratio=args.min_historical_ratio,
     )
     result = await identify_wallet_from_csv(
         args.evidence,
         output_dir=args.output_dir,
-        cache_dir=args.cache_dir,
         config=config,
     )
     print(json.dumps(result.to_dict(), sort_keys=True))
