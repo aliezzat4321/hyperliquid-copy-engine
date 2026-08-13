@@ -26,6 +26,8 @@ from hlcopy.signals.generic_csv import load_generic_closed_trades
 from hlcopy.signals.invo import CopySignal, load_invo_closed_trades
 
 D = Decimal
+BPS = D("10000")
+POSITION_EPSILON = D("0.000000000001")
 DEFAULT_MAX_SIZE_RATIO_ERROR = D("0.60")
 
 
@@ -121,6 +123,23 @@ def _episode_is_covered(
     )
 
 
+def _price_bps(left: Decimal, right: Decimal) -> Decimal:
+    if left <= 0 or right <= 0:
+        return D("Infinity")
+    return abs(right / left - D("1")) * BPS
+
+
+def _is_final_flatten(fill: SqdFill, *, direction: str) -> bool:
+    close_name = "close long" if direction == "LONG" else "close short"
+    if fill.direction.lower() != close_name:
+        return False
+    start_position = getattr(fill, "start_position", None)
+    if start_position is None:
+        return False
+    tolerance = max(POSITION_EPSILON, abs(start_position) * D("0.000000001"))
+    return abs(abs(start_position) - fill.sz) <= tolerance
+
+
 def _public_trade_matches(
     signal: CopySignal,
     fills: list[SqdFill],
@@ -159,12 +178,41 @@ def _public_trade_matches(
                 },
             )
         )
-    return _best_matches_for_anchor(
+    matches = _best_matches_for_anchor(
         signal,
         candidates,
         window_ms=window_ms,
         max_price_bps=max_price_bps,
     )
+
+    # An external avg_exit_price can span reductions from multiple orders over
+    # the whole position lifecycle. In that case the final flatten price/size
+    # may be far from the aggregate export and the strict close cluster above
+    # would incorrectly drop the correct wallet before historical verification.
+    # Keep observed final-flatten wallets as discovery-only fallbacks; the full
+    # lifecycle VWAP/size/entry is still required by held-out match_episode().
+    for fill in fills:
+        if not _is_final_flatten(fill, direction=signal.direction):
+            continue
+        close_offset = fill.time_ms - signal.closed_at_ms
+        if abs(close_offset) > window_ms or fill.user in matches:
+            continue
+        exit_bps = _price_bps(signal.exit_price, fill.px)
+        time_penalty = D(abs(close_offset)) / D("1000")
+        price_penalty = min(exit_bps, D("50"))
+        quality = max(D("0"), D("75") - time_penalty - price_penalty)
+        matches[fill.user] = AnchorMatch(
+            signal_id=signal.signal_id,
+            user=fill.user,
+            trade_id=f"final-flatten:{fill.tid or fill.oid}",
+            open_offset_ms=0,
+            close_offset_ms=close_offset,
+            offset_gap_ms=abs(close_offset),
+            entry_price_bps=D("0"),
+            exit_price_bps=exit_bps,
+            quality=quality,
+        )
+    return matches
 
 
 async def discover_candidates(
@@ -391,8 +439,8 @@ async def resolve_source_public_trades(
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / f"public_trade_resolution_{source.id}.json"
     report = {
-        "version": 6,
-        "resolver_rule_version": "sqd-fill-wallet-identity-v6",
+        "version": 7,
+        "resolver_rule_version": "sqd-fill-wallet-identity-v7",
         "source": source.to_dict(),
         "input_sha256": sha256_file(evidence_path),
         "input_bytes": evidence_path.stat().st_size,
@@ -415,6 +463,8 @@ async def resolve_source_public_trades(
             "held_out_verification_required": True,
             "flat_to_open_boundary_required": True,
             "entry_time_verification_required": True,
+            "duplicate_episode_evidence_deduplicated": True,
+            "full_lifecycle_exit_aggregation_required": True,
             "discovery_only_candidate_can_verify": False,
             "all_threshold_finalists_verified": True,
             "coverage_fail_closed": True,
