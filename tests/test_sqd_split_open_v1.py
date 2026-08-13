@@ -44,14 +44,8 @@ def _signal() -> CopySignal:
     )
 
 
-def test_split_open_same_oid_is_one_entry_event() -> None:
-    fills = [
-        _fill(px="99", sz="0.5", time_ms=1_000_000, direction="Open Long", oid="1"),
-        _fill(px="101", sz="0.5", time_ms=1_000_050, direction="Open Long", oid="1"),
-        _fill(px="109", sz="0.5", time_ms=1_999_900, direction="Close Long", oid="7"),
-        _fill(px="111", sz="0.5", time_ms=2_000_000, direction="Close Long", oid="7"),
-    ]
-    evidence = match_episode(
+def _match(fills: list[SqdFill]):
+    return match_episode(
         _signal(),
         fills,
         close_time_tolerance_ms=5_000,
@@ -60,7 +54,30 @@ def test_split_open_same_oid_is_one_entry_event() -> None:
         entry_time_tolerance_ms=5_000,
         entry_price_tolerance_bps=D("5"),
     )
+
+
+def test_split_open_same_oid_is_one_entry_event() -> None:
+    fills = [
+        _fill(px="99", sz="0.5", time_ms=1_000_000, direction="Open Long", oid="1"),
+        _fill(px="101", sz="0.5", time_ms=1_000_050, direction="Open Long", oid="1"),
+        _fill(px="109", sz="0.5", time_ms=1_999_900, direction="Close Long", oid="7"),
+        _fill(px="111", sz="0.5", time_ms=2_000_000, direction="Close Long", oid="7"),
+    ]
+    evidence = _match(fills)
     assert evidence.matched
     assert evidence.entry_time_error_ms == 0
+    assert evidence.reconstructed_size == D("1.0")
+    assert evidence.reconstructed_entry == D("100")
+
+
+def test_distinct_same_direction_open_orders_build_one_continuous_position() -> None:
+    fills = [
+        _fill(px="99", sz="0.5", time_ms=1_000_000, direction="Open Long", oid="1"),
+        _fill(px="101", sz="0.5", time_ms=1_500_000, direction="Open Long", oid="2"),
+        _fill(px="109", sz="0.5", time_ms=1_999_900, direction="Close Long", oid="7"),
+        _fill(px="111", sz="0.5", time_ms=2_000_000, direction="Close Long", oid="7"),
+    ]
+    evidence = _match(fills)
+    assert evidence.matched
     assert evidence.reconstructed_size == D("1.0")
     assert evidence.reconstructed_entry == D("100")
