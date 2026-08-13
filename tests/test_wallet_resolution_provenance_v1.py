@@ -1,6 +1,11 @@
 from decimal import Decimal
 
-from hlcopy.resolver.provenance import EvidenceSnapshot, jsonable_config, sha256_file
+from hlcopy.resolver.provenance import (
+    EvidenceSnapshot,
+    jsonable_config,
+    sha256_bytes,
+    sha256_file,
+)
 from hlcopy.resolver.public_trade_index import PublicTradeDiscoveryConfig
 from hlcopy.signals.generic_csv import load_generic_closed_trades_bytes
 
@@ -30,7 +35,7 @@ def test_evidence_snapshot_binds_parsing_hash_and_size_to_same_bytes(tmp_path) -
 
     assert snapshot.data == original
     assert snapshot.size == len(original)
-    assert snapshot.sha256 == sha256_file(tmp_path / "original-copy.csv") if False else snapshot.sha256
+    assert snapshot.sha256 == sha256_bytes(original)
     assert imported.signals[0].exit_price == Decimal("110")
     assert snapshot.sha256 != sha256_file(evidence)
 
