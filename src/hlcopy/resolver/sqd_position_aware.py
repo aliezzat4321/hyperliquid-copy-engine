@@ -244,7 +244,10 @@ def _match_from_boundary(
         and boundary.time_ms <= row.time_ms
         and row.time_ms <= signal.closed_at_ms + close_time_tolerance_ms
     ]
-    rows.sort(key=lambda row: (row.time_ms, row.block_number, row.tid))
+    # SQD emits fills in execution order. Keep that order for fills sharing the
+    # same millisecond/block; lexical transaction-id ordering can reverse split
+    # fills and fabricate a startPosition continuity failure.
+    rows.sort(key=lambda row: (row.time_ms, row.block_number))
 
     for fill in rows:
         text = fill.direction.lower()
