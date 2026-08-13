@@ -19,6 +19,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-price-bps", type=Decimal, default=Decimal("25"))
     parser.add_argument("--max-size-ratio-error", type=Decimal, default=Decimal("0.60"))
     parser.add_argument("--min-discovery-matches", type=int, default=3)
+    parser.add_argument("--max-candidates-to-verify", type=int, default=6)
     parser.add_argument("--historical-verify-trades", type=int, default=12)
     parser.add_argument("--historical-lookback-hours", type=int, default=6)
     parser.add_argument("--historical-time-tolerance-ms", type=int, default=25_000)
@@ -33,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--min-historical-matches", type=int, default=3)
     parser.add_argument("--min-historical-ratio", type=Decimal, default=Decimal("0.20"))
+    parser.add_argument("--min-historical-winner-match-gap", type=int, default=2)
     return parser
 
 
@@ -43,6 +45,7 @@ async def _run(args: argparse.Namespace) -> None:
         max_price_bps=args.max_price_bps,
         max_size_ratio_error=args.max_size_ratio_error,
         min_discovery_matches=max(1, args.min_discovery_matches),
+        max_candidates_to_verify=max(1, args.max_candidates_to_verify),
         historical_verify_trades=max(1, args.historical_verify_trades),
         historical_lookback_hours=max(1, args.historical_lookback_hours),
         historical_time_tolerance_ms=max(1, args.historical_time_tolerance_ms),
@@ -53,6 +56,7 @@ async def _run(args: argparse.Namespace) -> None:
         historical_max_size_ratio_error=args.historical_max_size_ratio_error,
         min_historical_matches=max(1, args.min_historical_matches),
         min_historical_ratio=args.min_historical_ratio,
+        min_historical_winner_match_gap=max(1, args.min_historical_winner_match_gap),
     )
     result = await identify_wallet_from_csv(
         args.evidence,
