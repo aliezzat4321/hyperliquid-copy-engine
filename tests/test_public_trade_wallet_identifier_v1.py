@@ -12,7 +12,7 @@ from hlcopy.resolver.public_trade_index import (
     verify_candidate_historically,
     verify_candidate_shortlist,
 )
-from hlcopy.resolver.reverse_index import CandidateFingerprint
+from hlcopy.resolver.reverse_index import AnchorMatch, CandidateFingerprint
 from hlcopy.resolver.sqd_fills import aggregate_close_fills, match_episode
 from hlcopy.resolver.sqd_position_aware import SqdFill
 from hlcopy.signals.invo import CopySignal
@@ -60,6 +60,7 @@ def _fill(
     time_ms: int,
     direction: str,
     oid: str,
+    start_position: str | None = None,
 ) -> SqdFill:
     return SqdFill(
         block_number=1,
@@ -73,11 +74,25 @@ def _fill(
         oid=oid,
         closed_pnl=D("0"),
         tid=f"tid-{time_ms}",
-        start_position=None,
+        start_position=D(start_position) if start_position is not None else None,
     )
 
 
 def _candidate(address: str, matches: int, score: str) -> CandidateFingerprint:
+    anchor_matches = tuple(
+        AnchorMatch(
+            signal_id=f"anchor-{index}",
+            user=address,
+            trade_id=f"final-flatten:tid:{address}:{index}",
+            open_offset_ms=0,
+            close_offset_ms=0,
+            offset_gap_ms=0,
+            entry_price_bps=D("0"),
+            exit_price_bps=D("0"),
+            quality=D("1"),
+        )
+        for index in range(matches)
+    )
     return CandidateFingerprint(
         address=address,
         matched_anchors=matches,
@@ -88,7 +103,7 @@ def _candidate(address: str, matches: int, score: str) -> CandidateFingerprint:
         median_offset_gap_ms=0.0,
         median_price_bps=D("1"),
         score=D(score),
-        matches=(),
+        matches=anchor_matches,
     )
 
 
@@ -156,8 +171,22 @@ class _FakeSqdClient:
 
 def test_partial_close_fills_are_aggregated_before_price_matching() -> None:
     fills = [
-        _fill(px="109", sz="0.5", time_ms=1_999_900, direction="Close Long", oid="7"),
-        _fill(px="111", sz="0.5", time_ms=2_000_000, direction="Close Long", oid="7"),
+        _fill(
+            px="109",
+            sz="0.5",
+            time_ms=1_999_900,
+            direction="Close Long",
+            oid="7",
+            start_position="1.0",
+        ),
+        _fill(
+            px="111",
+            sz="0.5",
+            time_ms=2_000_000,
+            direction="Close Long",
+            oid="7",
+            start_position="0.5",
+        ),
     ]
     closes = aggregate_close_fills(fills, direction="LONG")
     assert any(close.avg_price == D("110") and close.size == D("1.0") for close in closes)
