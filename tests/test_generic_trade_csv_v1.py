@@ -21,6 +21,7 @@ def test_generic_loader_autodetects_bones_style_columns(tmp_path: Path) -> None:
     assert len(result.signals) == 2
     assert result.rejected_rows == ()
     assert result.duplicate_rows == ()
+    assert result.overlapping_rows == ()
     assert result.column_map["coin"] == "ticker"
     assert result.column_map["exit_price"] == "closing_price"
     assert result.signals[0].source == "generic_closed_trades_csv"
@@ -67,6 +68,7 @@ def test_generic_loader_deduplicates_same_episode_without_trade_id(tmp_path: Pat
     assert len(result.duplicate_rows) == 2
     assert result.duplicate_rows[0]["duplicate_of_row"] == 2
     assert result.duplicate_rows[1]["duplicate_of_row"] == 2
+    assert result.overlapping_rows == ()
 
 
 def test_generic_loader_deduplicates_episode_even_with_different_row_ids(tmp_path: Path) -> None:
@@ -83,6 +85,30 @@ def test_generic_loader_deduplicates_episode_even_with_different_row_ids(tmp_pat
     assert [signal.signal_id for signal in result.signals] == ["a"]
     assert len(result.duplicate_rows) == 1
     assert result.duplicate_rows[0]["signal_id"] == "b"
+
+
+def test_overlapping_same_coin_rows_are_one_independent_evidence_unit(tmp_path: Path) -> None:
+    path = tmp_path / "overlap.csv"
+    path.write_text(
+        "id,symbol,position_side,avg_entry_price,avg_exit_price,start_time,end_time\n"
+        "wide,BTC,LONG,100,110,2026-08-01T10:00:00Z,2026-08-01T11:00:00Z\n"
+        "rounded,BTC,LONG,100.02,109.98,2026-08-01T10:00:01Z,2026-08-01T10:59:59Z\n"
+        "flip-copy,BTC,SHORT,100.03,109.97,2026-08-01T10:00:02Z,2026-08-01T10:59:58Z\n"
+        "next,BTC,LONG,111,112,2026-08-01T11:00:00Z,2026-08-01T11:05:00Z\n"
+        "parallel,ETH,LONG,10,11,2026-08-01T10:30:00Z,2026-08-01T10:40:00Z\n",
+        encoding="utf-8",
+    )
+
+    result = load_generic_closed_trades(path)
+
+    assert {signal.signal_id for signal in result.signals} == {"wide", "next", "parallel"}
+    assert result.duplicate_rows == ()
+    assert len(result.overlapping_rows) == 2
+    assert {row["signal_id"] for row in result.overlapping_rows} == {
+        "rounded",
+        "flip-copy",
+    }
+    assert all(row["representative_signal_id"] == "wide" for row in result.overlapping_rows)
 
 
 def test_generic_loader_rejects_ambiguous_side_only_schema(tmp_path: Path) -> None:
