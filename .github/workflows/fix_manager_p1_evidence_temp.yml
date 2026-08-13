@@ -1,0 +1,161 @@
+name: fix-manager-p1-evidence-temp
+
+on:
+  push:
+    branches: [agent/free-public-wallet-identifier-v1]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.event.head_commit.message != 'Close malformed and near-equivalent evidence loopholes'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/free-public-wallet-identifier-v1
+          fetch-depth: 0
+      - name: Patch fail-closed evidence handling and regressions
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          identifier = Path('src/hlcopy/resolver/identifier.py')
+          text = identifier.read_text()
+          old = '''    snapshot = EvidenceSnapshot.from_path(evidence_path)\n    imported: GenericTradeImportResult = load_generic_closed_trades_bytes(snapshot.data)\n    signals = imported.signals\n'''
+          new = '''    snapshot = EvidenceSnapshot.from_path(evidence_path)\n    imported: GenericTradeImportResult = load_generic_closed_trades_bytes(\n        snapshot.data,\n        near_duplicate_entry_time_ms=config.historical_entry_time_tolerance_ms,\n        near_duplicate_close_time_ms=max(\n            max(1, config.window_seconds) * 1000,\n            config.historical_time_tolerance_ms,\n        ),\n        near_duplicate_entry_price_bps=config.historical_entry_price_tolerance_bps,\n        near_duplicate_exit_price_bps=max(\n            config.max_price_bps,\n            config.historical_price_tolerance_bps,\n        ),\n    )\n    if imported.rejected_rows:\n        raise ValueError(\n            f"external evidence contains {len(imported.rejected_rows)} malformed rows; fail closed"\n        )\n    signals = imported.signals\n'''
+          if old not in text:
+              raise SystemExit('identifier import block pattern not found')
+          text = text.replace(old, new, 1)
+          text = text.replace(
+              'f"{len(imported.overlapping_rows)} overlapping rows collapsed"',
+              'f"{len(imported.overlapping_rows)} overlapping/near-equivalent rows collapsed"',
+              1,
+          )
+          text = text.replace(
+              '"unverified_candidate_exposed_as_wallet": False,\n',
+              '"unverified_candidate_exposed_as_wallet": False,\n                "malformed_rows_fail_closed": True,\n',
+              1,
+          )
+          text = text.replace(
+              '"overlapping_source_positions_collapsed": True,\n',
+              '"overlapping_source_positions_collapsed": True,\n                "near_equivalent_source_positions_collapsed": True,\n                "source_collapse_uses_effective_matching_tolerances": True,\n',
+              1,
+          )
+          identifier.write_text(text)
+
+          public = Path('src/hlcopy/resolver/public_trade_index.py')
+          text = public.read_text()
+          old = '''def _source_signals(\n    source: ExternalSourceSpec,\n    *,\n    snapshot: EvidenceSnapshot,\n) -> tuple[CopySignal, ...]:\n    if source.adapter == "generic_closed_trades_csv":\n        result = load_generic_closed_trades_bytes(snapshot.data)\n'''
+          new = '''def _source_signals(\n    source: ExternalSourceSpec,\n    *,\n    snapshot: EvidenceSnapshot,\n    config: PublicTradeDiscoveryConfig,\n) -> tuple[CopySignal, ...]:\n    if source.adapter == "generic_closed_trades_csv":\n        result = load_generic_closed_trades_bytes(\n            snapshot.data,\n            near_duplicate_entry_time_ms=config.historical_entry_time_tolerance_ms,\n            near_duplicate_close_time_ms=max(\n                max(1, config.window_seconds) * 1000,\n                config.historical_time_tolerance_ms,\n            ),\n            near_duplicate_entry_price_bps=config.historical_entry_price_tolerance_bps,\n            near_duplicate_exit_price_bps=max(\n                config.max_price_bps,\n                config.historical_price_tolerance_bps,\n            ),\n        )\n'''
+          if old not in text:
+              raise SystemExit('public _source_signals pattern not found')
+          text = text.replace(old, new, 1)
+          old_call = '    signals = _source_signals(source, snapshot=snapshot)\n'
+          new_call = '    signals = _source_signals(source, snapshot=snapshot, config=config)\n'
+          if old_call not in text:
+              raise SystemExit('public _source_signals call pattern not found')
+          text = text.replace(old_call, new_call, 1)
+          text = text.replace(
+              '"held_out_verification_required": True,\n',
+              '"held_out_verification_required": True,\n            "malformed_rows_fail_closed": True,\n',
+              1,
+          )
+          text = text.replace(
+              '"overlapping_source_positions_collapsed": True,\n',
+              '"overlapping_source_positions_collapsed": True,\n            "near_equivalent_source_positions_collapsed": True,\n            "source_collapse_uses_effective_matching_tolerances": True,\n',
+              1,
+          )
+          public.write_text(text)
+
+          tests = Path('tests/test_generic_trade_csv_v1.py')
+          text = tests.read_text()
+          addition = r'''
+
+
+def test_near_equivalent_short_nonoverlapping_rows_are_one_evidence_unit(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "near-duplicates.csv"
+    path.write_text(
+        "id,symbol,position_side,avg_entry_price,avg_exit_price,start_time,end_time\n"
+        "a,BTC,LONG,100,101,2026-08-01T10:00:00Z,2026-08-01T10:00:01Z\n"
+        "b,BTC,LONG,100.01,101.01,2026-08-01T10:00:02Z,2026-08-01T10:00:03Z\n"
+        "distinct,BTC,LONG,105,106,2026-08-01T10:00:04Z,2026-08-01T10:00:05Z\n",
+        encoding="utf-8",
+    )
+
+    result = load_generic_closed_trades(path)
+
+    assert {signal.signal_id for signal in result.signals} == {"a", "distinct"}
+    assert len(result.overlapping_rows) == 1
+    assert result.overlapping_rows[0]["signal_id"] == "b"
+    assert result.overlapping_rows[0]["representative_signal_id"] == "a"
+    assert result.overlapping_rows[0]["reason"] == (
+        "overlapping_or_near_equivalent_source_position_evidence"
+    )
+
+
+def test_near_equivalent_collapse_respects_effective_time_tolerance(tmp_path: Path) -> None:
+    path = tmp_path / "near-duplicates-narrow.csv"
+    path.write_text(
+        "id,symbol,position_side,avg_entry_price,avg_exit_price,start_time,end_time\n"
+        "a,BTC,LONG,100,101,2026-08-01T10:00:00Z,2026-08-01T10:00:01Z\n"
+        "b,BTC,LONG,100.01,101.01,2026-08-01T10:00:02Z,2026-08-01T10:00:03Z\n",
+        encoding="utf-8",
+    )
+
+    result = load_generic_closed_trades(
+        path,
+        near_duplicate_entry_time_ms=500,
+        near_duplicate_close_time_ms=500,
+    )
+
+    assert {signal.signal_id for signal in result.signals} == {"a", "b"}
+    assert result.overlapping_rows == ()
+'''
+          if 'test_near_equivalent_short_nonoverlapping_rows_are_one_evidence_unit' not in text:
+              tests.write_text(text + addition)
+
+          fail_closed = Path('tests/test_wallet_identifier_fail_closed_v1.py')
+          fail_closed.write_text(r'''from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+import pytest
+
+import hlcopy.resolver.identifier as identifier
+
+
+class _ForbiddenSqdClient:
+    def __init__(self) -> None:
+        raise AssertionError("SQD must not be opened for malformed evidence")
+
+
+def test_standalone_identifier_fails_closed_on_any_malformed_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "mixed.csv"
+    path.write_text(
+        "id,symbol,position_side,avg_entry_price,avg_exit_price,start_time,end_time\n"
+        "1,BTC,LONG,100,101,2026-08-01T10:00:00Z,2026-08-01T10:10:00Z\n"
+        "2,ETH,SHORT,200,199,2026-08-01T11:00:00Z,2026-08-01T11:10:00Z\n"
+        "3,SOL,LONG,50,51,2026-08-01T12:00:00Z,2026-08-01T12:10:00Z\n"
+        "bad,XRP,BUY,1,1.1,2026-08-01T13:00:00Z,2026-08-01T13:10:00Z\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(identifier, "SqdHyperliquidFillsClient", _ForbiddenSqdClient)
+
+    with pytest.raises(ValueError, match="1 malformed rows; fail closed"):
+        asyncio.run(identifier.identify_wallet_from_csv(path))
+''')
+          PY
+          git rm .github/workflows/fix_manager_p1_evidence_temp.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/hlcopy/resolver/identifier.py src/hlcopy/resolver/public_trade_index.py tests/test_generic_trade_csv_v1.py tests/test_wallet_identifier_fail_closed_v1.py
+          git commit -m 'Close malformed and near-equivalent evidence loopholes'
+          git push origin HEAD:agent/free-public-wallet-identifier-v1
