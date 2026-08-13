@@ -16,7 +16,12 @@ from hlcopy.resolver.reverse_index import (
     rank_candidates,
 )
 from hlcopy.resolver.source_registry import ExternalSourceSpec
-from hlcopy.resolver.sqd_fills import EpisodeEvidence, aggregate_close_fills, signal_position_size
+from hlcopy.resolver.sqd_fills import (
+    AggregatedClose,
+    EpisodeEvidence,
+    aggregate_close_fills,
+    signal_position_size,
+)
 from hlcopy.resolver.sqd_position_aware import (
     LifecycleEpisodeEvidence,
     SqdFill,
@@ -164,7 +169,7 @@ def _is_final_flatten(fill: SqdFill, *, direction: str) -> bool:
     close_name = "close long" if direction == "LONG" else "close short"
     if fill.direction.lower() != close_name:
         return False
-    start_position = getattr(fill, "start_position", None)
+    start_position = fill.start_position
     if start_position is None:
         return False
     tolerance = max(POSITION_EPSILON, abs(start_position) * D("0.000000001"))
@@ -172,13 +177,13 @@ def _is_final_flatten(fill: SqdFill, *, direction: str) -> bool:
 
 
 def _close_execution_id(
-    close: object,
+    close: AggregatedClose,
     fills: list[SqdFill],
     *,
     direction: str,
 ) -> str:
-    user = str(getattr(close, "user"))
-    last_time_ms = int(getattr(close, "last_time_ms"))
+    user = close.user
+    last_time_ms = close.last_time_ms
     final_flattens = [
         fill
         for fill in fills
@@ -190,9 +195,8 @@ def _close_execution_id(
         fill = min(final_flattens, key=lambda row: abs(row.time_ms - last_time_ms))
         return f"final-flatten:{_fill_execution_id(fill)}"
     return (
-        f"close:{user}:{getattr(close, 'coin')}:{direction}:"
-        f"{getattr(close, 'first_time_ms')}:{last_time_ms}:"
-        f"{getattr(close, 'size')}:{getattr(close, 'avg_price')}"
+        f"close:{user}:{close.coin}:{direction}:"
+        f"{close.first_time_ms}:{last_time_ms}:{close.size}:{close.avg_price}"
     )
 
 
