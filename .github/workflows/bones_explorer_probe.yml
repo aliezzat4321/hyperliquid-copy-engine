@@ -12,7 +12,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install requests
-      - name: Intersect SQD open and close fingerprints
+      - name: Reconstruct Bones position episodes from close candidates
         run: |
           python - <<'PY'
           import json, time
@@ -25,25 +25,30 @@ jobs:
           INFO='https://api.hyperliquid.xyz/info'
           s=requests.Session()
           anchors=[
-            ('a1',1101568933,1101616820,'2026-08-07T17:03:36.179+00:00','2026-08-07T18:00:35.908+00:00','LONG','64721','64773','0.01009177'),
-            ('a2',1101437857,1101456526,'2026-08-07T14:27:50.663+00:00','2026-08-07T14:50:01.743+00:00','SHORT','65183','65049','0.010000'),
-            ('a3',1101416443,1101433896,'2026-08-07T14:02:23.946+00:00','2026-08-07T14:23:08.261+00:00','LONG','64895','64987','0.010000'),
-            ('a4',1101237541,1101414678,'2026-08-07T10:29:48.496+00:00','2026-08-07T14:00:18.041+00:00','SHORT','65049.1693195782','64968','0.0100470734'),
-            ('a5',1100827635,1101002609,'2026-08-07T02:22:13.645+00:00','2026-08-07T05:50:38.289+00:00','LONG','64315','64330','0.0096458346'),
-            ('a6',1100775114,1100797190,'2026-08-07T01:19:40.089+00:00','2026-08-07T01:45:57.811+00:00','LONG','64309','64392','0.010000'),
-            ('a7',1100722765,1100761508,'2026-08-07T00:17:18.854+00:00','2026-08-07T01:03:27.710+00:00','LONG','64231','64384','0.010000'),
-            ('a8',1100695396,1100714421,'2026-08-06T23:44:42.858+00:00','2026-08-07T00:07:22.531+00:00','LONG','64194','64381','0.010000'),
+            ('a1',1101616820,'2026-08-07T17:03:36.179+00:00','2026-08-07T18:00:35.908+00:00','LONG','64721','64773','0.01009177'),
+            ('a2',1101456526,'2026-08-07T14:27:50.663+00:00','2026-08-07T14:50:01.743+00:00','SHORT','65183','65049','0.010000'),
+            ('a3',1101433896,'2026-08-07T14:02:23.946+00:00','2026-08-07T14:23:08.261+00:00','LONG','64895','64987','0.010000'),
+            ('a4',1101414678,'2026-08-07T10:29:48.496+00:00','2026-08-07T14:00:18.041+00:00','SHORT','65049.1693195782','64968','0.0100470734'),
+            ('a5',1101002609,'2026-08-07T02:22:13.645+00:00','2026-08-07T05:50:38.289+00:00','LONG','64315','64330','0.0096458346'),
+            ('a6',1100797190,'2026-08-07T01:19:40.089+00:00','2026-08-07T01:45:57.811+00:00','LONG','64309','64392','0.010000'),
+            ('a7',1100761508,'2026-08-07T00:17:18.854+00:00','2026-08-07T01:03:27.710+00:00','LONG','64231','64384','0.010000'),
+            ('a8',1100714421,'2026-08-06T23:44:42.858+00:00','2026-08-07T00:07:22.531+00:00','LONG','64194','64381','0.010000'),
           ]
           def ts(x): return int(datetime.fromisoformat(x).timestamp()*1000)
-          def stream(center):
+          def post(url,payload,timeout=60):
+            for i in range(8):
+              r=s.post(url,json=payload,timeout=timeout)
+              if r.status_code in (429,529,500,502,503,504):
+                time.sleep(.7+i*1.2); continue
+              r.raise_for_status(); return r
+            raise RuntimeError(f'upstream failed {url}')
+          def sqd_rows(center):
             p={'type':'hyperliquidFills','fromBlock':center-1800,'toBlock':center+1800,
                'fields':{'block':{'number':True,'timestamp':True},'fill':{'user':True,'coin':True,'px':True,'sz':True,'side':True,'time':True,'oid':True,'closedPnl':True,'crossed':True,'tid':True}},'fills':[{}]}
-            for i in range(7):
-              r=s.post(SQD,json=p,timeout=60)
-              if r.status_code in (429,529,500,502,503,504): time.sleep(1+i*1.5); continue
-              r.raise_for_status(); return [json.loads(x) for x in r.text.splitlines() if x.strip()]
-            raise RuntimeError(f'SQD failed around {center}')
-          def candidates(rows,target,side,px0,sz0,is_close,pnl0):
+            r=post(SQD,p)
+            return [json.loads(x) for x in r.text.splitlines() if x.strip()]
+          def close_candidates(rows,target,direction,exitpx,sz0,pnl0):
+            side='A' if direction=='LONG' else 'B'
             groups=defaultdict(lambda:{'sz':Decimal(0),'n':Decimal(0),'pnl':Decimal(0),'times':[]})
             for row in rows:
               for f in row.get('fills',[]):
@@ -55,65 +60,87 @@ jobs:
                 try: z=Decimal(str(f['sz'])); px=Decimal(str(f['px'])); cp=Decimal(str(f.get('closedPnl') or 0))
                 except Exception: continue
                 g=groups[u]; g['sz']+=z; g['n']+=z*px; g['pnl']+=cp; g['times'].append(t)
-            out={}
+            out=[]
             for u,g in groups.items():
-              if g['sz']<=0: continue
-              v=g['n']/g['sz']; dt=min(abs(x-target) for x in g['times']); sr=abs(g['sz']/sz0-1); pb=abs(v/px0-1)*10000
-              if dt>12000 or sr>Decimal('.60') or pb>35: continue
-              pr=Decimal(0)
-              if is_close:
-                if g['pnl']==0 or pnl0==0: continue
-                pr=abs(g['pnl']/pnl0-1)
-                if pr>Decimal('1.0'): continue
-              else:
-                # Opening fill normally realizes no pnl; tolerate tiny existing-position effects.
-                if abs(g['pnl'])>max(Decimal('.05'),abs(pnl0)*Decimal('.15')): continue
-              cost=Decimal(dt)/2000+sr*6+pb/7+(pr*6 if is_close else 0)
-              out[u]=(cost,dt,sr,pb,pr,g['sz'],v,g['pnl'])
-            return out
-          recurrence=defaultdict(list)
-          details={}
-          for aid,oh,ch,opened,closed,direction,entrys,exits,szs in anchors:
-            ot,ct=ts(opened),ts(closed); entry=Decimal(entrys); exitpx=Decimal(exits); sz0=Decimal(szs)
+              if g['sz']<=0 or g['pnl']==0: continue
+              v=g['n']/g['sz']; dt=min(abs(x-target) for x in g['times']); sr=abs(g['sz']/sz0-1); pb=abs(v/exitpx-1)*10000
+              pr=abs(g['pnl']/pnl0-1) if pnl0 else Decimal(999)
+              if dt<=12000 and sr<=Decimal('.65') and pb<=40 and pr<=Decimal('1.2'):
+                cost=Decimal(dt)/2000+sr*6+pb/8+pr*5
+                out.append((cost,u,dt,sr,pb,pr,g['sz'],v,g['pnl']))
+            return sorted(out)
+          def official_fills(user,start,end):
+            # Query bounded chunks to avoid the 10k response cap on active wallets.
+            rows=[]; cur=start; step=30*60*1000
+            while cur<=end:
+              stop=min(end,cur+step-1)
+              p={'type':'userFillsByTime','user':user,'startTime':cur,'endTime':stop,'aggregateByTime':True}
+              rows.extend(post(INFO,p,20).json())
+              cur=stop+1
+            uniq={}
+            for f in rows:
+              key=(f.get('tid'),f.get('oid'),f.get('time'),f.get('px'),f.get('sz'),f.get('dir'))
+              uniq[key]=f
+            return sorted(uniq.values(),key=lambda x:int(x.get('time',0)))
+          def reconstruct(user,opened,closed,direction,entry,exitpx,sz0):
+            ot,ct=ts(opened),ts(closed)
+            # Include a long lookback because export opened_at may be an episode marker rather than first fill.
+            start=min(ot-6*60*60*1000, ct-8*60*60*1000)
+            fills=official_fills(user,start,ct+15000)
+            btc=[]
+            for f in fills:
+              if str(f.get('coin','')).upper()!='BTC': continue
+              try:
+                t=int(f['time']); px=Decimal(str(f['px'])); z=Decimal(str(f['sz'])); d=str(f.get('dir',''))
+              except Exception: continue
+              if t>ct+15000: continue
+              btc.append((t,px,z,d,f))
+            # Require an actual close near the export close first.
+            close_name='Close Long' if direction=='LONG' else 'Close Short'
+            close_hits=[x for x in btc if x[3].lower()==close_name.lower() and abs(x[0]-ct)<=15000]
+            if not close_hits: return None
+            close_best=min(close_hits,key=lambda x:(abs(x[0]-ct),abs(x[1]/exitpx-1)))
+            # Walk backwards collecting same-direction opening/add fills until the exported size is explained.
+            open_names={'Open Long','Long > Long'} if direction=='LONG' else {'Open Short','Short > Short'}
+            selected=[]; total=Decimal(0); notional=Decimal(0)
+            for t,px,z,d,f in reversed(btc):
+              if t>=close_best[0]: continue
+              if d not in open_names: continue
+              # Avoid swallowing ancient unrelated episodes once enough size has been found.
+              selected.append((t,px,z,d,f)); total+=z; notional+=z*px
+              if total>=sz0*Decimal('.90'): break
+            if total<=0: return None
+            avg=notional/total
+            size_err=abs(total/sz0-1); entry_bps=abs(avg/entry-1)*10000
+            open_time=min(x[0] for x in selected); open_dt=abs(open_time-ot)
+            # Episode scoring: entry VWAP/size dominate; opened_at is soft evidence only.
+            score=size_err*Decimal('10')+entry_bps/Decimal('5')+Decimal(min(open_dt,6*60*60*1000))/Decimal(60*60*1000)
+            return {'score':score,'size_err':size_err,'entry_bps':entry_bps,'open_dt_ms':open_dt,
+                    'recon_size':total,'recon_entry':avg,'fills':len(selected),'close_dt_ms':abs(close_best[0]-ct),
+                    'close_px_bps':abs(close_best[1]/exitpx-1)*10000,'close_dir':close_best[3]}
+
+          recurrence=defaultdict(list); evidence={}
+          for aid,ch,opened,closed,direction,entrys,exits,szs in anchors:
+            ct=ts(closed); entry=Decimal(entrys); exitpx=Decimal(exits); sz0=Decimal(szs)
             pnl0=(exitpx-entry)*sz0*(Decimal(1) if direction=='LONG' else Decimal(-1))
-            open_side='B' if direction=='LONG' else 'A'; close_side='A' if direction=='LONG' else 'B'
-            opens=candidates(stream(oh),ot,open_side,entry,sz0,False,pnl0)
-            closes=candidates(stream(ch),ct,close_side,exitpx,sz0,True,pnl0)
-            common=set(opens)&set(closes)
-            ranked=sorted((opens[u][0]+closes[u][0],u,opens[u],closes[u]) for u in common)
-            print('TRADE',aid,'opens',len(opens),'closes',len(closes),'intersection',len(ranked))
-            for row in ranked[:20]: print(' FULL_CANDIDATE',row)
-            for _,u,o,c in ranked[:30]: recurrence[u].append(aid); details[(u,aid)]=(o,c)
-          final=sorted(recurrence.items(),key=lambda kv:len(kv[1]),reverse=True)
+            candidates=close_candidates(sqd_rows(ch),ct,direction,exitpx,sz0,pnl0)
+            print('ANCHOR',aid,'close_candidates',len(candidates))
+            accepted=[]
+            for c in candidates[:16]:
+              _,u,*meta=c
+              ep=reconstruct(u,opened,closed,direction,entry,exitpx,sz0)
+              if ep is None: continue
+              print(' EPISODE',aid,u,ep)
+              # Keep broad enough for export aggregation differences; recurrence across trades is the key gate.
+              if ep['size_err']<=Decimal('.35') and ep['entry_bps']<=30 and ep['close_dt_ms']<=15000 and ep['close_px_bps']<=40:
+                accepted.append((ep['score'],u,ep))
+            accepted.sort(key=lambda x:x[0])
+            print(' ACCEPTED',aid,len(accepted),[(str(x[0]),x[1]) for x in accepted[:10]])
+            for _,u,ep in accepted[:12]: recurrence[u].append(aid); evidence[(u,aid)]=ep
           print('RECURRENCE')
-          for u,ids in final[:30]: print('WALLET',u,'trades',len(ids),'ids',ids)
-          finalists=[u for u,ids in final if len(ids)>=2][:8]
-          print('FINALISTS',finalists)
-          # Only now ask the official API, as an independent verifier.
-          for u in finalists:
-            verified=[]
-            for aid,oh,ch,opened,closed,direction,entrys,exits,szs in anchors:
-              if aid not in recurrence[u]: continue
-              ot,ct=ts(opened),ts(closed); entry=Decimal(entrys); exitpx=Decimal(exits); sz0=Decimal(szs)
-              expected_open='Open Long' if direction=='LONG' else 'Open Short'; expected_close='Close Long' if direction=='LONG' else 'Close Short'
-              def get(center):
-                p={'type':'userFillsByTime','user':u,'startTime':center-15000,'endTime':center+15000,'aggregateByTime':True}
-                for i in range(5):
-                  r=s.post(INFO,json=p,timeout=20)
-                  if r.status_code==429: time.sleep(.5+i); continue
-                  r.raise_for_status(); return r.json()
-                return []
-              def best(rows,direction,target,px0):
-                ans=None
-                for f in rows:
-                  if str(f.get('coin','')).upper()!='BTC' or str(f.get('dir','')).lower()!=direction.lower(): continue
-                  try: rec=(abs(int(f['time'])-target),abs(Decimal(str(f['px']))/px0-1)*10000,abs(Decimal(str(f['sz']))/sz0-1),f)
-                  except Exception: continue
-                  if ans is None or rec[:3]<ans[:3]: ans=rec
-                return ans
-              om=best(get(ot),expected_open,ot,entry); cm=best(get(ct),expected_close,ct,exitpx)
-              ok=bool(om and cm and om[0]<=15000 and om[1]<=35 and om[2]<=Decimal('.6') and cm[0]<=15000 and cm[1]<=35 and cm[2]<=Decimal('.6'))
-              print('OFFICIAL',u,aid,'ok',ok,'open',None if not om else om[:3],'close',None if not cm else cm[:3])
-              if ok: verified.append(aid)
-            print('OFFICIAL_SUMMARY',u,'verified',len(verified),'ids',verified)
+          final=sorted(recurrence.items(),key=lambda kv:(len(kv[1]),-sum(float(evidence[(kv[0],a)]['score']) for a in kv[1])),reverse=True)
+          for u,ids in final[:30]:
+            print('WALLET',u,'trades',len(ids),'ids',ids,'scores',[str(evidence[(u,a)]['score']) for a in ids])
+          finalists=[(u,ids) for u,ids in final if len(ids)>=2]
+          print('FINALISTS',finalists[:10])
           PY
