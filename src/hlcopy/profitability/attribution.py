@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Iterable
 from decimal import Decimal, InvalidOperation
-from typing import Any, Iterable
+from typing import Any
 
 D = Decimal
 ZERO = D("0")
@@ -143,9 +144,10 @@ def build_trade_attribution(payload: dict[str, Any]) -> dict[str, object]:
         "source_pnl_model": payload.get("pnl_model"),
         "mode": "DESCRIPTIVE_RESEARCH_ONLY_NO_AUTOMATIC_FILTER_PROMOTION",
         "causal_note": (
-            "Inputs are prospective realized follower slices. Attribution uses realized outcomes "
-            "only to generate research hypotheses; these outcomes must never be used as same-period "
-            "entry features. Any selective-copy rule must be trained and validated chronologically."
+            "Inputs are prospective realized follower slices. Attribution uses realized "
+            "outcomes only to generate research hypotheses; these outcomes must never be "
+            "used as same-period entry features. Any selective-copy rule must be trained "
+            "and validated chronologically."
         ),
         "required_latency_scenarios": list(REQUIRED_SCENARIOS),
         "slice_count": len(slices),
