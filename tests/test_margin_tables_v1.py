@@ -29,13 +29,13 @@ def test_margin_table_deduction_is_continuous() -> None:
     first, second = btc.tiers
     assert first.maintenance_margin_rate == D("0.0125")
     assert second.maintenance_margin_rate == D("0.025")
-    assert second.maintenance_margin_deduction_usd == D("1875000.0000")
+    assert second.maintenance_deduction_usd == D("1875000.0000")
 
     boundary = D("150000000")
     first_requirement = boundary * first.maintenance_margin_rate
     second_requirement = (
         boundary * second.maintenance_margin_rate
-        - second.maintenance_margin_deduction_usd
+        - second.maintenance_deduction_usd
     )
     assert first_requirement == second_requirement
 
