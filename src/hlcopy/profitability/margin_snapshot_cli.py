@@ -54,7 +54,7 @@ async def _run(output: Path, dex: str) -> None:
         fetched_at_ns=fetched_at_ns,
         dex="",
     )
-    if not parsed.margin_tables:
+    if not parsed.tables:
         raise SystemExit("official meta response contained no parseable margin tables")
 
     # Persist the exact request provenance so downstream research can distinguish
@@ -78,7 +78,7 @@ async def _run(output: Path, dex: str) -> None:
 
     print(
         "margin_snapshot "
-        f"network={settings.network} tables={len(parsed.margin_tables)} "
+        f"network={settings.network} tables={len(parsed.tables)} "
         f"fetched_at_ns={fetched_at_ns} output={output}"
     )
 
