@@ -80,9 +80,10 @@ async def identify_wallet_from_csv(
     signals = imported.signals
     if len(signals) < 3:
         raise ValueError(
-            f"insufficient usable trade evidence: {len(signals)} accepted, "
+            f"insufficient independent trade evidence: {len(signals)} accepted units, "
             f"{len(imported.rejected_rows)} rejected, "
-            f"{len(imported.duplicate_rows)} duplicates removed"
+            f"{len(imported.duplicate_rows)} exact duplicates removed, "
+            f"{len(imported.overlapping_rows)} overlapping rows collapsed"
         )
 
     async with SqdHyperliquidFillsClient() as sqd:
@@ -143,8 +144,8 @@ async def identify_wallet_from_csv(
         output_dir.mkdir(parents=True, exist_ok=True)
         report_path = output_dir / f"wallet_identification_{evidence_path.stem}.json"
         payload = {
-            "version": 8,
-            "resolver_rule_version": "generic-sqd-fill-wallet-identity-v8",
+            "version": 9,
+            "resolver_rule_version": "generic-sqd-fill-wallet-identity-v9",
             "input_file": str(evidence_path),
             "input_sha256": snapshot.sha256,
             "input_bytes": snapshot.size,
@@ -153,6 +154,7 @@ async def identify_wallet_from_csv(
             "accepted_trades": len(signals),
             "rejected_rows": list(imported.rejected_rows),
             "duplicate_rows": list(imported.duplicate_rows),
+            "overlapping_rows": list(imported.overlapping_rows),
             "coverage_start_ms": discovery.coverage_start_ms,
             "coverage_end_ms": discovery.coverage_end_ms,
             "uncovered_signal_ids": uncovered_signal_ids,
@@ -178,9 +180,11 @@ async def identify_wallet_from_csv(
                 "auto_trading_promotion": False,
                 "unverified_candidate_exposed_as_wallet": False,
                 "held_out_verification_required": True,
+                "discovery_held_out_execution_disjointness_required": True,
                 "flat_to_open_boundary_required": True,
+                "exact_boundary_sequence_replay_required": True,
                 "entry_time_verification_required": True,
-                "exact_duplicate_rows_removed": True,
+                "overlapping_source_positions_collapsed": True,
                 "one_vote_per_sqd_execution_in_discovery": True,
                 "one_vote_per_sqd_lifecycle_in_verification": True,
                 "full_lifecycle_exit_aggregation_required": True,
