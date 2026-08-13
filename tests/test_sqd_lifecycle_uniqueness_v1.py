@@ -1,6 +1,5 @@
+import asyncio
 from decimal import Decimal
-
-import pytest
 
 from hlcopy.resolver.public_trade_index import (
     PublicTradeDiscoveryConfig,
@@ -105,8 +104,7 @@ def test_same_execution_can_only_supply_one_discovery_anchor_vote() -> None:
     assert kept == ["b"]
 
 
-@pytest.mark.asyncio
-async def test_near_duplicate_rows_cannot_reuse_one_lifecycle_for_three_matches() -> None:
+def test_near_duplicate_rows_cannot_reuse_one_lifecycle_for_three_matches() -> None:
     signals = (
         _signal("a", time_shift_ms=0, price_shift="0"),
         _signal("b", time_shift_ms=1, price_shift="0.01"),
@@ -121,13 +119,15 @@ async def test_near_duplicate_rows_cannot_reuse_one_lifecycle_for_three_matches(
         historical_max_size_ratio_error=D("0.45"),
     )
 
-    result = await verify_candidate_historically(
-        address=USER,
-        signals=signals,
-        excluded_signal_ids=set(),
-        coverage_start_ms=0,
-        client=_FakeClient(),  # type: ignore[arg-type]
-        config=config,
+    result = asyncio.run(
+        verify_candidate_historically(
+            address=USER,
+            signals=signals,
+            excluded_signal_ids=set(),
+            coverage_start_ms=0,
+            client=_FakeClient(),  # type: ignore[arg-type]
+            config=config,
+        )
     )
 
     assert result.attempted == 3
