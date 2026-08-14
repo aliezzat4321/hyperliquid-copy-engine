@@ -1,7 +1,9 @@
 import json
+from decimal import Decimal
 from pathlib import Path
 
 from hlcopy.research.selective_policy_publisher import publish_policy_from_attribution
+from hlcopy.shadow.selective_policy import load_policy_store
 
 
 def _row(
@@ -61,7 +63,7 @@ def test_new_qualifier_enters_shadow(tmp_path: Path) -> None:
     assert "LIFECYCLE_ACTIVE" in rule["reason_codes"]
 
 
-def test_mild_decay_watches_then_demotes(tmp_path: Path) -> None:
+def test_mild_decay_watches_then_demotes_without_rewriting_history(tmp_path: Path) -> None:
     attribution = tmp_path / "attribution.json"
     store = tmp_path / "policies.json"
 
@@ -96,6 +98,26 @@ def test_mild_decay_watches_then_demotes(tmp_path: Path) -> None:
     assert demoted_rule["state"] == "SKIP"
     assert "LIFECYCLE_DEMOTED_PERSISTENT_DECAY" in demoted_rule["reason_codes"]
     assert "DEGRADATION_CYCLES=2" in demoted_rule["reason_codes"]
+
+    policies = load_policy_store(store)
+    historical = policies.decide(
+        decision_time_ns=2_500_000_000,
+        wallet_address="0xabc",
+        coin="BTC",
+        direction="LONG",
+        action="INCREASE",
+        notional_usd=Decimal("0"),
+    )
+    future = policies.decide(
+        decision_time_ns=4_500_000_000,
+        wallet_address="0xabc",
+        coin="BTC",
+        direction="LONG",
+        action="INCREASE",
+        notional_usd=Decimal("0"),
+    )
+    assert historical.state == "SHADOW_ONLY"
+    assert future.state == "SKIP"
 
 
 def test_hard_negative_demotes_immediately(tmp_path: Path) -> None:
