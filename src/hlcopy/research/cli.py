@@ -60,7 +60,8 @@ def main() -> None:
     )
     print(
         f"policy_publish published={policy.published} policy_id={policy.policy_id} "
-        f"rules={policy.rules} newly_added={policy.newly_added_rules} reason={policy.reason}",
+        f"rules={policy.rules} newly_added={policy.newly_added_rules} "
+        f"watch={policy.watch_rules} demoted={policy.demoted_rules} reason={policy.reason}",
         flush=True,
     )
 
