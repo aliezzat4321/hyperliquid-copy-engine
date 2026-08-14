@@ -49,3 +49,30 @@ def test_single_tier_id_below_50_uses_id_as_max_leverage() -> None:
     tier = snapshot.by_coin()["ABC"].tiers[0]
     assert tier.max_leverage == D("10")
     assert tier.maintenance_margin_rate == D("0.05")
+
+
+def test_qualified_hip3_symbol_is_not_double_prefixed() -> None:
+    payload = {
+        "universe": [
+            {
+                "name": "xyz:HYUNDAI",
+                "szDecimals": 3,
+                "maxLeverage": 10,
+                "marginTableId": 10,
+                "onlyIsolated": True,
+                "marginMode": "noCross",
+            }
+        ],
+        "marginTables": [],
+    }
+
+    snapshot = parse_margin_metadata(payload, fetched_at_ns=1, dex="xyz")
+    tables = snapshot.by_coin()
+
+    assert "XYZ:HYUNDAI" in tables
+    assert "XYZ:XYZ:HYUNDAI" not in tables
+
+    table = tables["XYZ:HYUNDAI"]
+    assert table.margin_table_id == 10
+    assert table.tiers[0].max_leverage == D("10")
+    assert table.tiers[0].maintenance_margin_rate == D("0.05")
