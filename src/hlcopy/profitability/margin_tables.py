@@ -125,10 +125,13 @@ def _extract_meta_objects(payload: object) -> list[dict[str, Any]]:
 
 
 def _canonical_margin_coin(name: str, dex: str) -> str:
+    normalized_name = name.strip()
+    if ":" in normalized_name:
+        return canonical_coin(normalized_name)
     normalized_dex = dex.strip()
     if normalized_dex:
-        return canonical_coin(f"{normalized_dex}:{name}")
-    return canonical_coin(name)
+        return canonical_coin(f"{normalized_dex}:{normalized_name}")
+    return canonical_coin(normalized_name)
 
 
 def parse_margin_metadata(
