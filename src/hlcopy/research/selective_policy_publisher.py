@@ -17,7 +17,10 @@ class PolicyPublishConfig:
     min_actions: int = 5
     min_robust_return_bps: Decimal = D("25")
     min_win_pct: Decimal = D("40")
+    retain_robust_return_bps: Decimal = D("0")
+    retain_win_pct: Decimal = D("30")
     negative_block_bps: Decimal = D("-25")
+    demotion_grace_cycles: int = 2
     max_rules: int = 500
 
 
@@ -30,6 +33,8 @@ class PolicyPublishResult:
     training_end_ns: int | None
     effective_from_ns: int | None
     reason: str
+    watch_rules: int = 0
+    demoted_rules: int = 0
 
 
 def _decimal(value: object, default: Decimal = ZERO) -> Decimal:
@@ -121,11 +126,9 @@ def _existing_rules(
     return out
 
 
-def _candidate_coin_rules(
+def _rows_by_key(
     attribution: dict[str, Any],
-    *,
-    config: PolicyPublishConfig,
-) -> list[dict[str, object]]:
+) -> dict[tuple[str, str], list[dict[str, Any]]]:
     raw_rows = attribution.get("ranked_complete_cohorts")
     rows = [row for row in raw_rows or [] if isinstance(row, dict)]
     by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
@@ -135,14 +138,30 @@ def _candidate_coin_rules(
         if not wallet or not coin:
             continue
         by_key.setdefault((wallet, coin), []).append(row)
+    return by_key
 
+
+def _evidenced_rows(
+    rows: list[dict[str, Any]],
+    *,
+    config: PolicyPublishConfig,
+) -> list[dict[str, Any]]:
+    return [
+        row
+        for row in rows
+        if int(row.get("robust_actions_floor") or 0) >= config.min_actions
+    ]
+
+
+def _candidate_coin_rules(
+    attribution: dict[str, Any],
+    *,
+    config: PolicyPublishConfig,
+) -> list[dict[str, object]]:
+    by_key = _rows_by_key(attribution)
     candidates: list[tuple[Decimal, int, dict[str, object]]] = []
     for (wallet, coin), cohort_rows in by_key.items():
-        evidenced = [
-            row
-            for row in cohort_rows
-            if int(row.get("robust_actions_floor") or 0) >= config.min_actions
-        ]
+        evidenced = _evidenced_rows(cohort_rows, config=config)
         if not evidenced:
             continue
         # A coin hypothesis must not hide a materially negative direction/action.
@@ -191,6 +210,8 @@ def _candidate_coin_rules(
                     "reason_codes": [
                         "DESCRIPTIVE_COHORT_HYPOTHESIS",
                         "FULL_COIN_LIFECYCLE_REQUIRED",
+                        "LIFECYCLE_ACTIVE",
+                        "DEGRADATION_CYCLES=0",
                         f"ROBUST_EDGE_BPS={edge}",
                         f"ROBUST_ACTIONS={actions}",
                     ],
@@ -199,6 +220,144 @@ def _candidate_coin_rules(
         )
     candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
     return [item[2] for item in candidates[: max(0, config.max_rules)]]
+
+
+def _without_lifecycle_codes(reason_codes: object) -> list[str]:
+    prefixes = (
+        "LIFECYCLE_",
+        "DEGRADATION_CYCLES=",
+        "CURRENT_EDGE_BPS=",
+        "CURRENT_WIN_PCT=",
+    )
+    return [
+        str(code)
+        for code in reason_codes or []
+        if not str(code).startswith(prefixes)
+    ]
+
+
+def _degradation_cycles(rule: dict[str, object]) -> int:
+    for code in rule.get("reason_codes") or []:
+        text = str(code)
+        if not text.startswith("DEGRADATION_CYCLES="):
+            continue
+        try:
+            return max(0, int(text.split("=", 1)[1]))
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
+def _lifecycle_rule(
+    previous: dict[str, object],
+    *,
+    state: str,
+    lifecycle_code: str,
+    degradation_cycles: int,
+    edge: Decimal | None = None,
+    win_pct: Decimal | None = None,
+) -> dict[str, object]:
+    rule = dict(previous)
+    reasons = _without_lifecycle_codes(rule.get("reason_codes"))
+    reasons.extend([lifecycle_code, f"DEGRADATION_CYCLES={degradation_cycles}"])
+    if edge is not None:
+        reasons.append(f"CURRENT_EDGE_BPS={edge}")
+    if win_pct is not None:
+        reasons.append(f"CURRENT_WIN_PCT={win_pct}")
+    rule["state"] = state
+    rule["reason_codes"] = reasons
+    return rule
+
+
+def _apply_lifecycle(
+    *,
+    attribution: dict[str, Any],
+    existing: dict[tuple[str, str], dict[str, object]],
+    config: PolicyPublishConfig,
+) -> dict[tuple[str, str], dict[str, object]]:
+    candidates = {
+        _rule_key(rule): rule
+        for rule in _candidate_coin_rules(attribution, config=config)
+    }
+    by_key = _rows_by_key(attribution)
+    result = dict(candidates)
+
+    for key, previous in existing.items():
+        if key in candidates:
+            if str(previous.get("state") or "").upper() == "SKIP":
+                rule = dict(candidates[key])
+                reasons = list(rule.get("reason_codes") or [])
+                reasons.append("LIFECYCLE_REQUALIFIED")
+                rule["reason_codes"] = reasons
+                result[key] = rule
+            continue
+
+        previous_state = str(previous.get("state") or "SHADOW_ONLY").upper()
+        if previous_state == "SKIP":
+            result[key] = previous
+            continue
+
+        evidenced = _evidenced_rows(by_key.get(key, []), config=config)
+        if not evidenced:
+            result[key] = _lifecycle_rule(
+                previous,
+                state="SHADOW_ONLY",
+                lifecycle_code="LIFECYCLE_RETAIN_NO_NEW_EVIDENCE",
+                degradation_cycles=_degradation_cycles(previous),
+            )
+            continue
+
+        worst_edge = min(_decimal(row.get("robust_return_bps")) for row in evidenced)
+        if worst_edge <= config.negative_block_bps:
+            result[key] = _lifecycle_rule(
+                previous,
+                state="SKIP",
+                lifecycle_code="LIFECYCLE_DEMOTED_HARD_NEGATIVE",
+                degradation_cycles=max(1, config.demotion_grace_cycles),
+                edge=worst_edge,
+            )
+            continue
+
+        best = max(
+            evidenced,
+            key=lambda row: (
+                _decimal(row.get("robust_return_bps")),
+                int(row.get("robust_actions_floor") or 0),
+            ),
+        )
+        edge = _decimal(best.get("robust_return_bps"))
+        win_pct = _decimal(best.get("robust_win_pct_floor"))
+        if edge >= config.retain_robust_return_bps and win_pct >= config.retain_win_pct:
+            result[key] = _lifecycle_rule(
+                previous,
+                state="SHADOW_ONLY",
+                lifecycle_code="LIFECYCLE_RETAIN_HYSTERESIS",
+                degradation_cycles=0,
+                edge=edge,
+                win_pct=win_pct,
+            )
+            continue
+
+        cycles = _degradation_cycles(previous) + 1
+        if cycles >= max(1, config.demotion_grace_cycles):
+            result[key] = _lifecycle_rule(
+                previous,
+                state="SKIP",
+                lifecycle_code="LIFECYCLE_DEMOTED_PERSISTENT_DECAY",
+                degradation_cycles=cycles,
+                edge=edge,
+                win_pct=win_pct,
+            )
+        else:
+            result[key] = _lifecycle_rule(
+                previous,
+                state="SHADOW_ONLY",
+                lifecycle_code="LIFECYCLE_WATCH",
+                degradation_cycles=cycles,
+                edge=edge,
+                win_pct=win_pct,
+            )
+    return result
 
 
 def publish_policy_from_attribution(
@@ -230,12 +389,26 @@ def publish_policy_from_attribution(
         raise ValueError("training data must end strictly before policy activation")
 
     store = _load_store(policy_store_path)
-    cumulative = _existing_rules(store)
-    before = len(cumulative)
-    for rule in _candidate_coin_rules(attribution, config=config):
-        cumulative.setdefault(_rule_key(rule), rule)
-    rules = _canonical_rules(list(cumulative.values()))
-    added = len(cumulative) - before
+    existing = _existing_rules(store)
+    lifecycle = _apply_lifecycle(
+        attribution=attribution,
+        existing=existing,
+        config=config,
+    )
+    rules = _canonical_rules(list(lifecycle.values()))
+    added = sum(1 for key in lifecycle if key not in existing)
+    demoted = sum(
+        1
+        for key, rule in lifecycle.items()
+        if key in existing
+        and str(existing[key].get("state") or "").upper() != "SKIP"
+        and str(rule.get("state") or "").upper() == "SKIP"
+    )
+    watch = sum(
+        1
+        for rule in lifecycle.values()
+        if "LIFECYCLE_WATCH" in (rule.get("reason_codes") or [])
+    )
     if not rules:
         return PolicyPublishResult(
             False,
@@ -258,6 +431,8 @@ def publish_policy_from_attribution(
             training_end_ns,
             None,
             "UNCHANGED_RULE_SET",
+            watch_rules=watch,
+            demoted_rules=0,
         )
 
     policy_id = f"shadow-{effective_from_ns}-{fingerprint[:12]}"
@@ -279,6 +454,12 @@ def publish_policy_from_attribution(
         "rule_fingerprint": fingerprint,
         "source_attribution": str(attribution_path),
         "source_generated_from": attribution.get("generated_from"),
+        "lifecycle": {
+            "watch_rules": watch,
+            "demoted_rules": demoted,
+            "active_rules": sum(1 for rule in policy_rules if rule["state"] == "SHADOW_ONLY"),
+            "skipped_rules": sum(1 for rule in policy_rules if rule["state"] == "SKIP"),
+        },
         "rules": policy_rules,
     }
     store.setdefault("policies", []).append(policy)
@@ -298,4 +479,6 @@ def publish_policy_from_attribution(
         training_end_ns,
         effective_from_ns,
         "PUBLISHED",
+        watch_rules=watch,
+        demoted_rules=demoted,
     )
