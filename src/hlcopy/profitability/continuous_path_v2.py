@@ -212,9 +212,7 @@ def build_continuous_path(
                     avg_entry=avg,
                     mark_price=mark.mark_price,
                     maintenance_margin_rate=tier.maintenance_margin_rate,
-                    maintenance_margin_deduction_usd=(
-                        tier.maintenance_margin_deduction_usd
-                    ),
+                    maintenance_margin_deduction_usd=tier.maintenance_deduction_usd,
                 )
             )
             if now_ns - last_funding.get(coin, opened) > max_funding_gap_ns:
