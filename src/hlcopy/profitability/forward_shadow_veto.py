@@ -11,6 +11,7 @@ from typing import Any
 
 D = Decimal
 SAFETY_BLOCKERS = {"INCOMPLETE_PATH_TRUTH", "NO_SAFE_LEVERAGE_ACROSS_SCENARIOS"}
+VETO_BLOCKER = "FORWARD_EMERGENCY_VETO_ACTIVE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +188,45 @@ def evaluate_forward_vetoes(
     }
 
 
+def apply_veto_overlay_to_path_truth(
+    path_truth: dict[str, Any], veto_result: dict[str, Any]
+) -> dict[str, Any]:
+    active = {
+        wallet
+        for wallet, state in (veto_result.get("wallet_states") or {}).items()
+        if isinstance(state, dict) and bool(state.get("veto_active"))
+    }
+    promotion = []
+    for raw in path_truth.get("promotion_candidates") or []:
+        row = dict(raw)
+        wallet = str(row.get("wallet_address") or "").lower()
+        blockers = list(row.get("promotion_blockers") or [])
+        if wallet in active:
+            if VETO_BLOCKER not in blockers:
+                blockers.append(VETO_BLOCKER)
+            row["promotion_blockers"] = blockers
+            row["validated_champion"] = False
+            row["lifecycle_stage"] = "FORWARD_VETO_QUARANTINE"
+        promotion.append(row)
+
+    scenarios = []
+    for raw in path_truth.get("scenario_candidates") or []:
+        row = dict(raw)
+        wallet = str(row.get("wallet_address") or "").lower()
+        row["forward_veto_active"] = wallet in active
+        scenarios.append(row)
+
+    result = dict(path_truth)
+    result["promotion_candidates"] = promotion
+    result["scenario_candidates"] = scenarios
+    result["forward_veto_active_count"] = len(active)
+    result["forward_veto_mode"] = "QUARANTINE_CONTINUES_SHADOW_EVIDENCE"
+    result["validated_champion_count"] = sum(
+        bool(row.get("validated_champion")) for row in promotion
+    )
+    return result
+
+
 def write_forward_veto_store(*, path_truth_path: Path, output_path: Path) -> dict[str, Any]:
     if os.getenv("REAL_TRADING_ENABLED", "NO").strip().upper() == "YES":
         raise SystemExit("forward shadow veto refuses REAL_TRADING_ENABLED=YES")
@@ -199,8 +239,14 @@ def write_forward_veto_store(*, path_truth_path: Path, output_path: Path) -> dic
         existing=existing,
         now_ns=time.time_ns(),
     )
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = output_path.with_suffix(output_path.suffix + ".tmp")
-    tmp.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(output_path)
+    veto_tmp = output_path.with_suffix(output_path.suffix + ".tmp")
+    veto_tmp.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    veto_tmp.replace(output_path)
+
+    overlaid = apply_veto_overlay_to_path_truth(truth, result)
+    truth_tmp = path_truth_path.with_suffix(path_truth_path.suffix + ".tmp")
+    truth_tmp.write_text(json.dumps(overlaid, indent=2) + "\n", encoding="utf-8")
+    truth_tmp.replace(path_truth_path)
     return result
