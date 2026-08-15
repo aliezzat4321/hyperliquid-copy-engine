@@ -6,6 +6,7 @@ import sys
 from dataclasses import asdict
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 from hlcopy.profitability import position_live_cli
 from hlcopy.profitability.causal_book import CausalParquetL2BookProvider
@@ -44,7 +45,45 @@ def _event_direction(event) -> str:
     return event.direction_after or event.direction_before or "UNKNOWN"
 
 
-def _allowed(store: EffectivePolicyStore, event) -> bool:
+def _load_forward_veto_intervals(path: Path | None) -> tuple[dict[str, Any], ...]:
+    if path is None or not path.exists():
+        return ()
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("real_trading") is not False:
+        raise SystemExit("forward veto store must be research-only")
+    return tuple(
+        dict(row)
+        for row in payload.get("veto_intervals") or []
+        if isinstance(row, dict)
+    )
+
+
+def _forward_vetoed(vetoes: tuple[dict[str, Any], ...], event) -> bool:
+    wallet = str(event.wallet_address).lower()
+    coin = str(event.coin).upper()
+    ts = int(event.received_at_ns)
+    for veto in vetoes:
+        if str(veto.get("wallet_address") or "").lower() != wallet:
+            continue
+        veto_coin = str(veto.get("coin") or "*").upper()
+        if veto_coin not in {"*", coin}:
+            continue
+        try:
+            start = int(veto["effective_from_ns"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        raw_end = veto.get("effective_until_ns")
+        end = None if raw_end is None else int(raw_end)
+        if ts >= start and (end is None or ts < end):
+            return True
+    return False
+
+
+def _allowed(
+    store: EffectivePolicyStore,
+    event,
+    vetoes: tuple[dict[str, Any], ...] = (),
+) -> bool:
     decision = store.decide(
         decision_time_ns=event.received_at_ns,
         wallet_address=event.wallet_address,
@@ -53,7 +92,9 @@ def _allowed(store: EffectivePolicyStore, event) -> bool:
         action=_event_action(event),
         notional_usd=D("0"),
     )
-    return decision.state in {"SHADOW_ONLY", "COPY"}
+    if decision.state not in {"SHADOW_ONLY", "COPY"}:
+        return False
+    return not _forward_vetoed(vetoes, event)
 
 
 def _output_dir(argv: list[str]) -> Path:
@@ -84,6 +125,10 @@ def main() -> None:
     if not store.policies:
         raise SystemExit("selective policy store contains no policies")
 
+    raw_veto = os.getenv("HLCOPY_FORWARD_VETO_STORE", "").strip()
+    veto_path = Path(raw_veto) if raw_veto else None
+    vetoes = _load_forward_veto_intervals(veto_path)
+
     original_direct = position_live_cli.load_direct_events
     original_wide = position_live_cli.load_wide_events
     original_simulate = position_live_cli.simulate_copy_with_portfolio_capital
@@ -93,14 +138,14 @@ def main() -> None:
         return tuple(
             event
             for event in original_direct(shadow_dir, wallet_id)
-            if _allowed(store, event)
+            if _allowed(store, event, vetoes)
         )
 
     def selective_wide(enriched_dir: Path, *, cutoff_ns: int):
         return tuple(
             event
             for event in original_wide(enriched_dir, cutoff_ns=cutoff_ns)
-            if _allowed(store, event)
+            if _allowed(store, event, vetoes)
         )
 
     def capture_simulation(*args, **kwargs):
@@ -123,9 +168,12 @@ def main() -> None:
     position_live_cli.load_wide_events = selective_wide
     position_live_cli.simulate_copy_with_portfolio_capital = capture_simulation
     position_live_cli.ParquetL2BookProvider = _shared_causal_provider
+    active_vetoes = sum(veto.get("effective_until_ns") is None for veto in vetoes)
     print(
         f"selective_shadow policy_count={len(store.policies)} "
-        f"latest_policy={store.policies[-1].policy_id} real_trading=False",
+        f"latest_policy={store.policies[-1].policy_id} "
+        f"forward_veto_intervals={len(vetoes)} active_vetoes={active_vetoes} "
+        "real_trading=False",
         flush=True,
     )
     position_live_cli.main()
@@ -136,6 +184,7 @@ def main() -> None:
     payload = {
         "real_trading": False,
         "policy_store": str(policy_path),
+        "forward_veto_store": str(veto_path) if veto_path is not None else None,
         "latest_policy_id": store.policies[-1].policy_id,
         "fee_accounting_mode": "ALLOCATED_ENTRY_PLUS_EXIT_FEES_V1",
         "state_events": state_rows,
