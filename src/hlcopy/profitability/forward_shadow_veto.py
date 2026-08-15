@@ -69,7 +69,11 @@ def evaluate_forward_vetoes(
 ) -> dict[str, Any]:
     config = config or ForwardVetoConfig()
     states = dict(existing.get("wallet_states") or {})
-    intervals = [dict(row) for row in existing.get("veto_intervals") or [] if isinstance(row, dict)]
+    intervals = [
+        dict(row)
+        for row in existing.get("veto_intervals") or []
+        if isinstance(row, dict)
+    ]
     rows_by_wallet = _wallet_rows(path_truth)
 
     for wallet, rows in rows_by_wallet.items():
@@ -77,13 +81,22 @@ def evaluate_forward_vetoes(
         active_before = bool(previous.get("veto_active"))
         bad_cycles = int(previous.get("bad_cycles") or 0)
         healthy_cycles = int(previous.get("healthy_cycles") or 0)
-        mature = [r for r in rows if int(r.get("realized_actions_floor") or 0) >= config.min_actions]
+        mature = [
+            row
+            for row in rows
+            if int(row.get("realized_actions_floor") or 0) >= config.min_actions
+        ]
 
         if len(mature) < config.min_mature_notionals:
+            status = (
+                "VETO_ACTIVE_EVIDENCE_STALE"
+                if active_before
+                else "EVIDENCE_ACCUMULATING"
+            )
             states[wallet] = {
                 **previous,
                 "wallet_address": wallet,
-                "status": "VETO_ACTIVE_EVIDENCE_STALE" if active_before else "EVIDENCE_ACCUMULATING",
+                "status": status,
                 "veto_active": active_before,
                 "mature_notionals": len(mature),
                 "evaluated_at_ns": now_ns,
@@ -95,7 +108,8 @@ def evaluate_forward_vetoes(
         worst = min(returns)
         best = max(returns)
         safety_bad = [
-            r for r in mature
+            r
+            for r in mature
             if SAFETY_BLOCKERS.intersection(set(r.get("promotion_blockers") or []))
         ]
         hard_safety = len(safety_bad) == len(mature)
