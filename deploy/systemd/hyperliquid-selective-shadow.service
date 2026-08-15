@@ -9,6 +9,7 @@ WorkingDirectory=/root/hyperliquid-copy-engine
 EnvironmentFile=/root/hyperliquid-copy-engine/.env
 Environment=REAL_TRADING_ENABLED=NO
 Environment=HLCOPY_SELECTIVE_POLICY_STORE=/mnt/HC_Volume_106576526/hyperliquid/shadow/selective_policies.json
+Environment=HLCOPY_FORWARD_VETO_STORE=/mnt/HC_Volume_106576526/hyperliquid/selective-shadow/forward_vetoes.json
 ExecStart=/usr/bin/flock --wait 3600 /run/hyperliquid-causal-score.lock \
   /root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.profitability.causal_selective_live_cli \
   --registry /mnt/HC_Volume_106576526/hyperliquid/shadow/wallets.json \
@@ -25,6 +26,9 @@ ExecStartPost=/root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.profitabi
   --margin-snapshots /root/hyperliquid-copy-engine/data/research/margin_metadata.jsonl \
   --funding-cache /mnt/HC_Volume_106576526/hyperliquid/selective-shadow/funding_history.jsonl \
   --output /mnt/HC_Volume_106576526/hyperliquid/selective-shadow/path_truth.json
+ExecStartPost=/root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.profitability.forward_shadow_veto_cli \
+  --path-truth /mnt/HC_Volume_106576526/hyperliquid/selective-shadow/path_truth.json \
+  --output /mnt/HC_Volume_106576526/hyperliquid/selective-shadow/forward_vetoes.json
 Nice=15
 IOSchedulingClass=idle
 NoNewPrivileges=true
