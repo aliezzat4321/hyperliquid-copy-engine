@@ -33,41 +33,49 @@ def load_asset_context_marks(
     start_ns: int | None = None,
     end_ns: int | None = None,
 ) -> tuple[AssetContextMark, ...]:
-    """Load captured activeAssetCtx rows without substituting L2 mids."""
+    """Load captured activeAssetCtx rows without substituting L2 mids.
+
+    Use Polars lazy scanning so coin/time predicates are pushed into parquet reads instead
+    of eagerly opening every market file and filtering millions of rows in Python.
+    """
     wanted = {canonical_coin(coin) for coin in coins} if coins is not None else None
+    paths = sorted(market_dir.glob("date=*/coin=*/channel=activeAssetCtx/*.parquet"))
+    if not paths:
+        return ()
+
+    lazy = pl.scan_parquet([str(path) for path in paths]).select(
+        "coin",
+        "received_at_ns",
+        "mark_px",
+        "oracle_px",
+    )
+    if wanted is not None:
+        lazy = lazy.filter(pl.col("coin").is_in(sorted(wanted)))
+    if start_ns is not None:
+        lazy = lazy.filter(pl.col("received_at_ns") >= start_ns)
+    if end_ns is not None:
+        lazy = lazy.filter(pl.col("received_at_ns") <= end_ns)
+
+    frame = lazy.sort(["received_at_ns", "coin"]).collect(engine="streaming")
     rows: list[AssetContextMark] = []
-    for path in sorted(
-        market_dir.glob("date=*/coin=*/channel=activeAssetCtx/*.parquet")
-    ):
-        frame = pl.read_parquet(
-            path,
-            columns=["coin", "received_at_ns", "mark_px", "oracle_px"],
-        )
-        for row in frame.iter_rows(named=True):
-            coin = canonical_coin(row.get("coin") or "")
-            if wanted is not None and coin not in wanted:
-                continue
-            try:
-                received_at_ns = int(row["received_at_ns"])
-            except (KeyError, TypeError, ValueError):
-                continue
-            if start_ns is not None and received_at_ns < start_ns:
-                continue
-            if end_ns is not None and received_at_ns > end_ns:
-                continue
-            mark = _d(row.get("mark_px"))
-            oracle = _d(row.get("oracle_px"))
-            if mark is None or oracle is None or mark <= ZERO or oracle <= ZERO:
-                continue
-            rows.append(
-                AssetContextMark(
-                    coin=coin,
-                    received_at_ns=received_at_ns,
-                    mark_price=mark,
-                    oracle_price=oracle,
-                )
+    for coin_raw, received_raw, mark_raw, oracle_raw in frame.iter_rows():
+        coin = canonical_coin(coin_raw or "")
+        try:
+            received_at_ns = int(received_raw)
+        except (TypeError, ValueError):
+            continue
+        mark = _d(mark_raw)
+        oracle = _d(oracle_raw)
+        if mark is None or oracle is None or mark <= ZERO or oracle <= ZERO:
+            continue
+        rows.append(
+            AssetContextMark(
+                coin=coin,
+                received_at_ns=received_at_ns,
+                mark_price=mark,
+                oracle_price=oracle,
             )
-    rows.sort(key=lambda item: (item.received_at_ns, item.coin))
+        )
     return tuple(rows)
 
 
