@@ -5,7 +5,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
 
-from hlcopy.profitability.margin_tables import MarginMetadataSnapshot, snapshot_table_at
+from hlcopy.profitability.margin_tables import CoinMarginTable, MarginMetadataSnapshot
 from hlcopy.profitability.path_risk import EquityCheckpoint, OpenPositionMark
 from hlcopy.profitability.portfolio_position_copy import FollowerStateEvent
 
@@ -65,6 +65,40 @@ def _ctx(coin: str, at_ns: int, by_coin, times) -> AssetContextMark | None:
     return None if i < 0 else by_coin[coin][i]
 
 
+def _margin_indexes(
+    snapshots: tuple[MarginMetadataSnapshot, ...],
+) -> tuple[
+    dict[str, tuple[tuple[int, CoinMarginTable], ...]],
+    dict[str, tuple[int, ...]],
+]:
+    grouped: dict[str, list[tuple[int, CoinMarginTable]]] = {}
+    for snapshot in snapshots:
+        for table in snapshot.tables:
+            grouped.setdefault(table.coin, []).append((snapshot.fetched_at_ns, table))
+    by_coin = {
+        coin: tuple(sorted(items, key=lambda item: item[0]))
+        for coin, items in grouped.items()
+    }
+    times = {
+        coin: tuple(ts for ts, _ in items)
+        for coin, items in by_coin.items()
+    }
+    return by_coin, times
+
+
+def _margin_at(
+    coin: str,
+    at_ns: int,
+    by_coin: dict[str, tuple[tuple[int, CoinMarginTable], ...]],
+    times: dict[str, tuple[int, ...]],
+) -> tuple[int, CoinMarginTable] | None:
+    seq = times.get(coin, ())
+    if not seq:
+        return None
+    i = bisect_right(seq, at_ns) - 1
+    return None if i < 0 else by_coin[coin][i]
+
+
 def build_continuous_path(
     state_events: Iterable[FollowerStateEvent],
     asset_contexts: Iterable[AssetContextMark],
@@ -86,15 +120,9 @@ def build_continuous_path(
             ),
         )
     )
-    marks = tuple(
-        sorted(asset_contexts, key=lambda x: (x.received_at_ns, x.coin))
-    )
-    funding = tuple(
-        sorted(funding_rates, key=lambda x: (x.payment_ts_ms, x.coin))
-    )
-    snapshots = tuple(
-        sorted(margin_snapshots, key=lambda x: x.fetched_at_ns)
-    )
+    marks = tuple(sorted(asset_contexts, key=lambda x: (x.received_at_ns, x.coin)))
+    funding = tuple(sorted(funding_rates, key=lambda x: (x.payment_ts_ms, x.coin)))
+    snapshots = tuple(sorted(margin_snapshots, key=lambda x: x.fetched_at_ns))
     blockers: set[str] = set()
     if not states:
         blockers.add("NO_FOLLOWER_STATE_EVENTS")
@@ -103,14 +131,12 @@ def build_continuous_path(
     if not snapshots:
         blockers.add("NO_MARGIN_METADATA_SNAPSHOTS")
     if blockers:
-        return ContinuousPath(
-            (),
-            PathCoverage(False, tuple(sorted(blockers)), 0, 0),
-        )
+        return ContinuousPath((), PathCoverage(False, tuple(sorted(blockers)), 0, 0))
 
     first_ns = states[0].execution_received_at_ns
     last_ns = marks[-1].received_at_ns
     by_coin, mark_times = _indexes(marks)
+    margin_by_coin, margin_times = _margin_indexes(snapshots)
     states_at: dict[int, list[FollowerStateEvent]] = {}
     marks_at: dict[int, list[AssetContextMark]] = {}
     funding_at: dict[int, list[FundingRate]] = {}
@@ -171,9 +197,7 @@ def build_continuous_path(
         if not tick:
             continue
 
-        open_coins = sorted(
-            coin for coin, position in qty.items() if position != ZERO
-        )
+        open_coins = sorted(coin for coin, position in qty.items() if position != ZERO)
         if not open_coins:
             continue
         positions: list[OpenPositionMark] = []
@@ -187,17 +211,12 @@ def build_continuous_path(
             if now_ns - mark.received_at_ns > max_mark_age_ns:
                 blockers.add(f"MARK_GAP:{coin}")
                 continue
-            table = snapshot_table_at(snapshots, coin, now_ns)
-            snap_times = [
-                snapshot.fetched_at_ns
-                for snapshot in snapshots
-                if snapshot.fetched_at_ns <= now_ns
-                and coin in snapshot.by_coin()
-            ]
-            if table is None or not snap_times:
+            margin = _margin_at(coin, now_ns, margin_by_coin, margin_times)
+            if margin is None:
                 blockers.add(f"MISSING_MARGIN_TABLE:{coin}")
                 continue
-            if now_ns - max(snap_times) > max_margin_snapshot_age_ns:
+            margin_ts, table = margin
+            if now_ns - margin_ts > max_margin_snapshot_age_ns:
                 blockers.add(f"STALE_MARGIN_TABLE:{coin}")
                 continue
             avg = entry.get(coin)
@@ -221,8 +240,7 @@ def build_continuous_path(
         if len(positions) != len(open_coins):
             continue
         adjusted_realized = realized - sum(
-            (fee_remaining.get(coin, ZERO) for coin in open_coins),
-            ZERO,
+            (fee_remaining.get(coin, ZERO) for coin in open_coins), ZERO
         )
         checkpoints.append(
             EquityCheckpoint(
