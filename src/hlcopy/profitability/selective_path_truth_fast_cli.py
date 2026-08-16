@@ -6,10 +6,8 @@ import os
 import time
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
-from decimal import Decimal
 from typing import Any
 
-from hlcopy.market.symbols import canonical_coin
 from hlcopy.profitability.champion_truth import REQUIRED_TRUTH_LAYERS
 from hlcopy.profitability.continuous_path_v2 import AssetContextMark, FundingRate
 from hlcopy.profitability.path_inputs import (
@@ -20,9 +18,9 @@ from hlcopy.profitability.path_inputs import (
 from hlcopy.profitability.path_truth import evaluate_candidate_path_truth
 from hlcopy.profitability.portfolio_position_copy import FollowerStateEvent
 from hlcopy.profitability.selective_path_truth_cli import (
-    D,
     LEVERAGES,
     MIN_FORWARD_ACTIONS,
+    D,
     _group_key,
     _index_by_coin,
     _promotion_groups,
