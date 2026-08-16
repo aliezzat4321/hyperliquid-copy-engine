@@ -191,6 +191,15 @@ def _summary_index(
     return out
 
 
+def _index_by_coin(rows: tuple[Any, ...]) -> dict[str, tuple[Any, ...]]:
+    grouped: dict[str, list[Any]] = defaultdict(list)
+    for row in rows:
+        coin = canonical_coin(getattr(row, "coin", ""))
+        if coin:
+            grouped[coin].append(row)
+    return {coin: tuple(items) for coin, items in grouped.items()}
+
+
 def _promotion_groups(rows: list[dict[str, object]]) -> list[dict[str, object]]:
     grouped: dict[tuple[str, str, str], list[dict[str, object]]] = defaultdict(list)
     for row in rows:
@@ -308,6 +317,7 @@ async def _run(args: argparse.Namespace) -> None:
         default=None,
     )
     marks = load_asset_context_marks(args.market_dir, coins=coins, start_ns=start_ns)
+    marks_by_coin = _index_by_coin(marks)
     end_ns = max((mark.received_at_ns for mark in marks), default=start_ns or 0)
     end_ms = end_ns // 1_000_000
     if coins and end_ms > 0:
@@ -321,23 +331,29 @@ async def _run(args: argparse.Namespace) -> None:
     funding: tuple[FundingRate, ...] = ()
     if args.funding_cache.exists():
         funding = load_funding_history_jsonl(args.funding_cache, coins=coins)
+    funding_by_coin = _index_by_coin(funding)
     margins = load_margin_snapshots_jsonl(args.margin_snapshots)
 
     rows_out: list[dict[str, object]] = []
-    for key, states in sorted(groups.items()):
+    ordered_groups = sorted(groups.items())
+    total_groups = len(ordered_groups)
+    started = time.monotonic()
+    for group_number, (key, states) in enumerate(ordered_groups, start=1):
         lane, wallet, scenario, notional = key
         group_coins = {event.coin for event in states}
         first_ns = min(event.execution_received_at_ns for event in states)
         group_marks = tuple(
             mark
-            for mark in marks
-            if mark.coin in group_coins and mark.received_at_ns >= first_ns
+            for coin in group_coins
+            for mark in marks_by_coin.get(coin, ())
+            if mark.received_at_ns >= first_ns
         )
         first_ms = first_ns // 1_000_000
         group_funding = tuple(
             row
-            for row in funding
-            if row.coin in group_coins and row.payment_ts_ms >= first_ms
+            for coin in group_coins
+            for row in funding_by_coin.get(coin, ())
+            if row.payment_ts_ms >= first_ms
         )
         truth = evaluate_candidate_path_truth(
             state_events=states,
@@ -372,6 +388,14 @@ async def _run(args: argparse.Namespace) -> None:
                 **truth_payload,
             }
         )
+        if group_number == 1 or group_number % 25 == 0 or group_number == total_groups:
+            print(
+                "selective_path_truth_progress "
+                f"groups={group_number}/{total_groups} "
+                f"elapsed_s={time.monotonic() - started:.1f} "
+                f"wallet={wallet[:14]} scenario={scenario} notional={notional}",
+                flush=True,
+            )
 
     promotion = _promotion_groups(rows_out)
     rows_out.sort(
