@@ -19,7 +19,7 @@ ExecStart=/usr/bin/flock --wait 3600 /run/hyperliquid-causal-score.lock \
   --wide-cutoff-ns-file /mnt/HC_Volume_106576526/hyperliquid/shadow/wide_clean_cutoff_ns.txt \
   --wide-market-dir /mnt/HC_Volume_106576526/hyperliquid/market-shadow \
   --output-dir /mnt/HC_Volume_106576526/hyperliquid/selective-shadow
-ExecStartPost=/root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.profitability.selective_path_truth_cli \
+ExecStartPost=/root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.profitability.selective_path_truth_fast_cli \
   --state-events /mnt/HC_Volume_106576526/hyperliquid/selective-shadow/selective_state_events.json \
   --master /mnt/HC_Volume_106576526/hyperliquid/selective-shadow/master_profitability.json \
   --market-dir /mnt/HC_Volume_106576526/hyperliquid/market-shadow \
