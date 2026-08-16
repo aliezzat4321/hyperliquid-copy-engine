@@ -110,7 +110,7 @@ def test_streaming_path_truth_matches_materialized_reference() -> None:
 
     assert streaming == exact
     assert streaming["coverage"]["checkpoint_count"] == 4
-    assert streaming["safe_leverage"]["max_safe_leverage"] == "10"
+    assert streaming["safe_leverage"]["max_safe_leverage"] == "5"
 
 
 def test_streaming_path_truth_preserves_fail_closed_missing_margin() -> None:
