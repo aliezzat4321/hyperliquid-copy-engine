@@ -17,10 +17,12 @@ ExecStart=/root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.resolver.cli 
   --evidence-lookback-days 14 \
   --time-tolerance-ms 5000 \
   --price-tolerance-bps 5 \
-  --max-candidates 5000 \
+  --max-candidates 1000 \
   --report-candidates 25
 Nice=15
 IOSchedulingClass=idle
+MemoryHigh=600M
+MemoryMax=850M
 NoNewPrivileges=true
 PrivateTmp=true
 
