@@ -86,23 +86,29 @@ def _recent_signals(signals: tuple[CopySignal, ...], lookback_days: int) -> tupl
     return tuple(sorted(signals, key=lambda item: item.closed_at_ms)[-16:])
 
 
-async def _candidate_rows(
+async def _candidate_resolutions(
     dsn: str,
     *,
     start_ms: int,
     end_ms: int,
     max_candidates: int,
-) -> dict[str, list[dict[str, Any]]]:
-    """Load candidate fill evidence with one bounded DB query.
+    evidence: tuple[Any, ...],
+    time_tolerance_ms: int,
+    price_tolerance_bps: Decimal,
+) -> tuple[tuple[str, ...], tuple[CandidateResolution, ...]]:
+    """Score candidate wallets while streaming DB rows one wallet at a time.
 
-    Coverage can persist thousands of candidate wallets. The old implementation
-    first selected candidate addresses and then issued one additional query per
-    wallet, which made a full 5k resolver universe unnecessarily expensive. The
-    CTE preserves the same deterministic candidate ordering while fetching all
-    selected wallets' evidence in one round trip.
+    The old resolver used ``fetchall()`` and retained every selected wallet's raw
+    fill JSON until the full candidate universe had loaded. A 5k-wallet run can
+    therefore exceed the memory available on the research VM. The SQL ordering
+    already groups rows by wallet, so only one wallet's raw rows need to exist in
+    memory at once.
     """
     start = datetime.fromtimestamp(start_ms / 1000, tz=UTC)
     end = datetime.fromtimestamp(end_ms / 1000, tz=UTC)
+    addresses: list[str] = []
+    ranked: list[CandidateResolution] = []
+
     async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
         cursor = await conn.execute(
             """
@@ -123,14 +129,50 @@ async def _candidate_rows(
             """,
             (start, end, max_candidates, start, end),
         )
-        rows_by_wallet: dict[str, list[dict[str, Any]]] = {}
-        for row in await cursor.fetchall():
+
+        current_address: str | None = None
+        current_rows: list[dict[str, Any]] = []
+
+        def flush() -> None:
+            nonlocal current_address, current_rows
+            if current_address is None:
+                return
+            addresses.append(current_address)
+            ranked.append(
+                score_candidate(
+                    address=current_address,
+                    evidence=evidence,
+                    candidate=candidate_events(current_address, current_rows),
+                    time_tolerance_ms=time_tolerance_ms,
+                    price_tolerance_bps=price_tolerance_bps,
+                )
+            )
+            current_rows = []
+
+        async for row in cursor:
             address = str(row[0]).lower()
+            if current_address is None:
+                current_address = address
+            elif address != current_address:
+                flush()
+                current_address = address
+
             raw = row[1]
-            rows_by_wallet.setdefault(address, [])
             if isinstance(raw, dict):
-                rows_by_wallet[address].append(raw)
-        return rows_by_wallet
+                current_rows.append(raw)
+
+        flush()
+
+    return (
+        tuple(addresses),
+        tuple(
+            sorted(
+                ranked,
+                key=lambda item: (item.score, item.matched_events, item.address),
+                reverse=True,
+            )
+        ),
+    )
 
 
 def _ensure_verified_wallet(
@@ -191,28 +233,14 @@ async def resolve_source(
 
     start_ms = min(event.timestamp_ms for event in events) - config.time_tolerance_ms
     end_ms = max(event.timestamp_ms for event in events) + config.time_tolerance_ms
-    rows_by_wallet = await _candidate_rows(
+    addresses, ranked = await _candidate_resolutions(
         database_url,
         start_ms=start_ms,
         end_ms=end_ms,
         max_candidates=config.max_candidates,
-    )
-    addresses = tuple(sorted(rows_by_wallet))
-    ranked = tuple(
-        sorted(
-            (
-                score_candidate(
-                    address=address,
-                    evidence=events,
-                    candidate=candidate_events(address, rows),
-                    time_tolerance_ms=config.time_tolerance_ms,
-                    price_tolerance_bps=config.price_tolerance_bps,
-                )
-                for address, rows in rows_by_wallet.items()
-            ),
-            key=lambda item: (item.score, item.matched_events, item.address),
-            reverse=True,
-        )
+        evidence=events,
+        time_tolerance_ms=config.time_tolerance_ms,
+        price_tolerance_bps=config.price_tolerance_bps,
     )
     decision = decide_resolution(ranked)
     evidence_fp = evidence_fingerprint(events)

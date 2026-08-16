@@ -21,6 +21,8 @@ ExecStart=/root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.resolver.cli 
   --report-candidates 25
 Nice=15
 IOSchedulingClass=idle
+MemoryHigh=600M
+MemoryMax=850M
 NoNewPrivileges=true
 PrivateTmp=true
 
