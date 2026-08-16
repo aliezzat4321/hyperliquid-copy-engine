@@ -20,6 +20,7 @@ from hlcopy.profitability.safe_leverage import SafeLeverageRow, SafeLeverageSumm
 D = Decimal
 ZERO = D("0")
 ONE_HUNDRED = D("100")
+INFINITY = D("Infinity")
 
 
 @dataclass(slots=True)
@@ -36,7 +37,17 @@ class _Contribution:
     unrealized: Decimal = ZERO
     gross: Decimal = ZERO
     maintenance: Decimal = ZERO
+    exchange_max_leverage: Decimal | None = None
+    margin_ts_ns: int | None = None
     valid: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _Indexes:
+    marks_by_coin: dict[str, tuple[AssetContextMark, ...]]
+    mark_times: dict[str, tuple[int, ...]]
+    margin_by_coin: dict[str, tuple[tuple[int, CoinMarginTable], ...]]
+    margin_times: dict[str, tuple[int, ...]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,73 +56,69 @@ class _PassResult:
     checkpoint_count: int
     applied_funding_count: int
     peak_gross: Decimal
+    exchange_max_leverage: Decimal | None
     min_free_component_by_leverage: dict[Decimal, Decimal]
     min_liquidation_component: Decimal | None
     max_drawdown_pct_by_leverage: dict[Decimal, Decimal]
 
 
-def _mark_indexes(
-    rows: tuple[AssetContextMark, ...],
-) -> tuple[
-    dict[str, tuple[AssetContextMark, ...]],
-    dict[str, tuple[int, ...]],
-]:
-    grouped: dict[str, list[AssetContextMark]] = {}
-    for row in rows:
-        grouped.setdefault(row.coin, []).append(row)
-    by_coin = {
-        coin: tuple(sorted(items, key=lambda item: item.received_at_ns))
-        for coin, items in grouped.items()
-    }
-    times = {
+def _build_indexes(
+    marks: tuple[AssetContextMark, ...],
+    snapshots: tuple[MarginMetadataSnapshot, ...],
+) -> _Indexes:
+    mark_groups: dict[str, list[AssetContextMark]] = {}
+    for row in marks:
+        mark_groups.setdefault(row.coin, []).append(row)
+    marks_by_coin = {coin: tuple(items) for coin, items in mark_groups.items()}
+    mark_times = {
         coin: tuple(item.received_at_ns for item in items)
-        for coin, items in by_coin.items()
+        for coin, items in marks_by_coin.items()
     }
-    return by_coin, times
+
+    margin_groups: dict[str, list[tuple[int, CoinMarginTable]]] = {}
+    for snapshot in snapshots:
+        for table in snapshot.tables:
+            margin_groups.setdefault(table.coin, []).append(
+                (snapshot.fetched_at_ns, table)
+            )
+    margin_by_coin = {
+        coin: tuple(sorted(items, key=lambda item: item[0]))
+        for coin, items in margin_groups.items()
+    }
+    margin_times = {
+        coin: tuple(ts for ts, _ in items)
+        for coin, items in margin_by_coin.items()
+    }
+    return _Indexes(
+        marks_by_coin=marks_by_coin,
+        mark_times=mark_times,
+        margin_by_coin=margin_by_coin,
+        margin_times=margin_times,
+    )
 
 
-def _mark_at(
-    coin: str,
-    at_ns: int,
-    by_coin: dict[str, tuple[AssetContextMark, ...]],
-    times: dict[str, tuple[int, ...]],
-) -> AssetContextMark | None:
-    seq = times.get(coin, ())
+def _mark_at(coin: str, at_ns: int, indexes: _Indexes) -> AssetContextMark | None:
+    seq = indexes.mark_times.get(coin, ())
     if not seq:
         return None
     index = bisect_right(seq, at_ns) - 1
-    return None if index < 0 else by_coin[coin][index]
-
-
-def _margin_indexes(
-    snapshots: tuple[MarginMetadataSnapshot, ...],
-) -> tuple[
-    dict[str, tuple[tuple[int, CoinMarginTable], ...]],
-    dict[str, tuple[int, ...]],
-]:
-    grouped: dict[str, list[tuple[int, CoinMarginTable]]] = {}
-    for snapshot in snapshots:
-        for table in snapshot.tables:
-            grouped.setdefault(table.coin, []).append((snapshot.fetched_at_ns, table))
-    by_coin = {
-        coin: tuple(sorted(items, key=lambda item: item[0]))
-        for coin, items in grouped.items()
-    }
-    times = {coin: tuple(ts for ts, _ in items) for coin, items in by_coin.items()}
-    return by_coin, times
+    if index < 0:
+        return None
+    return indexes.marks_by_coin[coin][index]
 
 
 def _margin_at(
     coin: str,
     at_ns: int,
-    by_coin: dict[str, tuple[tuple[int, CoinMarginTable], ...]],
-    times: dict[str, tuple[int, ...]],
+    indexes: _Indexes,
 ) -> tuple[int, CoinMarginTable] | None:
-    seq = times.get(coin, ())
+    seq = indexes.margin_times.get(coin, ())
     if not seq:
         return None
     index = bisect_right(seq, at_ns) - 1
-    return None if index < 0 else by_coin[coin][index]
+    if index < 0:
+        return None
+    return indexes.margin_by_coin[coin][index]
 
 
 def _stream_pass(
@@ -120,6 +127,7 @@ def _stream_pass(
     marks: tuple[AssetContextMark, ...],
     funding: tuple[FundingRate, ...],
     snapshots: tuple[MarginMetadataSnapshot, ...],
+    indexes: _Indexes,
     leverages: tuple[Decimal, ...],
     starting_equity_by_leverage: dict[Decimal, Decimal] | None,
     max_mark_age_ns: int,
@@ -135,17 +143,21 @@ def _stream_pass(
         blockers.add("NO_MARGIN_METADATA_SNAPSHOTS")
     if blockers:
         return _PassResult(
-            tuple(sorted(blockers)), 0, 0, ZERO, {}, None, {}
+            blockers=tuple(sorted(blockers)),
+            checkpoint_count=0,
+            applied_funding_count=0,
+            peak_gross=ZERO,
+            exchange_max_leverage=None,
+            min_free_component_by_leverage={},
+            min_liquidation_component=None,
+            max_drawdown_pct_by_leverage={},
         )
 
     first_ns = states[0].execution_received_at_ns
     last_ns = marks[-1].received_at_ns
-    marks_by_coin, mark_times = _mark_indexes(marks)
-    margin_by_coin, margin_times = _margin_indexes(snapshots)
-
     latest_mark: dict[str, AssetContextMark] = {}
-    for coin in marks_by_coin:
-        row = _mark_at(coin, first_ns, marks_by_coin, mark_times)
+    for coin in indexes.marks_by_coin:
+        row = _mark_at(coin, first_ns, indexes)
         if row is not None:
             latest_mark[coin] = row
 
@@ -159,15 +171,16 @@ def _stream_pass(
     checkpoint_count = 0
     applied_funding = 0
     peak_gross = ZERO
-    min_free_component = {leverage: D("Infinity") for leverage in leverages}
+    exchange_max: Decimal | None = None
+    min_free_component = {leverage: INFINITY for leverage in leverages}
     min_liquidation_component: Decimal | None = None
     peak_base = ZERO
     max_drawdown_pct = {leverage: ZERO for leverage in leverages}
 
     state_index = 0
-    mark_index = bisect_right(
-        tuple(row.received_at_ns for row in marks), first_ns - 1
-    )
+    mark_index = 0
+    while mark_index < len(marks) and marks[mark_index].received_at_ns < first_ns:
+        mark_index += 1
     funding_index = 0
     while (
         funding_index < len(funding)
@@ -177,8 +190,8 @@ def _stream_pass(
 
     def recompute_coin(coin: str, now_ns: int) -> None:
         nonlocal total_unrealized, total_gross, total_maintenance
-        old = contributions.get(coin, _Contribution())
-        if old.valid:
+        old = contributions.get(coin)
+        if old is not None and old.valid:
             total_unrealized -= old.unrealized
             total_gross -= old.gross
             total_maintenance -= old.maintenance
@@ -191,11 +204,11 @@ def _stream_pass(
         if mark is None or position.entry is None:
             contributions[coin] = _Contribution()
             return
-        margin = _margin_at(coin, now_ns, margin_by_coin, margin_times)
+        margin = _margin_at(coin, now_ns, indexes)
         if margin is None:
             contributions[coin] = _Contribution()
             return
-        _, table = margin
+        margin_ts, table = margin
         gross = abs(position.qty * mark.mark_price)
         tier = table.tier_for_notional(gross)
         contribution = _Contribution(
@@ -206,6 +219,10 @@ def _stream_pass(
                 gross * tier.maintenance_margin_rate
                 - tier.maintenance_deduction_usd,
             ),
+            exchange_max_leverage=(
+                D("1") / (D("2") * tier.maintenance_margin_rate)
+            ),
+            margin_ts_ns=margin_ts,
             valid=True,
         )
         contributions[coin] = contribution
@@ -219,13 +236,19 @@ def _stream_pass(
             if state_index < len(states)
             else None
         )
-        next_mark = marks[mark_index].received_at_ns if mark_index < len(marks) else None
+        next_mark = (
+            marks[mark_index].received_at_ns if mark_index < len(marks) else None
+        )
         next_funding = (
             funding[funding_index].payment_ts_ms * 1_000_000
             if funding_index < len(funding)
             else None
         )
-        available = [value for value in (next_state, next_mark, next_funding) if value is not None]
+        available = [
+            value
+            for value in (next_state, next_mark, next_funding)
+            if value is not None
+        ]
         if not available:
             break
         now_ns = min(available)
@@ -253,7 +276,10 @@ def _stream_pass(
 
         mark_end = mark_index
         marks_now: dict[str, AssetContextMark] = {}
-        while mark_end < len(marks) and marks[mark_end].received_at_ns == now_ns:
+        while (
+            mark_end < len(marks)
+            and marks[mark_end].received_at_ns == now_ns
+        ):
             marks_now[marks[mark_end].coin] = marks[mark_end]
             mark_end += 1
 
@@ -265,11 +291,16 @@ def _stream_pass(
             position = positions.get(payment.coin)
             if position is not None and position.qty != ZERO:
                 oracle = marks_now.get(payment.coin) or latest_mark.get(payment.coin)
-                if oracle is None or now_ns - oracle.received_at_ns > max_mark_age_ns:
+                if (
+                    oracle is None
+                    or now_ns - oracle.received_at_ns > max_mark_age_ns
+                ):
                     blockers.add(f"FUNDING_ORACLE_COVERAGE:{payment.coin}")
                 else:
                     funding_pnl += (
-                        -position.qty * oracle.oracle_price * payment.funding_rate
+                        -position.qty
+                        * oracle.oracle_price
+                        * payment.funding_rate
                     )
                     position.last_funding_ns = now_ns
                     applied_funding += 1
@@ -284,17 +315,20 @@ def _stream_pass(
         if not had_mark_tick:
             continue
 
-        open_coins = sorted(
+        open_coins = [
             coin for coin, position in positions.items() if position.qty != ZERO
-        )
+        ]
         if not open_coins:
             continue
 
         valid = True
+        checkpoint_exchange_max: Decimal | None = None
         for coin in open_coins:
             position = positions[coin]
             mark = latest_mark.get(coin)
-            opened_ns = position.opened_ns if position.opened_ns is not None else now_ns
+            opened_ns = (
+                position.opened_ns if position.opened_ns is not None else now_ns
+            )
             if mark is None:
                 if now_ns - opened_ns > max_mark_age_ns:
                     blockers.add(f"MISSING_MARK:{coin}")
@@ -304,7 +338,7 @@ def _stream_pass(
                 blockers.add(f"MARK_GAP:{coin}")
                 valid = False
                 continue
-            margin = _margin_at(coin, now_ns, margin_by_coin, margin_times)
+            margin = _margin_at(coin, now_ns, indexes)
             if margin is None:
                 blockers.add(f"MISSING_MARGIN_TABLE:{coin}")
                 valid = False
@@ -318,9 +352,27 @@ def _stream_pass(
                 blockers.add(f"MISSING_ENTRY:{coin}")
                 valid = False
                 continue
-            if not contributions.get(coin, _Contribution()).valid:
+
+            contribution = contributions.get(coin)
+            if contribution is None or not contribution.valid:
                 valid = False
                 continue
+            if contribution.margin_ts_ns != margin_ts:
+                recompute_coin(coin, now_ns)
+                contribution = contributions.get(coin)
+                if contribution is None or not contribution.valid:
+                    valid = False
+                    continue
+            coin_max = contribution.exchange_max_leverage
+            if coin_max is None:
+                valid = False
+                continue
+            checkpoint_exchange_max = (
+                coin_max
+                if checkpoint_exchange_max is None
+                else min(checkpoint_exchange_max, coin_max)
+            )
+
             funding_reference = (
                 position.last_funding_ns
                 if position.last_funding_ns is not None
@@ -338,23 +390,30 @@ def _stream_pass(
         base_equity = adjusted_realized + funding_pnl + total_unrealized
         checkpoint_count += 1
         peak_gross = max(peak_gross, total_gross)
+        if checkpoint_exchange_max is not None:
+            exchange_max = (
+                checkpoint_exchange_max
+                if exchange_max is None
+                else min(exchange_max, checkpoint_exchange_max)
+            )
+        liquidation_component = base_equity - total_maintenance
         min_liquidation_component = (
-            base_equity - total_maintenance
+            liquidation_component
             if min_liquidation_component is None
-            else min(min_liquidation_component, base_equity - total_maintenance)
+            else min(min_liquidation_component, liquidation_component)
         )
         for leverage in leverages:
-            component = base_equity - total_gross / leverage
+            free_component = base_equity - total_gross / leverage
             min_free_component[leverage] = min(
-                min_free_component[leverage], component
+                min_free_component[leverage], free_component
             )
 
         if starting_equity_by_leverage is not None:
             peak_base = max(peak_base, base_equity)
             drawdown = max(ZERO, peak_base - base_equity)
             for leverage in leverages:
-                starting_equity = starting_equity_by_leverage[leverage]
-                peak_equity = starting_equity + peak_base
+                start = starting_equity_by_leverage[leverage]
+                peak_equity = start + peak_base
                 drawdown_pct = (
                     drawdown / peak_equity * ONE_HUNDRED
                     if peak_equity > ZERO
@@ -372,6 +431,7 @@ def _stream_pass(
         checkpoint_count=checkpoint_count,
         applied_funding_count=applied_funding,
         peak_gross=peak_gross,
+        exchange_max_leverage=exchange_max,
         min_free_component_by_leverage=min_free_component,
         min_liquidation_component=min_liquidation_component,
         max_drawdown_pct_by_leverage=max_drawdown_pct,
@@ -391,13 +451,12 @@ def evaluate_candidate_path_truth_streaming(
     max_margin_snapshot_age_ns: int = 7_200_000_000_000,
     max_funding_gap_ns: int = 3_900_000_000_000,
 ) -> CandidatePathTruth:
-    """Lossless streaming equivalent of exact checkpoint path truth.
+    """Evaluate every supplied mark tick with bounded memory.
 
-    Every supplied mark tick is evaluated. Unlike ``build_continuous_path`` this function
-    never materializes one ``EquityCheckpoint`` per mark and never replays that million-row
-    object graph once per leverage. It computes the same coverage and risk extrema in a
-    bounded-memory first pass, then performs one additional bounded-memory pass solely for
-    exact drawdown percentages after peak gross (and therefore starting equity) is known.
+    This is lossless with respect to the supplied path. It preserves the exact
+    checkpoint ordering and risk formulas used by the materialized evaluator but
+    does not allocate one checkpoint object per market tick or replay that object
+    graph separately for every leverage.
     """
     states = tuple(
         sorted(
@@ -409,16 +468,32 @@ def evaluate_candidate_path_truth_streaming(
             ),
         )
     )
-    marks = tuple(sorted(asset_contexts, key=lambda item: (item.received_at_ns, item.coin)))
-    funding = tuple(sorted(funding_rates, key=lambda item: (item.payment_ts_ms, item.coin)))
-    snapshots = tuple(sorted(margin_snapshots, key=lambda item: item.fetched_at_ns))
-    leverage_values = tuple(sorted({D(str(value)) for value in leverages if D(str(value)) > ZERO}))
+    marks = tuple(
+        sorted(asset_contexts, key=lambda item: (item.received_at_ns, item.coin))
+    )
+    funding = tuple(
+        sorted(funding_rates, key=lambda item: (item.payment_ts_ms, item.coin))
+    )
+    snapshots = tuple(
+        sorted(margin_snapshots, key=lambda item: item.fetched_at_ns)
+    )
+    leverage_values = tuple(
+        sorted(
+            {
+                value
+                for raw in leverages
+                if (value := D(str(raw))) > ZERO
+            }
+        )
+    )
+    indexes = _build_indexes(marks, snapshots)
 
     first = _stream_pass(
         states=states,
         marks=marks,
         funding=funding,
         snapshots=snapshots,
+        indexes=indexes,
         leverages=leverage_values,
         starting_equity_by_leverage=None,
         max_mark_age_ns=max_mark_age_ns,
@@ -435,28 +510,35 @@ def evaluate_candidate_path_truth_streaming(
     path = ContinuousPath((), coverage)
 
     safe_summary: SafeLeverageSummary | None = None
-    if coverage_complete and first.peak_gross > ZERO and leverage_values:
+    permitted = tuple(
+        leverage
+        for leverage in leverage_values
+        if first.exchange_max_leverage is not None
+        and leverage <= first.exchange_max_leverage
+    )
+    if coverage_complete and first.peak_gross > ZERO and permitted:
         starting_equity = {
-            leverage: first.peak_gross / leverage for leverage in leverage_values
+            leverage: first.peak_gross / leverage for leverage in permitted
         }
         second = _stream_pass(
             states=states,
             marks=marks,
             funding=funding,
             snapshots=snapshots,
-            leverages=leverage_values,
+            indexes=indexes,
+            leverages=permitted,
             starting_equity_by_leverage=starting_equity,
             max_mark_age_ns=max_mark_age_ns,
             max_margin_snapshot_age_ns=max_margin_snapshot_age_ns,
             max_funding_gap_ns=max_funding_gap_ns,
         )
-        rows: list[SafeLeverageRow] = []
         min_liq_component = (
             first.min_liquidation_component
             if first.min_liquidation_component is not None
             else ZERO
         )
-        for leverage in leverage_values:
+        rows: list[SafeLeverageRow] = []
+        for leverage in permitted:
             start = starting_equity[leverage]
             min_free = start + first.min_free_component_by_leverage[leverage]
             min_liq = start + min_liq_component
@@ -474,7 +556,9 @@ def evaluate_candidate_path_truth_streaming(
                     peak_gross_notional_usd=first.peak_gross,
                     min_free_collateral_usd=min_free,
                     min_liquidation_buffer_usd=min_liq,
-                    max_drawdown_pct=second.max_drawdown_pct_by_leverage[leverage],
+                    max_drawdown_pct=(
+                        second.max_drawdown_pct_by_leverage[leverage]
+                    ),
                     liquidation_survived=liquidation_survived,
                     initial_margin_survived=initial_margin_survived,
                     safe=safe,
@@ -486,7 +570,10 @@ def evaluate_candidate_path_truth_streaming(
             max_safe_leverage=max(safe_values) if safe_values else None,
         )
 
-    safe_found = safe_summary is not None and safe_summary.max_safe_leverage is not None
+    safe_found = (
+        safe_summary is not None
+        and safe_summary.max_safe_leverage is not None
+    )
     truth = evaluate_champion_truth(
         {
             "round_trip_fee_accounting": round_trip_fee_accounting,
