@@ -17,7 +17,7 @@ def test_selective_shadow_runs_causal_scorer_then_path_truth() -> None:
     unit = _text("hyperliquid-selective-shadow.service")
     assert "Environment=REAL_TRADING_ENABLED=NO" in unit
     assert "hlcopy.profitability.causal_selective_live_cli" in unit
-    assert "hlcopy.profitability.selective_path_truth_cli" in unit
+    assert "hlcopy.profitability.selective_path_truth_fast_cli" in unit
     assert "selective_state_events.json" in unit
     assert "path_truth.json" in unit
 
