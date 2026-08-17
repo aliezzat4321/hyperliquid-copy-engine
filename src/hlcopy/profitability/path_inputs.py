@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import polars as pl
 
-from hlcopy.market.symbols import canonical_coin
+from hlcopy.market.symbols import canonical_coin, wire_coin
 from hlcopy.profitability.continuous_path_v2 import AssetContextMark, FundingRate
 from hlcopy.profitability.margin_tables import (
     MarginMetadataSnapshot,
@@ -16,6 +18,7 @@ from hlcopy.profitability.margin_tables import (
 
 D = Decimal
 ZERO = D("0")
+_PARTITION_SAFE = re.compile(r"[^A-Za-z0-9_.:-]+")
 
 
 def _d(value: object) -> Decimal | None:
@@ -24,6 +27,58 @@ def _d(value: object) -> Decimal | None:
     except (InvalidOperation, TypeError, ValueError):
         return None
     return result
+
+
+def _safe_partition(value: str) -> str:
+    cleaned = _PARTITION_SAFE.sub("_", value.strip())
+    return cleaned or "unknown"
+
+
+def _date_from_ns(value: int) -> str:
+    return datetime.fromtimestamp(value / 1_000_000_000, tz=UTC).date().isoformat()
+
+
+def _active_asset_ctx_paths(
+    market_dir: Path,
+    *,
+    coins: set[str] | None,
+    start_ns: int | None,
+    end_ns: int | None,
+) -> list[Path]:
+    """Resolve only date/coin partitions that can satisfy the request."""
+    start_date = _date_from_ns(start_ns) if start_ns is not None else None
+    end_date = _date_from_ns(end_ns) if end_ns is not None else None
+
+    date_dirs: list[Path] = []
+    for date_dir in sorted(market_dir.glob("date=*")):
+        label = date_dir.name.removeprefix("date=")
+        if start_date is not None and label < start_date:
+            continue
+        if end_date is not None and label > end_date:
+            continue
+        date_dirs.append(date_dir)
+
+    paths: list[Path] = []
+    if coins is None:
+        for date_dir in date_dirs:
+            paths.extend(
+                date_dir.glob("coin=*/channel=activeAssetCtx/*.parquet")
+            )
+        return sorted(paths)
+
+    partition_names: set[str] = set()
+    for coin in coins:
+        partition_names.add(_safe_partition(coin))
+        partition_names.add(_safe_partition(wire_coin(coin)))
+
+    for date_dir in date_dirs:
+        for partition_name in partition_names:
+            paths.extend(
+                (date_dir / f"coin={partition_name}" / "channel=activeAssetCtx").glob(
+                    "*.parquet"
+                )
+            )
+    return sorted(paths)
 
 
 def load_asset_context_marks(
@@ -35,22 +90,30 @@ def load_asset_context_marks(
 ) -> tuple[AssetContextMark, ...]:
     """Load captured activeAssetCtx rows without substituting L2 mids.
 
-    Use Polars lazy scanning so coin/time predicates are pushed into parquet reads instead
-    of eagerly opening every market file and filtering millions of rows in Python.
+    Partition pruning happens before parquet discovery: only the requested date and
+    coin directories are considered. Polars then applies row-level timestamp filters.
     """
     wanted = {canonical_coin(coin) for coin in coins} if coins is not None else None
-    paths = sorted(market_dir.glob("date=*/coin=*/channel=activeAssetCtx/*.parquet"))
+    paths = _active_asset_ctx_paths(
+        market_dir,
+        coins=wanted,
+        start_ns=start_ns,
+        end_ns=end_ns,
+    )
     if not paths:
         return ()
 
-    lazy = pl.scan_parquet([str(path) for path in paths]).select(
+    lazy = pl.scan_parquet(
+        [str(path) for path in paths],
+        hive_partitioning=False,
+    ).select(
         "coin",
         "received_at_ns",
         "mark_px",
         "oracle_px",
     )
     if wanted is not None:
-        lazy = lazy.filter(pl.col("coin").is_in(sorted(wanted)))
+        lazy = lazy.filter(pl.col("coin").map_elements(canonical_coin, return_dtype=pl.String).is_in(sorted(wanted)))
     if start_ns is not None:
         lazy = lazy.filter(pl.col("received_at_ns") >= start_ns)
     if end_ns is not None:
