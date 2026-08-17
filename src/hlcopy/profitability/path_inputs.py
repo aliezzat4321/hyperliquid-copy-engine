@@ -61,9 +61,7 @@ def _active_asset_ctx_paths(
     paths: list[Path] = []
     if coins is None:
         for date_dir in date_dirs:
-            paths.extend(
-                date_dir.glob("coin=*/channel=activeAssetCtx/*.parquet")
-            )
+            paths.extend(date_dir.glob("coin=*/channel=activeAssetCtx/*.parquet"))
         return sorted(paths)
 
     partition_names: set[str] = set()
@@ -73,11 +71,8 @@ def _active_asset_ctx_paths(
 
     for date_dir in date_dirs:
         for partition_name in partition_names:
-            paths.extend(
-                (date_dir / f"coin={partition_name}" / "channel=activeAssetCtx").glob(
-                    "*.parquet"
-                )
-            )
+            directory = date_dir / f"coin={partition_name}" / "channel=activeAssetCtx"
+            paths.extend(directory.glob("*.parquet"))
     return sorted(paths)
 
 
@@ -112,8 +107,6 @@ def load_asset_context_marks(
         "mark_px",
         "oracle_px",
     )
-    if wanted is not None:
-        lazy = lazy.filter(pl.col("coin").map_elements(canonical_coin, return_dtype=pl.String).is_in(sorted(wanted)))
     if start_ns is not None:
         lazy = lazy.filter(pl.col("received_at_ns") >= start_ns)
     if end_ns is not None:
@@ -123,6 +116,8 @@ def load_asset_context_marks(
     rows: list[AssetContextMark] = []
     for coin_raw, received_raw, mark_raw, oracle_raw in frame.iter_rows():
         coin = canonical_coin(coin_raw or "")
+        if wanted is not None and coin not in wanted:
+            continue
         try:
             received_at_ns = int(received_raw)
         except (TypeError, ValueError):
