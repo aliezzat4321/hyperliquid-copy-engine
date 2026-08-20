@@ -1,0 +1,12 @@
+[Unit]
+Description=Run read-only Invo trader source miner continuously
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+RandomizedDelaySec=20s
+Persistent=true
+Unit=hyperliquid-invo-source-miner.service
+
+[Install]
+WantedBy=timers.target
