@@ -129,7 +129,10 @@ def test_read_only_client_uses_only_discovery_feed_endpoints() -> None:
 
     async def run() -> None:
         transport = httpx.MockTransport(handler)
-        async with InvoReadOnlyClient(access_token="test", transport=transport) as client:
+        async with InvoReadOnlyClient(
+            access_token="test",
+            transport=transport,
+        ) as client:
             await client.discover_portfolios(filter_name="trending")
             await client.trending_users()
             await client.feed()
