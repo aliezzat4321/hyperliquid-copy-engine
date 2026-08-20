@@ -71,7 +71,8 @@ class InvoPortfolioCandidate:
     def days_active(self) -> float | None:
         if self.created_at_ms is None:
             return None
-        return max(0.0, (datetime.now(tz=UTC).timestamp() * 1000 - self.created_at_ms) / 86_400_000)
+        elapsed_ms = datetime.now(tz=UTC).timestamp() * 1000 - self.created_at_ms
+        return max(0.0, elapsed_ms / 86_400_000)
 
     @property
     def win_loss_ratio(self) -> float:
@@ -135,7 +136,9 @@ class InvoTradeEvent:
         }
 
 
-def normalize_portfolio_candidate(row: Mapping[str, Any]) -> InvoPortfolioCandidate | None:
+def normalize_portfolio_candidate(
+    row: Mapping[str, Any],
+) -> InvoPortfolioCandidate | None:
     portfolio_id = str(row.get("id") or "").strip()
     owner_obj = row.get("owner") if isinstance(row.get("owner"), Mapping) else {}
     owner_id = str(row.get("ownerId") or owner_obj.get("id") or "").strip()
@@ -173,7 +176,11 @@ def normalize_trade_event(post: Mapping[str, Any]) -> InvoTradeEvent | None:
         direction = "SHORT"
     else:
         return None
-    portfolio = update.get("portfolio") if isinstance(update.get("portfolio"), Mapping) else {}
+    portfolio = (
+        update.get("portfolio")
+        if isinstance(update.get("portfolio"), Mapping)
+        else {}
+    )
     owner = update.get("owner") if isinstance(update.get("owner"), Mapping) else {}
     leverage_raw = update.get("leverage")
     entry_raw = update.get("entryPrice")
@@ -181,12 +188,22 @@ def normalize_trade_event(post: Mapping[str, Any]) -> InvoTradeEvent | None:
     is_open_raw = update.get("isOpen")
     return InvoTradeEvent(
         post_id=str(post.get("id") or ""),
-        portfolio_id=(str(portfolio.get("id")) if portfolio.get("id") is not None else None),
+        portfolio_id=(
+            str(portfolio.get("id")) if portfolio.get("id") is not None else None
+        ),
         owner_id=(str(owner.get("id")) if owner.get("id") is not None else None),
-        username=(str(owner.get("username")) if owner.get("username") is not None else None),
-        base_id=(str(update.get("baseId")) if update.get("baseId") is not None else None),
+        username=(
+            str(owner.get("username"))
+            if owner.get("username") is not None
+            else None
+        ),
+        base_id=(
+            str(update.get("baseId")) if update.get("baseId") is not None else None
+        ),
         base_short_id=(
-            str(update.get("baseShortId")) if update.get("baseShortId") is not None else None
+            str(update.get("baseShortId"))
+            if update.get("baseShortId") is not None
+            else None
         ),
         coin=ticker,
         direction=direction,
@@ -221,8 +238,12 @@ class InvoReadOnlyClient:
         timeout_seconds: float = 20.0,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
-        self._access_token = access_token.removeprefix("Bearer ") if access_token else None
-        self._refresh_token = refresh_token.removeprefix("Bearer ") if refresh_token else None
+        self._access_token = (
+            access_token.removeprefix("Bearer ") if access_token else None
+        )
+        self._refresh_token = (
+            refresh_token.removeprefix("Bearer ") if refresh_token else None
+        )
         self._app_version = app_version
         self._client = httpx.AsyncClient(
             base_url=base_url,
@@ -230,7 +251,7 @@ class InvoReadOnlyClient:
             transport=transport,
         )
 
-    async def __aenter__(self) -> "InvoReadOnlyClient":
+    async def __aenter__(self) -> InvoReadOnlyClient:
         return self
 
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
@@ -302,7 +323,12 @@ class InvoReadOnlyClient:
             payload["userId"] = user_id
         return await self._post("/v1_0/trending/get_portfolios_pl", payload)
 
-    async def trending_users(self, *, page: int = 1, size: int = 25) -> Mapping[str, Any]:
+    async def trending_users(
+        self,
+        *,
+        page: int = 1,
+        size: int = 25,
+    ) -> Mapping[str, Any]:
         return await self._post(
             "/v1_0/trending/get_users",
             {"filter": "trending", "params": {"page": page, "size": size}},
