@@ -56,6 +56,22 @@ def _allowed(store: EffectivePolicyStore, event) -> bool:
     return decision.state in {"SHADOW_ONLY", "COPY"}
 
 
+def _evidence_cutoff_ns() -> int:
+    raw_path = os.getenv("HLCOPY_SELECTIVE_EVIDENCE_CUTOFF_NS_FILE", "").strip()
+    if not raw_path:
+        return 0
+    path = Path(raw_path)
+    if not path.exists():
+        raise SystemExit(f"selective evidence cutoff file missing: {path}")
+    try:
+        cutoff = int(path.read_text(encoding="utf-8").strip())
+    except ValueError as exc:
+        raise SystemExit(f"invalid selective evidence cutoff: {path}") from exc
+    if cutoff < 0:
+        raise SystemExit("selective evidence cutoff must be non-negative")
+    return cutoff
+
+
 def _output_dir(argv: list[str]) -> Path:
     try:
         index = argv.index("--output-dir")
@@ -83,6 +99,7 @@ def main() -> None:
     store = load_policy_store(policy_path)
     if not store.policies:
         raise SystemExit("selective policy store contains no policies")
+    evidence_cutoff_ns = _evidence_cutoff_ns()
 
     original_direct = position_live_cli.load_direct_events
     original_wide = position_live_cli.load_wide_events
@@ -93,14 +110,15 @@ def main() -> None:
         return tuple(
             event
             for event in original_direct(shadow_dir, wallet_id)
-            if _allowed(store, event)
+            if event.received_at_ns >= evidence_cutoff_ns and _allowed(store, event)
         )
 
     def selective_wide(enriched_dir: Path, *, cutoff_ns: int):
+        effective_cutoff = max(cutoff_ns, evidence_cutoff_ns)
         return tuple(
             event
-            for event in original_wide(enriched_dir, cutoff_ns=cutoff_ns)
-            if _allowed(store, event)
+            for event in original_wide(enriched_dir, cutoff_ns=effective_cutoff)
+            if event.received_at_ns >= evidence_cutoff_ns and _allowed(store, event)
         )
 
     def capture_simulation(*args, **kwargs):
@@ -125,7 +143,8 @@ def main() -> None:
     position_live_cli.ParquetL2BookProvider = _shared_causal_provider
     print(
         f"selective_shadow policy_count={len(store.policies)} "
-        f"latest_policy={store.policies[-1].policy_id} real_trading=False",
+        f"latest_policy={store.policies[-1].policy_id} "
+        f"evidence_cutoff_ns={evidence_cutoff_ns} real_trading=False",
         flush=True,
     )
     position_live_cli.main()
@@ -137,6 +156,7 @@ def main() -> None:
         "real_trading": False,
         "policy_store": str(policy_path),
         "latest_policy_id": store.policies[-1].policy_id,
+        "evidence_cutoff_ns": evidence_cutoff_ns,
         "fee_accounting_mode": "ALLOCATED_ENTRY_PLUS_EXIT_FEES_V1",
         "state_events": state_rows,
     }
