@@ -34,17 +34,29 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _empty_state() -> dict[str, Any]:
+    return {
+        "seen_post_ids": [],
+        "recent_cursor": None,
+        "backfill_cursor": None,
+        "backfill_complete": False,
+    }
+
+
 def _load_state(path: Path) -> dict[str, Any]:
     if not path.exists():
-        return {"seen_post_ids": [], "backfill_cursor": None, "backfill_complete": False}
+        return _empty_state()
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {"seen_post_ids": [], "backfill_cursor": None, "backfill_complete": False}
+        return _empty_state()
     if not isinstance(payload, dict):
-        return {"seen_post_ids": [], "backfill_cursor": None, "backfill_complete": False}
+        return _empty_state()
     if not isinstance(payload.get("seen_post_ids"), list):
         payload["seen_post_ids"] = []
+    payload.setdefault("recent_cursor", None)
+    payload.setdefault("backfill_cursor", None)
+    payload.setdefault("backfill_complete", False)
     return payload
 
 
@@ -137,13 +149,17 @@ async def _collect_new_feed_events(
     client: InvoReadOnlyClient,
     *,
     known_post_ids: set[str],
+    start_cursor: str | None = None,
     pages: int,
     page_size: int,
-) -> tuple[list[dict[str, object]], list[str]]:
+) -> tuple[list[dict[str, object]], list[str], str | None, bool]:
+    """Walk recent feed until the known frontier, persisting a cursor if capped."""
     new_events: list[dict[str, object]] = []
     newly_seen: list[str] = []
     seen_ids = set(known_post_ids)
-    cursor: str | None = None
+    cursor = start_cursor
+    frontier_exists = bool(known_post_ids) or start_cursor is not None
+    complete = False
 
     for _ in range(max(1, pages)):
         payload = await client.feed(
@@ -153,6 +169,8 @@ async def _collect_new_feed_events(
         )
         page_items = _page_items(payload)
         if not page_items:
+            cursor = None
+            complete = True
             break
 
         page_had_known = any(
@@ -164,10 +182,18 @@ async def _collect_new_feed_events(
 
         next_cursor = str(page_items[-1].get("id") or "").strip() or None
         if page_had_known or next_cursor is None or next_cursor == cursor:
+            cursor = None
+            complete = True
             break
         cursor = next_cursor
+    else:
+        if not frontier_exists:
+            # First bootstrap has no known recent frontier. Historical backfill owns older
+            # history, so do not trap the recent crawler walking the entire feed.
+            cursor = None
+            complete = True
 
-    return new_events, newly_seen
+    return new_events, newly_seen, cursor, complete
 
 
 async def _collect_backfill_feed_events(
@@ -240,6 +266,8 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
         for value in state.get("seen_post_ids", [])
         if str(value).strip()
     }
+    recent_cursor_raw = state.get("recent_cursor")
+    recent_cursor = str(recent_cursor_raw) if recent_cursor_raw else None
     backfill_cursor_raw = state.get("backfill_cursor")
     backfill_cursor = str(backfill_cursor_raw) if backfill_cursor_raw else None
     backfill_complete = bool(state.get("backfill_complete", False))
@@ -253,9 +281,15 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
             pages=max(1, args.portfolio_pages),
             page_size=max(1, args.page_size),
         )
-        recent_events, recent_seen = await _collect_new_feed_events(
+        (
+            recent_events,
+            recent_seen,
+            recent_cursor,
+            recent_complete,
+        ) = await _collect_new_feed_events(
             client,
             known_post_ids=known_ids,
+            start_cursor=recent_cursor,
             pages=max(1, args.recent_feed_pages),
             page_size=max(1, args.page_size),
         )
@@ -309,6 +343,8 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
             "new_verified_trade_events": len(events),
             "new_closed_trade_evidence": len(evidence_rows),
             "resolution_ready_count": resolution["ready_count"],
+            "recent_cursor": recent_cursor,
+            "recent_catchup_active": not recent_complete,
             "backfill_cursor": backfill_cursor,
             "backfill_complete": backfill_complete,
         },
@@ -318,6 +354,8 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
         "new_verified_trade_events": len(events),
         "new_closed_trade_evidence": len(evidence_rows),
         "resolution_ready_count": resolution["ready_count"],
+        "recent_catchup_active": not recent_complete,
+        "recent_cursor": recent_cursor,
         "backfill_complete": backfill_complete,
         "backfill_cursor": backfill_cursor,
         "state_dir": str(state_dir),
