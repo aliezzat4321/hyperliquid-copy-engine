@@ -19,7 +19,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-price-bps", type=Decimal, default=Decimal("25"))
     parser.add_argument("--max-size-ratio-error", type=Decimal, default=Decimal("0.60"))
     parser.add_argument("--min-discovery-matches", type=int, default=3)
-    parser.add_argument("--max-candidates-to-verify", type=int, default=6)
+    parser.add_argument("--max-candidates-to-verify", type=int, default=64)
     parser.add_argument("--historical-verify-trades", type=int, default=12)
     parser.add_argument("--historical-lookback-hours", type=int, default=6)
     parser.add_argument("--historical-time-tolerance-ms", type=int, default=25_000)
