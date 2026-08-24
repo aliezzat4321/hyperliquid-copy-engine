@@ -10,12 +10,17 @@ from typing import Any
 
 from hlcopy.profitability.champion_truth import REQUIRED_TRUTH_LAYERS
 from hlcopy.profitability.continuous_path_v2 import AssetContextMark, FundingRate
+from hlcopy.profitability.parquet_mark_stream import (
+    iter_asset_context_marks,
+    latest_asset_context_ns,
+)
+from hlcopy.profitability.parquet_stream_evaluator import (
+    evaluate_candidate_path_truth_from_factory,
+)
 from hlcopy.profitability.path_inputs import (
-    load_asset_context_marks,
     load_funding_history_jsonl,
     load_margin_snapshots_jsonl,
 )
-from hlcopy.profitability.path_truth import evaluate_candidate_path_truth
 from hlcopy.profitability.portfolio_position_copy import FollowerStateEvent
 from hlcopy.profitability.selective_path_truth_cli import (
     LEVERAGES,
@@ -29,6 +34,8 @@ from hlcopy.profitability.selective_path_truth_cli import (
     _summary_index,
     build_parser,
 )
+
+MARK_LOOKBACK_NS = 15_000_000_000
 
 
 def _active_intervals(
@@ -71,6 +78,7 @@ def _marks_for_active_intervals(
     marks_by_coin: dict[str, tuple[AssetContextMark, ...]],
     intervals: dict[str, tuple[tuple[int, int], ...]],
 ) -> tuple[AssetContextMark, ...]:
+    """Legacy in-memory helper retained for regression tests only."""
     selected: dict[tuple[str, int], AssetContextMark] = {}
     for coin, spans in intervals.items():
         rows = marks_by_coin.get(coin, ())
@@ -125,6 +133,7 @@ def _deferred_truth_payload(*, fee_complete: bool) -> dict[str, object]:
         "validation_status": "BLOCKED_INCOMPLETE_PROFITABILITY_OR_PATH_RISK_TRUTH",
         "validation_blockers": blockers,
         "required_truth_layers": list(REQUIRED_TRUTH_LAYERS),
+        "gap_diagnostics": {},
     }
 
 
@@ -167,9 +176,12 @@ async def _run(args: Any) -> None:
         (state.execution_received_at_ns for state in mature_states),
         default=None,
     )
-    marks = load_asset_context_marks(args.market_dir, coins=coins, start_ns=start_ns)
-    marks_by_coin = _index_by_coin(marks)
-    end_ns = max((mark.received_at_ns for mark in marks), default=start_ns or 0)
+    tape_start_ns = max(0, start_ns - MARK_LOOKBACK_NS) if start_ns is not None else None
+    end_ns = latest_asset_context_ns(
+        args.market_dir,
+        coins=coins,
+        start_ns=tape_start_ns,
+    ) or 0
     if end_ns == 0:
         end_ns = max(
             (
@@ -206,7 +218,7 @@ async def _run(args: Any) -> None:
     print(
         "selective_path_truth_plan "
         f"groups={total_groups} mature={mature_total} deferred={total_groups - mature_total} "
-        f"mature_coins={len(coins)} marks={len(marks)} funding={len(funding)}",
+        f"mature_coins={len(coins)} funding={len(funding)} mode=PARQUET_STREAM_V4_1",
         flush=True,
     )
 
@@ -223,33 +235,48 @@ async def _run(args: Any) -> None:
             path_truth_complete = False
         else:
             intervals = _active_intervals(states, end_ns)
-            group_marks = _marks_for_active_intervals(
-                marks_by_coin=marks_by_coin,
-                intervals=intervals,
-            )
             group_funding = _funding_for_active_intervals(
                 funding_by_coin=funding_by_coin,
                 intervals=intervals,
             )
-            truth = evaluate_candidate_path_truth(
+            group_coins = tuple(sorted({state.coin for state in states}))
+            group_start_ns = max(0, first_ns - MARK_LOOKBACK_NS)
+
+            def mark_factory(
+                *,
+                _coins: tuple[str, ...] = group_coins,
+                _start_ns: int = group_start_ns,
+                _end_ns: int = end_ns,
+            ):
+                return iter_asset_context_marks(
+                    args.market_dir,
+                    coins=_coins,
+                    start_ns=_start_ns,
+                    end_ns=_end_ns,
+                )
+
+            truth, gap_diagnostics = evaluate_candidate_path_truth_from_factory(
                 state_events=states,
-                asset_contexts=group_marks,
+                mark_factory=mark_factory,
                 funding_rates=group_funding,
                 margin_snapshots=margins,
                 leverages=LEVERAGES,
                 round_trip_fee_accounting=fee_complete,
             )
             truth_payload = truth.to_dict()
+            truth_payload["gap_diagnostics"] = gap_diagnostics
             path_truth_complete = bool(
                 truth_payload.pop("validated_champion", False)
             )
             evaluated += 1
+            coverage = truth_payload.get("coverage") or {}
             print(
                 "selective_path_truth_mature "
                 f"evaluated={evaluated}/{mature_total} group={group_number}/{total_groups} "
                 f"elapsed_s={time.monotonic() - started:.1f} "
                 f"wallet={wallet[:14]} scenario={scenario} notional={notional} "
-                f"actions={realized_actions} active_marks={len(group_marks)}",
+                f"actions={realized_actions} checkpoints={coverage.get('checkpoint_count', 0)} "
+                f"gaps={len(gap_diagnostics)}",
                 flush=True,
             )
 
@@ -287,13 +314,14 @@ async def _run(args: Any) -> None:
     result = {
         "generated_at_ns": time.time_ns(),
         "real_trading": False,
-        "mode": "PROSPECTIVE_SELECTIVE_SHADOW_PATH_TRUTH_V2_MATURE_ONLY",
+        "mode": "PROSPECTIVE_SELECTIVE_SHADOW_PATH_TRUTH_V4_1_PARQUET_STREAM",
         "policy_id": payload.get("latest_policy_id"),
         "fee_accounting_complete": fee_complete,
         "minimum_forward_actions": MIN_FORWARD_ACTIONS,
         "minimum_forward_hours": "24",
         "state_event_count": len(raw_rows),
-        "mark_count": len(marks),
+        "mark_count": None,
+        "mark_count_mode": "STREAMED_NOT_MATERIALIZED",
         "funding_count": len(funding),
         "margin_snapshot_count": len(margins),
         "scenario_candidate_count": len(rows_out),
@@ -314,7 +342,7 @@ async def _run(args: Any) -> None:
         "selective_path_truth "
         f"candidates={len(promotion)} champions={result['validated_champion_count']} "
         f"evaluated={evaluated} deferred={deferred} "
-        f"states={len(raw_rows)} marks={len(marks)} funding={len(funding)} "
+        f"states={len(raw_rows)} funding={len(funding)} "
         f"margin_snapshots={len(margins)} output={args.output}",
         flush=True,
     )

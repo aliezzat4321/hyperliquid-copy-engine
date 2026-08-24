@@ -38,7 +38,7 @@ class CandidatePathTruth:
         }
 
 
-def evaluate_candidate_path_truth(
+def evaluate_candidate_path_truth_exact(
     *,
     state_events: Iterable[FollowerStateEvent],
     asset_contexts: Iterable[AssetContextMark],
@@ -51,7 +51,7 @@ def evaluate_candidate_path_truth(
     max_margin_snapshot_age_ns: int = 7_200_000_000_000,
     max_funding_gap_ns: int = 3_900_000_000_000,
 ) -> CandidatePathTruth:
-    """Produce one fail-closed truth result for a simulated follower candidate."""
+    """Materialized reference implementation retained for equivalence tests."""
     path = build_continuous_path(
         state_events,
         asset_contexts,
@@ -94,3 +94,35 @@ def evaluate_candidate_path_truth(
         }
     )
     return CandidatePathTruth(path=path, safe_leverage=safe, champion_truth=truth)
+
+
+def evaluate_candidate_path_truth(
+    *,
+    state_events: Iterable[FollowerStateEvent],
+    asset_contexts: Iterable[AssetContextMark],
+    funding_rates: Iterable[FundingRate],
+    margin_snapshots: Iterable[MarginMetadataSnapshot],
+    leverages: Iterable[Decimal],
+    round_trip_fee_accounting: bool,
+    minimum_liquidation_buffer_usd: Decimal = ZERO,
+    max_mark_age_ns: int = 15_000_000_000,
+    max_margin_snapshot_age_ns: int = 7_200_000_000_000,
+    max_funding_gap_ns: int = 3_900_000_000_000,
+) -> CandidatePathTruth:
+    """Bounded-memory lossless path truth used by production callers."""
+    from hlcopy.profitability.streaming_path_truth import (
+        evaluate_candidate_path_truth_streaming,
+    )
+
+    return evaluate_candidate_path_truth_streaming(
+        state_events=state_events,
+        asset_contexts=asset_contexts,
+        funding_rates=funding_rates,
+        margin_snapshots=margin_snapshots,
+        leverages=leverages,
+        round_trip_fee_accounting=round_trip_fee_accounting,
+        minimum_liquidation_buffer_usd=minimum_liquidation_buffer_usd,
+        max_mark_age_ns=max_mark_age_ns,
+        max_margin_snapshot_age_ns=max_margin_snapshot_age_ns,
+        max_funding_gap_ns=max_funding_gap_ns,
+    )
