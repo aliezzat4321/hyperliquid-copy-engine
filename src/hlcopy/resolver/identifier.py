@@ -77,6 +77,11 @@ async def identify_wallet_from_csv(
 
     snapshot = EvidenceSnapshot.from_path(evidence_path)
     imported: GenericTradeImportResult = load_generic_closed_trades_bytes(snapshot.data)
+    if imported.rejected_rows:
+        raise ValueError(
+            f"external evidence contains {len(imported.rejected_rows)} malformed rows; "
+            "fail closed before wallet discovery"
+        )
     signals = imported.signals
     if len(signals) < 3:
         raise ValueError(
