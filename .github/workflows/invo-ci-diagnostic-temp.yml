@@ -1,0 +1,56 @@
+name: invo-ci-diagnostic-temp
+
+on:
+  push:
+    branches:
+      - feature/invo-source-miner-v1
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: hlcopy
+          POSTGRES_PASSWORD: hlcopy
+          POSTGRES_DB: hlcopy
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U hlcopy -d hlcopy"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://hlcopy:hlcopy@localhost:5432/hlcopy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -U pip
+      - run: pip install -e '.[dev]'
+      - name: Capture Ruff
+        shell: bash
+        run: |
+          set +e
+          ruff check . > ruff.txt 2>&1
+          echo $? > ruff.exit
+          exit 0
+      - name: Capture pytest
+        shell: bash
+        run: |
+          set +e
+          pytest > pytest.txt 2>&1
+          echo $? > pytest.exit
+          exit 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: invo-ci-diagnostic
+          path: |
+            ruff.txt
+            ruff.exit
+            pytest.txt
+            pytest.exit
