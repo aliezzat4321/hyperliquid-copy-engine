@@ -61,12 +61,21 @@ install -m 0644 \
 
 systemctl daemon-reload
 
-# Prove authentication and endpoint compatibility before enabling unattended runs.
+# Prove authentication/API compatibility before enabling unattended execution.
 systemctl start "${SERVICE_NAME}"
-systemctl --no-pager --full status "${SERVICE_NAME}"
+service_result="$(systemctl show --property=Result --value "${SERVICE_NAME}")"
+if [[ "${service_result}" != "success" ]]; then
+  echo "Initial Invo source-miner run failed: ${service_result}" >&2
+  journalctl -u "${SERVICE_NAME}" -n 40 --no-pager >&2
+  exit 1
+fi
+journalctl -u "${SERVICE_NAME}" -n 10 --no-pager
 
 systemctl enable --now "${TIMER_NAME}"
-systemctl --no-pager --full status "${TIMER_NAME}"
+if ! systemctl is-active --quiet "${TIMER_NAME}"; then
+  echo "Invo source-miner timer did not become active." >&2
+  exit 1
+fi
 systemctl list-timers --all --no-pager "${TIMER_NAME}"
 
 echo
