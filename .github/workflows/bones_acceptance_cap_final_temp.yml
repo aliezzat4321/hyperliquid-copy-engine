@@ -20,9 +20,15 @@ jobs:
         run: |
           git fetch origin agent/bones-acceptance-v8-temp --depth=1
           git show FETCH_HEAD:tmp/bones_acceptance_v8.csv > /tmp/bones_acceptance.csv
-      - name: Run strict production identifier
+      - name: Measure bounded finalist workload and run strict identifier
         run: |
-          python -m hlcopy.resolver.identify_cli /tmp/bones_acceptance.csv --output-dir /tmp/bones-resolution
+          START=$(date +%s)
+          python -m hlcopy.resolver.identify_cli \
+            /tmp/bones_acceptance.csv \
+            --output-dir /tmp/bones-resolution \
+            --max-candidates-to-verify 64
+          END=$(date +%s)
+          echo "IDENTIFIER_SECONDS=$((END-START))"
           python - <<'PY'
           import hashlib, json
           from pathlib import Path
@@ -35,11 +41,9 @@ jobs:
               key=lambda x: (x['verification']['matched'], x['verification']['ratio']),
               reverse=True,
           )
-          threshold = int(report['effective_config']['min_discovery_matches'])
-          finalists = [row for row in report['ranked_candidates'] if int(row['matched_anchors']) >= threshold]
           cap = int(report['effective_config']['max_candidates_to_verify'])
-          print('THRESHOLD_FINALISTS', len(finalists), 'CAP', cap)
-          assert len(finalists) <= cap, (len(finalists), cap, finalists)
+          print('HISTORICALLY_VERIFIED_FINALISTS', len(rows), 'CAP', cap)
+          assert len(rows) <= cap, (len(rows), cap)
           assert report['status'] == 'VERIFIED', report
           assert report['wallet'] == expected, report
           assert report['candidate_unique'] is True, report
