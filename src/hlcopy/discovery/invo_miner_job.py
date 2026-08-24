@@ -8,6 +8,8 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from hlcopy.discovery.invo_evidence import closed_trade_evidence
+from hlcopy.discovery.invo_resolution_queue import materialize_resolution_queue
 from hlcopy.discovery.invo_source import (
     InvoPortfolioCandidate,
     InvoReadOnlyClient,
@@ -28,6 +30,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--recent-feed-pages", type=int, default=3)
     parser.add_argument("--backfill-pages", type=int, default=10)
     parser.add_argument("--page-size", type=int, default=50)
+    parser.add_argument("--resolution-min-trades", type=int, default=12)
     return parser.parse_args()
 
 
@@ -118,12 +121,16 @@ def _new_events_from_page(
         new_ids.append(post_id)
 
     new_id_set = set(new_ids)
-    events = [
-        event.to_dict()
-        for event in verified_trade_events({"items": page_items})
-        if event.post_id in new_id_set
-    ]
-    return events, new_ids
+    rows: list[dict[str, object]] = []
+    for event in verified_trade_events({"items": page_items}):
+        if event.post_id not in new_id_set:
+            continue
+        row = event.to_dict()
+        evidence = closed_trade_evidence(event)
+        if evidence is not None:
+            row["resolver_evidence"] = evidence
+        rows.append(row)
+    return rows, new_ids
 
 
 async def _collect_new_feed_events(
@@ -201,6 +208,17 @@ async def _collect_backfill_feed_events(
     return new_events, newly_seen, cursor, complete
 
 
+def _resolver_evidence_rows(
+    events: Sequence[Mapping[str, object]],
+) -> list[Mapping[str, object]]:
+    rows: list[Mapping[str, object]] = []
+    for event in events:
+        evidence = event.get("resolver_evidence")
+        if isinstance(evidence, Mapping):
+            rows.append(evidence)
+    return rows
+
+
 async def run_once(args: argparse.Namespace) -> dict[str, object]:
     access_token = os.getenv("INVO_ACCESS_TOKEN")
     refresh_token = os.getenv("INVO_REFRESH_TOKEN")
@@ -213,6 +231,8 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
     state_path = state_dir / "state.json"
     portfolios_path = state_dir / "latest_portfolios.json"
     events_path = state_dir / "verified_trade_events.ndjson"
+    evidence_path = state_dir / "closed_trade_evidence.ndjson"
+    queue_dir = state_dir / "resolution_queue"
 
     state = _load_state(state_path)
     known_ids = {
@@ -261,6 +281,7 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
         str(event["post_id"]): event for event in recent_events + backfill_events
     }
     events = list(events_by_post.values())
+    evidence_rows = _resolver_evidence_rows(events)
 
     _save_json(
         portfolios_path,
@@ -271,16 +292,23 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
         },
     )
     _append_ndjson(events_path, events)
-
-    ordered_seen = list(
-        dict.fromkeys(recent_seen + backfill_seen + sorted(known_ids))
+    _append_ndjson(evidence_path, evidence_rows)
+    resolution = materialize_resolution_queue(
+        evidence_path=evidence_path,
+        output_dir=queue_dir,
+        portfolios=portfolios,
+        min_trades=max(3, args.resolution_min_trades),
     )
+
+    ordered_seen = list(dict.fromkeys(recent_seen + backfill_seen + sorted(known_ids)))
     _save_json(
         state_path,
         {
             "seen_post_ids": ordered_seen[:MAX_SEEN_POST_IDS],
             "portfolio_count": len(portfolios),
             "new_verified_trade_events": len(events),
+            "new_closed_trade_evidence": len(evidence_rows),
+            "resolution_ready_count": resolution["ready_count"],
             "backfill_cursor": backfill_cursor,
             "backfill_complete": backfill_complete,
         },
@@ -288,6 +316,8 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
     return {
         "portfolio_count": len(portfolios),
         "new_verified_trade_events": len(events),
+        "new_closed_trade_evidence": len(evidence_rows),
+        "resolution_ready_count": resolution["ready_count"],
         "backfill_complete": backfill_complete,
         "backfill_cursor": backfill_cursor,
         "state_dir": str(state_dir),
