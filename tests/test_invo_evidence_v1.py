@@ -14,6 +14,7 @@ def test_closed_update_preserves_distinct_open_and_close_times() -> None:
             "leverage": 5,
             "entryPrice": 40.0,
             "closingPrice": 44.0,
+            "entrySize": 1.0,
             "isOpen": False,
             "verifiedTrade": True,
             "createdAt": "2026-08-20T10:00:00Z",
@@ -32,8 +33,34 @@ def test_closed_update_preserves_distinct_open_and_close_times() -> None:
     assert row["trade_id"] == "trade-1"
     assert row["username"] == "carmine"
     assert row["ticker"] == "HYPE"
-    assert row["opened_at"] == 1787220000000
-    assert row["closed_at"] == 1787223600000
+    assert row["entry_size"] == 1.0
+    assert row["opened_at"] == "2026-08-20T10:00:00.000Z"
+    assert row["closed_at"] == "2026-08-20T11:00:00.000Z"
+
+
+def test_close_without_stable_trade_id_is_not_identity_evidence() -> None:
+    post = {
+        "id": "partial-close-post",
+        "createdAt": "2026-08-20T11:00:00Z",
+        "update": {
+            "ticker": "HYPE",
+            "directionLong": True,
+            "leverage": 5,
+            "entryPrice": 40.0,
+            "closingPrice": 44.0,
+            "entrySize": 1.0,
+            "isOpen": False,
+            "verifiedTrade": True,
+            "createdAt": "2026-08-20T10:00:00Z",
+            "updatedAt": "2026-08-20T11:00:00Z",
+            "portfolio": {"id": "portfolio-carmine"},
+            "owner": {"id": "user-carmine", "username": "carmine"},
+        },
+    }
+
+    event = normalize_trade_event(post)
+    assert event is not None
+    assert closed_trade_evidence(event) is None
 
 
 def test_close_without_provable_later_timestamp_is_not_identity_evidence() -> None:
@@ -43,8 +70,10 @@ def test_close_without_provable_later_timestamp_is_not_identity_evidence() -> No
         "update": {
             "ticker": "SOL",
             "directionLong": False,
+            "leverage": 4,
             "entryPrice": 150.0,
             "closingPrice": 145.0,
+            "entrySize": 1.0,
             "isOpen": False,
             "verifiedTrade": True,
             "createdAt": "2026-08-20T10:00:00Z",
