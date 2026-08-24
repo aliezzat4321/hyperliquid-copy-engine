@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import base64
+import binascii
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -10,6 +14,7 @@ import httpx
 
 INVO_API_BASE = "https://api.invoapp.com"
 DEFAULT_INVO_APP_VERSION = "0.0.75"
+DEFAULT_RETRY_ATTEMPTS = 3
 
 
 class InvoApiError(RuntimeError):
@@ -49,6 +54,33 @@ def _timestamp_ms(value: object) -> int | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     return int(parsed.timestamp() * 1000)
+
+
+def _decode_mapping(response: httpx.Response, *, path: str) -> Mapping[str, Any]:
+    try:
+        data = response.json()
+    except ValueError:
+        text = response.text.strip()
+        try:
+            padded = text + "=" * (-len(text) % 4)
+            decoded = base64.b64decode(padded, validate=True).decode("utf-8")
+            data = json.loads(decoded)
+        except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise InvoApiError(f"Invo {path} returned an unreadable response") from exc
+    if not isinstance(data, Mapping):
+        raise InvoApiError(f"Invo {path} returned a non-object response")
+    return data
+
+
+def _retry_delay_seconds(response: httpx.Response | None, attempt: int) -> float:
+    if response is not None:
+        retry_after = response.headers.get("Retry-After")
+        if retry_after:
+            try:
+                return min(10.0, max(0.05, float(retry_after)))
+            except ValueError:
+                pass
+    return min(4.0, 0.5 * (2**attempt))
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,6 +215,7 @@ def normalize_trade_event(post: Mapping[str, Any]) -> InvoTradeEvent | None:
         else {}
     )
     owner = update.get("owner") if isinstance(update.get("owner"), Mapping) else {}
+    post_owner = post.get("owner") if isinstance(post.get("owner"), Mapping) else {}
     leverage_raw = update.get("leverage")
     entry_raw = update.get("entryPrice")
     close_raw = update.get("closingPrice")
@@ -192,10 +225,15 @@ def normalize_trade_event(post: Mapping[str, Any]) -> InvoTradeEvent | None:
         portfolio_id=(
             str(portfolio.get("id")) if portfolio.get("id") is not None else None
         ),
-        owner_id=(str(owner.get("id")) if owner.get("id") is not None else None),
+        owner_id=(
+            str(owner.get("id") or post_owner.get("id"))
+            if owner.get("id") is not None or post_owner.get("id") is not None
+            else None
+        ),
         username=(
-            str(owner.get("username"))
+            str(owner.get("username") or post_owner.get("username"))
             if owner.get("username") is not None
+            or post_owner.get("username") is not None
             else None
         ),
         base_id=(
@@ -214,20 +252,16 @@ def normalize_trade_event(post: Mapping[str, Any]) -> InvoTradeEvent | None:
         is_open=(bool(is_open_raw) if is_open_raw is not None else None),
         verified_trade=bool(update.get("verifiedTrade", False)),
         occurred_at_ms=(
-            _timestamp_ms(update.get("createdAt"))
-            or _timestamp_ms(post.get("createdAt"))
+            _timestamp_ms(post.get("createdAt"))
             or _timestamp_ms(update.get("updatedAt"))
+            or _timestamp_ms(update.get("createdAt"))
         ),
         raw=dict(post),
     )
 
 
 class InvoReadOnlyClient:
-    """Read-only client for Invo discovery/feed endpoints.
-
-    Authentication is supplied by the caller. Tokens are never logged or persisted by
-    this class. The client intentionally does not expose follow or trading endpoints.
-    """
+    """Read-only client for Invo discovery/feed endpoints."""
 
     def __init__(
         self,
@@ -237,6 +271,7 @@ class InvoReadOnlyClient:
         app_version: str = DEFAULT_INVO_APP_VERSION,
         base_url: str = INVO_API_BASE,
         timeout_seconds: float = 20.0,
+        retry_attempts: int = DEFAULT_RETRY_ATTEMPTS,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._access_token = (
@@ -246,6 +281,7 @@ class InvoReadOnlyClient:
             refresh_token.removeprefix("Bearer ") if refresh_token else None
         )
         self._app_version = app_version
+        self._retry_attempts = max(1, retry_attempts)
         self._client = httpx.AsyncClient(
             base_url=base_url,
             timeout=timeout_seconds,
@@ -272,41 +308,71 @@ class InvoReadOnlyClient:
     async def _refresh(self) -> bool:
         if not self._refresh_token:
             return False
-        response = await self._client.get(
-            "/v1_0/auth/refresh_token",
-            headers=self._headers(self._refresh_token),
-        )
-        if response.status_code != 200:
+        for attempt in range(self._retry_attempts):
+            response: httpx.Response | None = None
+            try:
+                response = await self._client.get(
+                    "/v1_0/auth/refresh_token",
+                    headers=self._headers(self._refresh_token),
+                )
+            except httpx.RequestError as exc:
+                if attempt + 1 >= self._retry_attempts:
+                    raise InvoApiError("Invo token refresh transport failed") from exc
+                await asyncio.sleep(_retry_delay_seconds(None, attempt))
+                continue
+
+            if response.status_code == 200:
+                payload = _decode_mapping(response, path="/v1_0/auth/refresh_token")
+                token = payload.get("accessToken")
+                if not token:
+                    raise InvoApiError("Invo token refresh response lacked accessToken")
+                self._access_token = str(token).removeprefix("Bearer ")
+                return True
+            if response.status_code == 429 or response.status_code >= 500:
+                if attempt + 1 >= self._retry_attempts:
+                    raise InvoApiError(
+                        f"Invo token refresh returned HTTP {response.status_code}"
+                    )
+                await asyncio.sleep(_retry_delay_seconds(response, attempt))
+                continue
             return False
-        payload = response.json()
-        token = payload.get("accessToken") if isinstance(payload, Mapping) else None
-        if not token:
-            return False
-        self._access_token = str(token).removeprefix("Bearer ")
-        return True
+        return False
 
     async def _post(self, path: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         if not self._access_token and not await self._refresh():
-            raise InvoApiError("Invo authentication is required")
-        assert self._access_token is not None
-        response = await self._client.post(
-            path,
-            json=dict(payload),
-            headers=self._headers(self._access_token),
-        )
-        if response.status_code == 401 and await self._refresh():
+            raise InvoApiError("Invo authentication failed")
+
+        refreshed_after_401 = False
+        for attempt in range(self._retry_attempts):
             assert self._access_token is not None
-            response = await self._client.post(
-                path,
-                json=dict(payload),
-                headers=self._headers(self._access_token),
-            )
-        if response.status_code >= 400:
-            raise InvoApiError(f"Invo {path} returned HTTP {response.status_code}")
-        data = response.json()
-        if not isinstance(data, Mapping):
-            raise InvoApiError(f"Invo {path} returned a non-object response")
-        return data
+            response: httpx.Response | None = None
+            try:
+                response = await self._client.post(
+                    path,
+                    json=dict(payload),
+                    headers=self._headers(self._access_token),
+                )
+            except httpx.RequestError as exc:
+                if attempt + 1 >= self._retry_attempts:
+                    raise InvoApiError(f"Invo {path} transport failed") from exc
+                await asyncio.sleep(_retry_delay_seconds(None, attempt))
+                continue
+
+            if response.status_code == 401 and not refreshed_after_401:
+                if not await self._refresh():
+                    raise InvoApiError("Invo authentication refresh was rejected")
+                refreshed_after_401 = True
+                continue
+            if response.status_code == 429 or response.status_code >= 500:
+                if attempt + 1 >= self._retry_attempts:
+                    raise InvoApiError(f"Invo {path} returned HTTP {response.status_code}")
+                await asyncio.sleep(_retry_delay_seconds(response, attempt))
+                continue
+            if response.status_code >= 400:
+                raise InvoApiError(f"Invo {path} returned HTTP {response.status_code}")
+            return _decode_mapping(response, path=path)
+
+        raise InvoApiError(f"Invo {path} exhausted retry attempts")
 
     async def discover_portfolios(
         self,
