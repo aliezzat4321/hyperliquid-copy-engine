@@ -1,6 +1,7 @@
 name: invo-ci-diagnostic-temp
 
 on:
+  pull_request:
   push:
     branches:
       - feature/invo-source-miner-v1
