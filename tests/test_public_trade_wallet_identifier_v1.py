@@ -135,6 +135,7 @@ class _FakeSqdClient:
         self.start_ms = start_ms
         self.end_ms = end_ms
         self.around_calls: list[int] = []
+        self.between_calls = 0
 
     async def coverage_start_ms(self) -> int:
         return self.start_ms
@@ -166,6 +167,7 @@ class _FakeSqdClient:
         del coin, user
         assert self.start_ms <= start_ms <= self.end_ms
         assert self.start_ms <= end_ms <= self.end_ms
+        self.between_calls += 1
         return []
 
 
@@ -354,7 +356,7 @@ def test_winner_gap_is_applied_before_runner_up_threshold_filtering() -> None:
     )
 
 
-def test_all_threshold_reaching_finalists_are_verified() -> None:
+def test_threshold_reaching_finalists_over_cap_fail_closed_before_history_scan() -> None:
     ranked = tuple(
         _candidate(f"0x{index:040x}", 3, str(100 - index))
         for index in range(1, 8)
@@ -377,8 +379,36 @@ def test_all_threshold_reaching_finalists_are_verified() -> None:
             config=config,
         )
     )
+    assert results == ()
+    assert client.between_calls == 0
+
+
+def test_all_threshold_reaching_finalists_are_verified_within_cap() -> None:
+    ranked = tuple(
+        _candidate(f"0x{index:040x}", 3, str(100 - index))
+        for index in range(1, 8)
+    )
+    signals = (_signal(signal_id="held-out", opened_at_ms=900_000),)
+    client = _FakeSqdClient()
+    config = PublicTradeDiscoveryConfig(
+        min_discovery_matches=3,
+        max_candidates_to_verify=7,
+        historical_verify_trades=1,
+        historical_entry_time_tolerance_ms=300_000,
+    )
+    results = asyncio.run(
+        verify_candidate_shortlist(
+            ranked=ranked,
+            signals=signals,
+            excluded_signal_ids=set(),
+            coverage_start_ms=client.start_ms,
+            client=client,
+            config=config,
+        )
+    )
     assert len(results) == 7
     assert {item.address for item in results} == {item.address for item in ranked}
+    assert client.between_calls == 7
 
 
 def test_discovery_excludes_evidence_beyond_finalized_head() -> None:
