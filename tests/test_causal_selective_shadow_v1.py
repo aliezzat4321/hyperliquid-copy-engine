@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from pathlib import Path
 
-from hlcopy.profitability.causal_selective_live_cli import _allowed
+import pytest
+
+from hlcopy.profitability.causal_selective_live_cli import _allowed, _evidence_cutoff_ns
 from hlcopy.profitability.position_copy import CopyFillEvent
 from hlcopy.shadow.selective_policy import EffectivePolicyStore, SelectivePolicy, SelectiveRule
 
@@ -52,3 +55,21 @@ def test_selective_shadow_never_uses_policy_before_activation() -> None:
 def test_selective_shadow_requires_wallet_coin_match() -> None:
     store = _store()
     assert _allowed(store, _event(300, coin="ETH")) is False
+
+
+def test_selective_evidence_cutoff_reads_fail_closed_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cutoff = tmp_path / "cutoff.txt"
+    cutoff.write_text("123456789\n", encoding="utf-8")
+    monkeypatch.setenv("HLCOPY_SELECTIVE_EVIDENCE_CUTOFF_NS_FILE", str(cutoff))
+    assert _evidence_cutoff_ns() == 123456789
+
+
+def test_selective_evidence_cutoff_requires_configured_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    missing = tmp_path / "missing.txt"
+    monkeypatch.setenv("HLCOPY_SELECTIVE_EVIDENCE_CUTOFF_NS_FILE", str(missing))
+    with pytest.raises(SystemExit, match="cutoff file missing"):
+        _evidence_cutoff_ns()
