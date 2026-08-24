@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+from hlcopy.resolver.identifier import _load_source_evidence
 from hlcopy.resolver.provenance import (
     EvidenceSnapshot,
     jsonable_config,
@@ -38,6 +39,33 @@ def test_evidence_snapshot_binds_parsing_hash_and_size_to_same_bytes(tmp_path) -
     assert snapshot.sha256 == sha256_bytes(original)
     assert imported.signals[0].exit_price == Decimal("110")
     assert snapshot.sha256 != sha256_file(evidence)
+
+
+def test_source_collapse_uses_effective_widened_resolver_tolerances(tmp_path) -> None:
+    evidence = tmp_path / "near-duplicates.csv"
+    evidence.write_text(
+        "id,symbol,position_side,avg_entry_price,avg_exit_price,start_time,end_time\n"
+        "a,BTC,LONG,100,110,2026-08-01T10:00:00Z,2026-08-01T10:00:20Z\n"
+        "b,BTC,LONG,100.20,110.44,2026-08-01T10:00:50Z,2026-08-01T10:01:10Z\n",
+        encoding="utf-8",
+    )
+    snapshot = EvidenceSnapshot.from_path(evidence)
+    config = PublicTradeDiscoveryConfig(
+        window_seconds=60,
+        max_price_bps=Decimal("50"),
+        historical_time_tolerance_ms=60_000,
+        historical_price_tolerance_bps=Decimal("50"),
+        historical_entry_time_tolerance_ms=60_000,
+        historical_entry_price_tolerance_bps=Decimal("25"),
+    )
+
+    imported = _load_source_evidence(snapshot, config)
+
+    assert len(imported.signals) == 1
+    assert len(imported.overlapping_rows) == 1
+    assert imported.overlapping_rows[0]["reason"] == (
+        "overlapping_or_near_equivalent_source_position_evidence"
+    )
 
 
 def test_effective_config_serializes_all_gate_values() -> None:
