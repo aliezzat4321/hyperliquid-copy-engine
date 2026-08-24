@@ -1,0 +1,63 @@
+name: bones-production-acceptance-final-temp
+
+on:
+  push:
+    branches: [agent/bones-acceptance-final-temp]
+  workflow_dispatch:
+
+jobs:
+  identify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e .
+      - name: Load fixed Bones fixture
+        run: |
+          git fetch origin agent/bones-acceptance-v8-temp --depth=1
+          git show FETCH_HEAD:tmp/bones_acceptance_v8.csv > /tmp/bones_acceptance.csv
+      - name: Run strict production identifier
+        run: |
+          python -m hlcopy.resolver.identify_cli /tmp/bones_acceptance.csv --output-dir /tmp/bones-resolution
+          python - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+
+          path = Path('/tmp/bones_acceptance.csv')
+          report = json.loads(Path('/tmp/bones-resolution/wallet_identification_bones_acceptance.json').read_text())
+          expected = '0x565590f4d2b00b567a564f56b13f898392aef180'
+          rows = sorted(
+              report['historical_candidate_verifications'],
+              key=lambda x: (x['verification']['matched'], x['verification']['ratio']),
+              reverse=True,
+          )
+          assert report['status'] == 'VERIFIED', report
+          assert report['wallet'] == expected, report
+          assert report['candidate_unique'] is True, report
+          assert report['uncovered_signal_ids'] == [], report
+          assert report['input_sha256'] == hashlib.sha256(path.read_bytes()).hexdigest(), report
+          assert report['input_bytes'] == len(path.read_bytes()), report
+          assert report['effective_config']['historical_entry_time_tolerance_ms'] == 300000, report
+          assert report['effective_config']['historical_entry_price_tolerance_bps'] == '15', report
+          assert rows[0]['address'] == expected, rows
+          assert rows[0]['verification']['matched'] >= 5, rows
+          runner = rows[1]['verification']['matched'] if len(rows) > 1 else 0
+          assert rows[0]['verification']['matched'] - runner >= 2, rows
+          matched = [e for e in rows[0]['verification']['evidence'] if e['matched']]
+          assert len({e['lifecycle_id'] for e in matched}) == len(matched), matched
+          assert all(e['lifecycle_id'] for e in matched), matched
+          assert report['safety']['one_vote_per_sqd_execution_in_discovery'] is True
+          assert report['safety']['one_vote_per_sqd_lifecycle_in_verification'] is True
+          assert report['safety']['complete_tolerance_windows_required_in_coverage'] is True
+          assert report['safety']['immutable_input_snapshot_required'] is True
+          assert report['safety']['source_collapse_uses_effective_resolver_tolerances'] is True
+          print('ACCEPTANCE_VERIFIED', expected)
+          print('DISCOVERY', report['discovery_anchor_ids'])
+          print('WINNER', rows[0]['verification']['matched'], '/', rows[0]['verification']['attempted'])
+          print('RUNNER', runner)
+          print('MATCHED_IDS', rows[0]['verification']['matched_signal_ids'])
+          PY
