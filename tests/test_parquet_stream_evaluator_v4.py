@@ -27,9 +27,9 @@ def _state(ts_ns: int, *, qty: str, entry: str | None, action: str) -> FollowerS
     )
 
 
-def _mark(ts_ns: int, price: str) -> AssetContextMark:
+def _mark(ts_ns: int, price: str, *, coin: str = "BTC") -> AssetContextMark:
     return AssetContextMark(
-        coin="BTC",
+        coin=coin,
         received_at_ns=ts_ns,
         mark_price=D(price),
         oracle_price=D(price),
@@ -87,6 +87,7 @@ def test_reopenable_stream_reports_gap_diagnostics_fail_closed() -> None:
     )
     marks = (
         _mark(1_000_000_000, "100"),
+        _mark(10_000_000_000, "200", coin="ETH"),
         _mark(20_000_000_000, "101"),
     )
     truth, gaps = evaluate_candidate_path_truth_from_factory(
@@ -101,4 +102,4 @@ def test_reopenable_stream_reports_gap_diagnostics_fail_closed() -> None:
     payload = truth.to_dict()
     assert payload["coverage"]["complete"] is False
     assert "MARK_GAP:BTC" in payload["coverage"]["blockers"]
-    assert gaps["MARK_GAP:BTC"]["max_gap_seconds"] == 19.0
+    assert gaps["MARK_GAP:BTC"]["max_gap_seconds"] == 9.0
