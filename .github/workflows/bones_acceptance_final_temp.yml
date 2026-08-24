@@ -3,6 +3,8 @@ name: bones-production-acceptance-final-temp
 on:
   push:
     branches: [agent/bones-acceptance-final-temp]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
