@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from hlcopy.discovery.invo_resolution_queue import materialize_resolution_queue
+from hlcopy.signals.invo import load_invo_closed_trades
+
+BASE_TIME = datetime(2026, 8, 1, 10, 0, tzinfo=UTC)
+
+
+def _iso(value: datetime) -> str:
+    return value.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _row(index: int, *, post_id: str | None = None) -> dict[str, object]:
+    opened = BASE_TIME + timedelta(minutes=index * 10)
+    closed = opened + timedelta(minutes=5)
     return {
         "trade_id": f"trade-{index}",
         "username": "carmine",
@@ -15,8 +25,9 @@ def _row(index: int, *, post_id: str | None = None) -> dict[str, object]:
         "leverage": 5,
         "entry_price": 100 + index,
         "closing_price": 101 + index,
-        "opened_at": 1_780_000_000_000 + index * 10_000,
-        "closed_at": 1_780_000_005_000 + index * 10_000,
+        "entry_size": 1.0,
+        "opened_at": _iso(opened),
+        "closed_at": _iso(closed),
         "portfolio_id": "portfolio-carmine",
         "source_post_id": post_id or f"post-{index}",
     }
@@ -28,7 +39,7 @@ def test_resolution_queue_requires_independent_trades_and_deduplicates_trade_id(
     evidence_path = tmp_path / "closed.ndjson"
     rows = [_row(index) for index in range(12)]
     duplicate = _row(3, post_id="duplicate-post")
-    duplicate["closed_at"] = int(duplicate["closed_at"]) + 1_000
+    duplicate["closed_at"] = _iso(BASE_TIME + timedelta(minutes=36))
     rows.append(duplicate)
     evidence_path.write_text(
         "".join(json.dumps(row) + "\n" for row in rows),
@@ -56,6 +67,10 @@ def test_resolution_queue_requires_independent_trades_and_deduplicates_trade_id(
     csv_path = Path(str(item["resolver_csv"]))
     assert csv_path.exists()
     assert len(csv_path.read_text(encoding="utf-8").splitlines()) == 13
+
+    imported = load_invo_closed_trades(csv_path)
+    assert len(imported.signals) == 12
+    assert imported.rejected_rows == ()
 
 
 def test_resolution_queue_waits_for_minimum_evidence(tmp_path: Path) -> None:
