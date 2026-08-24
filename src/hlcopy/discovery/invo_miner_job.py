@@ -4,8 +4,9 @@ import argparse
 import asyncio
 import json
 import os
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from hlcopy.discovery.invo_source import (
     InvoReadOnlyClient,
