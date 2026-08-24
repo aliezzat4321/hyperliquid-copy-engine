@@ -4,6 +4,7 @@ import csv
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 MIN_RESOLUTION_TRADES = 12
@@ -15,6 +16,7 @@ RESOLVER_FIELDS = (
     "leverage",
     "entry_price",
     "closing_price",
+    "entry_size",
     "opened_at",
     "closed_at",
     "portfolio_id",
@@ -44,11 +46,46 @@ def read_evidence_ndjson(path: Path) -> list[dict[str, object]]:
     return rows
 
 
-def _closed_at(row: Mapping[str, object]) -> int:
+def _timestamp_ms(value: object, *, field: str) -> int:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError(f"Invo evidence is missing {field}")
+    if text.isdigit():
+        numeric = int(text)
+        return numeric if numeric > 10_000_000_000 else numeric * 1000
     try:
-        return int(row.get("closed_at") or 0)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("Invo evidence has invalid closed_at") from exc
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"Invo evidence has invalid {field}") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return int(parsed.timestamp() * 1000)
+
+
+def _closed_at(row: Mapping[str, object]) -> int:
+    return _timestamp_ms(row.get("closed_at"), field="closed_at")
+
+
+def _validate_resolver_row(row: Mapping[str, object]) -> None:
+    required = (
+        "trade_id",
+        "ticker",
+        "direction",
+        "leverage",
+        "entry_price",
+        "closing_price",
+        "entry_size",
+        "opened_at",
+        "closed_at",
+        "portfolio_id",
+    )
+    missing = [field for field in required if str(row.get(field) or "").strip() == ""]
+    if missing:
+        raise ValueError("Invo evidence is missing resolver fields: " + ", ".join(missing))
+    opened_at = _timestamp_ms(row.get("opened_at"), field="opened_at")
+    closed_at = _timestamp_ms(row.get("closed_at"), field="closed_at")
+    if closed_at <= opened_at:
+        raise ValueError("Invo evidence close must be after open")
 
 
 def _group_evidence(
@@ -61,6 +98,7 @@ def _group_evidence(
         if not portfolio_id or not trade_id:
             raise ValueError("Invo evidence is missing portfolio_id or trade_id")
         row = {field: source.get(field, "") for field in RESOLVER_FIELDS}
+        _validate_resolver_row(row)
         key = (portfolio_id, trade_id)
         previous = deduped.get(key)
         if previous is None or _closed_at(row) >= _closed_at(previous):
