@@ -24,6 +24,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--historical-lookback-hours", type=int, default=6)
     parser.add_argument("--historical-time-tolerance-ms", type=int, default=25_000)
     parser.add_argument(
+        "--historical-entry-time-tolerance-ms", type=int, default=300_000
+    )
+    parser.add_argument(
         "--historical-price-tolerance-bps", type=Decimal, default=Decimal("35")
     )
     parser.add_argument(
@@ -49,6 +52,9 @@ async def _run(args: argparse.Namespace) -> None:
         historical_verify_trades=max(1, args.historical_verify_trades),
         historical_lookback_hours=max(1, args.historical_lookback_hours),
         historical_time_tolerance_ms=max(1, args.historical_time_tolerance_ms),
+        historical_entry_time_tolerance_ms=max(
+            1, args.historical_entry_time_tolerance_ms
+        ),
         historical_price_tolerance_bps=args.historical_price_tolerance_bps,
         historical_entry_price_tolerance_bps=(
             args.historical_entry_price_tolerance_bps
