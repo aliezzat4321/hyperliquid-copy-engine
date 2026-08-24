@@ -64,6 +64,26 @@ def _confidence(
     return min(D("0.999"), discovery_ratio * D("0.40") + historical_ratio * D("0.60"))
 
 
+def _load_source_evidence(
+    snapshot: EvidenceSnapshot,
+    config: PublicTradeDiscoveryConfig,
+) -> GenericTradeImportResult:
+    """Normalize source evidence using the widest tolerances that can award a vote."""
+    return load_generic_closed_trades_bytes(
+        snapshot.data,
+        near_duplicate_entry_time_ms=config.historical_entry_time_tolerance_ms,
+        near_duplicate_close_time_ms=max(
+            config.window_seconds * 1000,
+            config.historical_time_tolerance_ms,
+        ),
+        near_duplicate_entry_price_bps=config.historical_entry_price_tolerance_bps,
+        near_duplicate_exit_price_bps=max(
+            config.max_price_bps,
+            config.historical_price_tolerance_bps,
+        ),
+    )
+
+
 async def identify_wallet_from_csv(
     evidence_path: Path,
     *,
@@ -76,7 +96,7 @@ async def identify_wallet_from_csv(
         config = DEFAULT_PUBLIC_TRADE_CONFIG
 
     snapshot = EvidenceSnapshot.from_path(evidence_path)
-    imported: GenericTradeImportResult = load_generic_closed_trades_bytes(snapshot.data)
+    imported = _load_source_evidence(snapshot, config)
     if imported.rejected_rows:
         raise ValueError(
             f"external evidence contains {len(imported.rejected_rows)} malformed rows; "
@@ -190,6 +210,7 @@ async def identify_wallet_from_csv(
                 "exact_boundary_sequence_replay_required": True,
                 "entry_time_verification_required": True,
                 "overlapping_source_positions_collapsed": True,
+                "source_collapse_uses_effective_resolver_tolerances": True,
                 "one_vote_per_sqd_execution_in_discovery": True,
                 "one_vote_per_sqd_lifecycle_in_verification": True,
                 "full_lifecycle_exit_aggregation_required": True,
