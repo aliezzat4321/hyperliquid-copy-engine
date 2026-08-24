@@ -11,7 +11,6 @@ from typing import Any
 
 import httpx
 
-
 INVO_API_BASE = "https://api.invoapp.com"
 DEFAULT_INVO_APP_VERSION = "0.0.75"
 DEFAULT_RETRY_ATTEMPTS = 3
