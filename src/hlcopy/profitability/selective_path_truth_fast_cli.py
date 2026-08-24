@@ -9,7 +9,7 @@ from collections import defaultdict
 from typing import Any
 
 from hlcopy.profitability.champion_truth import REQUIRED_TRUTH_LAYERS
-from hlcopy.profitability.continuous_path_v2 import FundingRate
+from hlcopy.profitability.continuous_path_v2 import AssetContextMark, FundingRate
 from hlcopy.profitability.parquet_mark_stream import (
     iter_asset_context_marks,
     latest_asset_context_ns,
@@ -71,6 +71,28 @@ def _active_intervals(
         if intervals:
             result[coin] = tuple(intervals)
     return result
+
+
+def _marks_for_active_intervals(
+    *,
+    marks_by_coin: dict[str, tuple[AssetContextMark, ...]],
+    intervals: dict[str, tuple[tuple[int, int], ...]],
+) -> tuple[AssetContextMark, ...]:
+    """Legacy in-memory helper retained for regression tests only."""
+    selected: dict[tuple[str, int], AssetContextMark] = {}
+    for coin, spans in intervals.items():
+        rows = marks_by_coin.get(coin, ())
+        if not rows:
+            continue
+        times = tuple(row.received_at_ns for row in rows)
+        for start_ns, end_ns in spans:
+            left = max(0, bisect_right(times, start_ns) - 1)
+            right = min(len(rows), bisect_right(times, end_ns) + 1)
+            for row in rows[left:right]:
+                selected[(row.coin, row.received_at_ns)] = row
+    return tuple(
+        sorted(selected.values(), key=lambda row: (row.received_at_ns, row.coin))
+    )
 
 
 def _funding_for_active_intervals(
