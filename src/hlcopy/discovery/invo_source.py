@@ -342,7 +342,8 @@ class InvoReadOnlyClient:
             raise InvoApiError("Invo authentication failed")
 
         refreshed_after_401 = False
-        for attempt in range(self._retry_attempts):
+        attempt = 0
+        while attempt < self._retry_attempts:
             assert self._access_token is not None
             response: httpx.Response | None = None
             try:
@@ -352,9 +353,10 @@ class InvoReadOnlyClient:
                     headers=self._headers(self._access_token),
                 )
             except httpx.RequestError as exc:
-                if attempt + 1 >= self._retry_attempts:
+                attempt += 1
+                if attempt >= self._retry_attempts:
                     raise InvoApiError(f"Invo {path} transport failed") from exc
-                await asyncio.sleep(_retry_delay_seconds(None, attempt))
+                await asyncio.sleep(_retry_delay_seconds(None, attempt - 1))
                 continue
 
             if response.status_code == 401 and not refreshed_after_401:
@@ -363,9 +365,10 @@ class InvoReadOnlyClient:
                 refreshed_after_401 = True
                 continue
             if response.status_code == 429 or response.status_code >= 500:
-                if attempt + 1 >= self._retry_attempts:
+                attempt += 1
+                if attempt >= self._retry_attempts:
                     raise InvoApiError(f"Invo {path} returned HTTP {response.status_code}")
-                await asyncio.sleep(_retry_delay_seconds(response, attempt))
+                await asyncio.sleep(_retry_delay_seconds(response, attempt - 1))
                 continue
             if response.status_code >= 400:
                 raise InvoApiError(f"Invo {path} returned HTTP {response.status_code}")
