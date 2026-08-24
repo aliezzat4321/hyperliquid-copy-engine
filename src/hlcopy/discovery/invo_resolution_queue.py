@@ -27,14 +27,28 @@ def read_evidence_ndjson(path: Path) -> list[dict[str, object]]:
         return []
     rows: list[dict[str, object]] = []
     with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
             try:
                 value = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(value, dict):
-                rows.append(value)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"corrupt Invo evidence at {path}:{line_number}"
+                ) from exc
+            if not isinstance(value, dict):
+                raise ValueError(
+                    f"non-object Invo evidence at {path}:{line_number}"
+                )
+            rows.append(value)
     return rows
+
+
+def _closed_at(row: Mapping[str, object]) -> int:
+    try:
+        return int(row.get("closed_at") or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Invo evidence has invalid closed_at") from exc
 
 
 def _group_evidence(
@@ -45,20 +59,18 @@ def _group_evidence(
         portfolio_id = str(source.get("portfolio_id") or "").strip()
         trade_id = str(source.get("trade_id") or "").strip()
         if not portfolio_id or not trade_id:
-            continue
+            raise ValueError("Invo evidence is missing portfolio_id or trade_id")
         row = {field: source.get(field, "") for field in RESOLVER_FIELDS}
         key = (portfolio_id, trade_id)
         previous = deduped.get(key)
-        if previous is None or int(row.get("closed_at") or 0) >= int(
-            previous.get("closed_at") or 0
-        ):
+        if previous is None or _closed_at(row) >= _closed_at(previous):
             deduped[key] = row
 
     grouped: dict[str, list[dict[str, object]]] = {}
     for (portfolio_id, _), row in deduped.items():
         grouped.setdefault(portfolio_id, []).append(row)
     for portfolio_rows in grouped.values():
-        portfolio_rows.sort(key=lambda row: int(row.get("closed_at") or 0))
+        portfolio_rows.sort(key=_closed_at)
     return grouped
 
 
@@ -81,7 +93,7 @@ def materialize_resolution_queue(
     for portfolio_id, rows in grouped.items():
         if len(rows) < max(3, min_trades):
             continue
-        digest = hashlib.sha256(portfolio_id.encode()).hexdigest()[:16]
+        digest = hashlib.sha256(portfolio_id.encode("utf-8")).hexdigest()[:16]
         csv_path = output_dir / f"portfolio_{digest}.csv"
         temporary = csv_path.with_suffix(".csv.tmp")
         with temporary.open("w", newline="", encoding="utf-8") as handle:
@@ -91,11 +103,14 @@ def materialize_resolution_queue(
         temporary.replace(csv_path)
 
         meta = metadata.get(portfolio_id, {})
-        coins = sorted({str(row.get("ticker")) for row in rows if row.get("ticker")})
+        coins = sorted(
+            {str(row.get("ticker")) for row in rows if row.get("ticker")}
+        )
+        username = meta.get("username") or rows[-1].get("username") or "unknown"
         queue.append(
             {
                 "portfolio_id": portfolio_id,
-                "username": meta.get("username") or rows[-1].get("username") or "unknown",
+                "username": username,
                 "portfolio_name": meta.get("name"),
                 "evidence_count": len(rows),
                 "distinct_coins": coins,
@@ -106,7 +121,10 @@ def materialize_resolution_queue(
         )
 
     queue.sort(
-        key=lambda row: (int(row["distinct_coin_count"]), int(row["evidence_count"])),
+        key=lambda row: (
+            int(row["distinct_coin_count"]),
+            int(row["evidence_count"]),
+        ),
         reverse=True,
     )
     payload: dict[str, object] = {
@@ -117,6 +135,7 @@ def materialize_resolution_queue(
     }
     path = output_dir / "resolution_queue.json"
     temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    rendered = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    temporary.write_text(rendered, encoding="utf-8")
     temporary.replace(path)
     return payload
