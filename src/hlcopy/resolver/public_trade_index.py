@@ -448,6 +448,8 @@ async def verify_candidate_shortlist(
         for candidate in ranked
         if candidate.matched_anchors >= config.min_discovery_matches
     ]
+    if len(shortlist) > max(1, config.max_candidates_to_verify):
+        return ()
     results: list[HistoricalCandidateVerification] = []
     for candidate in shortlist:
         discovery_execution_ids = _candidate_discovery_final_execution_ids(candidate)
