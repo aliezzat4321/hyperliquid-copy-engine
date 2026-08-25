@@ -1,0 +1,21 @@
+[Unit]
+Description=Invo evidence to Hyperliquid wallet identifier
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/hyperliquid-copy-engine
+Environment=REAL_TRADING_ENABLED=NO
+ExecStart=/usr/bin/flock --wait 60 /run/hyperliquid-invo-wallet-identifier.lock /root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.discovery.invo_identifier_job --state-dir /var/lib/hyperliquid-copy-engine/invo --max-portfolios 4 --priority-trader carmine --priority-trader bones --unresolved-retry-minutes 60
+User=root
+Group=root
+UMask=0077
+TimeoutStartSec=45min
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/var/lib/hyperliquid-copy-engine
+RestrictSUIDSGID=true

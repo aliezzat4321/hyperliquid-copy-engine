@@ -1,0 +1,24 @@
+[Unit]
+Description=Read-only Invo trader source miner
+After=network-online.target
+Wants=network-online.target
+OnSuccess=hyperliquid-invo-wallet-identifier.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/hyperliquid-copy-engine
+EnvironmentFile=/etc/hyperliquid-copy-engine/invo.env
+ExecStart=/root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.discovery.invo_miner_job --state-dir /var/lib/hyperliquid-copy-engine/invo --portfolio-pages 5 --recent-feed-pages 3 --backfill-pages 10 --page-size 50
+User=root
+Group=root
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/var/lib/hyperliquid-copy-engine
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
