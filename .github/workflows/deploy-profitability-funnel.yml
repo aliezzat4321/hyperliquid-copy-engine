@@ -1,0 +1,50 @@
+name: deploy-profitability-funnel
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "src/hlcopy/profitability/incremental_funnel_cli.py"
+      - "scripts/deploy_profitability_funnel_self_hosted.sh"
+      - ".github/workflows/deploy-profitability-funnel.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hyperliquid-profitability-funnel-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.repository == 'aliezzat4321/hyperliquid-copy-engine'
+    runs-on: self-hosted
+    timeout-minutes: 10
+    steps:
+      - name: Checkout canonical main
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          clean: true
+
+      - name: Install current package
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /root/hyperliquid-copy-engine
+          git fetch origin main
+          git reset --hard origin/main
+          .venv/bin/python -m pip install -e . -q
+
+      - name: Start incremental profitability funnel
+        shell: bash
+        run: |
+          set -euo pipefail
+          script="$GITHUB_WORKSPACE/scripts/deploy_profitability_funnel_self_hosted.sh"
+          if [[ "$(id -u)" -eq 0 ]]; then
+            bash "$script"
+          else
+            sudo -n bash "$script"
+          fi
