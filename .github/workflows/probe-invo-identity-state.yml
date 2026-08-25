@@ -18,7 +18,7 @@ jobs:
       - hyperliquid
     timeout-minutes: 5
     steps:
-      - name: Print sanitized Invo resolver diagnostics
+      - name: Print sanitized strongest Invo resolver reports
         shell: bash
         run: |
           set -euo pipefail
@@ -27,10 +27,7 @@ jobs:
           from pathlib import Path
 
           root = Path('/var/lib/hyperliquid-copy-engine/invo')
-          targets = {
-              'carmine', 'bones', 'tyron', 'prateek', 'booobsas',
-              'rps', 'bartpeeters', 'vodkastrash',
-          }
+          focus = {'carmine', 'tyron', 'bartpeeters', 'rps'}
 
           def load(path):
               try:
@@ -39,52 +36,54 @@ jobs:
                   return {}
               return value if isinstance(value, dict) else {}
 
-          publication = load(root / 'identified_wallets.json')
-          queue_payload = load(root / 'resolution_queue/resolution_queue.json')
-          identifier_state = load(root / 'identifier_state.json')
-          identities = publication.get('identities', [])
-          state_items = identifier_state.get('items', {})
-          queue = queue_payload.get('queue', [])
-          verified = {
-              str(row.get('portfolio_id') or ''): row
-              for row in identities
-              if isinstance(row, dict)
-          }
-
+          state = load(root / 'identifier_state.json')
+          items = state.get('items', {}) if isinstance(state, dict) else {}
           rows = []
-          for q in queue:
-              if not isinstance(q, dict):
+          for pid, item in items.items() if isinstance(items, dict) else []:
+              if not isinstance(item, dict):
                   continue
-              name = str(q.get('username') or '').strip().casefold()
-              if name not in targets:
+              name = str(item.get('username') or '').strip().casefold()
+              if name not in focus:
                   continue
-              pid = str(q.get('portfolio_id') or '')
-              state = state_items.get(pid) if isinstance(state_items, dict) else None
-              state = state if isinstance(state, dict) else {}
-              result = state.get('result') if isinstance(state.get('result'), dict) else {}
-              identity = verified.get(pid)
+              result = item.get('result') if isinstance(item.get('result'), dict) else {}
+              if int(result.get('discovery_matches') or 0) < 2:
+                  continue
+              report_path = Path(str(result.get('report_path') or ''))
+              report = load(report_path) if str(report_path) else {}
+              best = report.get('best_discovery_candidate')
+              best = best if isinstance(best, dict) else {}
+              verifications = []
+              for v in report.get('historical_candidate_verifications', []):
+                  if not isinstance(v, dict):
+                      continue
+                  verification = v.get('verification')
+                  verification = verification if isinstance(verification, dict) else {}
+                  reasons = {}
+                  for ev in verification.get('evidence', []):
+                      if not isinstance(ev, dict) or ev.get('matched'):
+                          continue
+                      reason = str(ev.get('rejection_reason') or 'unknown')
+                      reasons[reason] = reasons.get(reason, 0) + 1
+                  verifications.append({
+                      'address': v.get('address'),
+                      'discovery_matches': v.get('discovery_matches'),
+                      'held_out_matched': verification.get('matched'),
+                      'held_out_attempted': verification.get('attempted'),
+                      'held_out_ratio': verification.get('ratio'),
+                      'rejection_reasons': reasons,
+                  })
               rows.append({
                   'username': name,
                   'portfolio_id': pid,
-                  'portfolio_name': q.get('portfolio_name'),
-                  'evidence_count': q.get('evidence_count'),
-                  'distinct_coin_count': q.get('distinct_coin_count'),
-                  'verified': bool(identity),
-                  'wallet': identity.get('wallet') if identity else None,
-                  'identifier_status': state.get('status') or 'NOT_ATTEMPTED',
-                  'candidate': state.get('candidate'),
-                  'confidence': state.get('confidence'),
-                  'discovery_matches': result.get('discovery_matches'),
-                  'discovery_anchors': result.get('discovery_anchors'),
-                  'historical_matches': result.get('historical_matches'),
-                  'historical_attempted': result.get('historical_attempted'),
-                  'median_clock_offset_ms': result.get('median_clock_offset_ms'),
-                  'median_price_bps': result.get('median_price_bps'),
-                  'next_retry_at': state.get('next_retry_at'),
-                  'attempted_at': state.get('attempted_at'),
+                  'evidence_count': item.get('evidence_count'),
+                  'status': item.get('status'),
+                  'candidate': item.get('candidate'),
+                  'best_discovery_matches': best.get('matched_anchors'),
+                  'best_clock_mad_ms': best.get('clock_offset_mad_ms'),
+                  'best_median_clock_offset_ms': best.get('median_clock_offset_ms'),
+                  'best_median_price_bps': best.get('median_price_bps'),
+                  'shortlist_verifications': verifications,
               })
-          rows.sort(key=lambda r: (r['username'], -int(r['evidence_count'] or 0), r['portfolio_id']))
-          print('INVO_RESOLVER_DIAGNOSTICS=' + json.dumps(rows, sort_keys=True))
-          print('TOTAL_DURABLE_IDENTITIES=' + str(publication.get('verified_count', 0)))
-          print('ATTESTATION_REPORTS_SEEN=' + str(publication.get('attestation_reports_seen', 0)))
+          rows.sort(key=lambda r: (r['username'], -int(r['evidence_count'] or 0)))
+          print('STRONGEST_RESOLVER_REPORTS=' + json.dumps(rows, sort_keys=True))
           PY
