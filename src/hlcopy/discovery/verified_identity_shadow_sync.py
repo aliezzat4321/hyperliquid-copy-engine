@@ -68,8 +68,6 @@ def _verified_rows(payload: Mapping[str, Any]) -> tuple[dict[str, str], ...]:
         resolver_rule = str(raw.get("resolver_rule_version") or "").strip()
         if not portfolio_id or not wallet or not evidence_sha or not resolver_rule:
             raise ValueError(f"verified identity row {index} lacks required provenance")
-        # Reuse WalletSpec validation for the Hyperliquid address contract without
-        # writing anything to the registry.
         WalletSpec(
             id=_stable_id(portfolio_id),
             label=username or portfolio_id,
@@ -168,9 +166,6 @@ def _activate_managed(
     existing_address = _by_address(registry).get(row["wallet"])
 
     if existing_id is not None and existing_id.source_ref.lower() != row["wallet"]:
-        # A changed wallet mapping is security-sensitive. Revoke the old managed
-        # subscription before failing so a stale identity cannot remain active
-        # while operators investigate the conflicting proof.
         registry.update(
             existing_id.id,
             stage="research",
@@ -185,9 +180,6 @@ def _activate_managed(
             f"{existing_id.source_ref} to {row['wallet']}"
         )
 
-    # Never seize ownership of an independently registered wallet. If it is
-    # already validation/approved it is already being observed; otherwise leave
-    # the manual lifecycle untouched and report the conflict.
     if existing_address is not None and existing_address.id != managed_id:
         if existing_address.enabled and existing_address.stage in {"validation", "approved"}:
             return "already_active_external"
@@ -195,9 +187,6 @@ def _activate_managed(
 
     if existing_id is not None:
         if existing_id.stage == "approved":
-            # A managed identity should not be live-approved automatically, but if
-            # an operator explicitly approved it, current identity proof may keep
-            # it active. Stale proof is still revoked by _revoke_stale_managed.
             return "already_approved"
         if existing_id.stage == "validation" and existing_id.enabled:
             registry.update(existing_id.id, notes=_note(row))
@@ -212,8 +201,6 @@ def _activate_managed(
                 notes=_note(row),
             )
         except ValueError as exc:
-            # Another registry mutation may consume the final slot between the
-            # count and the atomic update. Fail toward research.
             if "per-IP limit" not in str(exc):
                 raise
             return _capacity_waiting(registry, existing_id.id, notes=_note(row))
@@ -224,9 +211,14 @@ def _activate_managed(
         if _active_count(registry) < MAX_ACTIVE_HYPERLIQUID_USERS_PER_IP
         else "research"
     )
+    label = (
+        f"Invo @{row['username']}"
+        if row.get("username")
+        else f"Invo {row['portfolio_id']}"
+    )
     stored = WalletSpec(
         id=managed_id,
-        label=(f"Invo @{row['username']}" if row.get("username") else f"Invo {row['portfolio_id']}"),
+        label=label,
         source_type="hyperliquid_wallet",
         source_ref=row["wallet"],
         stage=stage,
@@ -237,9 +229,6 @@ def _activate_managed(
     try:
         registry.add(stored)
     except ValueError as exc:
-        # A concurrent registry mutation may consume the last active slot between
-        # the capacity read and the atomic add. Fail toward research rather than
-        # failing the identity pipeline or exceeding the Hyperliquid per-IP cap.
         if stage != "validation" or "per-IP limit" not in str(exc):
             raise
         registry.add(
@@ -262,10 +251,14 @@ def sync_verified_identities(*, identities_path: Path, registry_path: Path) -> d
     if os.getenv("REAL_TRADING_ENABLED", "NO").strip().upper() == "YES":
         raise RuntimeError("verified identity shadow sync refuses REAL_TRADING_ENABLED=YES")
 
-    payload = _load_payload(identities_path)
-    rows = _verified_rows(payload)
     registry = WalletRegistry(registry_path)
     registry.init()
+    try:
+        payload = _load_payload(identities_path)
+        rows = _verified_rows(payload)
+    except ValueError:
+        _revoke_stale_managed(registry, active_managed_ids=set())
+        raise
 
     active_managed_ids = {_stable_id(row["portfolio_id"]) for row in rows}
     revoked = _revoke_stale_managed(registry, active_managed_ids=active_managed_ids)
@@ -289,6 +282,7 @@ def sync_verified_identities(*, identities_path: Path, registry_path: Path) -> d
             "new_wallet_stage": "validation_or_research_when_capacity_full",
             "stale_managed_identity_revoked": True,
             "changed_wallet_revokes_old_before_error": True,
+            "invalid_publication_revokes_managed_before_error": True,
         },
     }
 
