@@ -1,0 +1,27 @@
+[Unit]
+Description=Sync verified Invo identities into Hyperliquid shadow validation
+After=hyperliquid-invo-wallet-identifier.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/hyperliquid-copy-engine
+Environment=REAL_TRADING_ENABLED=NO
+ExecStart=/usr/bin/env \
+  /root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.discovery.verified_identity_shadow_sync \
+  --identities /var/lib/hyperliquid-copy-engine/invo/identified_wallets.json \
+  --registry /mnt/HC_Volume_106576526/hyperliquid/shadow/wallets.json
+User=root
+Group=root
+UMask=0077
+TimeoutStartSec=2min
+RuntimeDirectory=hyperliquid-copy-engine
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/mnt/HC_Volume_106576526/hyperliquid/shadow
+RestrictSUIDSGID=true
