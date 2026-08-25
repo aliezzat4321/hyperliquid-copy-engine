@@ -11,7 +11,9 @@ from pathlib import Path
 from typing import Any
 
 from hlcopy.resolver.provenance import EvidenceSnapshot
-from hlcopy.resolver.size_agnostic_identifier import identify_wallet_from_csv_size_aware
+from hlcopy.resolver.size_agnostic_identifier import (
+    identify_wallet_from_csv_size_aware as identify_wallet_from_csv,
+)
 from hlcopy.resolver.sqd_position_aware import SqdHyperliquidFillsClient
 
 DEFAULT_STATE_DIR = Path("/var/lib/hyperliquid-copy-engine/invo")
@@ -238,7 +240,7 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
                 attempted_at = datetime.now(tz=UTC).isoformat()
                 try:
                     report_key = hashlib.sha256(portfolio_id.encode("utf-8")).hexdigest()[:16]
-                    result = await identify_wallet_from_csv_size_aware(
+                    result = await identify_wallet_from_csv(
                         evidence_path,
                         output_dir=reports_dir / report_key,
                         client=client,
