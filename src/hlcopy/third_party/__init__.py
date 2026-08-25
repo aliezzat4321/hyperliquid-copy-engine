@@ -1,1 +1,1 @@
-"""Third-party wallet identity, copyability, and profitability research."""
+"""Third-party wallet identity, copyability, and profitability research only."""
