@@ -10,6 +10,7 @@ from hlcopy.discovery.invo_miner_job import (
     _collect_new_feed_events,
     _load_state,
     _merge_recent_history,
+    _migrate_recent_state,
     _page_items,
 )
 from hlcopy.discovery.invo_source import InvoApiError
@@ -189,6 +190,30 @@ def test_resumed_catchup_appends_older_pages_behind_existing_head() -> None:
 
     assert resumed == ["current-head", "older-page", "original-frontier"]
     assert fresh == ["new-head", "current-head", "original-frontier"]
+
+
+def test_legacy_migration_resets_orphan_cursor_instead_of_trusting_global_ids() -> None:
+    history, frontier, cursor = _migrate_recent_state(
+        recent_history=[],
+        explicit_frontier=[],
+        cursor="legacy-cursor",
+    )
+
+    assert history == []
+    assert frontier == []
+    assert cursor is None
+
+
+def test_legacy_migration_preserves_explicit_active_frontier() -> None:
+    history, frontier, cursor = _migrate_recent_state(
+        recent_history=[],
+        explicit_frontier=["known-head"],
+        cursor="resume-cursor",
+    )
+
+    assert history == ["known-head"]
+    assert frontier == ["known-head"]
+    assert cursor == "resume-cursor"
 
 
 def test_malformed_page_fails_closed() -> None:

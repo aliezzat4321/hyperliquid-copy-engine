@@ -98,6 +98,23 @@ def _merge_recent_history(
     )
 
 
+def _migrate_recent_state(
+    *,
+    recent_history: Sequence[str],
+    explicit_frontier: Sequence[str],
+    cursor: str | None,
+) -> tuple[list[str], list[str], str | None]:
+    if recent_history:
+        return list(recent_history), list(explicit_frontier), cursor
+    if explicit_frontier:
+        # An active catch-up frontier was captured directly from a head scan and
+        # is safe to preserve. The mixed global seen history is not.
+        return list(explicit_frontier), list(explicit_frontier), cursor
+    # Legacy global history may be backfill-first. Reset any orphan cursor and
+    # rebuild recent history from a fresh bounded head scan.
+    return [], [], None
+
+
 def _save_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -302,7 +319,6 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
     known_ids = set(seen_values)
     recent_cursor_raw = state.get("recent_cursor")
     recent_cursor = str(recent_cursor_raw) if recent_cursor_raw else None
-    resumed_recent_catchup = recent_cursor is not None
     frontier_values = [
         str(value).strip()
         for value in state.get("recent_frontier_ids", [])
@@ -313,10 +329,12 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
         for value in state.get("recent_seen_post_ids", [])
         if str(value).strip()
     ]
-    if not recent_history_values:
-        # One-time compatibility fallback for state written before recent and
-        # backfill histories were separated.
-        recent_history_values = seen_values[: max(100, args.page_size * 2)]
+    recent_history_values, frontier_values, recent_cursor = _migrate_recent_state(
+        recent_history=recent_history_values,
+        explicit_frontier=frontier_values,
+        cursor=recent_cursor,
+    )
+    resumed_recent_catchup = recent_cursor is not None
     if recent_cursor and not frontier_values:
         frontier_values = recent_history_values[: max(100, args.page_size * 2)]
     if not recent_cursor:
