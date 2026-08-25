@@ -355,3 +355,69 @@ def test_changed_verified_digest_is_unpublished_while_waiting_behind_batch_limit
     assert [row["portfolio_id"] for row in identities["identities"]] == [
         "carmine-id"
     ]
+
+
+def test_verified_identity_from_old_resolver_rules_is_rechecked_and_unpublished(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_dir = tmp_path / "invo"
+    queue_dir = state_dir / "resolution_queue"
+    queue_dir.mkdir(parents=True)
+    evidence = queue_dir / "carmine.csv"
+    evidence.write_text("unchanged-evidence", encoding="utf-8")
+    evidence_sha = invo_identifier_job.EvidenceSnapshot.from_path(evidence).sha256
+    (queue_dir / "resolution_queue.json").write_text(
+        json.dumps(
+            {
+                "queue": [
+                    {
+                        "portfolio_id": "carmine-id",
+                        "username": "carmine",
+                        "resolver_csv": str(evidence),
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (state_dir / "identifier_state.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "items": {
+                    "carmine-id": {
+                        "status": "VERIFIED",
+                        "wallet": "0x" + "6" * 40,
+                        "username": "carmine",
+                        "evidence_sha256": evidence_sha,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    async def fake_identify(path: Path, **_: object) -> WalletIdentificationResult:
+        assert path == evidence
+        return _unresolved()
+
+    monkeypatch.setattr(invo_identifier_job, "SqdHyperliquidFillsClient", _FakeClient)
+    monkeypatch.setattr(invo_identifier_job, "identify_wallet_from_csv", fake_identify)
+    args = Namespace(state_dir=state_dir, max_portfolios=1, priority_trader=[])
+
+    result = asyncio.run(invo_identifier_job.run_once(args))
+
+    assert result["attempted"] == 1
+    state = json.loads(
+        (state_dir / "identifier_state.json").read_text(encoding="utf-8")
+    )
+    assert state["items"]["carmine-id"]["status"] == "UNRESOLVED"
+    assert (
+        state["items"]["carmine-id"]["resolver_rule_version"]
+        == invo_identifier_job.RESOLVER_RULE_VERSION
+    )
+    identities = json.loads(
+        (state_dir / "identified_wallets.json").read_text(encoding="utf-8")
+    )
+    assert identities["verified_count"] == 0

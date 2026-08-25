@@ -17,6 +17,7 @@ from hlcopy.resolver.sqd_position_aware import SqdHyperliquidFillsClient
 DEFAULT_STATE_DIR = Path("/var/lib/hyperliquid-copy-engine/invo")
 DEFAULT_PRIORITY_TRADERS = ("carmine", "bones")
 DEFAULT_UNRESOLVED_RETRY_MINUTES = 60
+RESOLVER_RULE_VERSION = "sqd-public-trade-v2-absolute-size"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -135,6 +136,7 @@ def _summary_payload(
             "wallet": row.get("wallet"),
             "confidence": row.get("confidence"),
             "evidence_sha256": row.get("evidence_sha256"),
+            "resolver_rule_version": row.get("resolver_rule_version"),
             "identified_at": row.get("attempted_at"),
         }
         for portfolio_id, row in sorted(items.items())
@@ -142,6 +144,7 @@ def _summary_payload(
         and isinstance(row, Mapping)
         and row.get("status") == "VERIFIED"
         and row.get("evidence_sha256") == current_evidence_sha256.get(portfolio_id)
+        and row.get("resolver_rule_version") == RESOLVER_RULE_VERSION
     ]
     return {
         "version": 1,
@@ -187,7 +190,11 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
         evidence_sha = snapshot.sha256
         current_evidence_sha256[portfolio_id] = evidence_sha
         previous = items.get(portfolio_id)
-        if isinstance(previous, Mapping) and previous.get("evidence_sha256") == evidence_sha:
+        if (
+            isinstance(previous, Mapping)
+            and previous.get("evidence_sha256") == evidence_sha
+            and previous.get("resolver_rule_version") == RESOLVER_RULE_VERSION
+        ):
             if previous.get("status") == "VERIFIED":
                 continue
             if previous.get("status") == "UNRESOLVED" and not _retry_is_due(
@@ -229,6 +236,8 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
                         and isinstance(previous, Mapping)
                         and previous.get("status") == "UNRESOLVED"
                         and previous.get("evidence_sha256") == evidence_sha
+                        and previous.get("resolver_rule_version")
+                        == RESOLVER_RULE_VERSION
                     )
                     unresolved_attempts = (
                         int(previous.get("unchanged_unresolved_attempts") or 0) + 1
@@ -264,6 +273,7 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
                         "confidence": str(result.confidence),
                         "evidence_count": row.get("evidence_count"),
                         "evidence_sha256": evidence_sha,
+                        "resolver_rule_version": RESOLVER_RULE_VERSION,
                         "attempted_at": attempted_at,
                         "unchanged_unresolved_attempts": unresolved_attempts,
                         "next_retry_at": next_retry_at,
@@ -281,6 +291,7 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
                         "confidence": "0",
                         "evidence_count": row.get("evidence_count"),
                         "evidence_sha256": evidence_sha,
+                        "resolver_rule_version": RESOLVER_RULE_VERSION,
                         "attempted_at": attempted_at,
                         "error": f"{type(exc).__name__}: {exc}",
                     }
