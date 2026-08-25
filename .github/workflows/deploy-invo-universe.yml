@@ -1,0 +1,44 @@
+name: deploy-invo-universe
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "src/hlcopy/discovery/invo_universe_job.py"
+      - "deploy/systemd/hyperliquid-invo-universe-miner.service"
+      - "deploy/systemd/hyperliquid-invo-universe-miner.timer"
+      - "scripts/deploy_invo_universe_self_hosted.sh"
+      - ".github/workflows/deploy-invo-universe.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hyperliquid-invo-universe-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.repository == 'aliezzat4321/hyperliquid-copy-engine'
+    runs-on:
+      - self-hosted
+      - hyperliquid
+    timeout-minutes: 35
+    steps:
+      - name: Checkout canonical main
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          clean: true
+      - name: Deploy Invo universe miner
+        shell: bash
+        run: |
+          set -euo pipefail
+          script="$GITHUB_WORKSPACE/scripts/deploy_invo_universe_self_hosted.sh"
+          if [[ "$(id -u)" -eq 0 ]]; then
+            bash "$script"
+          else
+            sudo -n bash "$script"
+          fi
