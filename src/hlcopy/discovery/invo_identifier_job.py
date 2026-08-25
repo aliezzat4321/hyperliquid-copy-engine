@@ -126,6 +126,7 @@ def _summary_payload(
     items: Mapping[str, Any],
     *,
     active_portfolio_ids: set[str],
+    current_evidence_sha256: Mapping[str, str],
 ) -> dict[str, Any]:
     verified = [
         {
@@ -140,6 +141,7 @@ def _summary_payload(
         if portfolio_id in active_portfolio_ids
         and isinstance(row, Mapping)
         and row.get("status") == "VERIFIED"
+        and row.get("evidence_sha256") == current_evidence_sha256.get(portfolio_id)
     ]
     return {
         "version": 1,
@@ -176,12 +178,14 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
         raise ValueError("wallet identifier state lacks an items object")
 
     pending: list[tuple[dict[str, Any], Path, EvidenceSnapshot]] = []
+    current_evidence_sha256: dict[str, str] = {}
     now = datetime.now(tz=UTC)
     for row in queue:
         portfolio_id = str(row["portfolio_id"])
         evidence_path = _safe_evidence_path(state_dir, row["resolver_csv"])
         snapshot = EvidenceSnapshot.from_path(evidence_path)
         evidence_sha = snapshot.sha256
+        current_evidence_sha256[portfolio_id] = evidence_sha
         previous = items.get(portfolio_id)
         if isinstance(previous, Mapping) and previous.get("evidence_sha256") == evidence_sha:
             if previous.get("status") == "VERIFIED":
@@ -286,6 +290,7 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
                     _summary_payload(
                         items,
                         active_portfolio_ids=active_portfolio_ids,
+                        current_evidence_sha256=current_evidence_sha256,
                     ),
                 )
 
@@ -293,7 +298,11 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
         _save_object(identifier_state_path, {"version": 1, "items": items})
     _save_object(
         identities_path,
-        _summary_payload(items, active_portfolio_ids=active_portfolio_ids),
+        _summary_payload(
+            items,
+            active_portfolio_ids=active_portfolio_ids,
+            current_evidence_sha256=current_evidence_sha256,
+        ),
     )
     if errors > 0:
         raise RuntimeError(
