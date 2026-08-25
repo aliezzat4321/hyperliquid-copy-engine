@@ -12,6 +12,7 @@ from hlcopy.discovery.invo_miner_job import (
     _merge_recent_history,
     _migrate_recent_state,
     _page_items,
+    _recent_scan_known_ids,
 )
 from hlcopy.discovery.invo_source import InvoApiError
 from hlcopy.discovery.invo_store import InvoRecordStore
@@ -214,6 +215,19 @@ def test_legacy_migration_rebuilds_even_with_unversioned_explicit_frontier() -> 
     assert history == []
     assert frontier == []
     assert cursor is None
+
+
+def test_legacy_recent_rebuild_ignores_global_dedup_only_for_first_head_scan() -> None:
+    global_known = {"current-head", "historical"}
+
+    assert _recent_scan_known_ids(
+        global_known,
+        has_separated_recent_history=False,
+    ) == set()
+    assert _recent_scan_known_ids(
+        global_known,
+        has_separated_recent_history=True,
+    ) == global_known
 
 
 def test_malformed_page_fails_closed() -> None:

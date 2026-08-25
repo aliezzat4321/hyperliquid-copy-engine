@@ -388,11 +388,10 @@ async def verify_candidate_historically(
     coverage_end_ms = await client.coverage_end_ms()
     entry_tolerance_ms = max(1, config.historical_entry_time_tolerance_ms)
     close_tolerance_ms = max(0, config.historical_time_tolerance_ms)
-    eligible = [
+    covered = [
         signal
         for signal in signals
-        if signal.signal_id not in excluded_signal_ids
-        and _episode_is_covered(
+        if _episode_is_covered(
             signal,
             coverage_start_ms=coverage_start_ms,
             coverage_end_ms=coverage_end_ms,
@@ -400,14 +399,18 @@ async def verify_candidate_historically(
             close_margin_ms=close_tolerance_ms,
         )
     ]
-    if eligible:
-        newest_close_ms = max(signal.closed_at_ms for signal in eligible)
+    lookback_cutoff_ms: int | None = None
+    if covered:
+        newest_close_ms = max(signal.closed_at_ms for signal in covered)
         lookback_cutoff_ms = newest_close_ms - (
             max(1, config.historical_lookback_hours) * 60 * 60 * 1000
         )
-        eligible = [
-            signal for signal in eligible if signal.closed_at_ms >= lookback_cutoff_ms
-        ]
+    eligible = [
+        signal
+        for signal in covered
+        if signal.signal_id not in excluded_signal_ids
+        and (lookback_cutoff_ms is None or signal.closed_at_ms >= lookback_cutoff_ms)
+    ]
     eligible.sort(key=lambda item: (item.closed_at_ms, item.signal_id), reverse=True)
     selected = eligible[: config.historical_verify_trades]
     semaphore = asyncio.Semaphore(max(1, config.max_parallel_verification_queries))

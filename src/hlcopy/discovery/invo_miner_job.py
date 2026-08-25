@@ -112,6 +112,16 @@ def _migrate_recent_state(
     return [], [], None
 
 
+def _recent_scan_known_ids(
+    global_known_ids: set[str],
+    *,
+    has_separated_recent_history: bool,
+) -> set[str]:
+    # During migration, scan the current head without legacy suppression so the
+    # new recent-only history is actually populated. Archive upserts remain idempotent.
+    return set(global_known_ids) if has_separated_recent_history else set()
+
+
 def _save_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -326,6 +336,7 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
         for value in state.get("recent_seen_post_ids", [])
         if str(value).strip()
     ]
+    has_separated_recent_history = bool(recent_history_values)
     recent_history_values, frontier_values, recent_cursor = _migrate_recent_state(
         recent_history=recent_history_values,
         explicit_frontier=frontier_values,
@@ -357,7 +368,10 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
             recent_complete,
         ) = await _collect_new_feed_events(
             client,
-            known_post_ids=known_ids,
+            known_post_ids=_recent_scan_known_ids(
+                known_ids,
+                has_separated_recent_history=has_separated_recent_history,
+            ),
             frontier_post_ids=recent_frontier_ids,
             start_cursor=recent_cursor,
             pages=max(1, args.recent_feed_pages),
