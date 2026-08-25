@@ -54,7 +54,9 @@ for row in payload.get("candidates", [])[:25]:
         continue
     rows.append({
         "username": row.get("username"),
+        "portfolio_name": row.get("name"),
         "portfolio_id": row.get("portfolio_id"),
+        "leaderboard_timeframes": row.get("leaderboard_timeframes"),
         "closed_positions": row.get("closed_positions"),
         "win_rate": row.get("win_rate"),
         "percent_change": row.get("percent_change"),
@@ -64,7 +66,9 @@ for row in payload.get("candidates", [])[:25]:
         "screen_score": row.get("screen_score"),
     })
 print("INVO_UNIVERSE_STATUS=" + json.dumps({
-    "candidate_count": payload.get("candidate_count"),
+    "candidate_portfolio_count": payload.get("candidate_portfolio_count"),
+    "candidate_owner_count": payload.get("candidate_owner_count"),
+    "discovered_owner_count": payload.get("discovered_owner_count"),
     "ready_for_wallet_resolution": payload.get("ready_for_wallet_resolution"),
     "resolution_queue_count": payload.get("resolution_queue_count"),
     "surface_errors": payload.get("surface_errors"),
