@@ -25,7 +25,7 @@ successful collection triggers `hyperliquid-invo-wallet-identifier.service`. The
 - processes at most four changed portfolios per run;
 - never promotes a wallet to validation, shadow, or live trading.
 
-The miner and identifier hold the same pipeline lock. A later timer cycle cannot replace
+The miner and identifier hold the same systemd-managed runtime pipeline lock. A later timer cycle cannot replace
 the queue or resolver CSVs while SQD resolution and identity publication are in progress.
 
 Durable outputs are under `/var/lib/hyperliquid-copy-engine/invo`:
