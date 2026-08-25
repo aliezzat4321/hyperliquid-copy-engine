@@ -7,7 +7,7 @@ on:
     paths:
       - "src/hlcopy/discovery/**"
       - "deploy/systemd/hyperliquid-invo-*.service"
-      - "deploy/systemd/hyperliquid-invo-source-miner.timer"
+      - "deploy/systemd/hyperliquid-invo-*.timer"
       - "scripts/deploy_wallet_identifier_self_hosted.sh"
       - ".github/workflows/deploy-wallet-identifier.yml"
   workflow_dispatch:
