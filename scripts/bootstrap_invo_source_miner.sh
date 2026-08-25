@@ -8,6 +8,7 @@ STATE_DIR="/var/lib/hyperliquid-copy-engine/invo"
 SERVICE_NAME="hyperliquid-invo-source-miner.service"
 TIMER_NAME="hyperliquid-invo-source-miner.timer"
 IDENTIFIER_SERVICE_NAME="hyperliquid-invo-wallet-identifier.service"
+SYNC_SERVICE_NAME="hyperliquid-invo-verified-shadow-sync.service"
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Run this bootstrap as root." >&2
@@ -94,6 +95,7 @@ install -m 0644 \
   "${REPO_DIR}/deploy/systemd/${TIMER_NAME}" \
   "/etc/systemd/system/${TIMER_NAME}"
 install_rendered_unit "${IDENTIFIER_SERVICE_NAME}"
+install_rendered_unit "${SYNC_SERVICE_NAME}"
 
 systemctl daemon-reload
 
@@ -112,6 +114,7 @@ if [[ "${service_result}" != "success" ]]; then
   exit 1
 fi
 journalctl -u "${IDENTIFIER_SERVICE_NAME}" -n 10 --no-pager || true
+journalctl -u "${SYNC_SERVICE_NAME}" -n 10 --no-pager || true
 journalctl -u "${SERVICE_NAME}" -n 10 --no-pager
 
 if ! systemctl start "${IDENTIFIER_SERVICE_NAME}"; then
@@ -123,6 +126,20 @@ identifier_result="$(systemctl show --property=Result --value "${IDENTIFIER_SERV
 if [[ "${identifier_result}" != "success" ]]; then
   echo "Initial Invo wallet-identifier run failed: ${identifier_result}" >&2
   journalctl -u "${IDENTIFIER_SERVICE_NAME}" -n 40 --no-pager >&2
+  exit 1
+fi
+
+# Start explicitly as well as via OnSuccess so bootstrap does not return until the
+# verified-identity publication has been reconciled with the shadow registry.
+if ! systemctl start "${SYNC_SERVICE_NAME}"; then
+  echo "Wallet identification succeeded, but verified shadow handoff failed." >&2
+  journalctl -u "${SYNC_SERVICE_NAME}" -n 40 --no-pager >&2
+  exit 1
+fi
+sync_result="$(systemctl show --property=Result --value "${SYNC_SERVICE_NAME}")"
+if [[ "${sync_result}" != "success" ]]; then
+  echo "Initial verified shadow handoff failed: ${sync_result}" >&2
+  journalctl -u "${SYNC_SERVICE_NAME}" -n 40 --no-pager >&2
   exit 1
 fi
 
@@ -143,3 +160,4 @@ echo "Secret: ${ENV_FILE} (mode 0600)"
 echo "State:  ${STATE_DIR}"
 echo "Timer:  ${TIMER_NAME}"
 echo "Wallet identities: ${STATE_DIR}/identified_wallets.json"
+echo "Shadow registry: /mnt/HC_Volume_106576526/hyperliquid/shadow/wallets.json"
