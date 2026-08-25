@@ -1,0 +1,74 @@
+name: inspect-third-party-profitability
+
+on:
+  push:
+    branches:
+      - agent/inspect-third-party-profitability-v1
+    paths:
+      - .github/workflows/inspect-third-party-profitability.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on:
+      - self-hosted
+      - hyperliquid
+    timeout-minutes: 5
+    steps:
+      - name: Print sanitized third-party profitability
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path('/root/hyperliquid-audit/third-party/third_party_scorecard.json')
+          payload = json.loads(path.read_text(encoding='utf-8'))
+          output = []
+          for row in payload.get('scorecards', []):
+              if not isinstance(row, dict):
+                  continue
+              history = row.get('historical_pre_screen') or {}
+              matrix = []
+              for item in history.get('matrix', []):
+                  if not isinstance(item, dict):
+                      continue
+                  matrix.append({
+                      'follower_leverage': item.get('follower_leverage'),
+                      'starting_capital': item.get('starting_capital'),
+                      'ending_capital': item.get('ending_capital'),
+                      'net_pnl': item.get('net_pnl'),
+                      'roi': item.get('roi'),
+                      'attempted': item.get('attempted'),
+                      'copied': item.get('copied'),
+                      'missed': item.get('missed'),
+                      'unresolved': item.get('unresolved'),
+                      'win_rate': item.get('win_rate'),
+                      'max_drawdown': item.get('max_drawdown'),
+                      'max_margin_reserved': item.get('max_margin_reserved'),
+                  })
+              output.append({
+                  'source': row.get('source'),
+                  'label': row.get('label'),
+                  'wallet': row.get('wallet'),
+                  'status': row.get('status'),
+                  'copyability_score': row.get('copyability_score'),
+                  'prospective_events': row.get('prospective_events'),
+                  'base_scenario': row.get('base_scenario'),
+                  'validation_candidate': row.get('validation_candidate'),
+                  'historical_pre_screen': {
+                      'available': history.get('available'),
+                      'mode': history.get('mode'),
+                      'selection_bias': history.get('selection_bias'),
+                      'execution_truth': history.get('execution_truth'),
+                      'input_trades': history.get('input_trades'),
+                      'rejected_rows': history.get('rejected_rows'),
+                      'matrix': matrix,
+                  },
+              })
+          print('THIRD_PARTY_PROFITABILITY=' + json.dumps(output, sort_keys=True))
+          PY
+PY
