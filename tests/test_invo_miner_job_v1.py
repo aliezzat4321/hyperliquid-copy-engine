@@ -9,6 +9,7 @@ from hlcopy.discovery.invo_miner_job import (
     _bounded_seen_history,
     _collect_new_feed_events,
     _load_state,
+    _merge_recent_history,
     _page_items,
 )
 from hlcopy.discovery.invo_source import InvoApiError
@@ -170,6 +171,24 @@ def test_recent_ids_stay_ahead_of_large_backfill_history() -> None:
     assert merged[:2] == recent
     assert len(merged) == 20_000
     assert "recent-frontier" in merged
+
+
+def test_resumed_catchup_appends_older_pages_behind_existing_head() -> None:
+    resumed = _merge_recent_history(
+        fetched_ids=["older-page"],
+        previous_ids=["current-head"],
+        active_frontier_ids=["original-frontier"],
+        resumed_catchup=True,
+    )
+    fresh = _merge_recent_history(
+        fetched_ids=["new-head"],
+        previous_ids=["current-head"],
+        active_frontier_ids=["original-frontier"],
+        resumed_catchup=False,
+    )
+
+    assert resumed == ["current-head", "older-page", "original-frontier"]
+    assert fresh == ["new-head", "current-head", "original-frontier"]
 
 
 def test_malformed_page_fails_closed() -> None:

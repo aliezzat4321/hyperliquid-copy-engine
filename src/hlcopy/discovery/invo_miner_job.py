@@ -76,6 +76,28 @@ def _bounded_seen_history(*groups: Sequence[str]) -> list[str]:
     ]
 
 
+def _merge_recent_history(
+    *,
+    fetched_ids: Sequence[str],
+    previous_ids: Sequence[str],
+    active_frontier_ids: Sequence[str],
+    resumed_catchup: bool,
+) -> list[str]:
+    if resumed_catchup:
+        # A resumed cursor walks toward older pages, so it must not displace the
+        # already-captured head of the feed.
+        return _bounded_seen_history(
+            previous_ids,
+            fetched_ids,
+            active_frontier_ids,
+        )
+    return _bounded_seen_history(
+        fetched_ids,
+        previous_ids,
+        active_frontier_ids,
+    )
+
+
 def _save_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -280,6 +302,7 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
     known_ids = set(seen_values)
     recent_cursor_raw = state.get("recent_cursor")
     recent_cursor = str(recent_cursor_raw) if recent_cursor_raw else None
+    resumed_recent_catchup = recent_cursor is not None
     frontier_values = [
         str(value).strip()
         for value in state.get("recent_frontier_ids", [])
@@ -383,13 +406,13 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
         )
 
     active_frontier = [] if recent_complete else frontier_values
-    ordered_recent_seen = _bounded_seen_history(
-        recent_seen,
-        active_frontier,
-        recent_history_values,
+    ordered_recent_seen = _merge_recent_history(
+        fetched_ids=recent_seen,
+        previous_ids=recent_history_values,
+        active_frontier_ids=active_frontier,
+        resumed_catchup=resumed_recent_catchup,
     )
     ordered_seen = _bounded_seen_history(
-        recent_seen,
         ordered_recent_seen,
         backfill_seen,
         seen_values,

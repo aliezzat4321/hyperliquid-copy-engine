@@ -485,3 +485,37 @@ def test_historical_verification_excludes_entry_before_coverage() -> None:
     )
     assert result.attempted == 1
     assert result.evidence[0].signal_id == "covered"
+
+
+def test_historical_verification_enforces_configured_lookback() -> None:
+    hour_ms = 60 * 60 * 1000
+    client = _FakeSqdClient(start_ms=0, end_ms=10 * hour_ms)
+    signals = (
+        _signal(
+            signal_id="outside-lookback",
+            opened_at_ms=1 * hour_ms,
+            closed_at_ms=2 * hour_ms,
+        ),
+        _signal(
+            signal_id="inside-lookback",
+            opened_at_ms=8 * hour_ms,
+            closed_at_ms=9 * hour_ms,
+        ),
+    )
+
+    result = asyncio.run(
+        verify_candidate_historically(
+            address=USER,
+            signals=signals,
+            excluded_signal_ids=set(),
+            coverage_start_ms=client.start_ms,
+            client=client,
+            config=PublicTradeDiscoveryConfig(
+                historical_verify_trades=10,
+                historical_lookback_hours=6,
+            ),
+        )
+    )
+
+    assert result.attempted == 1
+    assert result.evidence[0].signal_id == "inside-lookback"
