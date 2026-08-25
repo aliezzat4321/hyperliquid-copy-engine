@@ -7,6 +7,8 @@ from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from hlcopy.discovery import invo_identifier_job
 from hlcopy.resolver.identifier import WalletIdentificationResult
 
@@ -232,3 +234,58 @@ def test_identifier_uses_the_same_immutable_snapshot_it_hashed(
     result = asyncio.run(invo_identifier_job.run_once(args))
 
     assert result["verified"] == 1
+
+
+def test_mixed_success_and_error_fails_service_after_persisting_both(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_dir = tmp_path / "invo"
+    queue_dir = state_dir / "resolution_queue"
+    queue_dir.mkdir(parents=True)
+    carmine = queue_dir / "carmine.csv"
+    bones = queue_dir / "bones.csv"
+    carmine.write_text("carmine", encoding="utf-8")
+    bones.write_text("bones", encoding="utf-8")
+    (queue_dir / "resolution_queue.json").write_text(
+        json.dumps(
+            {
+                "queue": [
+                    {
+                        "portfolio_id": "carmine-id",
+                        "username": "carmine",
+                        "resolver_csv": str(carmine),
+                    },
+                    {
+                        "portfolio_id": "bones-id",
+                        "username": "bones",
+                        "resolver_csv": str(bones),
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    async def fake_identify(path: Path, **_: object) -> WalletIdentificationResult:
+        if path == carmine:
+            raise RuntimeError("SQD unavailable for Carmine")
+        return _result("0x" + "3" * 40)
+
+    monkeypatch.setattr(invo_identifier_job, "SqdHyperliquidFillsClient", _FakeClient)
+    monkeypatch.setattr(invo_identifier_job, "identify_wallet_from_csv", fake_identify)
+    args = Namespace(state_dir=state_dir, max_portfolios=2, priority_trader=[])
+
+    with pytest.raises(RuntimeError, match="1 of 2 .* attempts failed"):
+        asyncio.run(invo_identifier_job.run_once(args))
+
+    state = json.loads(
+        (state_dir / "identifier_state.json").read_text(encoding="utf-8")
+    )
+    assert state["items"]["carmine-id"]["status"] == "ERROR"
+    assert state["items"]["bones-id"]["status"] == "VERIFIED"
+    identities = json.loads(
+        (state_dir / "identified_wallets.json").read_text(encoding="utf-8")
+    )
+    assert identities["verified_count"] == 1
+    assert identities["identities"][0]["portfolio_id"] == "bones-id"

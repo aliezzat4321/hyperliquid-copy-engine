@@ -295,8 +295,10 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
         identities_path,
         _summary_payload(items, active_portfolio_ids=active_portfolio_ids),
     )
-    if attempted > 0 and errors == attempted:
-        raise RuntimeError(f"all {attempted} Invo wallet identification attempts failed")
+    if errors > 0:
+        raise RuntimeError(
+            f"{errors} of {attempted} Invo wallet identification attempts failed"
+        )
     return {
         "queue_ready": len(queue),
         "pending": len(pending),
