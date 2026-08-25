@@ -22,6 +22,7 @@ from hlcopy.discovery.invo_source import (
 from hlcopy.discovery.invo_store import InvoRecordStore, read_legacy_ndjson
 
 DEFAULT_STATE_DIR = Path("/var/lib/hyperliquid-copy-engine/invo")
+DEFAULT_FEED_FILTER = "following"
 MAX_SEEN_POST_IDS = 20_000
 
 
@@ -35,11 +36,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--backfill-pages", type=int, default=10)
     parser.add_argument("--page-size", type=int, default=50)
     parser.add_argument("--resolution-min-trades", type=int, default=12)
+    parser.add_argument("--feed-filter", default=DEFAULT_FEED_FILTER)
     return parser.parse_args()
 
 
 def _empty_state() -> dict[str, Any]:
     return {
+        "feed_filter": None,
         "seen_post_ids": [],
         "recent_seen_post_ids": [],
         "recent_cursor": None,
@@ -58,6 +61,7 @@ def _load_state(path: Path) -> dict[str, Any]:
         raise ValueError(f"corrupt Invo miner state: {path}") from exc
     if not isinstance(payload, dict):
         raise ValueError(f"non-object Invo miner state: {path}")
+    payload.setdefault("feed_filter", None)
     if not isinstance(payload.get("seen_post_ids"), list):
         payload["seen_post_ids"] = []
     if not isinstance(payload.get("recent_seen_post_ids"), list):
@@ -67,6 +71,37 @@ def _load_state(path: Path) -> dict[str, Any]:
         payload["recent_frontier_ids"] = []
     payload.setdefault("backfill_cursor", None)
     payload.setdefault("backfill_complete", False)
+    return payload
+
+
+def _prepare_feed_state(
+    state: Mapping[str, Any],
+    *,
+    feed_filter: str,
+) -> dict[str, Any]:
+    """Prevent cursors/frontiers from one Invo feed from contaminating another."""
+    selected = str(feed_filter or "").strip().casefold()
+    if not selected:
+        raise ValueError("Invo feed filter must not be blank")
+
+    payload = dict(state)
+    previous = str(payload.get("feed_filter") or "").strip().casefold()
+    has_walk_state = any(
+        (
+            payload.get("seen_post_ids"),
+            payload.get("recent_seen_post_ids"),
+            payload.get("recent_cursor"),
+            payload.get("recent_frontier_ids"),
+            payload.get("backfill_cursor"),
+            payload.get("backfill_complete"),
+        )
+    )
+    if previous != selected and (previous or has_walk_state):
+        legacy_imported = bool(payload.get("legacy_archive_imported", False))
+        payload = _empty_state()
+        if legacy_imported:
+            payload["legacy_archive_imported"] = True
+    payload["feed_filter"] = selected
     return payload
 
 
@@ -207,6 +242,7 @@ async def _collect_new_feed_events(
     start_cursor: str | None = None,
     pages: int,
     page_size: int,
+    feed_filter: str = DEFAULT_FEED_FILTER,
 ) -> tuple[list[dict[str, object]], list[str], str | None, bool]:
     """Walk recent feed until the known frontier, persisting a cursor if capped."""
     new_events: list[dict[str, object]] = []
@@ -219,7 +255,7 @@ async def _collect_new_feed_events(
 
     for _ in range(max(1, pages)):
         payload = await client.feed(
-            filter_name="all",
+            filter_name=feed_filter,
             last_post_id=cursor,
             item_limit=max(1, page_size),
         )
@@ -259,6 +295,7 @@ async def _collect_backfill_feed_events(
     start_cursor: str | None,
     pages: int,
     page_size: int,
+    feed_filter: str = DEFAULT_FEED_FILTER,
 ) -> tuple[list[dict[str, object]], list[str], str | None, bool]:
     new_events: list[dict[str, object]] = []
     newly_seen: list[str] = []
@@ -268,7 +305,7 @@ async def _collect_backfill_feed_events(
 
     for _ in range(max(1, pages)):
         payload = await client.feed(
-            filter_name="all",
+            filter_name=feed_filter,
             last_post_id=cursor,
             item_limit=max(1, page_size),
         )
@@ -309,6 +346,10 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
             "Invo auth missing: set INVO_REFRESH_TOKEN (preferred) or INVO_ACCESS_TOKEN"
         )
 
+    feed_filter = str(getattr(args, "feed_filter", DEFAULT_FEED_FILTER) or "").strip().casefold()
+    if not feed_filter:
+        raise ValueError("Invo feed filter must not be blank")
+
     state_dir: Path = args.state_dir
     state_path = state_dir / "state.json"
     portfolios_path = state_dir / "latest_portfolios.json"
@@ -317,7 +358,7 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
     store_path = state_dir / "archive.sqlite3"
     queue_dir = state_dir / "resolution_queue"
 
-    state = _load_state(state_path)
+    state = _prepare_feed_state(_load_state(state_path), feed_filter=feed_filter)
     seen_values = [
         str(value).strip()
         for value in state.get("seen_post_ids", [])
@@ -376,6 +417,7 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
             start_cursor=recent_cursor,
             pages=max(1, args.recent_feed_pages),
             page_size=max(1, args.page_size),
+            feed_filter=feed_filter,
         )
 
         all_known_ids = known_ids | set(recent_seen)
@@ -393,6 +435,7 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
                 start_cursor=backfill_cursor,
                 pages=max(1, args.backfill_pages),
                 page_size=max(1, args.page_size),
+                feed_filter=feed_filter,
             )
 
     events_by_post = {
@@ -405,6 +448,7 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
         portfolios_path,
         {
             "source": "invo",
+            "feed_filter": feed_filter,
             "portfolio_count": len(portfolios),
             "portfolios": portfolios,
         },
@@ -449,6 +493,7 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
     _save_json(
         state_path,
         {
+            "feed_filter": feed_filter,
             "seen_post_ids": ordered_seen,
             "recent_seen_post_ids": ordered_recent_seen,
             "portfolio_count": len(portfolios),
@@ -465,6 +510,7 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
         },
     )
     return {
+        "feed_filter": feed_filter,
         "portfolio_count": len(portfolios),
         "new_verified_trade_events": stored_events,
         "new_closed_trade_evidence": stored_evidence,
