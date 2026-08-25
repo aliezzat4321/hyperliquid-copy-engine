@@ -13,5 +13,7 @@ def test_source_miner_triggers_identifier_and_bootstrap_installs_it() -> None:
     assert "OnSuccess=hyperliquid-invo-wallet-identifier.service" in source
     assert "REAL_TRADING_ENABLED=NO" in identifier
     assert "--priority-trader carmine --priority-trader bones" in identifier
+    assert "/run/hyperliquid-invo-pipeline.lock" in source
+    assert "/run/hyperliquid-invo-pipeline.lock" in identifier
     assert "IDENTIFIER_SERVICE_NAME" in bootstrap
     assert "rollback_environment" in bootstrap
