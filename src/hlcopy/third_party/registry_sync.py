@@ -29,7 +29,9 @@ def _stable_id(source: str, identity: str) -> str:
 def _parse_publication(value: str) -> tuple[str, Path]:
     source, separator, raw_path = value.partition("=")
     if not separator or not source.strip() or not raw_path.strip():
-        raise argparse.ArgumentTypeError("publication must use SOURCE=/path/to/identified_wallets.json")
+        raise argparse.ArgumentTypeError(
+            "publication must use SOURCE=/path/to/identified_wallets.json"
+        )
     return source.strip().casefold(), Path(raw_path.strip())
 
 
@@ -135,11 +137,13 @@ def _sync_source(
     rows: tuple[dict[str, str], ...],
 ) -> dict[str, int]:
     active_ids = {_stable_id(source, row["identity"]) for row in rows}
-    outcomes: dict[str, int] = {"revoked_stale": _revoke_stale(
-        registry,
-        source=source,
-        active_ids=active_ids,
-    )}
+    outcomes: dict[str, int] = {
+        "revoked_stale": _revoke_stale(
+            registry,
+            source=source,
+            active_ids=active_ids,
+        )
+    }
 
     for row in rows:
         wallet_id = _stable_id(source, row["identity"])
