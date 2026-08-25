@@ -15,59 +15,65 @@ jobs:
     runs-on:
       - self-hosted
       - hyperliquid
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      - name: Print sanitized third-party profitability
+      - name: Inspect Bones historical backfill overlap
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
+          cd /root/hyperliquid-copy-engine
+          .venv/bin/python - <<'PY'
           import json
+          from collections import Counter, defaultdict
+          from datetime import UTC, datetime
           from pathlib import Path
 
-          path = Path('/root/hyperliquid-audit/third-party/third_party_scorecard.json')
-          payload = json.loads(path.read_text(encoding='utf-8'))
-          output = []
-          for row in payload.get('scorecards', []):
-              if not isinstance(row, dict):
-                  continue
-              history = row.get('historical_pre_screen') or {}
-              matrix = []
-              for item in history.get('matrix', []):
-                  if not isinstance(item, dict):
+          from hlcopy.signals.invo import load_invo_closed_trades
+
+          queue_path = Path('/var/lib/hyperliquid-copy-engine/invo/resolution_queue/resolution_queue.json')
+          market_dir = Path('/mnt/HC_Volume_106576526/hyperliquid/market-shadow')
+          queue = json.loads(queue_path.read_text(encoding='utf-8'))
+          bones = next(
+              row for row in queue.get('queue', [])
+              if str(row.get('username') or '').strip().casefold() == 'bones'
+          )
+          evidence = Path(str(bones['resolver_csv']))
+          imported = load_invo_closed_trades(evidence)
+          signals = imported.signals
+
+          signal_by_coin = Counter(signal.coin for signal in signals)
+          signal_by_date = Counter(
+              datetime.fromtimestamp(signal.closed_at_ms / 1000, UTC).date().isoformat()
+              for signal in signals
+          )
+          signal_coin_dates = defaultdict(set)
+          for signal in signals:
+              date = datetime.fromtimestamp(signal.closed_at_ms / 1000, UTC).date().isoformat()
+              signal_coin_dates[signal.coin].add(date)
+
+          market_partitions = defaultdict(set)
+          for date_dir in market_dir.glob('date=*'):
+              date = date_dir.name.removeprefix('date=')
+              for coin_dir in date_dir.glob('coin=*'):
+                  if next((coin_dir / 'channel=l2Book').glob('*.parquet'), None) is None:
                       continue
-                  matrix.append({
-                      'follower_leverage': item.get('follower_leverage'),
-                      'starting_capital': item.get('starting_capital'),
-                      'ending_capital': item.get('ending_capital'),
-                      'net_pnl': item.get('net_pnl'),
-                      'roi': item.get('roi'),
-                      'attempted': item.get('attempted'),
-                      'copied': item.get('copied'),
-                      'missed': item.get('missed'),
-                      'unresolved': item.get('unresolved'),
-                      'win_rate': item.get('win_rate'),
-                      'max_drawdown': item.get('max_drawdown'),
-                      'max_margin_reserved': item.get('max_margin_reserved'),
-                  })
-              output.append({
-                  'source': row.get('source'),
-                  'label': row.get('label'),
-                  'wallet': row.get('wallet'),
-                  'status': row.get('status'),
-                  'copyability_score': row.get('copyability_score'),
-                  'prospective_events': row.get('prospective_events'),
-                  'base_scenario': row.get('base_scenario'),
-                  'validation_candidate': row.get('validation_candidate'),
-                  'historical_pre_screen': {
-                      'available': history.get('available'),
-                      'mode': history.get('mode'),
-                      'selection_bias': history.get('selection_bias'),
-                      'execution_truth': history.get('execution_truth'),
-                      'input_trades': history.get('input_trades'),
-                      'rejected_rows': history.get('rejected_rows'),
-                      'matrix': matrix,
-                  },
-              })
-          print('THIRD_PARTY_PROFITABILITY=' + json.dumps(output, sort_keys=True))
+                  market_partitions[coin_dir.name.removeprefix('coin=')].add(date)
+
+          overlap = {}
+          for coin, count in sorted(signal_by_coin.items()):
+              signal_dates = signal_coin_dates[coin]
+              tape_dates = market_partitions.get(coin, set())
+              overlap[coin] = {
+                  'signal_count': count,
+                  'signal_dates': sorted(signal_dates),
+                  'market_dates': sorted(tape_dates),
+                  'overlap_dates': sorted(signal_dates & tape_dates),
+              }
+
+          print('BONES_BACKFILL_OVERLAP=' + json.dumps({
+              'evidence_rows': len(signals),
+              'coins': dict(sorted(signal_by_coin.items())),
+              'signal_dates': dict(sorted(signal_by_date.items())),
+              'overlap': overlap,
+          }, sort_keys=True))
           PY
