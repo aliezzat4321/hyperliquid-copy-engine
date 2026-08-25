@@ -1,0 +1,153 @@
+name: inspect-invo-universe
+
+on:
+  push:
+    branches:
+      - agent/invo-exhaustive-discovery-v1
+    paths:
+      - .github/workflows/inspect-invo-universe.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on:
+      - self-hosted
+      - hyperliquid
+    timeout-minutes: 10
+    steps:
+      - name: Inspect all known Invo discovery surfaces
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /root/hyperliquid-copy-engine
+          set -a
+          source /etc/hyperliquid-copy-engine/invo.env
+          set +a
+          .venv/bin/python - <<'PY'
+          import asyncio
+          import json
+          import os
+          from collections import defaultdict
+
+          from hlcopy.discovery.invo_source import InvoReadOnlyClient, portfolio_candidates, verified_trade_events
+
+          def items(payload):
+              value = payload.get('items', [])
+              return [x for x in value if isinstance(x, dict)] if isinstance(value, list) else []
+
+          def owner_of(post):
+              update = post.get('update') if isinstance(post.get('update'), dict) else {}
+              owner = update.get('owner') if isinstance(update.get('owner'), dict) else {}
+              post_owner = post.get('owner') if isinstance(post.get('owner'), dict) else {}
+              obj = owner or post_owner
+              return str(obj.get('id') or ''), str(obj.get('username') or '')
+
+          async def main():
+              async with InvoReadOnlyClient(
+                  access_token=os.getenv('INVO_ACCESS_TOKEN'),
+                  refresh_token=os.getenv('INVO_REFRESH_TOKEN'),
+                  app_version=os.getenv('INVO_APP_VERSION', '0.0.75'),
+              ) as client:
+                  portfolios = {}
+                  source_hits = defaultdict(set)
+                  for filter_name in ('trending', 'all'):
+                      for page in range(1, 11):
+                          payload = await client.discover_portfolios(filter_name=filter_name, page=page, size=50)
+                          rows = portfolio_candidates({'items': items(payload)})
+                          if not rows:
+                              break
+                          for row in rows:
+                              portfolios[row.portfolio_id] = row
+                              source_hits[row.owner_id].add(f'portfolio:{filter_name}')
+
+                  trending_users_payload = await client.trending_users(page=1, size=100)
+                  trending_users = items(trending_users_payload)
+                  for row in trending_users:
+                      uid = str(row.get('id') or row.get('userId') or '')
+                      if uid:
+                          source_hits[uid].add('users:trending')
+
+                  social = defaultdict(lambda: {'posts': 0, 'verified_trades': 0, 'username': ''})
+                  feed_shapes = {}
+                  for filter_name in ('trending', 'all', 'following'):
+                      cursor = None
+                      seen = set()
+                      count = 0
+                      for _ in range(10):
+                          payload = await client.feed(filter_name=filter_name, last_post_id=cursor, item_limit=50)
+                          page = items(payload)
+                          if not page:
+                              break
+                          feed_shapes[filter_name] = sorted(page[0].keys())
+                          trade_ids = {e.post_id for e in verified_trade_events({'items': page})}
+                          new = 0
+                          for post in page:
+                              pid = str(post.get('id') or '')
+                              if not pid or pid in seen:
+                                  continue
+                              seen.add(pid)
+                              new += 1
+                              uid, username = owner_of(post)
+                              if not uid:
+                                  continue
+                              source_hits[uid].add(f'feed:{filter_name}')
+                              rec = social[uid]
+                              rec['posts'] += 1
+                              rec['verified_trades'] += int(pid in trade_ids)
+                              if username:
+                                  rec['username'] = username
+                          count += new
+                          if new == 0:
+                              break
+                          nxt = payload.get('lastPostId') or payload.get('nextCursor') or str(page[-1].get('id') or '')
+                          if not nxt or nxt == cursor:
+                              break
+                          cursor = str(nxt)
+                      feed_shapes[f'{filter_name}:unique_posts'] = count
+
+                  by_owner = {}
+                  for row in portfolios.values():
+                      current = by_owner.get(row.owner_id)
+                      if current is None or (row.closed_positions, row.percent_change, row.win_rate) > (current.closed_positions, current.percent_change, current.win_rate):
+                          by_owner[row.owner_id] = row
+
+                  ranked = []
+                  for uid in set(source_hits) | set(social):
+                      p = by_owner.get(uid)
+                      s = social.get(uid, {})
+                      closed = p.closed_positions if p else 0
+                      wr = p.win_rate if p else 0.0
+                      ret = p.percent_change if p else 0.0
+                      followers = p.follower_count if p else 0
+                      liquidated = p.liquidated if p else False
+                      posts = int(s.get('posts', 0))
+                      trades = int(s.get('verified_trades', 0))
+                      cross_surface = len(source_hits.get(uid, set()))
+                      score = min(closed, 500) * 0.2 + min(max(wr, 0.0), 100.0) + min(max(ret, 0.0), 5000.0) * 0.02 + min(followers, 10000) * 0.002 + min(posts, 100) * 0.5 + min(trades, 100) * 1.5 + cross_surface * 10 - (100 if liquidated else 0)
+                      ranked.append({
+                          'owner_id': uid,
+                          'username': p.username if p else str(s.get('username') or ''),
+                          'portfolio_id': p.portfolio_id if p else None,
+                          'closed_positions': closed,
+                          'win_rate': wr,
+                          'percent_change': ret,
+                          'followers': followers,
+                          'liquidated': liquidated,
+                          'social_posts_sampled': posts,
+                          'verified_trade_posts_sampled': trades,
+                          'surfaces': sorted(source_hits.get(uid, set())),
+                          'screen_score': round(score, 3),
+                      })
+                  ranked.sort(key=lambda x: x['screen_score'], reverse=True)
+                  print('INVO_UNIVERSE_SUMMARY=' + json.dumps({
+                      'portfolio_count': len(portfolios),
+                      'trending_user_count': len(trending_users),
+                      'unique_candidate_owners': len(ranked),
+                      'feed_shapes': feed_shapes,
+                      'top_50': ranked[:50],
+                  }, sort_keys=True))
+
+          asyncio.run(main())
+          PY
