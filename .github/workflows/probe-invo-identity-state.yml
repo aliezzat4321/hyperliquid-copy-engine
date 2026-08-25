@@ -1,0 +1,68 @@
+name: probe-invo-identity-state
+
+on:
+  push:
+    branches:
+      - agent/invo-identity-state-probe
+    paths:
+      - ".github/workflows/probe-invo-identity-state.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    if: github.repository == 'aliezzat4321/hyperliquid-copy-engine'
+    runs-on:
+      - self-hosted
+      - hyperliquid
+    timeout-minutes: 5
+    steps:
+      - name: Print sanitized Invo identity state
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          state = Path('/var/lib/hyperliquid-copy-engine/invo')
+          targets = {
+              'carmine', 'bones', 'tyron', 'prateek', 'booobsas',
+              'rps', 'bartpeeters', 'vodkastrash',
+          }
+
+          def load(path):
+              try:
+                  value = json.loads(path.read_text())
+              except Exception:
+                  return {}
+              return value if isinstance(value, dict) else {}
+
+          identities = load(state / 'identified_wallets.json').get('identities', [])
+          queue = load(state / 'resolution_queue/resolution_queue.json').get('queue', [])
+          by_name = {}
+          for row in identities:
+              if not isinstance(row, dict):
+                  continue
+              name = str(row.get('username') or '').strip().casefold()
+              if name in targets:
+                  by_name.setdefault(name, {})['wallet'] = row.get('wallet')
+                  by_name[name]['verified'] = True
+                  by_name[name]['resolver_rule'] = row.get('resolver_rule') or row.get('rule')
+          for row in queue:
+              if not isinstance(row, dict):
+                  continue
+              name = str(row.get('username') or '').strip().casefold()
+              if name in targets:
+                  rec = by_name.setdefault(name, {})
+                  rec.setdefault('verified', False)
+                  rec['evidence_count'] = row.get('evidence_count')
+                  rec['queue_status'] = row.get('status')
+                  rec['portfolio_id'] = row.get('portfolio_id')
+          print('INVO_READY_IDENTITY_STATE=' + json.dumps(
+              {name: by_name.get(name, {'verified': False}) for name in sorted(targets)},
+              sort_keys=True,
+          ))
+          print('TOTAL_IDENTITIES=' + str(len([r for r in identities if isinstance(r, dict)])))
+          PY
