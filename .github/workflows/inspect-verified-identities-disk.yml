@@ -13,30 +13,93 @@ permissions:
 jobs:
   inspect:
     runs-on: self-hosted
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      - name: Verify whether old PostgreSQL tree is unused
+      - name: Inspect Carmine resolver and PostgreSQL cluster safety
         shell: bash
         run: |
           set -euo pipefail
-          OLD=/mnt/HC_Volume_106576526/hyperliquid/postgresql
-          echo '=== CURRENT_POSTGRES_MOUNT ==='
-          df -h /var/lib/postgresql/14/main "$OLD" || true
-          findmnt /var/lib/postgresql/14/main || true
-          findmnt "$OLD" || true
-          echo '=== POSTGRES_DATA_DIRECTORY ==='
-          sudo -u postgres psql -Atqc 'show data_directory;' || true
-          sudo -u postgres psql -Atqc 'select version();' || true
-          echo '=== OLD_TREE_METADATA ==='
-          ls -ld "$OLD" "$OLD/14" "$OLD/14/main" 2>/dev/null || true
-          du -sh "$OLD" 2>/dev/null || true
-          echo '=== OLD_TREE_RECENT_FILES ==='
-          find "$OLD" -xdev -type f -printf '%TY-%Tm-%Td %TH:%TM:%TS %s %p\n' 2>/dev/null | sort | tail -n 20 || true
-          echo '=== OPEN_REFERENCES ==='
-          fuser -vm "$OLD" 2>&1 || true
-          echo '=== CONFIG_REFERENCES ==='
-          grep -R -n -F '/mnt/HC_Volume_106576526/hyperliquid/postgresql' \
-            /etc/systemd/system /etc/postgresql /root/hyperliquid-copy-engine \
-            2>/dev/null | head -n 100 || true
-          echo '=== LIVE_CLUSTER_RECENT_FILES ==='
-          find /var/lib/postgresql/14/main -xdev -type f -printf '%TY-%Tm-%Td %TH:%TM:%TS %s %p\n' 2>/dev/null | sort | tail -n 10 || true
+
+          echo '=== POSTGRES_CLUSTERS ==='
+          pg_lsclusters || true
+          echo '=== HLCOPY_UNIT ==='
+          systemctl status postgresql@14-hlcopy.service --no-pager -l || true
+          systemctl is-enabled postgresql@14-hlcopy.service || true
+          echo '=== HLCOPY_CONFIG ==='
+          grep -nE '^[[:space:]]*(data_directory|port|cluster_name)' /etc/postgresql/14/hlcopy/postgresql.conf 2>/dev/null || true
+          echo '=== HLCOPY_DATA_CONTROL ==='
+          pg_controldata /mnt/HC_Volume_106576526/hyperliquid/postgresql/14/hlcopy 2>/dev/null | grep -E 'Database cluster state|Latest checkpoint|Time of latest checkpoint|Database system identifier|pg_control version number|Catalog version number' || true
+          echo '=== TARGET_DISK_CAPACITY ==='
+          df -h /mnt/HC_Volume_106168136 /mnt/HC_Volume_106576526
+
+          echo '=== CARMINE_RESOLVER_REPORT ==='
+          cd /root/hyperliquid-copy-engine
+          .venv/bin/python - <<'PY'
+          import json
+          from pathlib import Path
+
+          state_path = Path('/var/lib/hyperliquid-copy-engine/invo/identifier_state.json')
+          state = json.loads(state_path.read_text(encoding='utf-8'))
+          carmine = None
+          for row in state.get('items', {}).values():
+              if isinstance(row, dict) and str(row.get('username') or '').strip().casefold() == 'carmine':
+                  carmine = row
+                  break
+          if not carmine:
+              raise SystemExit('Carmine identifier state not found')
+
+          result = carmine.get('result') if isinstance(carmine.get('result'), dict) else {}
+          report_path = Path(str(result.get('report_path') or ''))
+          report = json.loads(report_path.read_text(encoding='utf-8'))
+
+          ranked = []
+          for item in report.get('ranked_candidates', [])[:12]:
+              if not isinstance(item, dict):
+                  continue
+              matches = item.get('matches') if isinstance(item.get('matches'), list) else []
+              ranked.append({
+                  'address': item.get('address'),
+                  'matched_anchors': item.get('matched_anchors'),
+                  'score': item.get('score'),
+                  'median_clock_offset_ms': item.get('median_clock_offset_ms'),
+                  'clock_offset_mad_ms': item.get('clock_offset_mad_ms'),
+                  'median_price_bps': item.get('median_price_bps'),
+                  'matched_signal_ids': [m.get('signal_id') for m in matches if isinstance(m, dict)],
+              })
+
+          historical = []
+          for item in report.get('historical_candidate_verifications', []):
+              if not isinstance(item, dict):
+                  continue
+              verification = item.get('verification') if isinstance(item.get('verification'), dict) else {}
+              historical.append({
+                  'address': item.get('address'),
+                  'discovery_matches': item.get('discovery_matches'),
+                  'attempted': verification.get('attempted'),
+                  'matched': verification.get('matched'),
+                  'ratio': verification.get('ratio'),
+              })
+
+          cfg = report.get('effective_config') if isinstance(report.get('effective_config'), dict) else {}
+          output = {
+              'accepted_trades': report.get('accepted_trades'),
+              'coverage_start_ms': report.get('coverage_start_ms'),
+              'coverage_end_ms': report.get('coverage_end_ms'),
+              'discovery_anchor_ids': report.get('discovery_anchor_ids'),
+              'status': report.get('status'),
+              'candidate': report.get('candidate'),
+              'candidate_unique': report.get('candidate_unique'),
+              'unresolved_reason': report.get('unresolved_reason'),
+              'config': {
+                  'window_seconds': cfg.get('window_seconds'),
+                  'max_price_bps': cfg.get('max_price_bps'),
+                  'historical_time_tolerance_ms': cfg.get('historical_time_tolerance_ms'),
+                  'historical_entry_time_tolerance_ms': cfg.get('historical_entry_time_tolerance_ms'),
+                  'historical_price_tolerance_bps': cfg.get('historical_price_tolerance_bps'),
+                  'historical_entry_price_tolerance_bps': cfg.get('historical_entry_price_tolerance_bps'),
+              },
+              'ranked_candidates': ranked,
+              'historical_candidate_verifications': historical,
+          }
+          print(json.dumps(output, indent=2, sort_keys=True))
+          PY
