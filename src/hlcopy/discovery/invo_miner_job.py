@@ -9,7 +9,9 @@ from pathlib import Path
 from typing import Any
 
 from hlcopy.discovery.invo_evidence import closed_trade_evidence
-from hlcopy.discovery.invo_resolution_queue import materialize_resolution_queue
+from hlcopy.discovery.invo_resolution_queue import (
+    materialize_resolution_queue_from_store,
+)
 from hlcopy.discovery.invo_source import (
     InvoApiError,
     InvoPortfolioCandidate,
@@ -17,6 +19,7 @@ from hlcopy.discovery.invo_source import (
     portfolio_candidates,
     verified_trade_events,
 )
+from hlcopy.discovery.invo_store import InvoRecordStore, read_legacy_ndjson
 
 DEFAULT_STATE_DIR = Path("/var/lib/hyperliquid-copy-engine/invo")
 MAX_SEEN_POST_IDS = 20_000
@@ -72,48 +75,6 @@ def _save_json(path: Path, payload: Mapping[str, Any]) -> None:
         encoding="utf-8",
     )
     temporary.replace(path)
-
-
-def _merge_ndjson(
-    path: Path,
-    rows: Sequence[Mapping[str, Any]],
-    *,
-    key_field: str,
-) -> int:
-    merged: dict[str, dict[str, Any]] = {}
-    if path.exists():
-        with path.open("r", encoding="utf-8") as handle:
-            for line_number, line in enumerate(handle, start=1):
-                if not line.strip():
-                    continue
-                try:
-                    value = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    raise ValueError(f"corrupt Invo NDJSON at {path}:{line_number}") from exc
-                if not isinstance(value, dict):
-                    raise ValueError(f"non-object Invo NDJSON at {path}:{line_number}")
-                key = str(value.get(key_field) or "").strip()
-                if not key:
-                    raise ValueError(
-                        f"Invo NDJSON is missing {key_field} at {path}:{line_number}"
-                    )
-                merged[key] = value
-
-    previous_count = len(merged)
-    for source in rows:
-        row = dict(source)
-        key = str(row.get(key_field) or "").strip()
-        if not key:
-            raise ValueError(f"new Invo NDJSON row is missing {key_field}")
-        merged[key] = row
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    with temporary.open("w", encoding="utf-8") as handle:
-        for key in sorted(merged):
-            handle.write(json.dumps(merged[key], sort_keys=True) + "\n")
-    temporary.replace(path)
-    return len(merged) - previous_count
 
 
 async def _discover_portfolios(
@@ -298,6 +259,7 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
     portfolios_path = state_dir / "latest_portfolios.json"
     events_path = state_dir / "verified_trade_events.ndjson"
     evidence_path = state_dir / "closed_trade_evidence.ndjson"
+    store_path = state_dir / "archive.sqlite3"
     queue_dir = state_dir / "resolution_queue"
 
     state = _load_state(state_path)
@@ -377,18 +339,30 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
             "portfolios": portfolios,
         },
     )
-    stored_events = _merge_ndjson(events_path, events, key_field="post_id")
-    stored_evidence = _merge_ndjson(
-        evidence_path,
-        evidence_rows,
-        key_field="source_post_id",
-    )
-    resolution = materialize_resolution_queue(
-        evidence_path=evidence_path,
-        output_dir=queue_dir,
-        portfolios=portfolios,
-        min_trades=max(3, args.resolution_min_trades),
-    )
+    with InvoRecordStore(store_path) as store:
+        if not bool(state.get("legacy_archive_imported", False)):
+            store.upsert(
+                "events",
+                read_legacy_ndjson(events_path),
+                key_field="post_id",
+            )
+            store.upsert(
+                "evidence",
+                read_legacy_ndjson(evidence_path),
+                key_field="source_post_id",
+            )
+        stored_events = store.upsert("events", events, key_field="post_id")
+        stored_evidence = store.upsert(
+            "evidence",
+            evidence_rows,
+            key_field="source_post_id",
+        )
+        resolution = materialize_resolution_queue_from_store(
+            store=store,
+            output_dir=queue_dir,
+            portfolios=portfolios,
+            min_trades=max(3, args.resolution_min_trades),
+        )
 
     active_frontier = [] if recent_complete else frontier_values
     ordered_seen = list(
@@ -407,6 +381,8 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
             "recent_catchup_active": not recent_complete,
             "backfill_cursor": backfill_cursor,
             "backfill_complete": backfill_complete,
+            "legacy_archive_imported": True,
+            "archive_store": str(store_path),
         },
     )
     return {

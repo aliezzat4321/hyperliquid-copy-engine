@@ -22,6 +22,7 @@ DEFAULT_NEAR_DUPLICATE_EXIT_PRICE_BPS = D("35")
 
 FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "trade_id": ("trade_id", "id", "position_id"),
+    "portfolio_id": ("portfolio_id", "source_portfolio_id", "account_id"),
     "trader": ("username", "trader_name", "trader_id", "trader", "user"),
     "coin": ("ticker", "coin", "symbol", "asset"),
     "direction": ("direction", "position_side", "position_direction"),
@@ -58,6 +59,9 @@ class GenericTradeImportResult:
     column_map: dict[str, str]
     duplicate_rows: tuple[dict[str, Any], ...] = ()
     overlapping_rows: tuple[dict[str, Any], ...] = ()
+    source_identity_field: str | None = None
+    source_identities: tuple[str, ...] = ()
+    missing_source_identity_rows: tuple[int, ...] = ()
 
 
 def _lookup_header(headers: list[str], aliases: tuple[str, ...]) -> str | None:
@@ -325,13 +329,26 @@ def _load_generic_closed_trades_text(
     if not headers:
         raise GenericTradeCsvError("CSV has no header row")
     mapping = detect_column_map(headers)
+    source_identity_field = (
+        "portfolio_id" if "portfolio_id" in mapping else "trader"
+        if "trader" in mapping
+        else None
+    )
     parsed: list[tuple[int, CopySignal]] = []
     rejected: list[dict[str, Any]] = []
     duplicates: list[dict[str, Any]] = []
     first_row_by_episode: dict[tuple[object, ...], int] = {}
+    source_identities: set[str] = set()
+    missing_source_identity_rows: list[int] = []
     for row_number, row in enumerate(reader, start=2):
         try:
             signal = normalize_generic_row(row, mapping=mapping, row_number=row_number)
+            if source_identity_field is not None:
+                source_identity = _value(row, mapping, source_identity_field)
+                if source_identity:
+                    source_identities.add(source_identity)
+                else:
+                    missing_source_identity_rows.append(row_number)
             fingerprint = _episode_fingerprint(signal)
             first_row = first_row_by_episode.get(fingerprint)
             if first_row is not None:
@@ -362,6 +379,9 @@ def _load_generic_closed_trades_text(
         column_map=mapping,
         duplicate_rows=tuple(duplicates),
         overlapping_rows=tuple(overlapping),
+        source_identity_field=source_identity_field,
+        source_identities=tuple(sorted(source_identities)),
+        missing_source_identity_rows=tuple(missing_source_identity_rows),
     )
 
 

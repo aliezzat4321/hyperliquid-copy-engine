@@ -157,3 +157,78 @@ def test_unchanged_unresolved_evidence_uses_retry_backoff(
     assert first["attempted"] == 1
     assert second["attempted"] == 0
     assert calls == 1
+
+
+def test_published_identities_only_include_current_ready_queue(tmp_path: Path) -> None:
+    state_dir = tmp_path / "invo"
+    queue_dir = state_dir / "resolution_queue"
+    queue_dir.mkdir(parents=True)
+    (queue_dir / "resolution_queue.json").write_text(
+        json.dumps({"queue": []}),
+        encoding="utf-8",
+    )
+    (state_dir / "identifier_state.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "items": {
+                    "no-longer-ready": {
+                        "status": "VERIFIED",
+                        "wallet": "0x" + "1" * 40,
+                        "username": "old",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = Namespace(state_dir=state_dir, max_portfolios=1, priority_trader=[])
+
+    result = asyncio.run(invo_identifier_job.run_once(args))
+
+    assert result["attempted"] == 0
+    identities = json.loads(
+        (state_dir / "identified_wallets.json").read_text(encoding="utf-8")
+    )
+    assert identities["verified_count"] == 0
+    assert identities["identities"] == []
+
+
+def test_identifier_uses_the_same_immutable_snapshot_it_hashed(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_dir = tmp_path / "invo"
+    queue_dir = state_dir / "resolution_queue"
+    queue_dir.mkdir(parents=True)
+    evidence = queue_dir / "carmine.csv"
+    evidence.write_bytes(b"original-evidence")
+    (queue_dir / "resolution_queue.json").write_text(
+        json.dumps(
+            {
+                "queue": [
+                    {
+                        "portfolio_id": "carmine-id",
+                        "username": "carmine",
+                        "resolver_csv": str(evidence),
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    async def fake_identify(path: Path, **options: object) -> WalletIdentificationResult:
+        path.write_bytes(b"replacement-evidence")
+        snapshot = options["snapshot"]
+        assert snapshot.data == b"original-evidence"
+        assert options["expected_source_identity"] == "carmine-id"
+        return _result("0x" + "2" * 40)
+
+    monkeypatch.setattr(invo_identifier_job, "SqdHyperliquidFillsClient", _FakeClient)
+    monkeypatch.setattr(invo_identifier_job, "identify_wallet_from_csv", fake_identify)
+    args = Namespace(state_dir=state_dir, max_portfolios=1, priority_trader=[])
+
+    result = asyncio.run(invo_identifier_job.run_once(args))
+
+    assert result["verified"] == 1

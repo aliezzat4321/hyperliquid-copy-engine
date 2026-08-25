@@ -13,6 +13,10 @@ from hlcopy.resolver.public_trade_index import PublicTradeDiscoveryConfig
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m hlcopy.resolver.identify_cli")
     parser.add_argument("evidence", type=Path)
+    parser.add_argument(
+        "--source-identity",
+        help="Bind evidence lacking an explicit portfolio_id or username column.",
+    )
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/resolver"))
     parser.add_argument("--anchor-trades", type=int, default=8)
     parser.add_argument("--window-seconds", type=int, default=30)
@@ -70,11 +74,13 @@ async def _run(args: argparse.Namespace) -> None:
         min_historical_ratio=args.min_historical_ratio,
         min_historical_winner_match_gap=max(1, args.min_historical_winner_match_gap),
     )
-    result = await identify_wallet_from_csv(
-        args.evidence,
-        output_dir=args.output_dir,
-        config=config,
-    )
+    identify_options = {
+        "output_dir": args.output_dir,
+        "config": config,
+    }
+    if args.source_identity:
+        identify_options["expected_source_identity"] = args.source_identity
+    result = await identify_wallet_from_csv(args.evidence, **identify_options)
     print(json.dumps(result.to_dict(), sort_keys=True))
 
 

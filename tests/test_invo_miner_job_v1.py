@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 
 import pytest
@@ -9,10 +8,10 @@ import pytest
 from hlcopy.discovery.invo_miner_job import (
     _collect_new_feed_events,
     _load_state,
-    _merge_ndjson,
     _page_items,
 )
 from hlcopy.discovery.invo_source import InvoApiError
+from hlcopy.discovery.invo_store import InvoRecordStore
 
 
 def _post(post_id: str) -> dict[str, object]:
@@ -166,17 +165,34 @@ def test_malformed_page_fails_closed() -> None:
         _page_items({"unexpected": []})
 
 
-def test_ndjson_merge_is_durable_and_deduplicated(tmp_path: Path) -> None:
-    path = tmp_path / "events.ndjson"
-    assert _merge_ndjson(path, [{"post_id": "p1", "value": 1}], key_field="post_id") == 1
-    assert _merge_ndjson(
-        path,
-        [{"post_id": "p1", "value": 2}, {"post_id": "p2", "value": 3}],
-        key_field="post_id",
-    ) == 1
+def test_indexed_store_is_durable_and_deduplicated(tmp_path: Path) -> None:
+    path = tmp_path / "archive.sqlite3"
+    with InvoRecordStore(path) as store:
+        assert store.upsert(
+            "evidence",
+            [{"source_post_id": "p1", "portfolio_id": "one", "value": 1}],
+            key_field="source_post_id",
+        ) == 1
+        assert store.upsert(
+            "evidence",
+            [
+                {"source_post_id": "p1", "portfolio_id": "one", "value": 2},
+                {"source_post_id": "p2", "portfolio_id": "one", "value": 3},
+            ],
+            key_field="source_post_id",
+        ) == 1
 
-    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-    assert rows == [{"post_id": "p1", "value": 2}, {"post_id": "p2", "value": 3}]
+    with InvoRecordStore(path) as store:
+        groups = list(store.evidence_groups())
+    assert groups == [
+        (
+            "one",
+            [
+                {"source_post_id": "p1", "portfolio_id": "one", "value": 2},
+                {"source_post_id": "p2", "portfolio_id": "one", "value": 3},
+            ],
+        )
+    ]
 
 
 def test_corrupt_durable_state_fails_closed(tmp_path: Path) -> None:

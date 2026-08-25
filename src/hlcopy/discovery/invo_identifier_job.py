@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from hlcopy.resolver.identifier import identify_wallet_from_csv
+from hlcopy.resolver.provenance import EvidenceSnapshot
 from hlcopy.resolver.sqd_position_aware import SqdHyperliquidFillsClient
 
 DEFAULT_STATE_DIR = Path("/var/lib/hyperliquid-copy-engine/invo")
@@ -53,14 +54,6 @@ def _save_object(path: Path, payload: Mapping[str, Any]) -> None:
         encoding="utf-8",
     )
     temporary.replace(path)
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _priority_names(values: Sequence[str]) -> tuple[str, ...]:
@@ -129,7 +122,11 @@ def _sort_queue(
     )
 
 
-def _summary_payload(items: Mapping[str, Any]) -> dict[str, Any]:
+def _summary_payload(
+    items: Mapping[str, Any],
+    *,
+    active_portfolio_ids: set[str],
+) -> dict[str, Any]:
     verified = [
         {
             "portfolio_id": portfolio_id,
@@ -140,7 +137,9 @@ def _summary_payload(items: Mapping[str, Any]) -> dict[str, Any]:
             "identified_at": row.get("attempted_at"),
         }
         for portfolio_id, row in sorted(items.items())
-        if isinstance(row, Mapping) and row.get("status") == "VERIFIED"
+        if portfolio_id in active_portfolio_ids
+        and isinstance(row, Mapping)
+        and row.get("status") == "VERIFIED"
     ]
     return {
         "version": 1,
@@ -170,17 +169,19 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
         _queue_items(queue_payload),
         priority_names=_priority_names(args.priority_trader),
     )
+    active_portfolio_ids = {str(row["portfolio_id"]) for row in queue}
     state = _load_object(identifier_state_path, missing={"version": 1, "items": {}})
     items = state.get("items")
     if not isinstance(items, dict):
         raise ValueError("wallet identifier state lacks an items object")
 
-    pending: list[tuple[dict[str, Any], Path, str]] = []
+    pending: list[tuple[dict[str, Any], Path, EvidenceSnapshot]] = []
     now = datetime.now(tz=UTC)
     for row in queue:
         portfolio_id = str(row["portfolio_id"])
         evidence_path = _safe_evidence_path(state_dir, row["resolver_csv"])
-        evidence_sha = _sha256(evidence_path)
+        snapshot = EvidenceSnapshot.from_path(evidence_path)
+        evidence_sha = snapshot.sha256
         previous = items.get(portfolio_id)
         if isinstance(previous, Mapping) and previous.get("evidence_sha256") == evidence_sha:
             if previous.get("status") == "VERIFIED":
@@ -189,7 +190,7 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
                 previous, now=now
             ):
                 continue
-        pending.append((row, evidence_path, evidence_sha))
+        pending.append((row, evidence_path, snapshot))
 
     attempted = 0
     verified = 0
@@ -198,9 +199,10 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
     limit = max(1, int(args.max_portfolios))
     if pending:
         async with SqdHyperliquidFillsClient() as client:
-            for row, evidence_path, evidence_sha in pending[:limit]:
+            for row, evidence_path, snapshot in pending[:limit]:
                 attempted += 1
                 portfolio_id = str(row["portfolio_id"])
+                evidence_sha = snapshot.sha256
                 attempted_at = datetime.now(tz=UTC).isoformat()
                 try:
                     report_key = hashlib.sha256(portfolio_id.encode("utf-8")).hexdigest()[:16]
@@ -208,6 +210,8 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
                         evidence_path,
                         output_dir=reports_dir / report_key,
                         client=client,
+                        snapshot=snapshot,
+                        expected_source_identity=portfolio_id,
                     )
                     result_row = result.to_dict()
                     status = result.status
@@ -277,11 +281,20 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
                         "error": f"{type(exc).__name__}: {exc}",
                     }
                 _save_object(identifier_state_path, {"version": 1, "items": items})
-                _save_object(identities_path, _summary_payload(items))
+                _save_object(
+                    identities_path,
+                    _summary_payload(
+                        items,
+                        active_portfolio_ids=active_portfolio_ids,
+                    ),
+                )
 
     if not identifier_state_path.exists():
         _save_object(identifier_state_path, {"version": 1, "items": items})
-    _save_object(identities_path, _summary_payload(items))
+    _save_object(
+        identities_path,
+        _summary_payload(items, active_portfolio_ids=active_portfolio_ids),
+    )
     if attempted > 0 and errors == attempted:
         raise RuntimeError(f"all {attempted} Invo wallet identification attempts failed")
     return {

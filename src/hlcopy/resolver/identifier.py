@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 from hlcopy.resolver.provenance import EvidenceSnapshot, jsonable_config
 from hlcopy.resolver.public_trade_index import (
@@ -86,6 +88,57 @@ def _load_source_evidence(
     )
 
 
+def _bind_source_identity(
+    imported: GenericTradeImportResult,
+    *,
+    expected_source_identity: str | None,
+) -> str:
+    """Fail closed unless every accepted row belongs to one bound source identity."""
+    observed = set(imported.source_identities)
+    if len(observed) > 1:
+        raise ValueError(
+            "external evidence mixes multiple source identities: "
+            + ", ".join(sorted(observed))
+        )
+    if imported.missing_source_identity_rows:
+        raise ValueError(
+            "external evidence has blank source identity rows: "
+            + ", ".join(str(row) for row in imported.missing_source_identity_rows)
+        )
+    expected = str(expected_source_identity or "").strip()
+    if expected and observed:
+        actual = next(iter(observed))
+        if actual.casefold() != expected.casefold():
+            raise ValueError(
+                f"external evidence source identity {actual!r} does not match "
+                f"expected identity {expected!r}"
+            )
+    if expected:
+        return expected
+    if observed:
+        return next(iter(observed))
+    raise ValueError(
+        "external evidence has no explicit source identity; provide a caller-bound "
+        "expected_source_identity"
+    )
+
+
+def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
+    rendered = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    with NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        temporary = Path(handle.name)
+        handle.write(rendered)
+        handle.flush()
+    temporary.replace(path)
+
+
 async def identify_wallet_from_csv(
     evidence_path: Path,
     *,
@@ -93,18 +146,24 @@ async def identify_wallet_from_csv(
     cache_dir: Path | None = None,
     config: PublicTradeDiscoveryConfig | None = None,
     client: SqdHyperliquidFillsClient | None = None,
+    snapshot: EvidenceSnapshot | None = None,
+    expected_source_identity: str | None = None,
 ) -> WalletIdentificationResult:
     del cache_dir
     if config is None:
         config = DEFAULT_PUBLIC_TRADE_CONFIG
 
-    snapshot = EvidenceSnapshot.from_path(evidence_path)
+    snapshot = snapshot or EvidenceSnapshot.from_path(evidence_path)
     imported = _load_source_evidence(snapshot, config)
     if imported.rejected_rows:
         raise ValueError(
             f"external evidence contains {len(imported.rejected_rows)} malformed rows; "
             "fail closed before wallet discovery"
         )
+    source_identity = _bind_source_identity(
+        imported,
+        expected_source_identity=expected_source_identity,
+    )
     signals = imported.signals
     if len(signals) < 3:
         raise ValueError(
@@ -183,13 +242,18 @@ async def identify_wallet_from_csv(
     report_path: Path | None = None
     if output_dir is not None:
         output_dir.mkdir(parents=True, exist_ok=True)
-        report_path = output_dir / f"wallet_identification_{evidence_path.stem}.json"
+        attempt_id = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%S%fZ")
+        report_path = output_dir / (
+            f"wallet_identification_{evidence_path.stem}_"
+            f"{snapshot.sha256[:16]}_{attempt_id}.json"
+        )
         payload = {
-            "version": 10,
-            "resolver_rule_version": "generic-sqd-fill-wallet-identity-v10",
+            "version": 11,
+            "resolver_rule_version": "generic-sqd-fill-wallet-identity-v11",
             "input_file": str(evidence_path),
             "input_sha256": snapshot.sha256,
             "input_bytes": snapshot.size,
+            "source_identity": source_identity,
             "effective_config": jsonable_config(config),
             "detected_columns": imported.column_map,
             "accepted_trades": len(signals),
@@ -237,10 +301,7 @@ async def identify_wallet_from_csv(
                 "coverage_fail_closed": True,
             },
         }
-        report_path.write_text(
-            json.dumps(payload, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        _write_json_atomic(report_path, payload)
 
     return WalletIdentificationResult(
         status=status,

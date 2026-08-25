@@ -3,9 +3,11 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+
+from hlcopy.discovery.invo_store import InvoRecordStore
 
 MIN_RESOLUTION_TRADES = 12
 RESOLVER_FIELDS = (
@@ -155,6 +157,42 @@ def materialize_resolution_queue(
     min_trades: int = MIN_RESOLUTION_TRADES,
 ) -> dict[str, object]:
     grouped = _group_evidence(read_evidence_ndjson(evidence_path))
+    return _materialize_grouped(
+        grouped.items(),
+        output_dir=output_dir,
+        portfolios=portfolios,
+        min_trades=min_trades,
+    )
+
+
+def materialize_resolution_queue_from_store(
+    *,
+    store: InvoRecordStore,
+    output_dir: Path,
+    portfolios: Sequence[Mapping[str, object]],
+    min_trades: int = MIN_RESOLUTION_TRADES,
+) -> dict[str, object]:
+    def grouped_rows():
+        for portfolio_id, rows in store.evidence_groups():
+            grouped = _group_evidence(rows)
+            if portfolio_id in grouped:
+                yield portfolio_id, grouped[portfolio_id]
+
+    return _materialize_grouped(
+        grouped_rows(),
+        output_dir=output_dir,
+        portfolios=portfolios,
+        min_trades=min_trades,
+    )
+
+
+def _materialize_grouped(
+    grouped: Iterable[tuple[str, list[dict[str, object]]]],
+    *,
+    output_dir: Path,
+    portfolios: Sequence[Mapping[str, object]],
+    min_trades: int,
+) -> dict[str, object]:
     metadata = {
         str(row.get("portfolio_id") or ""): row
         for row in portfolios
@@ -163,7 +201,7 @@ def materialize_resolution_queue(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     queue: list[dict[str, object]] = []
-    for portfolio_id, rows in grouped.items():
+    for portfolio_id, rows in grouped:
         if len(rows) < max(3, min_trades):
             continue
         digest = hashlib.sha256(portfolio_id.encode("utf-8")).hexdigest()[:16]

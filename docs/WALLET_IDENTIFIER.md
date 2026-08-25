@@ -27,10 +27,17 @@ successful collection triggers `hyperliquid-invo-wallet-identifier.service`. The
 
 Durable outputs are under `/var/lib/hyperliquid-copy-engine/invo`:
 
+- `archive.sqlite3`: transactional, indexed event/evidence archive (legacy NDJSON is
+  imported once without rewriting the full history each cycle);
 - `resolution_queue/resolution_queue.json`: resolver-ready Invo portfolios;
 - `identifier_state.json`: per-portfolio attempts and evidence hashes;
-- `identified_wallets.json`: verified identity summary;
+- `identified_wallets.json`: verified identities that are still present in the current
+  resolver-ready queue;
 - `wallet_identifications/<portfolio>/`: immutable resolver reports.
+
+The resolver hashes and parses one immutable byte snapshot. Every accepted row must share
+one explicit source identity, or the calling adapter must bind the file to an expected
+identity; mixed or mismatched evidence fails closed.
 
 ## Bootstrap
 
