@@ -178,7 +178,7 @@ def test_same_block_split_closes_keep_sqd_execution_order_not_tid_order() -> Non
     assert evidence.reconstructed_size == D("0.0128")
 
 
-def test_discovery_keeps_final_flatten_when_export_uses_lifecycle_vwap() -> None:
+def test_discovery_rejects_final_flatten_outside_price_and_size_limits() -> None:
     # The first partial reduction happened outside the close discovery window.
     # The remaining final fill is 740+ bps away from the exported lifecycle VWAP
     # and only 60% of the exported size, so strict single-cluster matching fails.
@@ -199,8 +199,41 @@ def test_discovery_keeps_final_flatten_when_export_uses_lifecycle_vwap() -> None
         max_size_ratio_error=D("0.05"),
     )
 
-    assert set(matches) == {USER}
-    assert matches[USER].trade_id.startswith("final-flatten:")
+    assert matches == {}
+
+
+def test_final_flatten_fallback_enforces_price_and_size_independently() -> None:
+    wrong_price = _fill(
+        px="100",
+        sz="1",
+        time_ms=2_000_000,
+        direction="Close Long",
+        oid="wrong-price",
+        start_position="1",
+    )
+    wrong_size = _fill(
+        px="108",
+        sz="0.6",
+        time_ms=2_000_000,
+        direction="Close Long",
+        oid="wrong-size",
+        start_position="0.6",
+    )
+
+    assert _public_trade_matches(
+        _signal(),
+        [wrong_price],
+        window_ms=5_000,
+        max_price_bps=D("5"),
+        max_size_ratio_error=D("0.05"),
+    ) == {}
+    assert _public_trade_matches(
+        _signal(),
+        [wrong_size],
+        window_ms=5_000,
+        max_price_bps=D("5"),
+        max_size_ratio_error=D("0.05"),
+    ) == {}
 
 
 def test_partial_reduction_does_not_end_episode_before_later_add_and_flatten() -> None:
