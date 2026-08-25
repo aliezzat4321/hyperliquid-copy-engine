@@ -1,0 +1,27 @@
+[Unit]
+Description=Third-party wallet copyability and profitability scorecard
+After=network-online.target hyperliquid-third-party-wide-enrichment.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/hyperliquid-copy-engine
+Environment=REAL_TRADING_ENABLED=NO
+ExecStart=/root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.third_party.profitability_cli \
+  --registry /var/lib/hyperliquid-copy-engine/third-party/wallets.json \
+  --wide-enriched-dir /var/lib/hyperliquid-copy-engine/third-party/wide-enriched \
+  --cutoff-ns-file /var/lib/hyperliquid-copy-engine/third-party/cutoff_ns.txt \
+  --market-dir /mnt/HC_Volume_106576526/hyperliquid/market-shadow \
+  --output-dir /root/hyperliquid-audit/third-party \
+  --invo-resolution-queue /var/lib/hyperliquid-copy-engine/invo/resolution_queue/resolution_queue.json
+User=root
+Group=root
+UMask=0077
+TimeoutStartSec=2h
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/root/hyperliquid-audit/third-party
+RestrictSUIDSGID=true
