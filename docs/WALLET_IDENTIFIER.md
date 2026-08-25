@@ -8,6 +8,7 @@ The production path is deliberately source-agnostic:
 4. Ready portfolios are resolved against free SQD finalized Hyperliquid fills.
 5. Discovery matches are verified on disjoint, full position lifecycles.
 6. Only a unique held-out winner is recorded as `VERIFIED`.
+7. A separate handoff reconciles current verified identities into shadow validation capacity.
 
 Invo is the first adapter. Carmine and Bones are processed first, followed by the rest of
 the ready Invo queue. Adding another third party should require a new read-only collector
@@ -51,7 +52,9 @@ being permanently `UNRESOLVED` or weakening the Tier A matcher:
   semantics inside one identity run.
 
 These requirements are intentionally stronger than the minimum Tier A evidence counts because
-Tier B does not have source quantity as an identity feature.
+Tier B does not have source quantity as an identity feature. The Invo resolution queue also
+waits for 20 canonical independent trades before invoking the resolver, avoiding predictable
+12-to-19-trade `UNRESOLVED` network work.
 
 ## Continuous flow
 
@@ -63,10 +66,33 @@ successful collection triggers `hyperliquid-invo-wallet-identifier.service`. The
   from one hour to a 24-hour maximum while still allowing SQD coverage to catch up;
 - retries transport/runtime errors on the next successful collector cycle;
 - processes at most four changed portfolios per run;
-- never promotes a wallet to validation, shadow, or live trading.
+- writes only current-digest/current-rule verified identities to `identified_wallets.json`;
+- never directly changes the shadow registry or live-trading approval.
 
-The miner and identifier hold the same systemd-managed runtime pipeline lock. A later timer cycle cannot replace
-the queue or resolver CSVs while SQD resolution and identity publication are in progress.
+A successful identifier run triggers
+`hyperliquid-invo-verified-shadow-sync.service`. That handoff is deliberately separate from
+identity proof and may only reconcile a current verified identity into **shadow validation**:
+
+- a new current verified wallet is added at `validation` when the Hyperliquid per-IP capacity
+  has a free slot;
+- the existing 10-active-Hyperliquid-wallet per-IP registry limit is never exceeded;
+- if capacity is full, the verified wallet is retained as enabled `research` and retried on a
+  later successful identifier cycle;
+- stale managed identities are immediately demoted to `research` and disabled;
+- if the same Invo portfolio resolves to a different wallet, the old managed wallet is
+  demoted and disabled before the handoff fails closed;
+- an independently/manual registered wallet is never seized or mutated by the Invo handoff;
+- the handoff refuses `REAL_TRADING_ENABLED=YES`;
+- it never sets `approved`, never supplies an approved-market allow-list and never enables
+  real trading. Live approval remains a separate explicit profitability/risk decision.
+
+The existing shadow capture service watches the registry continuously, so a newly added
+`validation` wallet is subscribed without restarting capture. This closes the identifier-to-
+shadow gap while keeping wallet identity proof separate from any decision to trade real money.
+
+The miner and identifier hold the same systemd-managed runtime pipeline lock. A later timer
+cycle cannot replace the queue or resolver CSVs while SQD resolution and identity publication
+are in progress. `WalletRegistry` provides its own atomic mutation lock for the shadow handoff.
 
 Durable outputs are under `/var/lib/hyperliquid-copy-engine/invo`:
 
@@ -77,6 +103,9 @@ Durable outputs are under `/var/lib/hyperliquid-copy-engine/invo`:
 - `identified_wallets.json`: verified identities that are still present in the current
   resolver-ready queue;
 - `wallet_identifications/<portfolio>/`: immutable resolver reports.
+
+Current verified wallets handed into shadow validation are reconciled into
+`/mnt/HC_Volume_106576526/hyperliquid/shadow/wallets.json` with managed provenance notes.
 
 The resolver hashes and parses one immutable byte snapshot. Every accepted row must share
 one explicit source identity, or the calling adapter must bind the file to an expected
@@ -91,14 +120,16 @@ cd /root/hyperliquid-copy-engine
 sudo bash scripts/bootstrap_invo_source_miner.sh
 ```
 
-The bootstrap validates the Invo credential before enabling the timer and restores the old
-credential if replacement authentication fails. The wallet identifier refuses to run when
+The bootstrap installs the miner, identifier and verified-shadow-sync units, validates the
+Invo credential before enabling the timer, performs an initial identity-to-shadow
+reconciliation, and restores the old credential if replacement authentication fails. Both
+the wallet identifier and verified-shadow handoff refuse to run when
 `REAL_TRADING_ENABLED=YES`.
 
 ## Current starting identities
 
 Bones previously passed strict production acceptance as
 `0x565590f4d2b00b567a564f56b13f898392aef180`. The current continuous service still requires
-Bones to pass the current evidence digest and resolver-rule gate before publication. Carmine
-remains the first Invo priority target and is published only if the applicable Tier A or Tier B
-public-data identity proof returns a unique held-out winner.
+Bones to pass the current evidence digest and resolver-rule gate before publication or shadow
+handoff. Carmine remains the first Invo priority target and is published only if the
+applicable Tier A or Tier B public-data identity proof returns a unique held-out winner.
