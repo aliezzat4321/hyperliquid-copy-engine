@@ -1,0 +1,180 @@
+name: third-party-scorecard
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/third-party-scorecard.yml"
+      - "src/hlcopy/third_party/profitability_cli.py"
+      - "src/hlcopy/discovery/invo_universe_job.py"
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hyperliquid-third-party-scorecard
+  cancel-in-progress: true
+
+jobs:
+  scorecard:
+    if: github.repository == 'aliezzat4321/hyperliquid-copy-engine'
+    runs-on:
+      - self-hosted
+      - hyperliquid
+    timeout-minutes: 5
+    steps:
+      - name: Render third-party trader scorecard
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          score_path = Path('/root/hyperliquid-audit/third-party/third_party_scorecard.json')
+          universe_path = Path('/var/lib/hyperliquid-copy-engine/invo/universe_candidates.json')
+          identity_path = Path('/var/lib/hyperliquid-copy-engine/invo/identified_wallets.json')
+          summary_path = Path(os.environ['GITHUB_STEP_SUMMARY'])
+
+          def load(path):
+              if not path.exists():
+                  return {}
+              try:
+                  value = json.loads(path.read_text())
+              except Exception:
+                  return {}
+              return value if isinstance(value, dict) else {}
+
+          def cell(value):
+              if value is None or value == '':
+                  return '—'
+              return str(value).replace('|', '\\|').replace('\n', ' ')
+
+          score = load(score_path)
+          universe = load(universe_path)
+          identities = load(identity_path)
+          identified = {}
+          for row in identities.get('identified_wallets', identities.get('wallets', [])):
+              if not isinstance(row, dict):
+                  continue
+              identity = str(row.get('portfolio_id') or row.get('identity') or '')
+              if identity:
+                  identified[identity] = row
+
+          lines = [
+              '# Third-Party Wallet Scorecard',
+              '',
+              f"Generated: {cell(score.get('generated_at'))}",
+              '',
+              f"**Verified wallets in profitability lane:** {score.get('wallet_count', 0)}  ",
+              f"**Prospective execution events:** {score.get('prospective_event_count', 0)}  ",
+              f"**Invo candidate portfolios:** {universe.get('candidate_portfolio_count', 0)}  ",
+              f"**Invo candidate traders:** {universe.get('candidate_owner_count', 0)}  ",
+              f"**Ready for wallet resolution:** {universe.get('ready_for_wallet_resolution', 0)}",
+              '',
+              '## Verified wallets — realistic copyability',
+              '',
+              '| Trader | Wallet | Status | Prospective events | Copyability | 500ms net bps | Execution | Actions | Robust sizes | Validation |',
+              '|---|---|---:|---:|---:|---:|---:|---:|---:|---:|',
+          ]
+
+          cards = score.get('scorecards') or []
+          if not cards:
+              lines.append('| — | — | COLLECTING | 0 | — | — | — | — | — | No |')
+          for row in cards[:30]:
+              if not isinstance(row, dict):
+                  continue
+              base = row.get('base_scenario') if isinstance(row.get('base_scenario'), dict) else {}
+              wallet = str(row.get('wallet') or '')
+              wallet_short = f"{wallet[:8]}…{wallet[-6:]}" if len(wallet) > 16 else wallet
+              execution = base.get('execution_pct')
+              execution_text = f"{float(execution):.1f}%" if execution is not None else '—'
+              lines.append(
+                  '| ' + ' | '.join([
+                      cell(row.get('label') or row.get('identity')),
+                      cell(wallet_short),
+                      cell(row.get('status')),
+                      cell(row.get('prospective_events')),
+                      cell(row.get('copyability_score')),
+                      cell(base.get('net_return_bps')),
+                      execution_text,
+                      cell(base.get('realized_actions')),
+                      cell(len(row.get('robust_notionals') or [])),
+                      'YES' if row.get('validation_candidate') else 'No',
+                  ]) + ' |'
+              )
+
+              hist = row.get('historical_pre_screen')
+              if isinstance(hist, dict) and hist.get('available'):
+                  matrix = hist.get('matrix') or []
+                  if matrix:
+                      lines.extend(['', f"### {cell(row.get('label') or row.get('identity'))} historical source-price pre-screen", ''])
+                      lines.append('| Leverage | Final equity | Net P&L | Return | Win rate |')
+                      lines.append('|---:|---:|---:|---:|---:|')
+                      for item in matrix:
+                          if not isinstance(item, dict):
+                              continue
+                          lines.append('| ' + ' | '.join([
+                              cell(item.get('follower_leverage') or item.get('leverage')),
+                              cell(item.get('final_equity')),
+                              cell(item.get('net_pnl')),
+                              cell(item.get('return_pct')),
+                              cell(item.get('win_rate_pct')),
+                          ]) + ' |')
+                      lines.append('')
+                      lines.append('*Source-price pre-screen only; it cannot promote a wallet. Execution-aware prospective results above are authoritative.*')
+
+          lines.extend([
+              '',
+              '## Invo discovery and identity funnel',
+              '',
+              '| Rank | Trader | Portfolio | Leaderboards | Closed trades | Win rate | P&L % | Evidence | Stage | Wallet |',
+              '|---:|---|---|---|---:|---:|---:|---:|---|---|',
+          ])
+          candidates = universe.get('candidates') or []
+          for index, row in enumerate(candidates[:50], 1):
+              if not isinstance(row, dict):
+                  continue
+              identity = str(row.get('portfolio_id') or '')
+              identity_row = identified.get(identity, {})
+              wallet = str(identity_row.get('wallet') or identity_row.get('wallet_address') or '')
+              wallet_short = f"{wallet[:8]}…{wallet[-6:]}" if len(wallet) > 16 else wallet
+              timeframes = ','.join(row.get('leaderboard_timeframes') or [])
+              lines.append('| ' + ' | '.join([
+                  str(index),
+                  cell(row.get('username')),
+                  cell(row.get('name')),
+                  cell(timeframes),
+                  cell(row.get('closed_positions')),
+                  cell(row.get('win_rate')),
+                  cell(row.get('percent_change')),
+                  cell(row.get('evidence_count')),
+                  cell(row.get('tracking_stage')),
+                  cell(wallet_short),
+              ]) + ' |')
+
+          errors = universe.get('surface_errors') or []
+          if errors:
+              lines.extend(['', '## Invo surface warnings', ''])
+              for error in errors[:20]:
+                  lines.append(f"- `{cell(error)}`")
+
+          lines.extend([
+              '',
+              '---',
+              '**Safety:** research/shadow only. No scorecard result automatically enables real trading.',
+          ])
+          summary_path.write_text('\n'.join(lines) + '\n')
+
+          print(
+              f"scorecard wallets={score.get('wallet_count', 0)} "
+              f"events={score.get('prospective_event_count', 0)} "
+              f"candidate_portfolios={universe.get('candidate_portfolio_count', 0)} "
+              f"ready={universe.get('ready_for_wallet_resolution', 0)}"
+          )
+          PY
