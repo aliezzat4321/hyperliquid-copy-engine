@@ -18,7 +18,7 @@ jobs:
       - hyperliquid
     timeout-minutes: 5
     steps:
-      - name: Print sanitized Invo identity state
+      - name: Print sanitized Invo resolver diagnostics
         shell: bash
         run: |
           set -euo pipefail
@@ -26,7 +26,7 @@ jobs:
           import json
           from pathlib import Path
 
-          state = Path('/var/lib/hyperliquid-copy-engine/invo')
+          root = Path('/var/lib/hyperliquid-copy-engine/invo')
           targets = {
               'carmine', 'bones', 'tyron', 'prateek', 'booobsas',
               'rps', 'bartpeeters', 'vodkastrash',
@@ -39,30 +39,52 @@ jobs:
                   return {}
               return value if isinstance(value, dict) else {}
 
-          identities = load(state / 'identified_wallets.json').get('identities', [])
-          queue = load(state / 'resolution_queue/resolution_queue.json').get('queue', [])
-          by_name = {}
-          for row in identities:
-              if not isinstance(row, dict):
+          publication = load(root / 'identified_wallets.json')
+          queue_payload = load(root / 'resolution_queue/resolution_queue.json')
+          identifier_state = load(root / 'identifier_state.json')
+          identities = publication.get('identities', [])
+          state_items = identifier_state.get('items', {})
+          queue = queue_payload.get('queue', [])
+          verified = {
+              str(row.get('portfolio_id') or ''): row
+              for row in identities
+              if isinstance(row, dict)
+          }
+
+          rows = []
+          for q in queue:
+              if not isinstance(q, dict):
                   continue
-              name = str(row.get('username') or '').strip().casefold()
-              if name in targets:
-                  by_name.setdefault(name, {})['wallet'] = row.get('wallet')
-                  by_name[name]['verified'] = True
-                  by_name[name]['resolver_rule'] = row.get('resolver_rule') or row.get('rule')
-          for row in queue:
-              if not isinstance(row, dict):
+              name = str(q.get('username') or '').strip().casefold()
+              if name not in targets:
                   continue
-              name = str(row.get('username') or '').strip().casefold()
-              if name in targets:
-                  rec = by_name.setdefault(name, {})
-                  rec.setdefault('verified', False)
-                  rec['evidence_count'] = row.get('evidence_count')
-                  rec['queue_status'] = row.get('status')
-                  rec['portfolio_id'] = row.get('portfolio_id')
-          print('INVO_READY_IDENTITY_STATE=' + json.dumps(
-              {name: by_name.get(name, {'verified': False}) for name in sorted(targets)},
-              sort_keys=True,
-          ))
-          print('TOTAL_IDENTITIES=' + str(len([r for r in identities if isinstance(r, dict)])))
+              pid = str(q.get('portfolio_id') or '')
+              state = state_items.get(pid) if isinstance(state_items, dict) else None
+              state = state if isinstance(state, dict) else {}
+              result = state.get('result') if isinstance(state.get('result'), dict) else {}
+              identity = verified.get(pid)
+              rows.append({
+                  'username': name,
+                  'portfolio_id': pid,
+                  'portfolio_name': q.get('portfolio_name'),
+                  'evidence_count': q.get('evidence_count'),
+                  'distinct_coin_count': q.get('distinct_coin_count'),
+                  'verified': bool(identity),
+                  'wallet': identity.get('wallet') if identity else None,
+                  'identifier_status': state.get('status') or 'NOT_ATTEMPTED',
+                  'candidate': state.get('candidate'),
+                  'confidence': state.get('confidence'),
+                  'discovery_matches': result.get('discovery_matches'),
+                  'discovery_anchors': result.get('discovery_anchors'),
+                  'historical_matches': result.get('historical_matches'),
+                  'historical_attempted': result.get('historical_attempted'),
+                  'median_clock_offset_ms': result.get('median_clock_offset_ms'),
+                  'median_price_bps': result.get('median_price_bps'),
+                  'next_retry_at': state.get('next_retry_at'),
+                  'attempted_at': state.get('attempted_at'),
+              })
+          rows.sort(key=lambda r: (r['username'], -int(r['evidence_count'] or 0), r['portfolio_id']))
+          print('INVO_RESOLVER_DIAGNOSTICS=' + json.dumps(rows, sort_keys=True))
+          print('TOTAL_DURABLE_IDENTITIES=' + str(publication.get('verified_count', 0)))
+          print('ATTESTATION_REPORTS_SEEN=' + str(publication.get('attestation_reports_seen', 0)))
           PY
