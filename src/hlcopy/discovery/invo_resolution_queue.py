@@ -9,7 +9,7 @@ from pathlib import Path
 
 from hlcopy.discovery.invo_store import InvoRecordStore
 
-MIN_RESOLUTION_TRADES = 12
+MIN_RESOLUTION_TRADES = 20
 RESOLVER_FIELDS = (
     "trade_id",
     "username",
