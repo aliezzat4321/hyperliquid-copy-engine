@@ -93,6 +93,26 @@ def test_stale_verified_identity_is_revoked_from_shadow(tmp_path: Path) -> None:
     assert "current_verified_identity=false" in stored.notes
 
 
+def test_corrupt_publication_revokes_managed_wallet_before_failing(tmp_path: Path) -> None:
+    identities = tmp_path / "identified_wallets.json"
+    registry_path = tmp_path / "wallets.json"
+    wallet = _address(103)
+    _write_identities(identities, [_identity("portfolio-carmine", wallet)])
+    sync_verified_identities(identities_path=identities, registry_path=registry_path)
+
+    identities.write_text("{corrupt-json", encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid verified identity publication"):
+        sync_verified_identities(
+            identities_path=identities,
+            registry_path=registry_path,
+        )
+
+    stored = WalletRegistry(registry_path).load()[0]
+    assert stored.stage == "research"
+    assert stored.enabled is False
+    assert "current_verified_identity=false" in stored.notes
+
+
 def test_capacity_full_keeps_new_verified_wallet_waiting_in_research(tmp_path: Path) -> None:
     identities = tmp_path / "identified_wallets.json"
     registry_path = tmp_path / "wallets.json"
