@@ -291,10 +291,11 @@ def _public_trade_matches(
         exit_bps = _price_bps(signal.exit_price, fill.px)
         if exit_bps > max_price_bps:
             continue
-        if target_size is not None:
-            size_error = abs(fill.sz / target_size - D("1"))
-            if size_error > max_size_ratio_error:
-                continue
+        if target_size is None:
+            continue
+        size_error = abs(fill.sz / target_size - D("1"))
+        if size_error > max_size_ratio_error:
+            continue
         time_penalty = D(abs(close_offset)) / D("1000")
         price_penalty = min(exit_bps, D("50"))
         quality = max(D("0"), D("75") - time_penalty - price_penalty)

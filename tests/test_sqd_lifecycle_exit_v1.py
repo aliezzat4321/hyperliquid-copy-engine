@@ -1,3 +1,4 @@
+from dataclasses import replace
 from decimal import Decimal
 
 from hlcopy.resolver.public_trade_index import _public_trade_matches
@@ -230,6 +231,36 @@ def test_final_flatten_fallback_enforces_price_and_size_independently() -> None:
     assert _public_trade_matches(
         _signal(),
         [wrong_size],
+        window_ms=5_000,
+        max_price_bps=D("5"),
+        max_size_ratio_error=D("0.05"),
+    ) == {}
+
+
+def test_final_flatten_fallback_requires_absolute_source_size() -> None:
+    invo_like_signal = replace(_signal(), raw={"entry_size": "25"})
+    fills = [
+        _fill(
+            px="200",
+            sz="0.4",
+            time_ms=1_999_000,
+            direction="Close Long",
+            oid="close",
+            start_position="1",
+        ),
+        _fill(
+            px="108",
+            sz="0.6",
+            time_ms=2_000_000,
+            direction="Close Long",
+            oid="close",
+            start_position="0.6",
+        ),
+    ]
+
+    assert _public_trade_matches(
+        invo_like_signal,
+        fills,
         window_ms=5_000,
         max_price_bps=D("5"),
         max_size_ratio_error=D("0.05"),
