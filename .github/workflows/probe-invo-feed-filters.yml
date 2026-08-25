@@ -15,7 +15,7 @@ jobs:
     runs-on: self-hosted
     timeout-minutes: 5
     steps:
-      - name: Probe read-only Invo feed filters
+      - name: Probe read-only Invo feed target coverage
         shell: bash
         run: |
           set -euo pipefail
@@ -30,33 +30,104 @@ jobs:
 
           from hlcopy.discovery.invo_source import InvoReadOnlyClient
 
+          TARGETS = {"carmine", "bones"}
+
+          def norm(value):
+              return str(value or "").removeprefix("@").strip().casefold()
+
+          def owner_name(post):
+              update = post.get("update") if isinstance(post, dict) else None
+              owner = update.get("owner") if isinstance(update, dict) and isinstance(update.get("owner"), dict) else {}
+              post_owner = post.get("owner") if isinstance(post, dict) and isinstance(post.get("owner"), dict) else {}
+              return norm(owner.get("username") or post_owner.get("username"))
+
+          async def feed_coverage(client, filter_name):
+              cursor = None
+              seen = set()
+              counts = {target: 0 for target in TARGETS}
+              verified_counts = {target: 0 for target in TARGETS}
+              pages = 0
+              for _ in range(10):
+                  payload = await client.feed(
+                      filter_name=filter_name,
+                      last_post_id=cursor,
+                      item_limit=50,
+                  )
+                  items = payload.get("items")
+                  if not isinstance(items, list) or not items:
+                      break
+                  pages += 1
+                  for post in items:
+                      if not isinstance(post, dict):
+                          continue
+                      post_id = str(post.get("id") or "")
+                      if not post_id or post_id in seen:
+                          continue
+                      seen.add(post_id)
+                      name = owner_name(post)
+                      if name in TARGETS:
+                          counts[name] += 1
+                          update = post.get("update")
+                          if isinstance(update, dict) and update.get("verifiedTrade") is True:
+                              verified_counts[name] += 1
+                  next_cursor = str(items[-1].get("id") or "") if isinstance(items[-1], dict) else ""
+                  if not next_cursor or next_cursor == cursor:
+                      break
+                  cursor = next_cursor
+              return {
+                  "filter": filter_name,
+                  "pages": pages,
+                  "unique_posts": len(seen),
+                  "target_posts": counts,
+                  "target_verified_trade_posts": verified_counts,
+              }
+
+          async def portfolio_coverage(client, filter_name):
+              found = {target: 0 for target in TARGETS}
+              total = 0
+              for page in range(1, 6):
+                  payload = await client.discover_portfolios(
+                      filter_name=filter_name,
+                      page=page,
+                      size=50,
+                  )
+                  items = payload.get("items")
+                  if not isinstance(items, list) or not items:
+                      break
+                  total += len(items)
+                  for row in items:
+                      if not isinstance(row, dict):
+                          continue
+                      owner = row.get("owner") if isinstance(row.get("owner"), dict) else {}
+                      name = norm(owner.get("username") or row.get("username"))
+                      if name in TARGETS:
+                          found[name] += 1
+              return {"filter": filter_name, "portfolios_seen": total, "targets": found}
+
           async def main():
-              results = []
+              results = {"feeds": [], "portfolios": []}
               async with InvoReadOnlyClient(
                   access_token=os.getenv("INVO_ACCESS_TOKEN"),
                   refresh_token=os.getenv("INVO_REFRESH_TOKEN"),
-                  retry_attempts=1,
+                  retry_attempts=2,
               ) as client:
-                  for name in ("recent", "trending", "following", "all"):
+                  for name in ("trending", "following"):
                       try:
-                          payload = await client.feed(
-                              filter_name=name,
-                              last_post_id=None,
-                              item_limit=20,
-                          )
-                          items = payload.get("items")
-                          results.append({
-                              "filter": name,
-                              "ok": True,
-                              "item_count": len(items) if isinstance(items, list) else None,
-                          })
+                          results["feeds"].append(await feed_coverage(client, name))
                       except Exception as exc:
-                          results.append({
+                          results["feeds"].append({
                               "filter": name,
-                              "ok": False,
                               "error": f"{type(exc).__name__}: {exc}",
                           })
-              print("INVO_FEED_FILTER_PROBE")
+                  for name in ("trending", "all"):
+                      try:
+                          results["portfolios"].append(await portfolio_coverage(client, name))
+                      except Exception as exc:
+                          results["portfolios"].append({
+                              "filter": name,
+                              "error": f"{type(exc).__name__}: {exc}",
+                          })
+              print("INVO_TARGET_COVERAGE_PROBE")
               print(json.dumps(results, indent=2, sort_keys=True))
 
           asyncio.run(main())
