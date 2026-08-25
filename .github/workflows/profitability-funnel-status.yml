@@ -1,0 +1,90 @@
+name: profitability-funnel-status
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hyperliquid-profitability-funnel-status
+  cancel-in-progress: true
+
+jobs:
+  status:
+    if: github.repository == 'aliezzat4321/hyperliquid-copy-engine'
+    runs-on: self-hosted
+    timeout-minutes: 5
+    steps:
+      - name: Report profitability funnel status
+        shell: bash
+        run: |
+          set -u
+          echo "========== TIME =========="
+          date -u
+
+          echo
+          echo "========== SERVICE =========="
+          systemctl is-active hlcopy-profitability-funnel.service || true
+          systemctl show hlcopy-profitability-funnel.service \
+            -p ActiveState -p SubState -p Result -p ExecMainStatus \
+            -p MemoryCurrent -p CPUUsageNSec 2>/dev/null || true
+
+          echo
+          echo "========== RECENT LOG =========="
+          journalctl -u hlcopy-profitability-funnel.service -n 12 --no-pager 2>/dev/null || true
+
+          OUT=/root/hyperliquid-audit/funnel
+          echo
+          echo "========== CHECKPOINT COUNTS =========="
+          for f in screening.jsonl confirmations.jsonl realized_slices.jsonl; do
+            if [[ -f "$OUT/$f" ]]; then
+              printf '%s=' "$f"
+              wc -l < "$OUT/$f"
+            else
+              echo "$f=0"
+            fi
+          done
+
+          echo
+          echo "========== REPORT =========="
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          p = Path('/root/hyperliquid-audit/funnel/funnel_report.json')
+          if not p.exists():
+              print('report=NOT_READY')
+          else:
+              try:
+                  d = json.loads(p.read_text())
+              except Exception as exc:
+                  print(f'report=INVALID {type(exc).__name__}: {exc}')
+              else:
+                  print('report=READY')
+                  for key in (
+                      'screened_count',
+                      'positive_screen_count',
+                      'confirmed_count',
+                      'robust_candidate_count',
+                  ):
+                      print(f'{key}={d.get(key)}')
+                  rows = d.get('top_robust_candidates') or []
+                  for i, row in enumerate(rows[:10], 1):
+                      print(
+                          f"TOP{i} wallet={str(row.get('wallet_address',''))[:14]} "
+                          f"coin={row.get('coin')} notional={row.get('notional_usd')} "
+                          f"worst_bps={row.get('worst_return_bps')} "
+                          f"actions={row.get('actions_floor')}"
+                      )
+          PY
+
+          echo
+          echo "========== MEMORY =========="
+          free -h
+
+          echo
+          echo "========== DISK =========="
+          df -h / /mnt/HC_Volume_106576526 2>/dev/null || true
