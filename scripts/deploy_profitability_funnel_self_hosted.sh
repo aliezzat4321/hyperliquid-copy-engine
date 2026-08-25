@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Canonical self-hosted launcher. Keep CLI arguments synchronized with incremental_funnel_cli.
 REPO="/root/hyperliquid-copy-engine"
 PY="$REPO/.venv/bin/python"
 OUT="/root/hyperliquid-audit/funnel"
