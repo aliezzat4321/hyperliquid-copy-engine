@@ -11,6 +11,8 @@ from typing import Any
 D = Decimal
 ZERO = D("0")
 BPS = D("10000")
+DEFAULT_TRAIN_FRACTION = D("0.60")
+NEGATIVE_SENTINEL = D("-1e99")
 SCENARIOS = ("LIVE_100MS", "LIVE_250MS", "LIVE_500MS", "LIVE_1000MS")
 
 
@@ -44,12 +46,18 @@ def _slice_stats(rows: list[dict[str, Any]], notional: Decimal) -> dict[str, obj
     negative = sum((-x for x in pnl if x < ZERO), ZERO)
     timestamps = [_ts(row) for row in rows if _ts(row) > 0]
     span_days = (
-        D(max(timestamps) - min(timestamps)) / D("86400000") if len(timestamps) >= 2 else ZERO
+        D(max(timestamps) - min(timestamps)) / D("86400000")
+        if len(timestamps) >= 2
+        else ZERO
     )
-    # Avoid explosive per-day estimates from a few minutes of evidence. A cohort has to
-    # earn at least one day of denominator before expected dollars/day is reported.
     effective_days = max(D("1"), span_days)
     return_bps = total / notional * BPS if notional > ZERO else ZERO
+    if negative > ZERO:
+        profit_factor: str | None = str(positive / negative)
+    elif positive > ZERO:
+        profit_factor = "Infinity"
+    else:
+        profit_factor = None
     return {
         "actions": len(rows),
         "net_pnl_usd": str(total),
@@ -59,7 +67,7 @@ def _slice_stats(rows: list[dict[str, Any]], notional: Decimal) -> dict[str, obj
         "avg_net_bps": str(return_bps / D(len(rows))) if rows else None,
         "median_net_pnl_usd": str(median(pnl)) if pnl else None,
         "win_pct": str(D(wins) / D(len(rows)) * D("100")) if rows else None,
-        "profit_factor": str(positive / negative) if negative > ZERO else ("Infinity" if positive > ZERO else None),
+        "profit_factor": profit_factor,
         "span_days": str(span_days),
         "trades_per_day": str(D(len(rows)) / effective_days) if rows else "0",
         "net_usd_per_day": str(total / effective_days),
@@ -68,12 +76,17 @@ def _slice_stats(rows: list[dict[str, Any]], notional: Decimal) -> dict[str, obj
     }
 
 
-def build_audit(payload: dict[str, Any], *, train_fraction: Decimal = D("0.60")) -> dict[str, object]:
+def build_audit(
+    payload: dict[str, Any],
+    *,
+    train_fraction: Decimal = DEFAULT_TRAIN_FRACTION,
+) -> dict[str, object]:
     raw = payload.get("realized_slices") or []
     slices = [row for row in raw if isinstance(row, dict)]
-    grouped: dict[tuple[str, str, str, str, str, str], dict[str, list[dict[str, Any]]]] = defaultdict(
-        lambda: defaultdict(list)
-    )
+    grouped: dict[
+        tuple[str, str, str, str, str, str],
+        dict[str, list[dict[str, Any]]],
+    ] = defaultdict(lambda: defaultdict(list))
     for row in slices:
         grouped[_key(row)][str(row.get("scenario") or "UNKNOWN")].append(row)
 
@@ -141,19 +154,29 @@ def build_audit(payload: dict[str, Any], *, train_fraction: Decimal = D("0.60"))
                 "latency_complete": complete,
                 "train_actions_floor": train_actions_floor,
                 "oos_actions_floor": oos_actions_floor,
-                "train_worst_return_bps": str(train_floor) if train_floor is not None else None,
+                "train_worst_return_bps": (
+                    str(train_floor) if train_floor is not None else None
+                ),
                 "oos_worst_return_bps": str(oos_floor) if oos_floor is not None else None,
-                "oos_worst_return_pct": str(oos_floor / D("100")) if oos_floor is not None else None,
-                "oos_worst_net_usd_per_day": str(oos_usd_day_floor) if oos_usd_day_floor is not None else None,
+                "oos_worst_return_pct": (
+                    str(oos_floor / D("100")) if oos_floor is not None else None
+                ),
+                "oos_worst_net_usd_per_day": (
+                    str(oos_usd_day_floor) if oos_usd_day_floor is not None else None
+                ),
                 "scenario_stats": scenario_rows,
             }
         )
 
     cohorts.sort(
         key=lambda row: (
-            2 if row["lifecycle"] == "SURVIVOR" else 1 if row["lifecycle"] == "UNRESOLVED" else 0,
-            _d(row.get("oos_worst_net_usd_per_day"), D("-1e99")),
-            _d(row.get("oos_worst_return_bps"), D("-1e99")),
+            2
+            if row["lifecycle"] == "SURVIVOR"
+            else 1
+            if row["lifecycle"] == "UNRESOLVED"
+            else 0,
+            _d(row.get("oos_worst_net_usd_per_day"), NEGATIVE_SENTINEL),
+            _d(row.get("oos_worst_return_bps"), NEGATIVE_SENTINEL),
             int(row.get("oos_actions_floor") or 0),
         ),
         reverse=True,
@@ -176,7 +199,10 @@ def build_audit(payload: dict[str, Any], *, train_fraction: Decimal = D("0.60"))
         "fee_accounting_mode": payload.get("fee_accounting_mode"),
         "train_fraction": str(train_fraction),
         "oos_fraction": str(D("1") - train_fraction),
-        "selection_rule": "SURVIVOR requires >=10 OOS actions in every latency scenario and positive train + OOS return in every latency scenario.",
+        "selection_rule": (
+            "SURVIVOR requires >=10 OOS actions in every latency scenario and positive "
+            "train + OOS return in every latency scenario."
+        ),
         "slice_count": len(slices),
         "cohort_count": len(cohorts),
         "survivor_count": len(survivors),
@@ -195,17 +221,22 @@ def build_audit(payload: dict[str, Any], *, train_fraction: Decimal = D("0.60"))
             "eligible_for_raw_evidence_pruning_wallets": dead_wallets,
             "eligible_for_raw_evidence_pruning_coins": dead_coins,
             "automatic_delete": False,
-            "note": "Pruning is only eligible after this compact audit is persisted and no other research dependency references the raw partition.",
+            "note": (
+                "Pruning is only eligible after this compact audit is persisted and no "
+                "other research dependency references the raw partition."
+            ),
         },
         "all_cohorts": cohorts,
     }
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="python -m hlcopy.profitability.extraction_audit_cli")
+    parser = argparse.ArgumentParser(
+        prog="python -m hlcopy.profitability.extraction_audit_cli"
+    )
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--train-fraction", type=Decimal, default=D("0.60"))
+    parser.add_argument("--train-fraction", type=Decimal, default=DEFAULT_TRAIN_FRACTION)
     return parser
 
 
