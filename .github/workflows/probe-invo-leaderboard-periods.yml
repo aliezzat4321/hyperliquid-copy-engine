@@ -1,0 +1,38 @@
+name: probe-invo-leaderboard-periods
+
+on:
+  push:
+    branches:
+      - agent/invo-exhaustive-discovery-v1
+    paths:
+      - "scripts/probe_invo_leaderboard_periods.py"
+      - ".github/workflows/probe-invo-leaderboard-periods.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hyperliquid-probe-invo-leaderboard-periods
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    if: github.repository == 'aliezzat4321/hyperliquid-copy-engine'
+    runs-on:
+      - self-hosted
+      - hyperliquid
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          clean: true
+      - name: Probe read-only Invo leaderboard filters
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -a
+          source /etc/hyperliquid-copy-engine/invo.env
+          set +a
+          /root/hyperliquid-copy-engine/.venv/bin/python "$GITHUB_WORKSPACE/scripts/probe_invo_leaderboard_periods.py"
