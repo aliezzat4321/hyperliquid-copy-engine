@@ -2,6 +2,7 @@
 Description=Invo evidence to Hyperliquid wallet identifier
 After=network-online.target
 Wants=network-online.target
+OnSuccess=hyperliquid-invo-verified-shadow-sync.service
 
 [Service]
 Type=oneshot
