@@ -1,0 +1,78 @@
+name: reclaim-cache-sync-bones
+
+on:
+  push:
+    branches:
+      - agent/reclaim-cache-sync-bones-v1
+    paths:
+      - .github/workflows/reclaim-cache-sync-bones.yml
+
+permissions:
+  contents: read
+
+jobs:
+  reclaim-and-sync:
+    runs-on: self-hosted
+    timeout-minutes: 10
+    steps:
+      - name: Reclaim rebuildable cache and sync verified identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          VOLUME=/mnt/HC_Volume_106576526
+          CACHE="$VOLUME/hyperliquid/cache/uv"
+          REGISTRY="$VOLUME/hyperliquid/shadow/wallets.json"
+          BONES=0x7a5973ca24c3d36cea16632711ac7a6cff684789
+
+          mountpoint -q "$VOLUME"
+          test "$(realpath -m "$CACHE")" = "$VOLUME/hyperliquid/cache/uv"
+
+          echo '=== BEFORE ==='
+          df -h "$VOLUME"
+          du -sh "$CACHE" 2>/dev/null || true
+
+          rm -rf --one-file-system "$CACHE"
+          mkdir -p "$CACHE"
+          chmod 755 "$CACHE"
+
+          echo '=== AFTER_CACHE_RECLAIM ==='
+          df -h "$VOLUME"
+
+          systemctl reset-failed hyperliquid-invo-verified-shadow-sync.service || true
+          systemctl start hyperliquid-invo-verified-shadow-sync.service
+          test "$(systemctl show -p Result --value hyperliquid-invo-verified-shadow-sync.service)" = success
+
+          echo '=== SYNC_JOURNAL ==='
+          journalctl -u hyperliquid-invo-verified-shadow-sync.service -n 12 --no-pager
+
+          echo '=== BONES_REGISTRY_STATUS ==='
+          cd /root/hyperliquid-copy-engine
+          .venv/bin/python - "$REGISTRY" "$BONES" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+          target = sys.argv[2].lower()
+          payload = json.loads(path.read_text(encoding='utf-8'))
+          matches = []
+          for row in payload.get('wallets', []):
+              if not isinstance(row, dict):
+                  continue
+              address = str(row.get('source_ref') or row.get('wallet') or row.get('address') or '').lower()
+              if address != target:
+                  continue
+              matches.append({
+                  'source_ref': row.get('source_ref'),
+                  'stage': row.get('stage'),
+                  'enabled': row.get('enabled'),
+                  'source_type': row.get('source_type'),
+                  'label': row.get('label'),
+              })
+          print(json.dumps({'wallet': target, 'matches': matches}, indent=2, sort_keys=True))
+          if not matches:
+              raise SystemExit('verified Bones wallet was not persisted to registry')
+          PY
+
+          echo '=== FINAL_SPACE ==='
+          df -h "$VOLUME"
