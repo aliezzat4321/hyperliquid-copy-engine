@@ -204,16 +204,16 @@ def test_legacy_migration_resets_orphan_cursor_instead_of_trusting_global_ids() 
     assert cursor is None
 
 
-def test_legacy_migration_preserves_explicit_active_frontier() -> None:
+def test_legacy_migration_rebuilds_even_with_unversioned_explicit_frontier() -> None:
     history, frontier, cursor = _migrate_recent_state(
         recent_history=[],
         explicit_frontier=["known-head"],
         cursor="resume-cursor",
     )
 
-    assert history == ["known-head"]
-    assert frontier == ["known-head"]
-    assert cursor == "resume-cursor"
+    assert history == []
+    assert frontier == []
+    assert cursor is None
 
 
 def test_malformed_page_fails_closed() -> None:

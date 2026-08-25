@@ -106,12 +106,9 @@ def _migrate_recent_state(
 ) -> tuple[list[str], list[str], str | None]:
     if recent_history:
         return list(recent_history), list(explicit_frontier), cursor
-    if explicit_frontier:
-        # An active catch-up frontier was captured directly from a head scan and
-        # is safe to preserve. The mixed global seen history is not.
-        return list(explicit_frontier), list(explicit_frontier), cursor
-    # Legacy global history may be backfill-first. Reset any orphan cursor and
-    # rebuild recent history from a fresh bounded head scan.
+    # Before separated recent history existed, both the global history and an
+    # explicit frontier could have been derived from a backfill-first prefix.
+    # Trust neither: reset the cursor and rebuild from a fresh bounded head scan.
     return [], [], None
 
 
