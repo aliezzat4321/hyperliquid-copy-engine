@@ -15,63 +15,28 @@ jobs:
     runs-on: self-hosted
     timeout-minutes: 5
     steps:
-      - name: Print sanitized resolver and block-device status
+      - name: Verify whether old PostgreSQL tree is unused
         shell: bash
         run: |
           set -euo pipefail
-          echo '=== DISK_BYTES ==='
-          df -h / /mnt/HC_Volume_106576526 || true
-          echo '=== BLOCK_DEVICES ==='
-          lsblk -b -o NAME,SIZE,FSTYPE,FSVER,MOUNTPOINTS
-          echo '=== MOUNT_SOURCE ==='
-          findmnt -no SOURCE,FSTYPE,SIZE,USED,AVAIL,USE% /mnt/HC_Volume_106576526 || true
-          echo '=== TARGET_RESOLVER_STATE ==='
-          cd /root/hyperliquid-copy-engine
-          .venv/bin/python - <<'PY'
-          import json
-          from pathlib import Path
-
-          path = Path('/var/lib/hyperliquid-copy-engine/invo/identifier_state.json')
-          try:
-              state = json.loads(path.read_text(encoding='utf-8'))
-          except Exception as exc:
-              print(json.dumps({'state_error': f'{type(exc).__name__}: {exc}'}))
-              raise SystemExit
-
-          output = []
-          for portfolio_id, row in state.get('items', {}).items():
-              if not isinstance(row, dict):
-                  continue
-              username = str(row.get('username') or '').strip().casefold()
-              if username not in {'carmine', 'bones'}:
-                  continue
-              result = row.get('result') if isinstance(row.get('result'), dict) else {}
-              output.append({
-                  'portfolio_id': portfolio_id,
-                  'username': row.get('username'),
-                  'status': row.get('status'),
-                  'wallet': row.get('wallet'),
-                  'candidate': row.get('candidate'),
-                  'confidence': row.get('confidence'),
-                  'evidence_count': row.get('evidence_count'),
-                  'attempted_at': row.get('attempted_at'),
-                  'next_retry_at': row.get('next_retry_at'),
-                  'result': {
-                      'status': result.get('status'),
-                      'wallet': result.get('wallet'),
-                      'candidate': result.get('candidate'),
-                      'confidence': result.get('confidence'),
-                      'input_trades': result.get('input_trades'),
-                      'discovery_matches': result.get('discovery_matches'),
-                      'discovery_anchors': result.get('discovery_anchors'),
-                      'candidate_unique': result.get('candidate_unique'),
-                      'historical_matches': result.get('historical_matches'),
-                      'historical_attempted': result.get('historical_attempted'),
-                      'verification_source': result.get('verification_source'),
-                      'median_clock_offset_ms': result.get('median_clock_offset_ms'),
-                      'median_price_bps': result.get('median_price_bps'),
-                      'report_path': result.get('report_path'),
-                  },
-              })
-          print(json.dumps(output, indent=2, sort_keys=True))
-          PY
+          OLD=/mnt/HC_Volume_106576526/hyperliquid/postgresql
+          echo '=== CURRENT_POSTGRES_MOUNT ==='
+          df -h /var/lib/postgresql/14/main "$OLD" || true
+          findmnt /var/lib/postgresql/14/main || true
+          findmnt "$OLD" || true
+          echo '=== POSTGRES_DATA_DIRECTORY ==='
+          sudo -u postgres psql -Atqc 'show data_directory;' || true
+          sudo -u postgres psql -Atqc 'select version();' || true
+          echo '=== OLD_TREE_METADATA ==='
+          ls -ld "$OLD" "$OLD/14" "$OLD/14/main" 2>/dev/null || true
+          du -sh "$OLD" 2>/dev/null || true
+          echo '=== OLD_TREE_RECENT_FILES ==='
+          find "$OLD" -xdev -type f -printf '%TY-%Tm-%Td %TH:%TM:%TS %s %p\n' 2>/dev/null | sort | tail -n 20 || true
+          echo '=== OPEN_REFERENCES ==='
+          fuser -vm "$OLD" 2>&1 || true
+          echo '=== CONFIG_REFERENCES ==='
+          grep -R -n -F '/mnt/HC_Volume_106576526/hyperliquid/postgresql' \
+            /etc/systemd/system /etc/postgresql /root/hyperliquid-copy-engine \
+            2>/dev/null | head -n 100 || true
+          echo '=== LIVE_CLUSTER_RECENT_FILES ==='
+          find /var/lib/postgresql/14/main -xdev -type f -printf '%TY-%Tm-%Td %TH:%TM:%TS %s %p\n' 2>/dev/null | sort | tail -n 10 || true
