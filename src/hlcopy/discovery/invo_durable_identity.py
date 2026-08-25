@@ -89,7 +89,11 @@ def _verified_report(path: Path) -> dict[str, str] | None:
     if resolver_rule != EXPECTED_RULE:
         return None
     safety = payload.get("safety")
-    if not isinstance(safety, Mapping) or any(safety.get(key) is not True for key in _REQUIRED_SAFETY):
+    missing_safety = (
+        not isinstance(safety, Mapping)
+        or any(safety.get(key) is not True for key in _REQUIRED_SAFETY)
+    )
+    if missing_safety:
         raise ValueError(f"verified report lacks required identity safety proof: {path}")
     identity = str(payload.get("source_identity") or "").strip()
     wallet = str(payload.get("wallet") or "").strip().lower()
