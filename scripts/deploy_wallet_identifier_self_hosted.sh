@@ -75,13 +75,20 @@ service_result() {
 
 run_checked() {
   local unit="$1"
-  echo "=== starting ${unit} ==="
-  systemctl start "${unit}"
   local result
+  echo "=== starting ${unit} ==="
+  if ! systemctl start "${unit}"; then
+    result="$(service_result "${unit}")"
+    echo "${unit} start failed: ${result}" >&2
+    systemctl status "${unit}" --no-pager -l >&2 || true
+    journalctl -u "${unit}" -n 120 --no-pager >&2 || true
+    exit 1
+  fi
   result="$(service_result "${unit}")"
   if [[ "${result}" != "success" ]]; then
     echo "${unit} failed: ${result}" >&2
-    journalctl -u "${unit}" -n 80 --no-pager >&2
+    systemctl status "${unit}" --no-pager -l >&2 || true
+    journalctl -u "${unit}" -n 120 --no-pager >&2 || true
     exit 1
   fi
 }
