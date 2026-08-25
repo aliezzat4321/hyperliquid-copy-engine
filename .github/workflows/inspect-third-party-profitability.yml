@@ -71,4 +71,3 @@ jobs:
               })
           print('THIRD_PARTY_PROFITABILITY=' + json.dumps(output, sort_keys=True))
           PY
-PY
