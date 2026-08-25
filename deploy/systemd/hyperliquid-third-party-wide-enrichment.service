@@ -1,0 +1,31 @@
+[Unit]
+Description=Third-party wallet fill enrichment worker
+After=network-online.target hyperliquid-third-party-wide-watch.service
+Wants=network-online.target hyperliquid-third-party-wide-watch.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root/hyperliquid-copy-engine
+EnvironmentFile=/root/hyperliquid-copy-engine/.env
+Environment=REAL_TRADING_ENABLED=NO
+ExecStart=/root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.shadow.wide_enrich_cli_live \
+  --source-dir /var/lib/hyperliquid-copy-engine/third-party/wide-trades \
+  --output-dir /var/lib/hyperliquid-copy-engine/third-party/wide-enriched \
+  --checkpoint /var/lib/hyperliquid-copy-engine/third-party/wide-enriched/checkpoint.json \
+  --poll-seconds 0.5 \
+  --query-window-ms 2000 \
+  --max-event-age-ms 10000
+Restart=always
+RestartSec=5
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/var/lib/hyperliquid-copy-engine/third-party
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
