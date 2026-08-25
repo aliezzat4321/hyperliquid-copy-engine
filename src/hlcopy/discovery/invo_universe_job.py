@@ -60,7 +60,10 @@ def _load_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
 def _save_json(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.write_text(
+        json.dumps(value, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     temporary.replace(path)
 
 
@@ -228,7 +231,12 @@ def _owner_metrics(social_rows: list[dict[str, object]]) -> dict[str, dict[str, 
     return dict(output)
 
 
-def _screen_score(row: Mapping[str, object], *, evidence_count: int, owner_stats: Mapping[str, int]) -> float:
+def _screen_score(
+    row: Mapping[str, object],
+    *,
+    evidence_count: int,
+    owner_stats: Mapping[str, int],
+) -> float:
     closed = int(row.get("closed_positions") or 0)
     win_rate = float(row.get("win_rate") or 0.0)
     percent_change = float(row.get("percent_change") or 0.0)
@@ -268,7 +276,6 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
     portfolios: dict[str, dict[str, object]] = {}
     social_rows: list[dict[str, object]] = []
     trade_events: list[dict[str, object]] = []
-    trending_users: list[Mapping[str, Any]] = []
     owner_priority: dict[str, int] = defaultdict(int)
     now_s = int(time.time())
 
@@ -307,7 +314,6 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
             page = _page_items(payload)
             if not page:
                 break
-            trending_users.extend(page)
             for row in page:
                 if not isinstance(row, Mapping):
                     continue
@@ -345,9 +351,16 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
         tasks = []
         for owner_id in ordered_owners:
             cached = profile_cache.get(owner_id)
-            cached_at = int(cached.get("fetched_at_s", 0)) if isinstance(cached, Mapping) else 0
-            cached_rows = cached.get("portfolios", []) if isinstance(cached, Mapping) else []
-            if cached_at and now_s - cached_at < PROFILE_REFRESH_SECONDS and isinstance(cached_rows, list):
+            cached_at = (
+                int(cached.get("fetched_at_s", 0))
+                if isinstance(cached, Mapping)
+                else 0
+            )
+            cached_rows = (
+                cached.get("portfolios", []) if isinstance(cached, Mapping) else []
+            )
+            cache_fresh = cached_at and now_s - cached_at < PROFILE_REFRESH_SECONDS
+            if cache_fresh and isinstance(cached_rows, list):
                 for row in cached_rows:
                     if isinstance(row, Mapping):
                         _merge_portfolio(portfolios, row, surface="profile:user")
@@ -386,8 +399,16 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
         for row in portfolios.values()
     ]
     with InvoRecordStore(store_path) as store:
-        stored_events = store.upsert("events", list(events_by_post.values()), key_field="post_id")
-        stored_evidence = store.upsert("evidence", evidence_rows, key_field="source_post_id")
+        stored_events = store.upsert(
+            "events",
+            list(events_by_post.values()),
+            key_field="post_id",
+        )
+        stored_evidence = store.upsert(
+            "evidence",
+            evidence_rows,
+            key_field="source_post_id",
+        )
         evidence_counts = {
             portfolio_id: len(rows) for portfolio_id, rows in store.evidence_groups()
         }
@@ -413,10 +434,18 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
     ranked: list[dict[str, object]] = []
     for portfolio_id, row in portfolios.items():
         owner_id = str(row.get("owner_id") or "").strip()
-        evidence_count = evidence_counts.get(portfolio_id, int(row.get("evidence_count") or 0))
-        stats = owner_stats.get(owner_id, {"social_posts": 0, "verified_trade_posts": 0})
+        evidence_count = evidence_counts.get(
+            portfolio_id,
+            int(row.get("evidence_count") or 0),
+        )
+        stats = owner_stats.get(
+            owner_id,
+            {"social_posts": 0, "verified_trade_posts": 0},
+        )
         surfaces = row.get("surfaces")
-        surface_set = set(surfaces) if isinstance(surfaces, (set, list, tuple)) else set()
+        surface_set = (
+            set(surfaces) if isinstance(surfaces, (set, list, tuple)) else set()
+        )
         if evidence_count >= EVIDENCE_THRESHOLD:
             stage = "READY_FOR_WALLET_RESOLUTION"
         elif evidence_count > 0 or stats.get("verified_trade_posts", 0) > 0:
@@ -446,7 +475,11 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
         )
     ranked.sort(key=lambda row: float(row["screen_score"]), reverse=True)
 
-    portfolio_owner_ids = {str(row.get("owner_id") or "") for row in ranked}
+    portfolio_owner_ids = {
+        str(row.get("owner_id") or "").strip()
+        for row in ranked
+        if str(row.get("owner_id") or "").strip()
+    }
     discovered_owner_ids = {owner_id for owner_id in owner_priority if owner_id}
     payload = {
         "source": "invo",
@@ -480,7 +513,9 @@ async def _main() -> int:
             {
                 "candidate_portfolio_count": payload["candidate_portfolio_count"],
                 "candidate_owner_count": payload["candidate_owner_count"],
-                "ready_for_wallet_resolution": payload["ready_for_wallet_resolution"],
+                "ready_for_wallet_resolution": payload[
+                    "ready_for_wallet_resolution"
+                ],
                 "resolution_queue_count": payload["resolution_queue_count"],
                 "new_verified_trade_events": payload["new_verified_trade_events"],
                 "new_closed_trade_evidence": payload["new_closed_trade_evidence"],
