@@ -1,0 +1,22 @@
+[Unit]
+Description=Sync verified third-party identities into research-only wallet registry
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/hyperliquid-copy-engine
+Environment=REAL_TRADING_ENABLED=NO
+ExecStart=/root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.third_party.registry_sync \
+  --publication invo=/var/lib/hyperliquid-copy-engine/invo/identified_wallets.json \
+  --registry /var/lib/hyperliquid-copy-engine/third-party/wallets.json
+User=root
+Group=root
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/var/lib/hyperliquid-copy-engine/third-party
+RestrictSUIDSGID=true
