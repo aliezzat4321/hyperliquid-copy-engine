@@ -1,0 +1,63 @@
+name: probe-invo-feed-filters
+
+on:
+  push:
+    branches:
+      - agent/probe-invo-feed-filters-v1
+    paths:
+      - .github/workflows/probe-invo-feed-filters.yml
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: self-hosted
+    timeout-minutes: 5
+    steps:
+      - name: Probe read-only Invo feed filters
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -a
+          source /etc/hyperliquid-copy-engine/invo.env
+          set +a
+          cd /root/hyperliquid-copy-engine
+          .venv/bin/python - <<'PY'
+          import asyncio
+          import json
+          import os
+
+          from hlcopy.discovery.invo_source import InvoReadOnlyClient
+
+          async def main():
+              results = []
+              async with InvoReadOnlyClient(
+                  access_token=os.getenv("INVO_ACCESS_TOKEN"),
+                  refresh_token=os.getenv("INVO_REFRESH_TOKEN"),
+                  retry_attempts=1,
+              ) as client:
+                  for name in ("recent", "trending", "following", "all"):
+                      try:
+                          payload = await client.feed(
+                              filter_name=name,
+                              last_post_id=None,
+                              item_limit=20,
+                          )
+                          items = payload.get("items")
+                          results.append({
+                              "filter": name,
+                              "ok": True,
+                              "item_count": len(items) if isinstance(items, list) else None,
+                          })
+                      except Exception as exc:
+                          results.append({
+                              "filter": name,
+                              "ok": False,
+                              "error": f"{type(exc).__name__}: {exc}",
+                          })
+              print("INVO_FEED_FILTER_PROBE")
+              print(json.dumps(results, indent=2, sort_keys=True))
+
+          asyncio.run(main())
+          PY
