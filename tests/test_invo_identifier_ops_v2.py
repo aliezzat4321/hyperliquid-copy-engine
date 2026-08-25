@@ -12,6 +12,9 @@ def test_source_miner_triggers_identifier_and_bootstrap_installs_it() -> None:
     bootstrap = Path("scripts/bootstrap_invo_source_miner.sh").read_text(encoding="utf-8")
 
     assert "OnSuccess=hyperliquid-invo-wallet-identifier.service" in source
+    assert "--feed-filter following" in source
+    assert "--resolution-min-trades 20" in source
+    assert "--backfill-pages 50" in source
     assert "REAL_TRADING_ENABLED=NO" in identifier
     assert "--priority-trader carmine --priority-trader bones" in identifier
     lock_path = "/run/hyperliquid-copy-engine/invo-pipeline.lock"

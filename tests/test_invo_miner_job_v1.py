@@ -6,12 +6,14 @@ from pathlib import Path
 import pytest
 
 from hlcopy.discovery.invo_miner_job import (
+    DEFAULT_FEED_FILTER,
     _bounded_seen_history,
     _collect_new_feed_events,
     _load_state,
     _merge_recent_history,
     _migrate_recent_state,
     _page_items,
+    _prepare_feed_state,
     _recent_scan_known_ids,
 )
 from hlcopy.discovery.invo_source import InvoApiError
@@ -40,7 +42,7 @@ class _FakeClient:
         last_post_id: str | None,
         item_limit: int,
     ) -> dict[str, object]:
-        assert filter_name == "all"
+        assert filter_name == DEFAULT_FEED_FILTER == "following"
         assert item_limit == 50
         self.calls.append(last_post_id)
         if last_post_id is None:
@@ -83,7 +85,7 @@ class _CatchupClient:
         last_post_id: str | None,
         item_limit: int,
     ) -> dict[str, object]:
-        assert filter_name == "all"
+        assert filter_name == "following"
         assert item_limit == 2
         self.calls.append(last_post_id)
         return {"items": [_post(post_id) for post_id in self.pages.get(last_post_id, [])]}
@@ -228,6 +230,30 @@ def test_legacy_recent_rebuild_ignores_global_dedup_only_for_first_head_scan() -
         global_known,
         has_separated_recent_history=True,
     ) == global_known
+
+
+def test_feed_filter_change_resets_only_walk_state() -> None:
+    state = {
+        "feed_filter": "all",
+        "seen_post_ids": ["old"],
+        "recent_seen_post_ids": ["old"],
+        "recent_cursor": "cursor",
+        "recent_frontier_ids": ["frontier"],
+        "backfill_cursor": "backfill",
+        "backfill_complete": True,
+        "legacy_archive_imported": True,
+    }
+
+    migrated = _prepare_feed_state(state, feed_filter="following")
+
+    assert migrated["feed_filter"] == "following"
+    assert migrated["seen_post_ids"] == []
+    assert migrated["recent_seen_post_ids"] == []
+    assert migrated["recent_cursor"] is None
+    assert migrated["recent_frontier_ids"] == []
+    assert migrated["backfill_cursor"] is None
+    assert migrated["backfill_complete"] is False
+    assert migrated["legacy_archive_imported"] is True
 
 
 def test_malformed_page_fails_closed() -> None:
