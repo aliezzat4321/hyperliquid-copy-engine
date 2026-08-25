@@ -203,6 +203,17 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
                 continue
         pending.append((row, evidence_path, snapshot))
 
+    # Revoke stale digests and resolver-rule versions before any network await. A
+    # slow or failed SQD lookup must never leave a legacy identity published.
+    _save_object(
+        identities_path,
+        _summary_payload(
+            items,
+            active_portfolio_ids=active_portfolio_ids,
+            current_evidence_sha256=current_evidence_sha256,
+        ),
+    )
+
     attempted = 0
     verified = 0
     unresolved = 0

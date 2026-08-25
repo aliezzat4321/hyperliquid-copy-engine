@@ -400,6 +400,10 @@ def test_verified_identity_from_old_resolver_rules_is_rechecked_and_unpublished(
 
     async def fake_identify(path: Path, **_: object) -> WalletIdentificationResult:
         assert path == evidence
+        identities = json.loads(
+            (state_dir / "identified_wallets.json").read_text(encoding="utf-8")
+        )
+        assert identities["verified_count"] == 0
         return _unresolved()
 
     monkeypatch.setattr(invo_identifier_job, "SqdHyperliquidFillsClient", _FakeClient)
