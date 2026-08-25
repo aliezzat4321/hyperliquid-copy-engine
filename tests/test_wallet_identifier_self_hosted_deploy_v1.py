@@ -21,6 +21,7 @@ def test_self_hosted_deploy_script_is_fail_closed() -> None:
     assert "git diff --quiet" in script
     assert "git diff --cached --quiet" in script
     assert "mountpoint -q" in script
+    assert 'install -d -m 0700 -o root -g root "${STATE_DIR}"' in script
     assert "systemd-analyze verify" in script
     assert "hyperliquid-invo-wallet-identifier.service" in script
     assert "hyperliquid-invo-verified-shadow-sync.service" in script

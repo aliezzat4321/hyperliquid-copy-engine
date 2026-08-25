@@ -29,6 +29,10 @@ if ! mountpoint -q "${VOLUME_MOUNT}"; then
   exit 1
 fi
 
+# ReadWritePaths in the hardened systemd units requires the target to exist before
+# systemd builds the service mount namespace. A clean VM may not have this yet.
+install -d -m 0700 -o root -g root "${STATE_DIR}"
+
 cd "${REPO_DIR}"
 if ! git diff --quiet || ! git diff --cached --quiet; then
   echo "refusing deployment because ${REPO_DIR} has tracked local changes" >&2
