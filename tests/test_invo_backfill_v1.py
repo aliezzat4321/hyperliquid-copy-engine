@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 
-from hlcopy.discovery.invo_miner_job import _collect_backfill_feed_events
+from hlcopy.discovery.invo_miner_job import (
+    DEFAULT_FEED_FILTER,
+    _collect_backfill_feed_events,
+)
 
 
 class _BackfillClient:
@@ -13,7 +16,7 @@ class _BackfillClient:
         last_post_id: str | None,
         item_limit: int,
     ) -> dict[str, object]:
-        assert filter_name == "all"
+        assert filter_name == DEFAULT_FEED_FILTER == "following"
         assert item_limit == 50
         if last_post_id is None:
             return {
