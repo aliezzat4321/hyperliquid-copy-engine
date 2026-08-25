@@ -39,7 +39,7 @@ jobs:
           OUT=/root/hyperliquid-audit/funnel
           echo
           echo "========== CHECKPOINT COUNTS =========="
-          for f in screening.jsonl confirmations.jsonl realized_slices.jsonl; do
+          for f in screening.jsonl confirmation.jsonl realized_slices.jsonl; do
             if [[ -f "$OUT/$f" ]]; then
               printf '%s=' "$f"
               wc -l < "$OUT/$f"
@@ -65,18 +65,18 @@ jobs:
               else:
                   print('report=READY')
                   for key in (
-                      'screened_count',
+                      'screened_cohort_count',
                       'positive_screen_count',
-                      'confirmed_count',
+                      'confirmed_row_count',
                       'robust_candidate_count',
                   ):
                       print(f'{key}={d.get(key)}')
-                  rows = d.get('top_robust_candidates') or []
+                  rows = d.get('robust_candidates') or []
                   for i, row in enumerate(rows[:10], 1):
                       print(
                           f"TOP{i} wallet={str(row.get('wallet_address',''))[:14]} "
                           f"coin={row.get('coin')} notional={row.get('notional_usd')} "
-                          f"worst_bps={row.get('worst_return_bps')} "
+                          f"worst_bps={row.get('worst_latency_return_bps')} "
                           f"actions={row.get('actions_floor')}"
                       )
           PY
