@@ -245,7 +245,7 @@ def test_final_flatten_fallback_requires_absolute_source_size() -> None:
             sz="0.4",
             time_ms=1_999_000,
             direction="Close Long",
-            oid="close",
+            oid="partial-close",
             start_position="1",
         ),
         _fill(
@@ -253,7 +253,7 @@ def test_final_flatten_fallback_requires_absolute_source_size() -> None:
             sz="0.6",
             time_ms=2_000_000,
             direction="Close Long",
-            oid="close",
+            oid="final-close",
             start_position="0.6",
         ),
     ]

@@ -243,6 +243,8 @@ def _public_trade_matches(
     max_size_ratio_error: Decimal = DEFAULT_MAX_SIZE_RATIO_ERROR,
 ) -> dict[str, AnchorMatch]:
     target_size = signal_position_size(signal)
+    if target_size is None:
+        return {}
     candidates: list[IndexedCompletedTrade] = []
     for close in aggregate_close_fills(fills, direction=signal.direction):
         time_error = min(
@@ -251,10 +253,9 @@ def _public_trade_matches(
         )
         if time_error > window_ms:
             continue
-        if target_size is not None:
-            size_error = abs(close.size / target_size - D("1"))
-            if size_error > max_size_ratio_error:
-                continue
+        size_error = abs(close.size / target_size - D("1"))
+        if size_error > max_size_ratio_error:
+            continue
         trade_id = _close_execution_id(close, fills, direction=signal.direction)
         if trade_id is None:
             continue
@@ -290,8 +291,6 @@ def _public_trade_matches(
             continue
         exit_bps = _price_bps(signal.exit_price, fill.px)
         if exit_bps > max_price_bps:
-            continue
-        if target_size is None:
             continue
         size_error = abs(fill.sz / target_size - D("1"))
         if size_error > max_size_ratio_error:
