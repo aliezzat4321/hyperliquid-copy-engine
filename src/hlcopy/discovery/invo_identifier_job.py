@@ -160,14 +160,24 @@ def _summary_payload(
 
 
 async def run_once(args: argparse.Namespace) -> dict[str, object]:
-    if os.getenv("REAL_TRADING_ENABLED", "NO").strip().upper() == "YES":
-        raise RuntimeError("Invo wallet identifier refuses REAL_TRADING_ENABLED=YES")
-
     state_dir: Path = args.state_dir
     queue_path = state_dir / "resolution_queue" / "resolution_queue.json"
     identifier_state_path = state_dir / "identifier_state.json"
     identities_path = state_dir / "identified_wallets.json"
     reports_dir = state_dir / "wallet_identifications"
+
+    # Revoke the published view before parsing queue/state or reading evidence. Any
+    # malformed or missing input must fail closed instead of preserving old output.
+    _save_object(
+        identities_path,
+        _summary_payload(
+            {},
+            active_portfolio_ids=set(),
+            current_evidence_sha256={},
+        ),
+    )
+    if os.getenv("REAL_TRADING_ENABLED", "NO").strip().upper() == "YES":
+        raise RuntimeError("Invo wallet identifier refuses REAL_TRADING_ENABLED=YES")
 
     queue_payload = _load_object(queue_path, missing={"queue": []})
     queue = _sort_queue(

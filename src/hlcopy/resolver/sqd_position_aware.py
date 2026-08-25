@@ -262,6 +262,13 @@ def _match_from_boundary(
     entry_time_error = abs(boundary.time_ms - signal.opened_at_ms)
     source_size = signal_position_size(signal)
     boundary_execution_id = fill_execution_id(boundary)
+    if source_size is None:
+        return _failed(
+            signal.signal_id,
+            entry_time_error_ms=entry_time_error,
+            boundary_execution_id=boundary_execution_id,
+            rejection_reason="missing_absolute_source_size",
+        )
 
     ordered = _ordered_wallet_coin_fills(
         fills,
@@ -372,7 +379,7 @@ def _match_from_boundary(
         close_price_bps = _price_bps(signal.exit_price, reconstructed_exit)
         reconstructed_entry = gross_entry_notional / gross_entry_size
         entry_price_bps = _price_bps(signal.entry_price, reconstructed_entry)
-        target_size = source_size if source_size is not None else close_size
+        target_size = source_size
         close_size_error = abs(close_size / target_size - D("1"))
         entry_size_error = abs(gross_entry_size / target_size - D("1"))
         lifecycle_balance_error = abs(gross_entry_size - close_size) / gross_entry_size
@@ -422,6 +429,8 @@ def match_episode(
     entry_time_tolerance_ms: int,
     entry_price_tolerance_bps: Decimal,
 ) -> LifecycleEpisodeEvidence:
+    if signal_position_size(signal) is None:
+        return _failed(signal.signal_id, rejection_reason="missing_absolute_source_size")
     open_name, _, _, _, _ = _direction_names(signal.direction)
     order_index = {id(fill): index for index, fill in enumerate(fills)}
     boundaries = [

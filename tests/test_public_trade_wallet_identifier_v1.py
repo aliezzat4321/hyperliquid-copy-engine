@@ -258,7 +258,7 @@ def test_full_position_episode_reconstructs_from_partial_fills() -> None:
     assert evidence.reconstructed_entry == D("100")
 
 
-def test_no_source_size_still_requires_entry_reconstruction() -> None:
+def test_no_source_size_rejects_lifecycle_verification() -> None:
     fills = [
         _fill(
             px="99", sz="0.5", time_ms=1_000_000, direction="Open Long", oid="1", start_position="0"
@@ -297,9 +297,8 @@ def test_no_source_size_still_requires_entry_reconstruction() -> None:
         entry_time_tolerance_ms=5_000,
         entry_price_tolerance_bps=D("5"),
     )
-    assert evidence.matched
-    assert evidence.reconstructed_size == D("1.0")
-    assert evidence.reconstructed_entry == D("100")
+    assert not evidence.matched
+    assert evidence.rejection_reason == "missing_absolute_source_size"
 
     wrong_entry = match_episode(
         _signal(entry_price="105", raw={}),
@@ -311,7 +310,7 @@ def test_no_source_size_still_requires_entry_reconstruction() -> None:
         entry_price_tolerance_bps=D("5"),
     )
     assert not wrong_entry.matched
-    assert wrong_entry.entry_price_bps is not None
+    assert wrong_entry.rejection_reason == "missing_absolute_source_size"
 
 
 def test_episode_rejects_right_price_at_wrong_entry_time() -> None:

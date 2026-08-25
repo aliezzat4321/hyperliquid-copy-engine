@@ -425,3 +425,46 @@ def test_verified_identity_from_old_resolver_rules_is_rechecked_and_unpublished(
         (state_dir / "identified_wallets.json").read_text(encoding="utf-8")
     )
     assert identities["verified_count"] == 0
+
+
+def test_invalid_evidence_path_revokes_previously_published_identity(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "invo"
+    queue_dir = state_dir / "resolution_queue"
+    queue_dir.mkdir(parents=True)
+    (queue_dir / "resolution_queue.json").write_text(
+        json.dumps(
+            {
+                "queue": [
+                    {
+                        "portfolio_id": "carmine-id",
+                        "username": "carmine",
+                        "resolver_csv": str(queue_dir / "missing.csv"),
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (state_dir / "identified_wallets.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "source": "invo",
+                "verified_count": 1,
+                "identities": [{"wallet": "0x" + "7" * 40}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = Namespace(state_dir=state_dir, max_portfolios=1, priority_trader=[])
+
+    with pytest.raises(ValueError, match="resolver evidence does not exist"):
+        asyncio.run(invo_identifier_job.run_once(args))
+
+    identities = json.loads(
+        (state_dir / "identified_wallets.json").read_text(encoding="utf-8")
+    )
+    assert identities["verified_count"] == 0
+    assert identities["identities"] == []
