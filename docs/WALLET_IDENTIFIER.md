@@ -13,6 +13,46 @@ Invo is the first adapter. Carmine and Bones are processed first, followed by th
 the ready Invo queue. Adding another third party should require a new read-only collector
 that emits the same resolver CSV, not another wallet-matching engine.
 
+## Two-tier identity proof
+
+The identifier chooses the strongest proof mode supported by the source evidence; it never
+converts an allocation percentage into a fake contract quantity.
+
+### Tier A — absolute-size proof
+
+When every source trade contains a trustworthy absolute position size, the existing strict
+resolver is used unchanged. Discovery and held-out verification require size agreement in
+addition to coin, direction, time, price, flat-to-open boundary reconstruction, complete
+position lifecycle replay and a unique held-out winner.
+
+### Tier B — size-agnostic sequence proof
+
+Sources such as Invo currently expose `entrySize` as an allocation percentage, not an
+absolute Hyperliquid quantity. Those rows use a separate stronger sequence gate instead of
+being permanently `UNRESOLVED` or weakening the Tier A matcher:
+
+- at least 20 independent closed trades are required;
+- eight source-selected discovery anchors are queried against SQD;
+- a discovery vote can come only from a `startPosition`-proven final flatten matching the
+  source coin, direction, close time and close price;
+- at least four discovery anchors must identify the same candidate, with bounded close-clock
+  dispersion and price error;
+- discovery is candidate generation only and can never verify a wallet;
+- twelve disjoint held-out trades are replayed against candidate-specific SQD fills;
+- held-out matches must reconstruct a complete flat-to-open-to-flat lifecycle, including
+  scale-ins and partial reductions, with continuous `startPosition`, entry/exit price and
+  time agreement, exact internal size balance and stable source-vs-Hyperliquid close-clock
+  offset;
+- discovery executions and held-out lifecycles cannot be reused;
+- verification requires at least five of twelve held-out matches, at least a 40% held-out
+  match ratio, and a two-match lead over the strongest runner-up;
+- more than six discovery finalists fails closed rather than widening verification work;
+- mixed absolute-size and size-unknown evidence fails closed instead of switching proof
+  semantics inside one identity run.
+
+These requirements are intentionally stronger than the minimum Tier A evidence counts because
+Tier B does not have source quantity as an identity feature.
+
 ## Continuous flow
 
 `hyperliquid-invo-source-miner.timer` runs the read-only collector every five minutes. A
@@ -57,7 +97,8 @@ credential if replacement authentication fails. The wallet identifier refuses to
 
 ## Current starting identities
 
-Bones has already passed strict production acceptance as
-`0x565590f4d2b00b567a564f56b13f898392aef180`. Carmine remains an Invo-priority target and
-will be recorded only when the same strict public-data identity gate returns a unique held-out
-winner.
+Bones previously passed strict production acceptance as
+`0x565590f4d2b00b567a564f56b13f898392aef180`. The current continuous service still requires
+Bones to pass the current evidence digest and resolver-rule gate before publication. Carmine
+remains the first Invo priority target and is published only if the applicable Tier A or Tier B
+public-data identity proof returns a unique held-out winner.

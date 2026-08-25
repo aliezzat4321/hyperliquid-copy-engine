@@ -10,14 +10,16 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from hlcopy.resolver.identifier import identify_wallet_from_csv
 from hlcopy.resolver.provenance import EvidenceSnapshot
+from hlcopy.resolver.size_agnostic_identifier import (
+    identify_wallet_from_csv_size_aware as identify_wallet_from_csv,
+)
 from hlcopy.resolver.sqd_position_aware import SqdHyperliquidFillsClient
 
 DEFAULT_STATE_DIR = Path("/var/lib/hyperliquid-copy-engine/invo")
 DEFAULT_PRIORITY_TRADERS = ("carmine", "bones")
 DEFAULT_UNRESOLVED_RETRY_MINUTES = 60
-RESOLVER_RULE_VERSION = "sqd-public-trade-v2-absolute-size"
+RESOLVER_RULE_VERSION = "sqd-public-trade-v3-size-aware-sequence"
 
 
 def _parse_args() -> argparse.Namespace:
