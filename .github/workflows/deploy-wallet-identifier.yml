@@ -1,0 +1,43 @@
+name: deploy-wallet-identifier
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "src/hlcopy/discovery/**"
+      - "deploy/systemd/hyperliquid-invo-*.service"
+      - "deploy/systemd/hyperliquid-invo-source-miner.timer"
+      - "scripts/deploy_wallet_identifier_self_hosted.sh"
+      - ".github/workflows/deploy-wallet-identifier.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hyperliquid-wallet-identifier-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.repository == 'aliezzat4321/hyperliquid-copy-engine'
+    runs-on: self-hosted
+    timeout-minutes: 130
+    steps:
+      - name: Checkout canonical main
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          clean: true
+
+      - name: Deploy and run wallet identifier pipeline
+        shell: bash
+        run: |
+          set -euo pipefail
+          script="$GITHUB_WORKSPACE/scripts/deploy_wallet_identifier_self_hosted.sh"
+          if [[ "$(id -u)" -eq 0 ]]; then
+            bash "$script"
+          else
+            sudo -n bash "$script"
+          fi
