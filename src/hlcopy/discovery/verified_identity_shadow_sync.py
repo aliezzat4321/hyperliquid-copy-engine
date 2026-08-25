@@ -144,6 +144,21 @@ def _revoke_stale_managed(
     return revoked
 
 
+def _capacity_waiting(
+    registry: WalletRegistry,
+    wallet_id: str,
+    *,
+    notes: str,
+) -> str:
+    registry.update(
+        wallet_id,
+        stage="research",
+        enabled=True,
+        notes=notes,
+    )
+    return "capacity_waiting"
+
+
 def _activate_managed(
     registry: WalletRegistry,
     row: Mapping[str, str],
@@ -153,6 +168,18 @@ def _activate_managed(
     existing_address = _by_address(registry).get(row["wallet"])
 
     if existing_id is not None and existing_id.source_ref.lower() != row["wallet"]:
+        # A changed wallet mapping is security-sensitive. Revoke the old managed
+        # subscription before failing so a stale identity cannot remain active
+        # while operators investigate the conflicting proof.
+        registry.update(
+            existing_id.id,
+            stage="research",
+            enabled=False,
+            notes=(
+                f"{existing_id.notes}; current_verified_identity=false; "
+                f"wallet_changed_to={row['wallet']}"
+            ),
+        )
         raise ValueError(
             f"managed Invo identity {managed_id} changed wallet from "
             f"{existing_id.source_ref} to {row['wallet']}"
@@ -176,19 +203,20 @@ def _activate_managed(
             registry.update(existing_id.id, notes=_note(row))
             return "already_validation"
         if _active_count(registry) >= MAX_ACTIVE_HYPERLIQUID_USERS_PER_IP:
+            return _capacity_waiting(registry, existing_id.id, notes=_note(row))
+        try:
             registry.update(
                 existing_id.id,
-                stage="research",
+                stage="validation",
                 enabled=True,
                 notes=_note(row),
             )
-            return "capacity_waiting"
-        registry.update(
-            existing_id.id,
-            stage="validation",
-            enabled=True,
-            notes=_note(row),
-        )
+        except ValueError as exc:
+            # Another registry mutation may consume the final slot between the
+            # count and the atomic update. Fail toward research.
+            if "per-IP limit" not in str(exc):
+                raise
+            return _capacity_waiting(registry, existing_id.id, notes=_note(row))
         return "promoted_validation"
 
     stage = (
@@ -260,6 +288,7 @@ def sync_verified_identities(*, identities_path: Path, registry_path: Path) -> d
             "auto_live_approval": False,
             "new_wallet_stage": "validation_or_research_when_capacity_full",
             "stale_managed_identity_revoked": True,
+            "changed_wallet_revokes_old_before_error": True,
         },
     }
 
