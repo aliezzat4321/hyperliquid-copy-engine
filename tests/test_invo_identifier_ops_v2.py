@@ -20,3 +20,6 @@ def test_source_miner_triggers_identifier_and_bootstrap_installs_it() -> None:
     assert "RuntimeDirectory=hyperliquid-copy-engine" in identifier
     assert "IDENTIFIER_SERVICE_NAME" in bootstrap
     assert "rollback_environment" in bootstrap
+    assert 'install_rendered_unit "${SERVICE_NAME}"' in bootstrap
+    assert 'install_rendered_unit "${IDENTIFIER_SERVICE_NAME}"' in bootstrap
+    assert 's|/root/hyperliquid-copy-engine|${REPO_DIR}|g' in bootstrap

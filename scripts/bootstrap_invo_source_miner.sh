@@ -19,6 +19,11 @@ if [[ ! -d "${REPO_DIR}" ]]; then
   exit 1
 fi
 
+if [[ ! "${REPO_DIR}" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+  echo "REPO_DIR must be an absolute path containing only safe path characters." >&2
+  exit 1
+fi
+
 if [[ ! -x "${REPO_DIR}/.venv/bin/python" ]]; then
   echo "Python virtualenv not found at ${REPO_DIR}/.venv" >&2
   exit 1
@@ -69,15 +74,26 @@ chmod 0600 "${ENV_FILE}.tmp"
 mv -f "${ENV_FILE}.tmp" "${ENV_FILE}"
 unset refresh_token
 
-install -m 0644 \
-  "${REPO_DIR}/deploy/systemd/${SERVICE_NAME}" \
-  "/etc/systemd/system/${SERVICE_NAME}"
+install_rendered_unit() {
+  local unit_name="$1"
+  local source_path="${REPO_DIR}/deploy/systemd/${unit_name}"
+  local target_path="/etc/systemd/system/${unit_name}"
+  local temporary
+  temporary="$(mktemp "/etc/systemd/system/.${unit_name}.XXXXXX")"
+  if ! sed "s|/root/hyperliquid-copy-engine|${REPO_DIR}|g" \
+    "${source_path}" >"${temporary}"; then
+    rm -f "${temporary}"
+    return 1
+  fi
+  chmod 0644 "${temporary}"
+  mv -f "${temporary}" "${target_path}"
+}
+
+install_rendered_unit "${SERVICE_NAME}"
 install -m 0644 \
   "${REPO_DIR}/deploy/systemd/${TIMER_NAME}" \
   "/etc/systemd/system/${TIMER_NAME}"
-install -m 0644 \
-  "${REPO_DIR}/deploy/systemd/${IDENTIFIER_SERVICE_NAME}" \
-  "/etc/systemd/system/${IDENTIFIER_SERVICE_NAME}"
+install_rendered_unit "${IDENTIFIER_SERVICE_NAME}"
 
 systemctl daemon-reload
 
