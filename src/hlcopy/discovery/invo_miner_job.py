@@ -41,6 +41,7 @@ def _parse_args() -> argparse.Namespace:
 def _empty_state() -> dict[str, Any]:
     return {
         "seen_post_ids": [],
+        "recent_seen_post_ids": [],
         "recent_cursor": None,
         "recent_frontier_ids": [],
         "backfill_cursor": None,
@@ -59,12 +60,20 @@ def _load_state(path: Path) -> dict[str, Any]:
         raise ValueError(f"non-object Invo miner state: {path}")
     if not isinstance(payload.get("seen_post_ids"), list):
         payload["seen_post_ids"] = []
+    if not isinstance(payload.get("recent_seen_post_ids"), list):
+        payload["recent_seen_post_ids"] = []
     payload.setdefault("recent_cursor", None)
     if not isinstance(payload.get("recent_frontier_ids"), list):
         payload["recent_frontier_ids"] = []
     payload.setdefault("backfill_cursor", None)
     payload.setdefault("backfill_complete", False)
     return payload
+
+
+def _bounded_seen_history(*groups: Sequence[str]) -> list[str]:
+    return list(dict.fromkeys(value for group in groups for value in group))[
+        :MAX_SEEN_POST_IDS
+    ]
 
 
 def _save_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -276,10 +285,19 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
         for value in state.get("recent_frontier_ids", [])
         if str(value).strip()
     ]
+    recent_history_values = [
+        str(value).strip()
+        for value in state.get("recent_seen_post_ids", [])
+        if str(value).strip()
+    ]
+    if not recent_history_values:
+        # One-time compatibility fallback for state written before recent and
+        # backfill histories were separated.
+        recent_history_values = seen_values[: max(100, args.page_size * 2)]
     if recent_cursor and not frontier_values:
-        frontier_values = seen_values[: max(100, args.page_size * 2)]
+        frontier_values = recent_history_values[: max(100, args.page_size * 2)]
     if not recent_cursor:
-        frontier_values = seen_values[: max(100, args.page_size * 2)]
+        frontier_values = recent_history_values[: max(100, args.page_size * 2)]
     recent_frontier_ids = set(frontier_values)
     backfill_cursor_raw = state.get("backfill_cursor")
     backfill_cursor = str(backfill_cursor_raw) if backfill_cursor_raw else None
@@ -365,13 +383,22 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
         )
 
     active_frontier = [] if recent_complete else frontier_values
-    ordered_seen = list(
-        dict.fromkeys(recent_seen + backfill_seen + active_frontier + seen_values)
+    ordered_recent_seen = _bounded_seen_history(
+        recent_seen,
+        active_frontier,
+        recent_history_values,
+    )
+    ordered_seen = _bounded_seen_history(
+        recent_seen,
+        ordered_recent_seen,
+        backfill_seen,
+        seen_values,
     )
     _save_json(
         state_path,
         {
-            "seen_post_ids": ordered_seen[:MAX_SEEN_POST_IDS],
+            "seen_post_ids": ordered_seen,
+            "recent_seen_post_ids": ordered_recent_seen,
             "portfolio_count": len(portfolios),
             "new_verified_trade_events": stored_events,
             "new_closed_trade_evidence": stored_evidence,

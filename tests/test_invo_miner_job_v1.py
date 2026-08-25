@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from hlcopy.discovery.invo_miner_job import (
+    _bounded_seen_history,
     _collect_new_feed_events,
     _load_state,
     _page_items,
@@ -158,6 +159,17 @@ def test_active_catchup_stops_only_at_persisted_frontier() -> None:
     assert seen == ["new-1"]
     assert cursor is None
     assert complete
+
+
+def test_recent_ids_stay_ahead_of_large_backfill_history() -> None:
+    recent = ["recent-new", "recent-frontier"]
+    backfill = [f"old-{index}" for index in range(25_000)]
+
+    merged = _bounded_seen_history(recent, backfill)
+
+    assert merged[:2] == recent
+    assert len(merged) == 20_000
+    assert "recent-frontier" in merged
 
 
 def test_malformed_page_fails_closed() -> None:
