@@ -22,12 +22,19 @@ DEFAULT_UNRESOLVED_RETRY_MINUTES = 60
 RESOLVER_RULE_VERSION = "sqd-public-trade-v3-size-aware-sequence"
 
 
+class PortfolioResolutionBatchError(RuntimeError):
+    def __init__(self, message: str, *, summary: dict[str, object]) -> None:
+        super().__init__(message)
+        self.summary = summary
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Resolve ready Invo trade evidence to Hyperliquid wallets.",
     )
     parser.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
     parser.add_argument("--max-portfolios", type=int, default=4)
+    parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--priority-trader", action="append", default=[])
     parser.add_argument(
         "--unresolved-retry-minutes",
@@ -61,7 +68,9 @@ def _save_object(path: Path, payload: Mapping[str, Any]) -> None:
 
 def _priority_names(values: Sequence[str]) -> tuple[str, ...]:
     selected = values or DEFAULT_PRIORITY_TRADERS
-    return tuple(dict.fromkeys(value.removeprefix("@").strip().casefold() for value in selected))
+    return tuple(
+        dict.fromkeys(value.removeprefix("@").strip().casefold() for value in selected)
+    )
 
 
 def _normalized_name(value: object) -> str:
@@ -161,6 +170,40 @@ def _summary_payload(
     }
 
 
+async def _identify_one(
+    row: dict[str, Any],
+    evidence_path: Path,
+    snapshot: EvidenceSnapshot,
+    *,
+    reports_dir: Path,
+    semaphore: asyncio.Semaphore,
+) -> tuple[dict[str, Any], EvidenceSnapshot, str, Any | None, str | None]:
+    async with semaphore:
+        portfolio_id = str(row["portfolio_id"])
+        attempted_at = datetime.now(tz=UTC).isoformat()
+        report_key = hashlib.sha256(portfolio_id.encode("utf-8")).hexdigest()[:16]
+        try:
+            # One client per active portfolio keeps HTTP/session state isolated while
+            # the semaphore bounds aggregate pressure on SQD.
+            async with SqdHyperliquidFillsClient() as client:
+                result = await identify_wallet_from_csv(
+                    evidence_path,
+                    output_dir=reports_dir / report_key,
+                    client=client,
+                    snapshot=snapshot,
+                    expected_source_identity=portfolio_id,
+                )
+            return row, snapshot, attempted_at, result, None
+        except Exception as exc:
+            return (
+                row,
+                snapshot,
+                attempted_at,
+                None,
+                f"{type(exc).__name__}: {exc}",
+            )
+
+
 async def run_once(args: argparse.Namespace) -> dict[str, object]:
     state_dir: Path = args.state_dir
     queue_path = state_dir / "resolution_queue" / "resolution_queue.json"
@@ -226,107 +269,116 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
         ),
     )
 
-    attempted = 0
     verified = 0
     unresolved = 0
     errors = 0
     limit = max(1, int(args.max_portfolios))
-    if pending:
-        async with SqdHyperliquidFillsClient() as client:
-            for row, evidence_path, snapshot in pending[:limit]:
-                attempted += 1
-                portfolio_id = str(row["portfolio_id"])
-                evidence_sha = snapshot.sha256
-                attempted_at = datetime.now(tz=UTC).isoformat()
-                try:
-                    report_key = hashlib.sha256(portfolio_id.encode("utf-8")).hexdigest()[:16]
-                    result = await identify_wallet_from_csv(
-                        evidence_path,
-                        output_dir=reports_dir / report_key,
-                        client=client,
-                        snapshot=snapshot,
-                        expected_source_identity=portfolio_id,
-                    )
-                    result_row = result.to_dict()
-                    status = result.status
-                    if status == "VERIFIED":
-                        verified += 1
-                    else:
-                        unresolved += 1
-                    previous = items.get(portfolio_id)
-                    repeated_unresolved = (
-                        status == "UNRESOLVED"
-                        and isinstance(previous, Mapping)
-                        and previous.get("status") == "UNRESOLVED"
-                        and previous.get("evidence_sha256") == evidence_sha
-                        and previous.get("resolver_rule_version")
-                        == RESOLVER_RULE_VERSION
-                    )
-                    unresolved_attempts = (
-                        int(previous.get("unchanged_unresolved_attempts") or 0) + 1
-                        if repeated_unresolved
-                        else (1 if status == "UNRESOLVED" else 0)
-                    )
-                    retry_minutes = min(
-                        24 * 60,
-                        max(
-                            1,
-                            int(
-                                getattr(
-                                    args,
-                                    "unresolved_retry_minutes",
-                                    DEFAULT_UNRESOLVED_RETRY_MINUTES,
-                                )
-                            ),
-                        )
-                        * (2 ** max(0, unresolved_attempts - 1)),
-                    )
-                    next_retry_at = (
-                        (datetime.now(tz=UTC) + timedelta(minutes=retry_minutes)).isoformat()
-                        if status == "UNRESOLVED"
-                        else None
-                    )
-                    items[portfolio_id] = {
-                        "portfolio_id": portfolio_id,
-                        "username": row.get("username"),
-                        "portfolio_name": row.get("portfolio_name"),
-                        "status": status,
-                        "wallet": result.wallet,
-                        "candidate": result.candidate,
-                        "confidence": str(result.confidence),
-                        "evidence_count": row.get("evidence_count"),
-                        "evidence_sha256": evidence_sha,
-                        "resolver_rule_version": RESOLVER_RULE_VERSION,
-                        "attempted_at": attempted_at,
-                        "unchanged_unresolved_attempts": unresolved_attempts,
-                        "next_retry_at": next_retry_at,
-                        "result": result_row,
-                    }
-                except Exception as exc:
-                    errors += 1
-                    items[portfolio_id] = {
-                        "portfolio_id": portfolio_id,
-                        "username": row.get("username"),
-                        "portfolio_name": row.get("portfolio_name"),
-                        "status": "ERROR",
-                        "wallet": None,
-                        "candidate": None,
-                        "confidence": "0",
-                        "evidence_count": row.get("evidence_count"),
-                        "evidence_sha256": evidence_sha,
-                        "resolver_rule_version": RESOLVER_RULE_VERSION,
-                        "attempted_at": attempted_at,
-                        "error": f"{type(exc).__name__}: {exc}",
-                    }
-                _save_object(identifier_state_path, {"version": 1, "items": items})
-                _save_object(
-                    identities_path,
-                    _summary_payload(
-                        items,
-                        active_portfolio_ids=active_portfolio_ids,
-                        current_evidence_sha256=current_evidence_sha256,
-                    ),
+    selected = pending[:limit]
+    attempted = len(selected)
+    concurrency = max(1, int(getattr(args, "concurrency", 1)))
+    concurrency = min(concurrency, attempted) if attempted else 1
+
+    if selected:
+        semaphore = asyncio.Semaphore(concurrency)
+        outcomes = await asyncio.gather(
+            *(
+                _identify_one(
+                    row,
+                    evidence_path,
+                    snapshot,
+                    reports_dir=reports_dir,
+                    semaphore=semaphore,
                 )
+                for row, evidence_path, snapshot in selected
+            )
+        )
+
+        # Network work is concurrent, but all durable state publication remains
+        # single-writer and deterministic in queue order.
+        for row, snapshot, attempted_at, result, error in outcomes:
+            portfolio_id = str(row["portfolio_id"])
+            evidence_sha = snapshot.sha256
+            previous = items.get(portfolio_id)
+            if error is not None:
+                errors += 1
+                items[portfolio_id] = {
+                    "portfolio_id": portfolio_id,
+                    "username": row.get("username"),
+                    "portfolio_name": row.get("portfolio_name"),
+                    "status": "ERROR",
+                    "wallet": None,
+                    "candidate": None,
+                    "confidence": "0",
+                    "evidence_count": row.get("evidence_count"),
+                    "evidence_sha256": evidence_sha,
+                    "resolver_rule_version": RESOLVER_RULE_VERSION,
+                    "attempted_at": attempted_at,
+                    "error": error,
+                }
+            else:
+                assert result is not None
+                result_row = result.to_dict()
+                status = result.status
+                if status == "VERIFIED":
+                    verified += 1
+                else:
+                    unresolved += 1
+                repeated_unresolved = (
+                    status == "UNRESOLVED"
+                    and isinstance(previous, Mapping)
+                    and previous.get("status") == "UNRESOLVED"
+                    and previous.get("evidence_sha256") == evidence_sha
+                    and previous.get("resolver_rule_version") == RESOLVER_RULE_VERSION
+                )
+                unresolved_attempts = (
+                    int(previous.get("unchanged_unresolved_attempts") or 0) + 1
+                    if repeated_unresolved
+                    else (1 if status == "UNRESOLVED" else 0)
+                )
+                retry_minutes = min(
+                    24 * 60,
+                    max(
+                        1,
+                        int(
+                            getattr(
+                                args,
+                                "unresolved_retry_minutes",
+                                DEFAULT_UNRESOLVED_RETRY_MINUTES,
+                            )
+                        ),
+                    )
+                    * (2 ** max(0, unresolved_attempts - 1)),
+                )
+                next_retry_at = (
+                    (datetime.now(tz=UTC) + timedelta(minutes=retry_minutes)).isoformat()
+                    if status == "UNRESOLVED"
+                    else None
+                )
+                items[portfolio_id] = {
+                    "portfolio_id": portfolio_id,
+                    "username": row.get("username"),
+                    "portfolio_name": row.get("portfolio_name"),
+                    "status": status,
+                    "wallet": result.wallet,
+                    "candidate": result.candidate,
+                    "confidence": str(result.confidence),
+                    "evidence_count": row.get("evidence_count"),
+                    "evidence_sha256": evidence_sha,
+                    "resolver_rule_version": RESOLVER_RULE_VERSION,
+                    "attempted_at": attempted_at,
+                    "unchanged_unresolved_attempts": unresolved_attempts,
+                    "next_retry_at": next_retry_at,
+                    "result": result_row,
+                }
+            _save_object(identifier_state_path, {"version": 1, "items": items})
+            _save_object(
+                identities_path,
+                _summary_payload(
+                    items,
+                    active_portfolio_ids=active_portfolio_ids,
+                    current_evidence_sha256=current_evidence_sha256,
+                ),
+            )
 
     if not identifier_state_path.exists():
         _save_object(identifier_state_path, {"version": 1, "items": items})
@@ -338,20 +390,24 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
             current_evidence_sha256=current_evidence_sha256,
         ),
     )
-    if errors > 0:
-        raise RuntimeError(
-            f"{errors} of {attempted} Invo wallet identification attempts failed"
-        )
-    return {
+    summary: dict[str, object] = {
         "queue_ready": len(queue),
         "pending": len(pending),
         "attempted": attempted,
         "verified": verified,
         "unresolved": unresolved,
         "errors": errors,
+        "partial_failure": errors > 0,
+        "concurrency": concurrency,
         "priority_traders": list(_priority_names(args.priority_trader)),
         "state_dir": str(state_dir),
     }
+    if errors > 0:
+        raise PortfolioResolutionBatchError(
+            f"{errors} of {attempted} Invo wallet identification attempts failed",
+            summary=summary,
+        )
+    return summary
 
 
 async def _main() -> int:

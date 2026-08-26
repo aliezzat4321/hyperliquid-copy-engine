@@ -1,0 +1,148 @@
+from __future__ import annotations
+
+import asyncio
+import json
+from argparse import Namespace
+from decimal import Decimal
+from pathlib import Path
+
+from hlcopy.discovery import invo_identifier_durable_job, invo_identifier_job
+from hlcopy.resolver.identifier import WalletIdentificationResult
+
+
+class _FakeClient:
+    async def __aenter__(self) -> _FakeClient:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        return None
+
+
+def _result(wallet: str) -> WalletIdentificationResult:
+    return WalletIdentificationResult(
+        status="VERIFIED",
+        wallet=wallet,
+        candidate=wallet,
+        confidence=Decimal("0.75"),
+        input_trades=20,
+        rejected_rows=0,
+        discovery_matches=4,
+        discovery_anchors=8,
+        candidate_unique=True,
+        historical_matches=5,
+        historical_attempted=12,
+        verification_source="sqd_finalized_fills",
+        median_clock_offset_ms=1000.0,
+        median_price_bps=Decimal("1.5"),
+        report_path=None,
+    )
+
+
+def test_identifier_runs_portfolios_concurrently_but_bounded(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_dir = tmp_path / "invo"
+    queue_dir = state_dir / "resolution_queue"
+    queue_dir.mkdir(parents=True)
+    queue = []
+    for index in range(6):
+        evidence = queue_dir / f"trader-{index}.csv"
+        evidence.write_text(f"evidence-{index}", encoding="utf-8")
+        queue.append(
+            {
+                "portfolio_id": f"portfolio-{index}",
+                "username": f"trader-{index}",
+                "resolver_csv": str(evidence),
+                "evidence_count": 50 - index,
+                "distinct_coin_count": 8,
+            }
+        )
+    (queue_dir / "resolution_queue.json").write_text(
+        json.dumps({"queue": queue}),
+        encoding="utf-8",
+    )
+
+    active = 0
+    peak = 0
+
+    async def fake_identify(path: Path, **_: object) -> WalletIdentificationResult:
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.02)
+        active -= 1
+        index = int(path.stem.split("-")[-1])
+        return _result("0x" + f"{index + 1:040x}")
+
+    monkeypatch.setattr(invo_identifier_job, "SqdHyperliquidFillsClient", _FakeClient)
+    monkeypatch.setattr(invo_identifier_job, "identify_wallet_from_csv", fake_identify)
+    args = Namespace(
+        state_dir=state_dir,
+        max_portfolios=6,
+        concurrency=2,
+        priority_trader=[],
+        unresolved_retry_minutes=60,
+    )
+
+    result = asyncio.run(invo_identifier_job.run_once(args))
+
+    assert result["attempted"] == 6
+    assert result["verified"] == 6
+    assert result["errors"] == 0
+    assert result["concurrency"] == 2
+    assert peak == 2
+
+
+def test_production_identifier_uses_wide_bounded_batch() -> None:
+    service = Path(
+        "deploy/systemd/hyperliquid-invo-wallet-identifier.service"
+    ).read_text(encoding="utf-8")
+
+    assert "--max-portfolios 64" in service
+    assert "--concurrency 4" in service
+    assert "--unresolved-retry-minutes 60" in service
+    assert "REAL_TRADING_ENABLED=NO" in service
+
+
+def test_durable_wrapper_publishes_after_partial_portfolio_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    args = Namespace(state_dir=tmp_path)
+    publication_calls = 0
+
+    async def fake_run_once(_: Namespace) -> dict[str, object]:
+        raise invo_identifier_job.PortfolioResolutionBatchError(
+            "1 of 4 Invo wallet identification attempts failed",
+            summary={
+                "attempted": 4,
+                "verified": 2,
+                "unresolved": 1,
+                "errors": 1,
+                "partial_failure": True,
+            },
+        )
+
+    def fake_publish(*, state_dir: Path) -> dict[str, object]:
+        nonlocal publication_calls
+        assert state_dir == tmp_path
+        publication_calls += 1
+        return {
+            "verified_count": 2,
+            "identities": [
+                {"username": "alpha"},
+                {"username": "beta"},
+            ],
+        }
+
+    monkeypatch.setattr(invo_identifier_durable_job, "_parse_args", lambda: args)
+    monkeypatch.setattr(invo_identifier_durable_job, "run_once", fake_run_once)
+    monkeypatch.setattr(
+        invo_identifier_durable_job,
+        "publish_durable_verified_identities",
+        fake_publish,
+    )
+
+    assert asyncio.run(invo_identifier_durable_job._main()) == 0
+    assert publication_calls == 1

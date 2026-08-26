@@ -30,11 +30,16 @@ jobs:
         run: |
           ruff check \
             src/hlcopy/discovery/invo_direct_history_job.py \
-            tests/test_invo_direct_history_v4.py
+            src/hlcopy/discovery/invo_identifier_job.py \
+            src/hlcopy/discovery/invo_identifier_durable_job.py \
+            tests/test_invo_direct_history_v4.py \
+            tests/test_invo_identifier_parallel_v7.py
       - name: Test identity and third-party handoff
         run: |
           pytest -q \
             tests/test_invo_direct_history_v4.py \
             tests/test_invo_resolution_threshold_v3.py \
             tests/test_invo_identifier_job_v2.py \
+            tests/test_invo_identifier_ops_v2.py \
+            tests/test_invo_identifier_parallel_v7.py \
             tests/test_third_party_profitability_track_v1.py

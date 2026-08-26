@@ -4,12 +4,22 @@ import asyncio
 import json
 
 from hlcopy.discovery.invo_durable_identity import publish_durable_verified_identities
-from hlcopy.discovery.invo_identifier_job import _parse_args, run_once
+from hlcopy.discovery.invo_identifier_job import (
+    PortfolioResolutionBatchError,
+    _parse_args,
+    run_once,
+)
 
 
 async def _main() -> int:
     args = _parse_args()
-    result = await run_once(args)
+    try:
+        result = await run_once(args)
+    except PortfolioResolutionBatchError as exc:
+        # Individual portfolio failures are already persisted as ERROR and are never
+        # published as identities. Do not hold successful verified portfolios back
+        # from the durable scoring/shadow handoff.
+        result = exc.summary
     publication = publish_durable_verified_identities(state_dir=args.state_dir)
     print(
         json.dumps(
