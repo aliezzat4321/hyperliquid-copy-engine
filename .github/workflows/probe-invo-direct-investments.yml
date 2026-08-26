@@ -1,0 +1,81 @@
+name: probe-invo-direct-investments
+
+on:
+  push:
+    branches:
+      - agent/status-disk-probe
+    paths:
+      - .github/workflows/probe-invo-direct-investments.yml
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: self-hosted
+    timeout-minutes: 10
+    steps:
+      - name: Probe direct portfolio closed investments
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /root/hyperliquid-copy-engine
+          set -a
+          source /etc/hyperliquid-copy-engine/invo.env
+          set +a
+          .venv/bin/python - <<'PY'
+          import asyncio
+          import json
+          import os
+
+          from hlcopy.discovery.invo_source import InvoReadOnlyClient
+
+          PORTFOLIO_ID = '76507487-c0a0-4e4f-af35-5f4321a6c36e'
+
+          async def main():
+              async with InvoReadOnlyClient(
+                  access_token=os.getenv('INVO_ACCESS_TOKEN'),
+                  refresh_token=os.getenv('INVO_REFRESH_TOKEN'),
+              ) as client:
+                  payload = await client._post(
+                      '/v1_0/investments/get_investments',
+                      {
+                          'portfolioId': PORTFOLIO_ID,
+                          'isOpen': False,
+                          'params': {'page': 1, 'size': 50},
+                      },
+                  )
+                  keys = sorted(str(k) for k in payload.keys())
+                  print('DIRECT_INVESTMENTS_KEYS=' + json.dumps(keys))
+                  print('DIRECT_INVESTMENTS_SUCCESS=' + str(payload.get('success')))
+                  total = 0
+                  samples = []
+                  for key in ('investmentsTicker','investmentsBusiness','investmentsMaterial','investmentsProperty'):
+                      rows = payload.get(key)
+                      count = len(rows) if isinstance(rows, list) else 0
+                      total += count
+                      print(f'{key}={count}')
+                      if isinstance(rows, list):
+                          for row in rows[:2]:
+                              if not isinstance(row, dict):
+                                  continue
+                              samples.append({
+                                  'id': row.get('id'),
+                                  'ticker': row.get('ticker'),
+                                  'directionLong': row.get('directionLong'),
+                                  'entryPrice': row.get('entryPrice'),
+                                  'closingPrice': row.get('closingPrice'),
+                                  'leverage': row.get('leverage'),
+                                  'positionSize': row.get('positionSize'),
+                                  'entrySize': row.get('entrySize'),
+                                  'createdAt': row.get('createdAt'),
+                                  'updatedAt': row.get('updatedAt'),
+                                  'isOpen': row.get('isOpen'),
+                                  'verifiedTrade': row.get('verifiedTrade'),
+                                  'portfolioId': (row.get('portfolio') or {}).get('id') if isinstance(row.get('portfolio'), dict) else row.get('portfolioId'),
+                              })
+                  print('DIRECT_INVESTMENTS_TOTAL=' + str(total))
+                  print('DIRECT_INVESTMENTS_SAMPLES=' + json.dumps(samples, sort_keys=True))
+
+          asyncio.run(main())
+          PY
