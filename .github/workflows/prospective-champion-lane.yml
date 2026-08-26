@@ -1,0 +1,60 @@
+name: prospective-champion-lane
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/prospective_champion_lane.py
+      - .github/workflows/prospective-champion-lane.yml
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Sync canonical server checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /root/hyperliquid-copy-engine
+          git fetch origin main
+          git reset --hard origin/main
+      - name: Install prospective champion timer
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/etc/systemd/system/hyperliquid-prospective-champions.service <<'UNIT'
+          [Unit]
+          Description=Hyperliquid clean prospective champion scorer
+          After=network-online.target
+          [Service]
+          Type=oneshot
+          WorkingDirectory=/root/hyperliquid-copy-engine
+          Environment=REAL_TRADING_ENABLED=NO
+          ExecStart=/root/hyperliquid-copy-engine/.venv/bin/python /root/hyperliquid-copy-engine/scripts/prospective_champion_lane.py
+          MemoryMax=1200M
+          UNIT
+          cat >/etc/systemd/system/hyperliquid-prospective-champions.timer <<'UNIT'
+          [Unit]
+          Description=Refresh Hyperliquid prospective champion evidence every 15 minutes
+          [Timer]
+          OnBootSec=2min
+          OnUnitActiveSec=15min
+          AccuracySec=30s
+          Persistent=true
+          [Install]
+          WantedBy=timers.target
+          UNIT
+          systemctl daemon-reload
+          systemctl enable --now hyperliquid-prospective-champions.timer
+          systemctl start hyperliquid-prospective-champions.service
+      - name: Report first clean prospective checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          systemctl --no-pager --full status hyperliquid-prospective-champions.timer | head -15 || true
+          journalctl -u hyperliquid-prospective-champions.service -n 25 --no-pager || true
+          cat /root/hyperliquid-audit/prospective-champions/report.json || true
+          echo 'REAL TRADING: OFF'
