@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Mapping, Sequence
@@ -34,7 +35,11 @@ def _empty_publication() -> dict[str, Any]:
             "auto_trading_promotion": False,
             "unverified_candidate_used_as_identity": False,
             "durable_verified_attestation": True,
+            # A later transient/unresolved retry cannot erase a proof for the
+            # exact same evidence, but any evidence change does revoke it.
             "unresolved_refresh_revokes_verified_identity": False,
+            "current_evidence_digest_required": True,
+            "evidence_change_revokes_verified_identity": True,
             "conflicting_verified_wallet_fails_closed": True,
         },
     }
@@ -64,12 +69,46 @@ def _load_queue(path: Path) -> dict[str, dict[str, str]]:
             raise ValueError(f"Invo resolution queue row {index} is not an object")
         identity = str(raw.get("portfolio_id") or "").strip()
         username = str(raw.get("username") or "").strip()
-        if not identity or not username:
-            raise ValueError(f"Invo resolution queue row {index} lacks identity provenance")
+        resolver_csv = str(raw.get("resolver_csv") or "").strip()
+        if not identity or not username or not resolver_csv:
+            raise ValueError(
+                f"Invo resolution queue row {index} lacks identity/evidence provenance"
+            )
         if identity in output:
             raise ValueError(f"duplicate Invo portfolio in resolution queue: {identity}")
-        output[identity] = {"portfolio_id": identity, "username": username}
+        output[identity] = {
+            "portfolio_id": identity,
+            "username": username,
+            "resolver_csv": resolver_csv,
+        }
     return output
+
+
+def _current_evidence_sha256(*, state_dir: Path, resolver_csv: str) -> str:
+    root = state_dir.resolve()
+    raw_path = Path(resolver_csv)
+    candidate = raw_path if raw_path.is_absolute() else root / raw_path
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(f"current Invo resolver evidence is missing: {candidate}") from exc
+    if not resolved.is_file():
+        raise ValueError(f"current Invo resolver evidence is not a file: {resolved}")
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(
+            f"Invo resolver evidence escapes state directory: {resolved}"
+        ) from exc
+
+    digest = hashlib.sha256()
+    try:
+        with resolved.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        raise ValueError(f"cannot read current Invo resolver evidence: {resolved}") from exc
+    return digest.hexdigest()
 
 
 def _verified_report(path: Path) -> dict[str, str] | None:
@@ -114,7 +153,11 @@ def _verified_report(path: Path) -> dict[str, str] | None:
     }
 
 
-def _collect_attestations(reports_dir: Path) -> dict[str, dict[str, str]]:
+def _collect_attestations(
+    reports_dir: Path,
+    *,
+    current_evidence_sha: Mapping[str, str],
+) -> dict[str, dict[str, str]]:
     by_identity: dict[str, list[dict[str, str]]] = {}
     if not reports_dir.exists():
         return {}
@@ -122,7 +165,13 @@ def _collect_attestations(reports_dir: Path) -> dict[str, dict[str, str]]:
         attestation = _verified_report(path)
         if attestation is None:
             continue
-        by_identity.setdefault(attestation["portfolio_id"], []).append(attestation)
+        identity = attestation["portfolio_id"]
+        expected_sha = current_evidence_sha.get(identity)
+        if expected_sha is None or attestation["evidence_sha256"] != expected_sha:
+            # Historical proofs are useful audit records, but they are never a
+            # current identity proof after the source evidence changes.
+            continue
+        by_identity.setdefault(identity, []).append(attestation)
 
     output: dict[str, dict[str, str]] = {}
     wallet_owners: dict[str, str] = {}
@@ -151,10 +200,20 @@ def publish_durable_verified_identities(*, state_dir: Path) -> dict[str, Any]:
     reports_dir = state_dir / "wallet_identifications"
     identities_path = state_dir / "identified_wallets.json"
 
-    # Any malformed queue/report set must revoke the public view before failing.
+    # Any malformed queue/report/evidence set must revoke the public view first.
     _write_atomic(identities_path, _empty_publication())
     queue = _load_queue(queue_path)
-    attestations = _collect_attestations(reports_dir)
+    current_evidence_sha = {
+        portfolio_id: _current_evidence_sha256(
+            state_dir=state_dir,
+            resolver_csv=current["resolver_csv"],
+        )
+        for portfolio_id, current in queue.items()
+    }
+    attestations = _collect_attestations(
+        reports_dir,
+        current_evidence_sha=current_evidence_sha,
+    )
 
     identities: list[dict[str, Any]] = []
     for portfolio_id, current in sorted(queue.items()):
