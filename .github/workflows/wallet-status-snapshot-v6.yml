@@ -1,0 +1,94 @@
+name: wallet-status-snapshot-v6
+
+on:
+  push:
+    branches:
+      - wallet-pipeline/status-snapshot-v6
+    paths:
+      - ".github/workflows/wallet-status-snapshot-v6.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    if: github.repository == 'aliezzat4321/hyperliquid-copy-engine'
+    runs-on:
+      - self-hosted
+      - hyperliquid
+    timeout-minutes: 3
+    steps:
+      - name: Print sanitized wallet lane snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          def load(path):
+              p = Path(path)
+              if not p.exists():
+                  return {}
+              try:
+                  v = json.loads(p.read_text())
+              except Exception as exc:
+                  return {"_error": str(exc)}
+              return v if isinstance(v, dict) else {}
+
+          score = load('/root/hyperliquid-audit/third-party/third_party_scorecard.json')
+          universe = load('/var/lib/hyperliquid-copy-engine/invo/universe_candidates.json')
+          identities = load('/var/lib/hyperliquid-copy-engine/invo/identified_wallets.json')
+
+          rows = []
+          for r in score.get('scorecards') or []:
+              if not isinstance(r, dict):
+                  continue
+              base = r.get('base_scenario') if isinstance(r.get('base_scenario'), dict) else {}
+              hist = r.get('historical_pre_screen') if isinstance(r.get('historical_pre_screen'), dict) else {}
+              hist1 = None
+              for item in hist.get('matrix') or []:
+                  if isinstance(item, dict) and str(item.get('follower_leverage') or item.get('leverage')) in {'1','1.0'}:
+                      hist1 = item
+                      break
+              rows.append({
+                  'label': r.get('label') or r.get('identity'),
+                  'identity': r.get('identity'),
+                  'wallet': r.get('wallet'),
+                  'status': r.get('status'),
+                  'prospective_events': r.get('prospective_events'),
+                  'copyability_score': r.get('copyability_score'),
+                  'base_500ms_net_bps': base.get('net_return_bps'),
+                  'base_500ms_execution_pct': base.get('execution_pct'),
+                  'base_500ms_actions': base.get('realized_actions'),
+                  'robust_sizes': len(r.get('robust_notionals') or []),
+                  'validation_candidate': bool(r.get('validation_candidate')),
+                  'historical_1x_return_pct': None if hist1 is None else hist1.get('return_pct'),
+                  'historical_1x_win_rate_pct': None if hist1 is None else hist1.get('win_rate_pct'),
+              })
+
+          published = identities.get('identities') or identities.get('identified_wallets') or identities.get('wallets') or []
+          clean_ids = []
+          for r in published:
+              if not isinstance(r, dict):
+                  continue
+              clean_ids.append({
+                  'username': r.get('username'),
+                  'portfolio_id': r.get('portfolio_id') or r.get('identity'),
+                  'wallet': r.get('wallet') or r.get('wallet_address'),
+                  'confidence': r.get('confidence'),
+                  'attestation_status': r.get('attestation_status'),
+              })
+
+          out = {
+              'score_generated_at': score.get('generated_at'),
+              'wallet_count': score.get('wallet_count'),
+              'prospective_event_count': score.get('prospective_event_count'),
+              'candidate_portfolios': universe.get('candidate_portfolio_count'),
+              'candidate_traders': universe.get('candidate_owner_count'),
+              'ready_for_resolution': universe.get('ready_for_wallet_resolution'),
+              'verified_identities': clean_ids,
+              'scorecards': rows,
+          }
+          print('WALLET_STATUS_JSON=' + json.dumps(out, sort_keys=True))
+          PY
