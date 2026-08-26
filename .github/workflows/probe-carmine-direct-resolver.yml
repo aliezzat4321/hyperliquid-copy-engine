@@ -1,0 +1,105 @@
+name: probe-carmine-direct-resolver
+
+on:
+  push:
+    branches:
+      - agent/status-disk-probe
+    paths:
+      - .github/workflows/probe-carmine-direct-resolver.yml
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: self-hosted
+    timeout-minutes: 30
+    steps:
+      - name: Resolve Carmine from direct closed investments
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /root/hyperliquid-copy-engine
+          set -a
+          source /etc/hyperliquid-copy-engine/invo.env
+          set +a
+          .venv/bin/python - <<'PY'
+          import asyncio
+          import csv
+          import json
+          import os
+          import tempfile
+          from pathlib import Path
+
+          from hlcopy.discovery.invo_source import InvoReadOnlyClient
+          from hlcopy.resolver.size_agnostic_identifier import identify_wallet_from_csv_size_aware
+
+          PID='76507487-c0a0-4e4f-af35-5f4321a6c36e'
+          USER='carmine'
+          FIELDS=['trade_id','username','ticker','direction','leverage','entry_price','closing_price','entry_size','opened_at','closed_at','portfolio_id','source_post_id']
+
+          def rows_from(payload):
+              out=[]
+              for key in ('investmentsTicker','investmentsBusiness','investmentsMaterial','investmentsProperty'):
+                  raw=payload.get(key)
+                  if not isinstance(raw,list):
+                      continue
+                  for inv in raw:
+                      if not isinstance(inv,dict) or inv.get('verifiedTrade') is not True or inv.get('isOpen') is not False:
+                          continue
+                      values=(inv.get('id'),inv.get('ticker'),inv.get('leverage'),inv.get('entryPrice'),inv.get('closingPrice'),inv.get('entrySize'),inv.get('createdAt'),inv.get('updatedAt'))
+                      if any(v in (None,'') for v in values):
+                          continue
+                      out.append({
+                          'trade_id':str(inv['id']),
+                          'username':USER,
+                          'ticker':str(inv['ticker']).upper(),
+                          'direction':'LONG' if inv.get('directionLong') else 'SHORT',
+                          'leverage':str(inv['leverage']),
+                          'entry_price':str(inv['entryPrice']),
+                          'closing_price':str(inv['closingPrice']),
+                          'entry_size':str(inv['entrySize']),
+                          'opened_at':str(inv['createdAt']),
+                          'closed_at':str(inv['updatedAt']),
+                          'portfolio_id':PID,
+                          'source_post_id':'direct-investment:'+str(inv['id']),
+                      })
+              return out
+
+          async def main():
+              all_rows={}
+              async with InvoReadOnlyClient(access_token=os.getenv('INVO_ACCESS_TOKEN'), refresh_token=os.getenv('INVO_REFRESH_TOKEN')) as invo:
+                  for page in range(1,5):
+                      payload=await invo._post('/v1_0/investments/get_investments', {'portfolioId':PID,'isOpen':False,'params':{'page':page,'size':50}})
+                      page_rows=rows_from(payload)
+                      print(f'DIRECT_PAGE page={page} rows={len(page_rows)}')
+                      for row in page_rows:
+                          all_rows[row['trade_id']]=row
+                      if len(page_rows)<50:
+                          break
+              rows=list(all_rows.values())
+              print(f'DIRECT_EVIDENCE rows={len(rows)} coins={len({r["ticker"] for r in rows})}')
+              if len(rows)<20:
+                  raise SystemExit('INSUFFICIENT_DIRECT_EVIDENCE')
+              with tempfile.TemporaryDirectory(prefix='carmine-direct-', dir='/root') as td:
+                  path=Path(td)/'carmine.csv'
+                  with path.open('w',newline='',encoding='utf-8') as fh:
+                      w=csv.DictWriter(fh,fieldnames=FIELDS)
+                      w.writeheader(); w.writerows(rows)
+                  result=await identify_wallet_from_csv_size_aware(path, output_dir=Path(td)/'reports', expected_source_identity=PID)
+                  print('DIRECT_RESOLVER_RESULT='+json.dumps(result.to_dict(),sort_keys=True))
+                  if result.report_path:
+                      report=json.loads(Path(result.report_path).read_text())
+                      compact={
+                          'status':report.get('status'),
+                          'wallet':report.get('wallet'),
+                          'candidate':report.get('candidate'),
+                          'confidence':report.get('confidence'),
+                          'accepted_trades':report.get('accepted_trades'),
+                          'best_discovery_candidate':report.get('best_discovery_candidate'),
+                          'historical_candidate_verifications':report.get('historical_candidate_verifications'),
+                      }
+                      print('DIRECT_RESOLVER_REPORT='+json.dumps(compact,sort_keys=True))
+
+          asyncio.run(main())
+          PY
