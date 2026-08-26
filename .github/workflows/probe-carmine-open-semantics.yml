@@ -1,0 +1,100 @@
+name: probe-carmine-open-semantics
+
+on:
+  push:
+    branches:
+      - agent/status-disk-probe
+    paths:
+      - .github/workflows/probe-carmine-open-semantics.yml
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: self-hosted
+    timeout-minutes: 20
+    steps:
+      - name: Probe Carmine candidate open/close alignment
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /root/hyperliquid-copy-engine
+          .venv/bin/python - <<'PY'
+          import asyncio
+          import json
+          from decimal import Decimal
+          from pathlib import Path
+
+          from hlcopy.resolver.identifier import _bind_source_identity, _load_source_evidence
+          from hlcopy.resolver.provenance import EvidenceSnapshot
+          from hlcopy.resolver.public_trade_index import DEFAULT_PUBLIC_TRADE_CONFIG, _episode_is_covered
+          from hlcopy.resolver.size_agnostic_identifier import _discover_without_size, _is_final_flatten, _price_bps
+          from hlcopy.resolver.sqd_position_aware import SqdHyperliquidFillsClient
+
+          ROOT = Path('/var/lib/hyperliquid-copy-engine/invo')
+          queue = json.loads((ROOT / 'resolution_queue/resolution_queue.json').read_text()).get('queue', [])
+          carmine = [r for r in queue if str(r.get('username') or '').strip().casefold() == 'carmine']
+          carmine.sort(key=lambda r: int(r.get('evidence_count') or 0), reverse=True)
+          if not carmine:
+              raise SystemExit('NO_CARMINE_QUEUE_ROW')
+          row = carmine[0]
+          evidence_path = Path(str(row['resolver_csv']))
+          snapshot = EvidenceSnapshot.from_path(evidence_path)
+          imported = _load_source_evidence(snapshot, DEFAULT_PUBLIC_TRADE_CONFIG)
+          _bind_source_identity(imported, expected_source_identity=str(row['portfolio_id']))
+          signals = imported.signals
+
+          async def main():
+              async with SqdHyperliquidFillsClient() as client:
+                  discovery = await _discover_without_size(signals, client=client, config=DEFAULT_PUBLIC_TRADE_CONFIG)
+                  if not discovery.ranked:
+                      print('NO_DISCOVERY_CANDIDATE')
+                      return
+                  candidate = discovery.ranked[0]
+                  print('CANDIDATE', candidate.address, 'matches', candidate.matched_anchors, 'clock_ms', candidate.median_clock_offset_ms, 'price_bps', candidate.median_price_bps)
+                  coverage_start = discovery.coverage_start_ms
+                  coverage_end = await client.coverage_end_ms()
+                  excluded = {s.signal_id for s in discovery.anchors}
+                  entry_tol = max(1, DEFAULT_PUBLIC_TRADE_CONFIG.historical_entry_time_tolerance_ms)
+                  close_tol = max(0, DEFAULT_PUBLIC_TRADE_CONFIG.historical_time_tolerance_ms)
+                  eligible = [
+                      s for s in signals
+                      if s.signal_id not in excluded
+                      and _episode_is_covered(
+                          s,
+                          coverage_start_ms=coverage_start,
+                          coverage_end_ms=coverage_end,
+                          entry_margin_ms=entry_tol,
+                          close_margin_ms=close_tol,
+                      )
+                  ]
+                  eligible.sort(key=lambda s: (s.closed_at_ms, s.signal_id), reverse=True)
+                  selected = eligible[:12]
+                  print('HELDOUT_SELECTED', len(selected), 'entry_tol_ms', entry_tol, 'close_tol_ms', close_tol)
+                  for s in selected:
+                      open_window = 60 * 60 * 1000
+                      fills = await client.fills_around(timestamp_ms=s.opened_at_ms, coin=s.coin, window_ms=open_window, user=candidate.address)
+                      open_name = 'open long' if s.direction == 'LONG' else 'open short'
+                      add_name = 'long > long' if s.direction == 'LONG' else 'short > short'
+                      directional = [f for f in fills if f.direction.lower() in {open_name, add_name}]
+                      directional.sort(key=lambda f: (abs(f.time_ms - s.opened_at_ms), _price_bps(s.entry_price, f.px)))
+                      nearest = directional[0] if directional else None
+                      close_fills = await client.fills_around(timestamp_ms=s.closed_at_ms, coin=s.coin, window_ms=max(close_tol, 60_000), user=candidate.address)
+                      finals = [f for f in close_fills if _is_final_flatten(f, direction=s.direction)]
+                      finals.sort(key=lambda f: (abs((f.time_ms - s.closed_at_ms) - candidate.median_clock_offset_ms), _price_bps(s.exit_price, f.px)))
+                      final = finals[0] if finals else None
+                      print(json.dumps({
+                          'signal': s.signal_id,
+                          'coin': s.coin,
+                          'direction': s.direction,
+                          'nearest_open_offset_ms': None if nearest is None else nearest.time_ms - s.opened_at_ms,
+                          'nearest_open_dir': None if nearest is None else nearest.direction,
+                          'nearest_open_start_position': None if nearest is None or nearest.start_position is None else str(nearest.start_position),
+                          'nearest_open_price_bps': None if nearest is None else str(_price_bps(s.entry_price, nearest.px)),
+                          'final_close_offset_ms': None if final is None else final.time_ms - s.closed_at_ms,
+                          'final_close_price_bps': None if final is None else str(_price_bps(s.exit_price, final.px)),
+                      }, sort_keys=True))
+
+          asyncio.run(main())
+          PY
