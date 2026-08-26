@@ -6,7 +6,9 @@ on:
       - main
     paths:
       - "src/hlcopy/discovery/invo_universe_job.py"
+      - "src/hlcopy/discovery/invo_direct_history_job.py"
       - "deploy/systemd/hyperliquid-invo-universe-miner.service"
+      - "deploy/systemd/hyperliquid-invo-direct-history.service"
       - "deploy/systemd/hyperliquid-invo-universe-miner.timer"
       - "scripts/deploy_invo_universe_self_hosted.sh"
       - ".github/workflows/deploy-invo-universe.yml"

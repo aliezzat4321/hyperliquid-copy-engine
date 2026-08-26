@@ -1,0 +1,26 @@
+[Unit]
+Description=Fast direct Invo closed-investment identity backfill
+After=network-online.target
+Wants=network-online.target
+OnSuccess=hyperliquid-invo-wallet-identifier.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/hyperliquid-copy-engine
+EnvironmentFile=/etc/hyperliquid-copy-engine/invo.env
+Environment=REAL_TRADING_ENABLED=NO
+ExecStart=/usr/bin/flock --wait 3000 /run/hyperliquid-copy-engine/invo-pipeline.lock /root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.discovery.invo_direct_history_job --state-dir /var/lib/hyperliquid-copy-engine/invo --max-portfolios 80 --max-pages 4 --page-size 50 --concurrency 6 --refresh-minutes 60 --priority-trader carmine --priority-trader bones --priority-trader tyron --priority-trader rps --priority-trader tony64dss --priority-trader profitales --priority-trader limpan96 --priority-trader vortex_legion
+User=root
+Group=root
+UMask=0077
+TimeoutStartSec=20min
+RuntimeDirectory=hyperliquid-copy-engine
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/var/lib/hyperliquid-copy-engine
+RestrictSUIDSGID=true

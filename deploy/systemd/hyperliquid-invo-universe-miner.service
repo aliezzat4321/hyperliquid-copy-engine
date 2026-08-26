@@ -2,7 +2,7 @@
 Description=Exhaustive read-only Invo universe miner
 After=network-online.target
 Wants=network-online.target
-OnSuccess=hyperliquid-invo-wallet-identifier.service
+OnSuccess=hyperliquid-invo-direct-history.service
 
 [Service]
 Type=oneshot
