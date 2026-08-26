@@ -15,8 +15,17 @@ def psql(db: str, sql: str) -> list[list[str]]:
         'sudo', '-n', '-u', 'postgres', 'psql', '-X', '-v', 'ON_ERROR_STOP=1',
         '-d', db, '-At', '-F', '\t', '-c', sql,
     ]
-    text = subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT)
-    return [line.split('\t') for line in text.splitlines() if line.strip()]
+    # sudo may emit a harmless cwd warning because postgres cannot traverse /root.
+    # Keep stderr out of machine-readable query output so it can never be parsed
+    # as a database/table row.
+    proc = subprocess.run(
+        cmd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    )
+    return [line.split('\t') for line in proc.stdout.splitlines() if line.strip()]
 
 
 dbs = [r[0] for r in psql('postgres', "SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate ORDER BY pg_database_size(datname) DESC")]
