@@ -1,0 +1,99 @@
+name: probe-invo-position-size
+
+on:
+  push:
+    branches:
+      - agent/status-disk-probe
+    paths:
+      - .github/workflows/probe-invo-position-size.yml
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: self-hosted
+    timeout-minutes: 10
+    steps:
+      - name: Compare direct Invo positionSize to SQD final fills
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /root/hyperliquid-copy-engine
+          set -a
+          source /etc/hyperliquid-copy-engine/invo.env
+          set +a
+          .venv/bin/python - <<'PY'
+          import asyncio
+          import json
+          import os
+          from decimal import Decimal
+          from datetime import datetime, timezone
+
+          from hlcopy.discovery.invo_source import InvoReadOnlyClient
+          from hlcopy.resolver.sqd_position_aware import SqdHyperliquidFillsClient
+
+          D = Decimal
+          PORTFOLIO_ID = '76507487-c0a0-4e4f-af35-5f4321a6c36e'
+          CANDIDATE = '0xf28eadb6b2ecf18a37f38e4e104a1b4b9f977e09'
+
+          def ts_ms(value):
+              return int(datetime.fromisoformat(str(value).replace('Z','+00:00')).timestamp() * 1000)
+
+          def bps(a,b):
+              a,b=D(str(a)),D(str(b))
+              return abs(b/a-D('1'))*D('10000') if a>0 and b>0 else D('Infinity')
+
+          async def main():
+              async with InvoReadOnlyClient(
+                  access_token=os.getenv('INVO_ACCESS_TOKEN'),
+                  refresh_token=os.getenv('INVO_REFRESH_TOKEN'),
+              ) as invo, SqdHyperliquidFillsClient() as sqd:
+                  payload = await invo._post('/v1_0/investments/get_investments', {
+                      'portfolioId': PORTFOLIO_ID,
+                      'isOpen': False,
+                      'params': {'page': 1, 'size': 20},
+                  })
+                  rows = payload.get('investmentsTicker') or []
+                  checked = 0
+                  matched = 0
+                  for inv in rows:
+                      if checked >= 10:
+                          break
+                      if not isinstance(inv, dict) or not inv.get('verifiedTrade') or inv.get('isOpen') is not False:
+                          continue
+                      if not inv.get('ticker') or inv.get('closingPrice') in (None,0) or inv.get('updatedAt') is None:
+                          continue
+                      position_size = inv.get('positionSize')
+                      if position_size in (None,0):
+                          continue
+                      checked += 1
+                      direction = 'LONG' if inv.get('directionLong') else 'SHORT'
+                      close_name = 'close long' if direction == 'LONG' else 'close short'
+                      close_ms = ts_ms(inv['updatedAt'])
+                      fills = await sqd.fills_around(timestamp_ms=close_ms, coin=str(inv['ticker']), window_ms=90_000, user=CANDIDATE)
+                      candidates = [f for f in fills if f.direction.lower() == close_name and f.start_position is not None]
+                      candidates.sort(key=lambda f: (abs(f.time_ms-close_ms), bps(inv['closingPrice'], f.px)))
+                      best = candidates[0] if candidates else None
+                      size_ratio = None
+                      final_flatten = False
+                      if best is not None:
+                          final_flatten = abs(abs(best.start_position)-best.sz) <= max(D('1e-12'), abs(best.start_position)*D('1e-9'))
+                          size_ratio = best.sz / D(str(position_size))
+                          if abs(best.time_ms-close_ms) <= 30_000 and bps(inv['closingPrice'], best.px) <= D('20'):
+                              matched += 1
+                      print(json.dumps({
+                          'ticker': inv.get('ticker'),
+                          'direction': direction,
+                          'invo_position_size': str(position_size),
+                          'best_fill_size': None if best is None else str(best.sz),
+                          'best_start_position': None if best is None else str(best.start_position),
+                          'size_ratio_fill_to_invo': None if size_ratio is None else str(size_ratio),
+                          'close_offset_ms': None if best is None else best.time_ms-close_ms,
+                          'price_bps': None if best is None else str(bps(inv['closingPrice'], best.px)),
+                          'final_flatten': final_flatten,
+                      }, sort_keys=True))
+                  print(f'POSITION_SIZE_PROBE checked={checked} close_matches={matched}')
+
+          asyncio.run(main())
+          PY
