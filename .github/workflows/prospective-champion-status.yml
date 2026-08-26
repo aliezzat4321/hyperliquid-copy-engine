@@ -1,0 +1,61 @@
+name: prospective-champion-status
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/prospective-champion-status.yml'
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  status:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 5
+    steps:
+      - name: Report clean prospective champion state
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          p = Path('/root/hyperliquid-audit/prospective-champions/report.json')
+          if not p.exists():
+              raise SystemExit('PROSPECTIVE_CHAMPION_REPORT=NOT_FOUND')
+          d = json.loads(p.read_text())
+          out = {
+              'mode': d.get('mode'),
+              'cutoff_ns': d.get('cutoff_ns'),
+              'age_hours': d.get('age_hours'),
+              'real_trading': d.get('real_trading'),
+              'approved_count': d.get('approved_count'),
+              'targets': [],
+          }
+          for r in d.get('targets') or []:
+              scenarios = r.get('scenarios') or []
+              primary = str(r.get('primary_notional') or '')
+              primary_rows = [x for x in scenarios if str(x.get('notional_usd') or '') == primary]
+              worst_dd = None
+              if primary_rows:
+                  vals = [x.get('max_drawdown_pct') for x in primary_rows if x.get('max_drawdown_pct') is not None]
+                  if vals:
+                      worst_dd = max(float(v) for v in vals)
+              out['targets'].append({
+                  'wallet_address': r.get('wallet_address'),
+                  'coin': r.get('coin'),
+                  'primary_notional': r.get('primary_notional'),
+                  'event_count': r.get('event_count'),
+                  'actions_floor': r.get('actions_floor'),
+                  'worst_primary_return_bps': r.get('worst_primary_return_bps'),
+                  'worst_primary_drawdown_pct': worst_dd,
+                  'approved': r.get('approved'),
+                  'scenario_count': len(primary_rows),
+              })
+          print('PROSPECTIVE_CHAMPION_JSON=' + json.dumps(out, sort_keys=True))
+          PY
