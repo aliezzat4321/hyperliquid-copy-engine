@@ -1,0 +1,41 @@
+name: deploy-invo-notification-executor
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - services/invo-notification-executor/**
+      - deploy/systemd/hyperliquid-invo-notification-executor.service
+      - scripts/deploy_invo_notification_executor_self_hosted.sh
+      - .github/workflows/deploy-invo-notification-executor.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-invo-notification-executor
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on:
+      - self-hosted
+      - hyperliquid
+    timeout-minutes: 20
+    steps:
+      - name: Checkout canonical main
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          clean: true
+      - name: Deploy Invo notification executor
+        shell: bash
+        run: |
+          set -euo pipefail
+          script="$GITHUB_WORKSPACE/scripts/deploy_invo_notification_executor_self_hosted.sh"
+          if [[ "$(id -u)" -eq 0 ]]; then
+            bash "$script"
+          else
+            sudo -n bash "$script"
+          fi
