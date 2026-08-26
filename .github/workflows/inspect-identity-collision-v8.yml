@@ -18,169 +18,74 @@ jobs:
       - hyperliquid
     timeout-minutes: 5
     steps:
-      - name: Inspect sanitized collision and resolver queue state
+      - name: Read sanitized verified publication
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import hashlib
           import json
-          from collections import Counter
-          from datetime import datetime, timezone
           from pathlib import Path
 
-          state_dir = Path('/var/lib/hyperliquid-copy-engine/invo')
-          queue_path = state_dir / 'resolution_queue' / 'resolution_queue.json'
-          state_path = state_dir / 'identifier_state.json'
-          universe_path = state_dir / 'universe_candidates.json'
-          reports_dir = state_dir / 'wallet_identifications'
-          target_ids = {
-              '3de730c5-d1b9-4e5d-be79-66375fc02910',
-              'add098a5-636a-4686-b2e5-2783c6a4736f',
-          }
-          target_wallet = '0xa6cfb58994ed0d5e765830072b73d5243df2f379'
+          publication_path = Path('/var/lib/hyperliquid-copy-engine/invo/identified_wallets.json')
+          registry_path = Path('/var/lib/hyperliquid-copy-engine/third-party/wallets.json')
+          score_path = Path('/root/hyperliquid-audit/third-party/third_party_scorecard.json')
 
           def load(path):
               try:
-                  return json.loads(path.read_text())
+                  value = json.loads(path.read_text())
               except Exception as exc:
                   return {'_error': f'{type(exc).__name__}: {exc}'}
+              return value
 
-          def parse_time(raw):
-              if not raw:
-                  return None
-              try:
-                  value = datetime.fromisoformat(str(raw).replace('Z', '+00:00'))
-              except ValueError:
-                  return None
-              return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-
-          queue_payload = load(queue_path)
-          queue = queue_payload.get('queue', []) if isinstance(queue_payload, dict) else []
-          identifier = load(state_path)
-          items = identifier.get('items', {}) if isinstance(identifier, dict) else {}
-          now = datetime.now(timezone.utc)
-
-          queue_rows = []
-          queue_status_counts = Counter()
-          queue_attempted = 0
-          queue_never_attempted = 0
-          queue_retry_due = 0
-          queue_cooldown = 0
-          queue_errors = 0
-          current_verified = []
-
-          for row in queue:
-              if not isinstance(row, dict):
-                  continue
-              pid = str(row.get('portfolio_id') or '')
-              state = items.get(pid) if isinstance(items.get(pid), dict) else None
-              if state is None:
-                  queue_never_attempted += 1
-                  queue_status_counts['NEVER_ATTEMPTED'] += 1
-              else:
-                  queue_attempted += 1
-                  status = str(state.get('status') or 'UNKNOWN')
-                  queue_status_counts[status] += 1
-                  if status == 'ERROR':
-                      queue_errors += 1
-                  if status == 'VERIFIED':
-                      current_verified.append({
-                          'portfolio_id': pid,
-                          'username': state.get('username'),
-                          'wallet': state.get('wallet'),
-                          'attempted_at': state.get('attempted_at'),
-                      })
-                  elif status == 'UNRESOLVED':
-                      retry = parse_time(state.get('next_retry_at'))
-                      if retry is None or retry <= now:
-                          queue_retry_due += 1
-                      else:
-                          queue_cooldown += 1
-
-              if pid not in target_ids:
-                  continue
-              csv_path = Path(str(row.get('resolver_csv') or ''))
-              digest = hashlib.sha256(csv_path.read_bytes()).hexdigest() if csv_path.is_file() else None
-              queue_rows.append({
-                  'portfolio_id': pid,
-                  'username': row.get('username'),
-                  'evidence_count': row.get('evidence_count'),
-                  'distinct_coin_count': row.get('distinct_coin_count'),
-                  'current_evidence_sha256': digest,
-              })
-
-          state_rows = []
-          for pid in sorted(target_ids):
-              row = items.get(pid)
-              if not isinstance(row, dict):
-                  continue
-              result = row.get('result') if isinstance(row.get('result'), dict) else {}
-              state_rows.append({
-                  'portfolio_id': pid,
-                  'username': row.get('username'),
-                  'status': row.get('status'),
-                  'wallet': row.get('wallet'),
-                  'evidence_sha256': row.get('evidence_sha256'),
-                  'attempted_at': row.get('attempted_at'),
-                  'discovery_matches': result.get('discovery_matches'),
-                  'historical_matches': result.get('historical_matches'),
-                  'historical_attempted': result.get('historical_attempted'),
-              })
-
-          report_rows = []
-          for path in sorted(reports_dir.glob('*/wallet_identification_*.json')):
-              try:
-                  row = json.loads(path.read_text())
-              except Exception:
-                  continue
-              if not isinstance(row, dict) or row.get('status') != 'VERIFIED':
-                  continue
-              if row.get('source_identity') not in target_ids and str(row.get('wallet') or '').lower() != target_wallet:
-                  continue
-              report_rows.append({
-                  'source_identity': row.get('source_identity'),
-                  'wallet': str(row.get('wallet') or '').lower(),
-                  'input_sha256': row.get('input_sha256'),
-                  'confidence': row.get('confidence'),
-                  'report': str(path),
-              })
-
-          universe = load(universe_path)
-          universe_rows = []
-          for row in (universe.get('candidates', []) if isinstance(universe, dict) else []):
-              if isinstance(row, dict) and row.get('portfolio_id') in target_ids:
-                  universe_rows.append({
-                      'portfolio_id': row.get('portfolio_id'),
+          publication = load(publication_path)
+          identities = []
+          for row in publication.get('identities', []) if isinstance(publication, dict) else []:
+              if isinstance(row, dict):
+                  identities.append({
                       'username': row.get('username'),
-                      'closed_positions': row.get('closed_positions'),
-                      'win_rate': row.get('win_rate'),
-                      'percent_change': row.get('percent_change'),
+                      'portfolio_id': row.get('portfolio_id'),
+                      'wallet': row.get('wallet'),
+                      'confidence': row.get('confidence'),
+                      'attestation_status': row.get('attestation_status'),
+                  })
+          conflicts = publication.get('identity_conflicts', []) if isinstance(publication, dict) else []
+
+          registry = load(registry_path)
+          registry_rows = registry.get('wallets', registry.get('items', [])) if isinstance(registry, dict) else []
+          enabled = []
+          if isinstance(registry_rows, list):
+              for row in registry_rows:
+                  if not isinstance(row, dict) or not row.get('enabled'):
+                      continue
+                  enabled.append({
+                      'label': row.get('label'),
+                      'wallet': row.get('source_ref'),
+                      'stage': row.get('stage'),
                   })
 
-          cutoff = datetime.fromisoformat('2026-08-26T13:07:04+00:00')
-          recent_counts = Counter()
-          for row in items.values():
+          score = load(score_path)
+          cards = []
+          for row in score.get('scorecards', []) if isinstance(score, dict) else []:
               if not isinstance(row, dict):
                   continue
-              attempted = parse_time(row.get('attempted_at'))
-              if attempted is not None and attempted >= cutoff:
-                  recent_counts[str(row.get('status') or 'UNKNOWN')] += 1
+              base = row.get('base_scenario') if isinstance(row.get('base_scenario'), dict) else {}
+              cards.append({
+                  'label': row.get('label'),
+                  'wallet': row.get('wallet'),
+                  'status': row.get('status'),
+                  'events': row.get('prospective_events'),
+                  'copyability': row.get('copyability_score'),
+                  'net_bps_500ms': base.get('net_return_bps'),
+                  'actions_500ms': base.get('realized_actions'),
+              })
 
-          output = {
-              'queue_total': len(queue),
-              'queue_attempted': queue_attempted,
-              'queue_never_attempted': queue_never_attempted,
-              'queue_status_counts': dict(queue_status_counts),
-              'queue_unresolved_retry_due': queue_retry_due,
-              'queue_unresolved_in_cooldown': queue_cooldown,
-              'queue_errors': queue_errors,
-              'current_verified': current_verified,
-              'collision_queue_rows': queue_rows,
-              'collision_identifier_rows': state_rows,
-              'collision_reports': report_rows,
-              'collision_universe_rows': universe_rows,
-              'recent_parallel_status_counts': dict(recent_counts),
-          }
-          print('IDENTITY_QUEUE_JSON=' + json.dumps(output, sort_keys=True))
+          print('POST_FIX_JSON=' + json.dumps({
+              'verified_count': publication.get('verified_count') if isinstance(publication, dict) else None,
+              'identities': identities,
+              'conflicts': conflicts,
+              'quarantined_identity_count': publication.get('quarantined_identity_count') if isinstance(publication, dict) else None,
+              'enabled_registry': enabled,
+              'score_wallet_count': score.get('wallet_count') if isinstance(score, dict) else None,
+              'scorecards': cards,
+          }, sort_keys=True))
           PY
