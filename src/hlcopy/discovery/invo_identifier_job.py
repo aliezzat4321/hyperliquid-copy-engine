@@ -22,6 +22,12 @@ DEFAULT_UNRESOLVED_RETRY_MINUTES = 60
 RESOLVER_RULE_VERSION = "sqd-public-trade-v3-size-aware-sequence"
 
 
+class PortfolioResolutionBatchError(RuntimeError):
+    def __init__(self, message: str, *, summary: dict[str, object]) -> None:
+        super().__init__(message)
+        self.summary = summary
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Resolve ready Invo trade evidence to Hyperliquid wallets.",
@@ -384,7 +390,7 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
             current_evidence_sha256=current_evidence_sha256,
         ),
     )
-    return {
+    summary: dict[str, object] = {
         "queue_ready": len(queue),
         "pending": len(pending),
         "attempted": attempted,
@@ -396,6 +402,12 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
         "priority_traders": list(_priority_names(args.priority_trader)),
         "state_dir": str(state_dir),
     }
+    if errors > 0:
+        raise PortfolioResolutionBatchError(
+            f"{errors} of {attempted} Invo wallet identification attempts failed",
+            summary=summary,
+        )
+    return summary
 
 
 async def _main() -> int:
