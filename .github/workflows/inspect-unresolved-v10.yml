@@ -1,0 +1,135 @@
+name: inspect-unresolved-v10
+
+on:
+  push:
+    branches:
+      - wallet-pipeline/inspect-unresolved-v10
+    paths:
+      - ".github/workflows/inspect-unresolved-v10.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    if: github.repository == 'aliezzat4321/hyperliquid-copy-engine'
+    runs-on:
+      - self-hosted
+      - hyperliquid
+    timeout-minutes: 5
+    steps:
+      - name: Aggregate unresolved identity failure modes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from collections import Counter, defaultdict
+          from pathlib import Path
+
+          state_dir = Path('/var/lib/hyperliquid-copy-engine/invo')
+          state = json.loads((state_dir / 'identifier_state.json').read_text())
+          queue = json.loads((state_dir / 'resolution_queue' / 'resolution_queue.json').read_text()).get('queue', [])
+          items = state.get('items', {})
+          qmap = {str(r.get('portfolio_id')): r for r in queue if isinstance(r, dict)}
+
+          counts = Counter()
+          discovery_hist = Counter()
+          attempts_hist = Counter()
+          top_hist = Counter()
+          second_hist = Counter()
+          report_missing = 0
+          examples = defaultdict(list)
+          rows = []
+
+          for pid, st in items.items():
+              if not isinstance(st, dict) or st.get('status') != 'UNRESOLVED' or pid not in qmap:
+                  continue
+              r = st.get('result') if isinstance(st.get('result'), dict) else {}
+              dm = int(r.get('discovery_matches') or 0)
+              da = int(r.get('discovery_anchors') or 0)
+              ha = int(r.get('historical_attempted') or 0)
+              hm = int(r.get('historical_matches') or 0)
+              cand = r.get('candidate') or st.get('candidate')
+              uniq = bool(r.get('candidate_unique'))
+              discovery_hist[dm] += 1
+              attempts_hist[ha] += 1
+
+              if not cand:
+                  category = 'NO_DISCOVERY_CANDIDATE'
+              elif dm < 4:
+                  category = f'DISCOVERY_BELOW_GATE_{dm}_OF_{da or 8}'
+              elif ha == 0:
+                  category = 'DISCOVERY_PASSED_BUT_NO_HELDOUT_FINALIST'
+              elif hm < 5:
+                  category = f'HELDOUT_BELOW_MIN_MATCHES_{hm}_OF_{ha}'
+              elif not uniq:
+                  category = 'HELDOUT_NO_UNIQUE_WINNER'
+              else:
+                  category = 'OTHER_UNRESOLVED'
+              counts[category] += 1
+
+              report_path = r.get('report_path')
+              top = None
+              second = None
+              rejection_counts = Counter()
+              if report_path and Path(str(report_path)).is_file():
+                  try:
+                      rep = json.loads(Path(str(report_path)).read_text())
+                      hist = rep.get('historical_candidate_verifications', [])
+                      scored = []
+                      for h in hist if isinstance(hist, list) else []:
+                          if not isinstance(h, dict):
+                              continue
+                          ver = h.get('verification') if isinstance(h.get('verification'), dict) else h
+                          matched = int(ver.get('matched') or h.get('matched') or 0)
+                          attempted = int(ver.get('attempted') or h.get('attempted') or 0)
+                          addr = h.get('address') or h.get('candidate')
+                          scored.append((matched, attempted, addr))
+                          for ev in ver.get('evidence', []) if isinstance(ver.get('evidence'), list) else []:
+                              if isinstance(ev, dict) and not ev.get('matched'):
+                                  rejection_counts[str(ev.get('rejection_reason') or 'unknown')] += 1
+                      scored.sort(reverse=True, key=lambda x: (x[0], x[1]))
+                      top = scored[0] if scored else None
+                      second = scored[1] if len(scored) > 1 else None
+                  except Exception:
+                      pass
+              else:
+                  report_missing += 1
+
+              if top:
+                  top_hist[top[0]] += 1
+              if second:
+                  second_hist[second[0]] += 1
+
+              row = {
+                  'username': st.get('username'),
+                  'evidence_count': st.get('evidence_count'),
+                  'category': category,
+                  'discovery': f'{dm}/{da}',
+                  'candidate': cand,
+                  'historical_result': f'{hm}/{ha}',
+                  'top_heldout': top[:2] if top else None,
+                  'second_heldout': second[:2] if second else None,
+                  'rejections': rejection_counts.most_common(4),
+                  'unchanged_attempts': st.get('unchanged_unresolved_attempts'),
+                  'next_retry_at': st.get('next_retry_at'),
+              }
+              rows.append(row)
+              if len(examples[category]) < 4:
+                  examples[category].append(row)
+
+          rows.sort(key=lambda x: (-int(x.get('evidence_count') or 0), str(x.get('username') or '')))
+          output = {
+              'unresolved_total': len(rows),
+              'failure_categories': dict(counts.most_common()),
+              'discovery_match_histogram': {str(k): v for k, v in sorted(discovery_hist.items())},
+              'historical_attempted_histogram': {str(k): v for k, v in sorted(attempts_hist.items())},
+              'top_heldout_match_histogram': {str(k): v for k, v in sorted(top_hist.items())},
+              'second_heldout_match_histogram': {str(k): v for k, v in sorted(second_hist.items())},
+              'report_missing': report_missing,
+              'examples_by_failure': dict(examples),
+              'highest_evidence_unresolved': rows[:15],
+          }
+          print('UNRESOLVED_DIAGNOSTICS_JSON=' + json.dumps(output, sort_keys=True))
+          PY
