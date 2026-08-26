@@ -11,8 +11,6 @@ import { NotificationState } from './notification-state.js';
 if (INVO_TOKEN) invo.setToken(INVO_TOKEN);
 if (INVO_REFRESH_TOKEN) invo.setRefreshToken(INVO_REFRESH_TOKEN);
 
-type Config = ReturnType<typeof loadConfig>;
-
 function n(name: string, fallback: number): number {
   const raw = process.env[name];
   const value = raw == null || raw === '' ? fallback : Number(raw);
@@ -72,6 +70,10 @@ function log(event: Record<string, unknown>) {
   console.log(JSON.stringify(row));
   mkdirSync(dirname(cfg.auditPath), { recursive: true });
   appendFileSync(cfg.auditPath, `${JSON.stringify(row)}\n`);
+}
+
+function detectionLatencyMs(signal: InvoSignal, receivedAtMs: number): number | null {
+  return signal.sourceTimeMs == null ? null : receivedAtMs - signal.sourceTimeMs;
 }
 
 function chaseBps(signal: InvoSignal, mid: number): number | null {
@@ -137,8 +139,47 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
       }
 
       if (!cfg.live) {
+        const mids = await hl.getAllMids();
+        const exitMid = Number(mids[signal.coin]);
+        const entryMid = Number(managed.entryMid);
+        const size = Number(managed.size);
+        if (!(exitMid > 0) || !(entryMid > 0) || !(size > 0)) {
+          state.clearManaged(signal.coin);
+          state.markSeen(signal.key);
+          log({ type: 'shadow_close_unpriced', reason: 'missing_shadow_economics', managed, signal, exitMid, wakeSource });
+          return;
+        }
+        const direction = managed.side === 'long' ? 1 : -1;
+        const grossPnlUsd = (exitMid - entryMid) * size * direction;
+        const grossReturnBps = ((exitMid - entryMid) / entryMid) * direction * 10_000;
+        const returnOnMarginPct = managed.marginUsd && managed.marginUsd > 0
+          ? (grossPnlUsd / managed.marginUsd) * 100
+          : null;
+        const heldMs = Date.now() - managed.openedAtMs;
+        state.clearManaged(signal.coin);
         state.markSeen(signal.key);
-        log({ type: 'dry_run_close', signal, wakeSource, detectionLatencyMs: signal.sourceTimeMs ? receivedAtMs - signal.sourceTimeMs : null });
+        log({
+          type: 'shadow_closed',
+          username: managed.username ?? signal.username,
+          coin: signal.coin,
+          side: managed.side,
+          sourceBaseId: managed.sourceBaseId,
+          entryMid,
+          exitMid,
+          sourceClosingPrice: signal.closingPrice,
+          size,
+          notionalUsd: managed.notionalUsd,
+          marginUsd: managed.marginUsd,
+          leverage: managed.leverage,
+          grossPnlUsd,
+          grossReturnBps,
+          returnOnMarginPct,
+          heldMs,
+          signal,
+          wakeSource,
+          detectionLatencyMs: detectionLatencyMs(signal, receivedAtMs),
+          decisionLatencyMs: Date.now() - receivedAtMs,
+        });
         return;
       }
 
@@ -182,7 +223,7 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
       state.markSeen(signal.key);
       log({
         type: 'closed', signal, wakeSource, result, invoResult,
-        detectionLatencyMs: signal.sourceTimeMs ? receivedAtMs - signal.sourceTimeMs : null,
+        detectionLatencyMs: detectionLatencyMs(signal, receivedAtMs),
         decisionLatencyMs: decisionAtMs - receivedAtMs,
         executionLatencyMs: Date.now() - orderAtMs,
       });
@@ -190,6 +231,11 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
     }
 
     const existingManaged = state.getManaged(signal.coin);
+    if (existingManaged?.sourceBaseId === signal.sourceBaseId) {
+      state.markSeen(signal.key);
+      log({ type: 'skip', reason: 'source_already_managed', existingManaged, signal, wakeSource });
+      return;
+    }
     if (existingManaged && existingManaged.sourceBaseId !== signal.sourceBaseId) {
       state.markSeen(signal.key);
       log({ type: 'skip', reason: 'same_coin_source_conflict', existingManaged, signal, wakeSource });
@@ -236,23 +282,38 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
     const size = roundSize(notionalUsd / mid, asset.szDecimals);
 
     const existing = positions.find((p: any) => p.coin === signal.coin);
-    if (!existingManaged && Object.keys(state.snapshot().managed).length >= cfg.maxPositions) {
+    if (Object.keys(state.snapshot().managed).length >= cfg.maxPositions) {
       state.markSeen(signal.key);
       log({ type: 'skip', reason: 'max_managed_positions', maxPositions: cfg.maxPositions, signal, wakeSource });
       return;
     }
-    if (existing && !existingManaged) {
+    if (existing) {
       state.markSeen(signal.key);
       log({ type: 'skip', reason: 'unmanaged_existing_coin_position', existing, signal, wakeSource });
       return;
     }
 
     if (!cfg.live) {
+      state.setManaged({
+        coin: signal.coin,
+        sourceBaseId: signal.sourceBaseId,
+        sourceBaseShortId: signal.sourceBaseShortId,
+        sourcePostId: signal.postId,
+        username: signal.username,
+        side: signal.side,
+        openedAtMs: Date.now(),
+        paper: true,
+        entryMid: mid,
+        notionalUsd,
+        marginUsd,
+        leverage,
+        size: Number(size),
+      });
       state.markSeen(signal.key);
       log({
-        type: 'dry_run_open', signal, wakeSource, equity, mid, chaseBps: chase,
-        leverage, marginUsd, notionalUsd, size,
-        detectionLatencyMs: signal.sourceTimeMs ? receivedAtMs - signal.sourceTimeMs : null,
+        type: 'shadow_opened', signal, wakeSource, equity, entryMid: mid, chaseBps: chase,
+        leverage, marginUsd, notionalUsd, size: Number(size),
+        detectionLatencyMs: detectionLatencyMs(signal, receivedAtMs),
         decisionLatencyMs: Date.now() - receivedAtMs,
       });
       return;
@@ -303,15 +364,22 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
       sourceBaseId: signal.sourceBaseId,
       sourceBaseShortId: signal.sourceBaseShortId,
       sourcePostId: signal.postId,
+      username: signal.username,
       side: signal.side,
       openedAtMs: Date.now(),
       localBaseShortId: invoResult?.baseShortId ?? invoResult?.investment?.baseShortId,
+      paper: false,
+      entryMid: mid,
+      notionalUsd,
+      marginUsd,
+      leverage,
+      size: Number(size),
     });
     state.markSeen(signal.key);
     log({
       type: 'opened', signal, wakeSource, equity, mid, chaseBps: chase, leverage,
       marginUsd, notionalUsd, size, qtyBefore, qtyAfter, result, invoResult,
-      detectionLatencyMs: signal.sourceTimeMs ? receivedAtMs - signal.sourceTimeMs : null,
+      detectionLatencyMs: detectionLatencyMs(signal, receivedAtMs),
       decisionLatencyMs: orderAtMs - receivedAtMs,
       executionLatencyMs: Date.now() - orderAtMs,
     });
@@ -327,14 +395,19 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
   const posts = data?.items ?? [];
 
   if (!initialized) {
+    const recoverableCloses: InvoSignal[] = [];
     for (const post of posts) {
       const signal = signalFromFeedPost(post);
-      if (signal) state.markSeen(signal.key);
+      if (!signal) continue;
+      const managed = signal.action === 'close' ? state.getManaged(signal.coin) : null;
+      if (managed?.sourceBaseId === signal.sourceBaseId) recoverableCloses.push(signal);
+      else state.markSeen(signal.key);
     }
     initialized = true;
     lastSuccessPollMs = Date.now();
-    log({ type: 'baseline_indexed', posts: posts.length, live: cfg.live });
-    return 0;
+    log({ type: 'baseline_indexed', posts: posts.length, recoverableCloses: recoverableCloses.length, live: cfg.live });
+    for (const signal of recoverableCloses) await execute(signal, 'startup_recovery', receivedAtMs);
+    return recoverableCloses.length;
   }
 
   const signals: InvoSignal[] = (posts as any[])
