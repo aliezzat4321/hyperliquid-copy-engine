@@ -2,6 +2,7 @@
 Description=Sync verified third-party identities into research-only wallet registry
 After=network-online.target
 Wants=network-online.target
+OnSuccess=hyperliquid-third-party-profitability.service
 
 [Service]
 Type=oneshot
