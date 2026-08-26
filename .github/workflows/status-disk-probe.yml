@@ -1,0 +1,30 @@
+name: status-disk-probe
+
+on:
+  push:
+    branches:
+      - agent/status-disk-probe
+    paths:
+      - ".github/workflows/status-disk-probe.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    if: github.repository == 'aliezzat4321/hyperliquid-copy-engine'
+    runs-on:
+      - self-hosted
+      - hyperliquid
+    timeout-minutes: 5
+    steps:
+      - name: Report volume usage
+        shell: bash
+        run: |
+          set -u
+          echo '=== DF ==='
+          df -h /mnt/HC_Volume_106576526 || true
+          echo '=== TOP LEVEL ==='
+          du -x -h --max-depth=2 /mnt/HC_Volume_106576526 2>/dev/null | sort -h | tail -40 || true
+          echo '=== LARGE FILES ==='
+          find /mnt/HC_Volume_106576526 -xdev -type f -size +500M -printf '%s %p\n' 2>/dev/null | sort -nr | head -30 || true
