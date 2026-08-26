@@ -30,7 +30,7 @@ export function resolveWalletAddress(): string {
 export function validateEnv(live: boolean) {
   const missing: string[] = [];
   if (!INVO_TOKEN && !INVO_REFRESH_TOKEN) missing.push('INVO_ACCESS_TOKEN/INVO_TOKEN or INVO_REFRESH_TOKEN');
-  if (!resolveWalletAddress()) missing.push('WALLET_ADDRESS (or a JWT containing trading_account.wallet_address)');
+  if (live && !resolveWalletAddress()) missing.push('WALLET_ADDRESS (or a JWT containing trading_account.wallet_address)');
   if (live && !HL_AGENT_KEY) missing.push('HL_AGENT_KEY');
   if (missing.length) throw new Error(`Missing environment variables: ${missing.join(', ')}`);
 }
