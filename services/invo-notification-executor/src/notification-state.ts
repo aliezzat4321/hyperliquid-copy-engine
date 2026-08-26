@@ -6,9 +6,17 @@ export interface ManagedPosition {
   sourceBaseId: string;
   sourceBaseShortId: string;
   sourcePostId: string;
+  username?: string;
   side: 'long' | 'short';
   openedAtMs: number;
   localBaseShortId?: string;
+  paper?: boolean;
+  entryMid?: number;
+  notionalUsd?: number;
+  marginUsd?: number;
+  leverage?: number;
+  size?: number;
+  estimatedOpenCostUsd?: number;
 }
 
 interface DiskState {

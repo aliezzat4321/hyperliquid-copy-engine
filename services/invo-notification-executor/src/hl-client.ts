@@ -37,10 +37,18 @@ export async function getAllMids(): Promise<Record<string, string>> {
 }
 
 export async function getClearinghouseState(wallet: string) {
+  if (!wallet) throw new Error('Hyperliquid wallet address is required for account state');
   return info({ type: 'clearinghouseState', user: wallet });
 }
 
 export async function getAccountEquity(wallet: string): Promise<number> {
+  if (!wallet) {
+    const paperEquity = Number(process.env.NOTIFICATION_TRADER_DRY_EQUITY_USD ?? '1000');
+    if (!Number.isFinite(paperEquity) || paperEquity <= 0) {
+      throw new Error(`Invalid NOTIFICATION_TRADER_DRY_EQUITY_USD: ${process.env.NOTIFICATION_TRADER_DRY_EQUITY_USD}`);
+    }
+    return paperEquity;
+  }
   const data = await getClearinghouseState(wallet);
   const raw = data?.marginSummary?.accountValue ?? data?.crossMarginSummary?.accountValue ?? '0';
   const equity = Number(raw);
@@ -49,6 +57,7 @@ export async function getAccountEquity(wallet: string): Promise<number> {
 }
 
 export async function getPositions(wallet: string): Promise<any[]> {
+  if (!wallet) return [];
   const data = await getClearinghouseState(wallet);
   return (data?.assetPositions ?? [])
     .filter((p: any) => Number(p?.position?.szi) !== 0)
@@ -78,6 +87,7 @@ export async function placeMarketOrder(coin: string, isBuy: boolean, size: strin
 }
 
 export async function closePosition(coin: string, wallet: string, slippagePct: number) {
+  if (!wallet) throw new Error('Hyperliquid wallet address is required for live close');
   const positions = await getPositions(wallet);
   const pos = positions.find((p: any) => p.coin === coin);
   if (!pos) throw new Error(`No open position for ${coin}`);
