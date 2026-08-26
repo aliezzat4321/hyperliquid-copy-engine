@@ -1,0 +1,165 @@
+name: probe-close-signature-v11
+
+on:
+  push:
+    branches:
+      - wallet-pipeline/inspect-unresolved-v10
+    paths:
+      - ".github/workflows/probe-close-signature-v11.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    if: github.repository == 'aliezzat4321/hyperliquid-copy-engine'
+    runs-on:
+      - self-hosted
+      - hyperliquid
+    timeout-minutes: 20
+    steps:
+      - name: Test disjoint final-flatten held-out signatures
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /root/hyperliquid-copy-engine
+          .venv/bin/python - <<'PY'
+          import asyncio
+          import json
+          from decimal import Decimal
+          from pathlib import Path
+
+          from hlcopy.resolver.identifier import _load_source_evidence
+          from hlcopy.resolver.provenance import EvidenceSnapshot
+          from hlcopy.resolver.public_trade_index import DEFAULT_PUBLIC_TRADE_CONFIG, _episode_is_covered
+          from hlcopy.resolver.reverse_index import rank_candidates
+          from hlcopy.resolver.size_agnostic_identifier import (
+              FINAL_FLATTEN_PREFIX,
+              SIZE_AGNOSTIC_CLOSE_OFFSET_DRIFT_MS,
+              SIZE_AGNOSTIC_MAX_CLOCK_MAD_MS,
+              SIZE_AGNOSTIC_MAX_MEDIAN_PRICE_BPS,
+              SIZE_AGNOSTIC_MIN_HISTORICAL_MATCHES,
+              SIZE_AGNOSTIC_MIN_HISTORICAL_RATIO,
+              SIZE_AGNOSTIC_MIN_WINNER_MATCH_GAP,
+              SIZE_AGNOSTIC_VERIFY_TRADES,
+              _dedupe_discovery_executions,
+              _discovery_matches_without_size,
+          )
+          from hlcopy.resolver.sqd_position_aware import SqdHyperliquidFillsClient
+
+          D = Decimal
+          state_dir = Path('/var/lib/hyperliquid-copy-engine/invo')
+          state = json.loads((state_dir / 'identifier_state.json').read_text())
+          queue = json.loads((state_dir / 'resolution_queue' / 'resolution_queue.json').read_text()).get('queue', [])
+          qmap = {str(r.get('portfolio_id')): r for r in queue if isinstance(r, dict)}
+          items = state.get('items', {})
+          config = DEFAULT_PUBLIC_TRADE_CONFIG
+
+          async def evaluate(pid, st, client, coverage_start, coverage_end):
+              row = qmap[pid]
+              r = st.get('result') if isinstance(st.get('result'), dict) else {}
+              candidate = str(r.get('candidate') or st.get('candidate') or '').lower()
+              report_path = Path(str(r.get('report_path') or ''))
+              if not candidate or not report_path.is_file():
+                  return None
+              report = json.loads(report_path.read_text())
+              discovery_ids = set(report.get('discovery_anchor_ids', []))
+              snapshot = EvidenceSnapshot.from_path(Path(str(row['resolver_csv'])))
+              imported = _load_source_evidence(snapshot, config)
+              signals = imported.signals
+              entry_margin = max(1, config.historical_entry_time_tolerance_ms)
+              close_margin = max(0, config.historical_time_tolerance_ms)
+              eligible = [
+                  s for s in signals
+                  if s.signal_id not in discovery_ids
+                  and _episode_is_covered(
+                      s,
+                      coverage_start_ms=coverage_start,
+                      coverage_end_ms=coverage_end,
+                      entry_margin_ms=0,
+                      close_margin_ms=close_margin,
+                  )
+              ]
+              eligible.sort(key=lambda s: (s.closed_at_ms, s.signal_id), reverse=True)
+              selected = eligible[:SIZE_AGNOSTIC_VERIFY_TRADES]
+              if len(selected) < SIZE_AGNOSTIC_VERIFY_TRADES:
+                  return {'username': st.get('username'), 'candidate': candidate, 'reason': 'insufficient_heldout'}
+
+              sem = asyncio.Semaphore(6)
+              window_ms = max(1, config.historical_time_tolerance_ms)
+              async def one(signal):
+                  async with sem:
+                      fills = await client.fills_around(
+                          timestamp_ms=signal.closed_at_ms,
+                          coin=signal.coin,
+                          window_ms=window_ms,
+                      )
+                  return signal.signal_id, _discovery_matches_without_size(
+                      signal,
+                      fills,
+                      window_ms=window_ms,
+                      max_price_bps=config.historical_price_tolerance_bps,
+                  )
+              raw = dict(await asyncio.gather(*(one(s) for s in selected)))
+              unique = _dedupe_discovery_executions(raw)
+              ranked = rank_candidates(unique, total_anchors=len(selected))
+              target = next((x for x in ranked if x.address.lower() == candidate), None)
+              leader = ranked[0] if ranked else None
+              runner = ranked[1] if len(ranked) > 1 else None
+              target_matches = target.matched_anchors if target else 0
+              leader_matches = leader.matched_anchors if leader else 0
+              runner_matches = runner.matched_anchors if runner else 0
+              target_is_leader = bool(target and leader and target.address == leader.address)
+              gap = leader_matches - runner_matches if leader else 0
+              passes = bool(
+                  target
+                  and target_is_leader
+                  and target_matches >= SIZE_AGNOSTIC_MIN_HISTORICAL_MATCHES
+                  and D(target_matches) / D(len(selected)) >= SIZE_AGNOSTIC_MIN_HISTORICAL_RATIO
+                  and gap >= SIZE_AGNOSTIC_MIN_WINNER_MATCH_GAP
+                  and target.clock_offset_mad_ms <= SIZE_AGNOSTIC_MAX_CLOCK_MAD_MS
+                  and target.median_price_bps <= SIZE_AGNOSTIC_MAX_MEDIAN_PRICE_BPS
+              )
+              return {
+                  'username': st.get('username'),
+                  'candidate': candidate,
+                  'current_discovery': f"{r.get('discovery_matches')}/{r.get('discovery_anchors')}",
+                  'heldout_target_matches': target_matches,
+                  'heldout_total': len(selected),
+                  'heldout_leader_matches': leader_matches,
+                  'heldout_runner_matches': runner_matches,
+                  'heldout_gap': gap,
+                  'target_is_leader': target_is_leader,
+                  'clock_mad_ms': target.clock_offset_mad_ms if target else None,
+                  'median_price_bps': str(target.median_price_bps) if target else None,
+                  'passes_strict_close_signature': passes,
+              }
+
+          async def main():
+              targets = [
+                  (pid, st)
+                  for pid, st in items.items()
+                  if pid in qmap
+                  and isinstance(st, dict)
+                  and st.get('status') == 'UNRESOLVED'
+                  and isinstance(st.get('result'), dict)
+                  and int(st['result'].get('discovery_matches') or 0) >= 4
+                  and st['result'].get('candidate')
+              ]
+              async with SqdHyperliquidFillsClient() as client:
+                  coverage_start = await client.coverage_start_ms()
+                  coverage_end = await client.coverage_end_ms()
+                  results = []
+                  for pid, st in targets:
+                      results.append(await evaluate(pid, st, client, coverage_start, coverage_end))
+              clean = [r for r in results if r]
+              passed = [r for r in clean if r.get('passes_strict_close_signature')]
+              print('CLOSE_SIGNATURE_PROBE_JSON=' + json.dumps({
+                  'tested': len(clean),
+                  'passed': len(passed),
+                  'passed_usernames': [r.get('username') for r in passed],
+                  'results': clean,
+              }, sort_keys=True))
+
+          asyncio.run(main())
+          PY
