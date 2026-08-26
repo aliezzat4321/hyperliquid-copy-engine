@@ -1,0 +1,72 @@
+name: storage-governance
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/postgres_storage_audit.py'
+      - 'scripts/hyperliquid_storage_guard.sh'
+      - '.github/workflows/storage-governance.yml'
+  workflow_dispatch:
+
+jobs:
+  audit-and-guard:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 20
+    steps:
+      - name: Checkout canonical main
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Sync server checkout
+        run: |
+          set -euo pipefail
+          cd /root/hyperliquid-copy-engine
+          git fetch origin main
+          git reset --hard origin/main
+
+      - name: Read-only PostgreSQL storage audit
+        run: |
+          set -euo pipefail
+          cd /root/hyperliquid-copy-engine
+          .venv/bin/python scripts/postgres_storage_audit.py
+
+      - name: Install disk pressure guard
+        run: |
+          set -euo pipefail
+          install -m 0755 /root/hyperliquid-copy-engine/scripts/hyperliquid_storage_guard.sh /usr/local/bin/hyperliquid-storage-guard
+          cat >/etc/systemd/system/hyperliquid-storage-guard.service <<'UNIT'
+          [Unit]
+          Description=Hyperliquid storage pressure guard
+          After=local-fs.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/hyperliquid-storage-guard
+          UNIT
+
+          cat >/etc/systemd/system/hyperliquid-storage-guard.timer <<'UNIT'
+          [Unit]
+          Description=Check Hyperliquid storage pressure every five minutes
+
+          [Timer]
+          OnBootSec=2min
+          OnUnitActiveSec=5min
+          AccuracySec=30s
+          Persistent=true
+
+          [Install]
+          WantedBy=timers.target
+          UNIT
+
+          systemctl daemon-reload
+          systemctl enable --now hyperliquid-storage-guard.timer
+          systemctl start hyperliquid-storage-guard.service
+
+      - name: Storage guard status
+        run: |
+          set -u
+          systemctl --no-pager --full status hyperliquid-storage-guard.timer || true
+          journalctl -u hyperliquid-storage-guard.service -n 15 --no-pager || true
+          df -h / /mnt/HC_Volume_106576526 || true
