@@ -21,11 +21,11 @@ Invo push (optional wake) ─┐
                     dedupe + freshness + chase
                      + trader + leverage gates
                                    |
-                       dry-run / Hyperliquid IOC
+                       shadow / Hyperliquid IOC
                                    |
-                    signed position-delta verify
+             source close -> copied close at our HL mid
                                    |
-                    persistent ownership + audit
+             copied P&L + latency + persistent ownership
 ```
 
 A notification is only a **wake-up hint**. Notification text can never directly place an order; every candidate is hydrated from authenticated Invo API data first.
@@ -40,14 +40,27 @@ The deployed service starts dry:
 - maximum source age: 5s
 - maximum adverse entry chase: 25 bps
 - maximum leverage: 20x
-- target margin: 1% of account equity
+- target margin: 1% of account equity (or paper equity in walletless shadow mode)
 - maximum notional: $500
 - IOC slippage envelope: 0.5%
 - maximum managed positions: 5
 - position increases are fail-closed in the MVP
 - no close unless this service recorded ownership of that source trade
-- no entry over an existing unmanaged same-coin position
+- no duplicate entry for an already-managed source trade
+- no entry over an existing unmanaged same-coin live position
 - live execution requires **both** `NOTIFICATION_TRADER_LIVE=true` and repo-wide `REAL_TRADING_ENABLED=YES`
+
+## Shadow profitability loop
+
+Dry mode is a real trade-lifecycle ledger, not an entry logger:
+
+1. At an eligible Invo open, record the Hyperliquid mid visible to **us at detection time**, simulated size/notional/margin, source trader, chase and latency.
+2. Persist that ownership across restarts.
+3. When the same source trade closes, record the Hyperliquid mid visible to us at close detection.
+4. Emit `shadow_closed` with gross copied P&L, gross return bps, return on simulated margin, holding time, and close-detection latency.
+5. A restart recovers matching source closes from the startup feed rather than baselining them away.
+
+This intentionally reports **gross** copied P&L. Fee/builder/funding assumptions should be layered on from measured Hyperliquid execution costs rather than hard-coded guesses.
 
 Every decision writes JSONL with detection/decision/execution latency, chase, sizing and reason codes. That audit stream is the profitability dataset: source headline P&L is irrelevant if the edge disappears after our latency, fill drift and fees.
 
@@ -56,8 +69,8 @@ Every decision writes JSONL with detection/decision/execution latency, chase, si
 The service reuses the existing repo contract from `/etc/hyperliquid-copy-engine/invo.env`:
 
 - `INVO_ACCESS_TOKEN` or `INVO_REFRESH_TOKEN`
-- `WALLET_ADDRESS` is optional when embedded in the Invo JWT
-- `HL_AGENT_KEY` is required only for live execution
+- `WALLET_ADDRESS` and `HL_AGENT_KEY` are required for live execution
+- dry mode may run walletless using `NOTIFICATION_TRADER_DRY_EQUITY_USD` for sizing
 
 Service-specific controls live in `/etc/hyperliquid-copy-engine/invo-notification-executor.env`.
 
@@ -90,4 +103,4 @@ That POST only wakes canonical API hydration.
 
 ## Promotion criterion
 
-Run dry first and rank traders by **prospective copied results**: signal count, median/p95 detection latency, adverse chase bps, stale/chase rejection rate, theoretical fills net of Hyperliquid fees/builder costs, and copied return at the source exit. Only proven positive copied cohorts should enter the live allowlist.
+Run shadow first and rank traders by **prospective copied results**: signal count, median/p95 detection latency, adverse chase bps, stale/chase rejection rate, copied gross return at the source exit, and then measured execution/funding/fee costs. Only positive copied cohorts after those costs should enter the live allowlist.
