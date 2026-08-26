@@ -1,0 +1,99 @@
+name: probe-invo-direct-wallet-fields-v12
+
+on:
+  push:
+    branches:
+      - wallet-pipeline/inspect-unresolved-v10
+    paths:
+      - ".github/workflows/probe-invo-direct-wallet-fields-v12.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    if: github.repository == 'aliezzat4321/hyperliquid-copy-engine'
+    runs-on:
+      - self-hosted
+      - hyperliquid
+    timeout-minutes: 5
+    steps:
+      - name: Inspect sanitized Invo payload metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /root/hyperliquid-copy-engine
+          set -a
+          source /etc/hyperliquid-copy-engine/invo.env
+          set +a
+          .venv/bin/python - <<'PY'
+          import asyncio
+          import json
+          import os
+          import re
+          from collections.abc import Mapping, Sequence
+
+          from hlcopy.discovery.invo_source import InvoReadOnlyClient
+
+          KEY_RE = re.compile(r'(wallet|address|hyper|account|exchange|broker|chain|evm|public.?key|deposit)', re.I)
+          ADDR_RE = re.compile(r'^0x[0-9a-fA-F]{40}$')
+          TARGETS = {'carmine', 'bones'}
+
+          def username_of(post):
+              if not isinstance(post, Mapping):
+                  return ''
+              update = post.get('update') if isinstance(post.get('update'), Mapping) else {}
+              owner = update.get('owner') if isinstance(update.get('owner'), Mapping) else {}
+              post_owner = post.get('owner') if isinstance(post.get('owner'), Mapping) else {}
+              return str(owner.get('username') or post_owner.get('username') or '').removeprefix('@').casefold()
+
+          def walk(value, path='$', out=None):
+              if out is None:
+                  out = []
+              if isinstance(value, Mapping):
+                  for k, v in value.items():
+                      p = f'{path}.{k}'
+                      if KEY_RE.search(str(k)):
+                          if isinstance(v, str) and ADDR_RE.fullmatch(v.strip()):
+                              rendered = v.strip().lower()
+                          elif v is None or isinstance(v, (bool, int, float)):
+                              rendered = v
+                          else:
+                              rendered = f'<{type(v).__name__}>'
+                          out.append({'path': p, 'value': rendered})
+                      if isinstance(v, str) and ADDR_RE.fullmatch(v.strip()):
+                          out.append({'path': p, 'value': v.strip().lower(), 'detected_address_value': True})
+                      walk(v, p, out)
+              elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+                  for i, v in enumerate(value[:20]):
+                      walk(v, f'{path}[{i}]', out)
+              return out
+
+          async def main():
+              refresh = os.environ.get('INVO_REFRESH_TOKEN') or os.environ.get('INVO_TOKEN')
+              access = os.environ.get('INVO_ACCESS_TOKEN')
+              async with InvoReadOnlyClient(access_token=access, refresh_token=refresh) as client:
+                  payload = await client.feed(filter_name='following', item_limit=50)
+              items = payload.get('items', []) if isinstance(payload, Mapping) else []
+              generic = walk(payload)
+              targets = {}
+              for post in items if isinstance(items, Sequence) else []:
+                  u = username_of(post)
+                  if u in TARGETS and u not in targets:
+                      targets[u] = walk(post)
+              # Deduplicate exact observations.
+              def dedupe(rows):
+                  seen = set(); out = []
+                  for row in rows:
+                      key = json.dumps(row, sort_keys=True)
+                      if key in seen: continue
+                      seen.add(key); out.append(row)
+                  return out[:100]
+              print('INVO_DIRECT_FIELD_PROBE_JSON=' + json.dumps({
+                  'generic_matching_fields': dedupe(generic),
+                  'target_matching_fields': {k: dedupe(v) for k, v in targets.items()},
+                  'targets_seen': sorted(targets),
+              }, sort_keys=True))
+
+          asyncio.run(main())
+          PY
