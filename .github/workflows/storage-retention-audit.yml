@@ -1,0 +1,66 @@
+name: storage-retention-audit
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "scripts/storage_retention_audit.py"
+      - ".github/workflows/storage-retention-audit.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hyperliquid-storage-retention-audit
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    if: github.repository == 'aliezzat4321/hyperliquid-copy-engine'
+    runs-on: self-hosted
+    timeout-minutes: 20
+    steps:
+      - name: Checkout canonical main
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          clean: true
+
+      - name: Sync server checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /root/hyperliquid-copy-engine
+          git fetch origin main
+          git reset --hard origin/main
+
+      - name: Run dry-run retention planner
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /root/hyperliquid-copy-engine
+          python3 scripts/storage_retention_audit.py
+
+      - name: Print top deletion candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          p=Path('/root/hyperliquid-audit/storage-retention/storage_retention_manifest.json')
+          d=json.loads(p.read_text())
+          rows=[r for r in d['market_shadow']['partitions'] if r['action']=='DELETE_CANDIDATE']
+          rows.sort(key=lambda r:r['bytes'], reverse=True)
+          print('========== TOP DELETE CANDIDATES (DRY RUN) ==========')
+          for r in rows[:30]:
+              print(f"{r['bytes']/1024**3:.3f} GiB | {r['date']} | {r['coin_dir']} | {r['path']}")
+          print('DELETION_PERFORMED=NO')
+          PY
+
+      - name: Filesystem after audit
+        shell: bash
+        run: |
+          df -h / /mnt/HC_Volume_106576526 || true
