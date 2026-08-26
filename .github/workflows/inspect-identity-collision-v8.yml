@@ -1,0 +1,165 @@
+name: inspect-identity-collision-v8
+
+on:
+  push:
+    branches:
+      - wallet-pipeline/inspect-identity-collision-v8
+    paths:
+      - ".github/workflows/inspect-identity-collision-v8.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    if: github.repository == 'aliezzat4321/hyperliquid-copy-engine'
+    runs-on:
+      - self-hosted
+      - hyperliquid
+    timeout-minutes: 5
+    steps:
+      - name: Inspect sanitized collision and recent resolver throughput
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from collections import Counter
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          state_dir = Path('/var/lib/hyperliquid-copy-engine/invo')
+          queue_path = state_dir / 'resolution_queue' / 'resolution_queue.json'
+          state_path = state_dir / 'identifier_state.json'
+          universe_path = state_dir / 'universe_candidates.json'
+          reports_dir = state_dir / 'wallet_identifications'
+          target_ids = {
+              '3de730c5-d1b9-4e5d-be79-66375fc02910',
+              'add098a5-636a-4686-b2e5-2783c6a4736f',
+          }
+          target_wallet = '0xa6cfb58994ed0d5e765830072b73d5243df2f379'
+
+          def load(path):
+              try:
+                  value = json.loads(path.read_text())
+              except Exception as exc:
+                  return {'_error': f'{type(exc).__name__}: {exc}'}
+              return value
+
+          queue_payload = load(queue_path)
+          queue = queue_payload.get('queue', []) if isinstance(queue_payload, dict) else []
+          queue_rows = []
+          current_sha = {}
+          for row in queue:
+              if not isinstance(row, dict) or row.get('portfolio_id') not in target_ids:
+                  continue
+              csv_path = Path(str(row.get('resolver_csv') or ''))
+              digest = None
+              if csv_path.is_file():
+                  digest = hashlib.sha256(csv_path.read_bytes()).hexdigest()
+                  current_sha[str(row['portfolio_id'])] = digest
+              queue_rows.append({
+                  'portfolio_id': row.get('portfolio_id'),
+                  'username': row.get('username'),
+                  'portfolio_name': row.get('portfolio_name'),
+                  'evidence_count': row.get('evidence_count'),
+                  'distinct_coin_count': row.get('distinct_coin_count'),
+                  'current_evidence_sha256': digest,
+              })
+
+          identifier = load(state_path)
+          items = identifier.get('items', {}) if isinstance(identifier, dict) else {}
+          state_rows = []
+          for pid in sorted(target_ids):
+              row = items.get(pid)
+              if not isinstance(row, dict):
+                  continue
+              result = row.get('result') if isinstance(row.get('result'), dict) else {}
+              state_rows.append({
+                  'portfolio_id': pid,
+                  'username': row.get('username'),
+                  'status': row.get('status'),
+                  'wallet': row.get('wallet'),
+                  'candidate': row.get('candidate'),
+                  'evidence_sha256': row.get('evidence_sha256'),
+                  'attempted_at': row.get('attempted_at'),
+                  'discovery_matches': result.get('discovery_matches'),
+                  'discovery_anchors': result.get('discovery_anchors'),
+                  'historical_matches': result.get('historical_matches'),
+                  'historical_attempted': result.get('historical_attempted'),
+              })
+
+          report_rows = []
+          for path in sorted(reports_dir.glob('*/wallet_identification_*.json')):
+              try:
+                  row = json.loads(path.read_text())
+              except Exception:
+                  continue
+              if not isinstance(row, dict) or row.get('status') != 'VERIFIED':
+                  continue
+              if row.get('source_identity') not in target_ids and str(row.get('wallet') or '').lower() != target_wallet:
+                  continue
+              report_rows.append({
+                  'source_identity': row.get('source_identity'),
+                  'wallet': str(row.get('wallet') or '').lower(),
+                  'input_sha256': row.get('input_sha256'),
+                  'confidence': row.get('confidence'),
+                  'report': str(path),
+              })
+
+          universe = load(universe_path)
+          universe_rows = []
+          for row in (universe.get('candidates', []) if isinstance(universe, dict) else []):
+              if isinstance(row, dict) and row.get('portfolio_id') in target_ids:
+                  universe_rows.append({
+                      'portfolio_id': row.get('portfolio_id'),
+                      'username': row.get('username'),
+                      'name': row.get('name'),
+                      'closed_positions': row.get('closed_positions'),
+                      'win_rate': row.get('win_rate'),
+                      'percent_change': row.get('percent_change'),
+                      'evidence_count': row.get('evidence_count'),
+                      'tracking_stage': row.get('tracking_stage'),
+                  })
+
+          cutoff = datetime.fromisoformat('2026-08-26T13:07:04+00:00')
+          recent = []
+          status_counts = Counter()
+          for pid, row in items.items():
+              if not isinstance(row, dict):
+                  continue
+              raw = row.get('attempted_at')
+              if not raw:
+                  continue
+              try:
+                  dt = datetime.fromisoformat(str(raw).replace('Z', '+00:00'))
+              except ValueError:
+                  continue
+              if dt.tzinfo is None:
+                  dt = dt.replace(tzinfo=timezone.utc)
+              if dt < cutoff:
+                  continue
+              status = str(row.get('status') or 'UNKNOWN')
+              status_counts[status] += 1
+              if status == 'VERIFIED':
+                  recent.append({
+                      'portfolio_id': pid,
+                      'username': row.get('username'),
+                      'wallet': row.get('wallet'),
+                      'attempted_at': raw,
+                  })
+
+          output = {
+              'queue_collision_rows': queue_rows,
+              'identifier_collision_rows': state_rows,
+              'verified_collision_reports': report_rows,
+              'universe_collision_rows': universe_rows,
+              'recent_since_parallel_deploy': {
+                  'status_counts': dict(status_counts),
+                  'verified': recent,
+                  'total': sum(status_counts.values()),
+              },
+          }
+          print('IDENTITY_COLLISION_JSON=' + json.dumps(output, sort_keys=True))
+          PY
