@@ -1,0 +1,33 @@
+name: invo-notification-executor-ci
+
+on:
+  pull_request:
+    paths:
+      - services/invo-notification-executor/**
+      - deploy/systemd/hyperliquid-invo-notification-executor.service
+      - scripts/deploy_invo_notification_executor_self_hosted.sh
+      - .github/workflows/invo-notification-executor-ci.yml
+      - .github/workflows/deploy-invo-notification-executor.yml
+  push:
+    branches: [main]
+    paths:
+      - services/invo-notification-executor/**
+      - deploy/systemd/hyperliquid-invo-notification-executor.service
+      - scripts/deploy_invo_notification_executor_self_hosted.sh
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/invo-notification-executor
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --ignore-scripts --no-audit --no-fund
+      - run: npm run check
