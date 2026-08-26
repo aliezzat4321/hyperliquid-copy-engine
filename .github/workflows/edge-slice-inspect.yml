@@ -1,0 +1,49 @@
+name: edge-slice-inspect
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/edge-slice-inspect.yml'
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: [self-hosted, linux]
+    steps:
+      - name: Inspect persisted funnel evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          F=/root/hyperliquid-audit/funnel/realized_slices.jsonl
+          R=/root/hyperliquid-audit/funnel/funnel_report.json
+          echo '=== REPORT TOP ==='
+          python3 - <<'PY'
+          import json
+          r=json.load(open('/root/hyperliquid-audit/funnel/funnel_report.json'))
+          for x in r.get('robust_candidates',[])[:20]: print(x)
+          PY
+          echo '=== SLICE FILE ==='
+          wc -l "$F"
+          ls -lh "$F"
+          echo '=== SAMPLE KEYS ==='
+          python3 - <<'PY'
+          import json
+          from itertools import islice
+          p='/root/hyperliquid-audit/funnel/realized_slices.jsonl'
+          with open(p) as f:
+              rows=[json.loads(x) for x in islice(f,5)]
+          for i,r in enumerate(rows,1):
+              print('ROW',i)
+              print('KEYS',sorted(r))
+              print(r)
+          print('=== ACE SAMPLES ===')
+          n=0
+          with open(p) as f:
+              for line in f:
+                  r=json.loads(line)
+                  if str(r.get('coin','')).upper()=='ACE':
+                      print(r)
+                      n+=1
+                      if n>=5: break
+          print('ACE_SAMPLE_COUNT',n)
+          PY
