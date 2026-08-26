@@ -1,0 +1,26 @@
+{
+  "name": "@hlcopy/invo-notification-executor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Low-latency Invo notification/API signal executor for Hyperliquid",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/src/service.js",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "check": "npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "hyperliquid": "^1.7.7"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.2",
+    "dotenv": "^17.4.1",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
