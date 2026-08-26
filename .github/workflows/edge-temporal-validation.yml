@@ -1,0 +1,53 @@
+name: edge-temporal-validation
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/edge_temporal_validation.py'
+      - '.github/workflows/edge-temporal-validation.yml'
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Sync canonical server checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /root/hyperliquid-copy-engine
+          git fetch origin main
+          git reset --hard origin/main
+      - name: Run temporal stability challenge
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /root/hyperliquid-copy-engine
+          .venv/bin/python scripts/edge_temporal_validation.py \
+            --funnel-dir /root/hyperliquid-audit/funnel \
+            --output /root/hyperliquid-audit/edge-temporal-validation.json \
+            --train-fraction 0.60 \
+            --min-holdout-actions 5
+      - name: Print top passed configs with account outcomes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          p='/root/hyperliquid-audit/edge-temporal-validation.json'
+          d=json.load(open(p))
+          print('PASSED', d['configs_passed'], 'OF', d['configs_evaluated'])
+          for r in d['passed'][:25]:
+              bps=r['worst_holdout_return_bps']
+              ret=bps/10000
+              print(r['wallet_address'][:14], r['coin'], '$'+r['notional_usd'],
+                    'holdout_worst_bps=',round(bps,2),
+                    'actions=',r['holdout_actions_floor'],
+                    'dd_pct=',round(r['worst_holdout_drawdown_pct'],2),
+                    'win_floor=',round(r['holdout_win_rate_floor'],3),
+                    '$100_end=',round(100*(1+ret),2),
+                    '$1000_end=',round(1000*(1+ret),2),
+                    '$5000_end=',round(5000*(1+ret),2))
+          PY
