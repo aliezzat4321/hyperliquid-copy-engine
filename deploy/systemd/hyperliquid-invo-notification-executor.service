@@ -1,0 +1,33 @@
+[Unit]
+Description=Low-latency Invo notification/API executor for Hyperliquid
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/hyperliquid-copy-engine/services/invo-notification-executor
+Environment=REAL_TRADING_ENABLED=NO
+Environment=NOTIFICATION_TRADER_LIVE=false
+EnvironmentFile=/etc/hyperliquid-copy-engine/invo.env
+EnvironmentFile=-/etc/hyperliquid-copy-engine/invo-notification-executor.env
+ExecStart=/usr/bin/node /root/hyperliquid-copy-engine/services/invo-notification-executor/dist/src/service.js
+Restart=always
+RestartSec=2
+User=root
+Group=root
+UMask=0077
+RuntimeDirectory=hyperliquid-copy-engine
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+StateDirectory=hyperliquid-copy-engine/invo-notification-executor
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/var/lib/hyperliquid-copy-engine/invo-notification-executor
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
