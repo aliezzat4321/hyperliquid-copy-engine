@@ -18,7 +18,7 @@ jobs:
       - hyperliquid
     timeout-minutes: 5
     steps:
-      - name: Inspect sanitized collision and recent resolver throughput
+      - name: Inspect sanitized collision and resolver queue state
         shell: bash
         run: |
           set -euo pipefail
@@ -42,34 +42,74 @@ jobs:
 
           def load(path):
               try:
-                  value = json.loads(path.read_text())
+                  return json.loads(path.read_text())
               except Exception as exc:
                   return {'_error': f'{type(exc).__name__}: {exc}'}
-              return value
+
+          def parse_time(raw):
+              if not raw:
+                  return None
+              try:
+                  value = datetime.fromisoformat(str(raw).replace('Z', '+00:00'))
+              except ValueError:
+                  return None
+              return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
           queue_payload = load(queue_path)
           queue = queue_payload.get('queue', []) if isinstance(queue_payload, dict) else []
+          identifier = load(state_path)
+          items = identifier.get('items', {}) if isinstance(identifier, dict) else {}
+          now = datetime.now(timezone.utc)
+
           queue_rows = []
-          current_sha = {}
+          queue_status_counts = Counter()
+          queue_attempted = 0
+          queue_never_attempted = 0
+          queue_retry_due = 0
+          queue_cooldown = 0
+          queue_errors = 0
+          current_verified = []
+
           for row in queue:
-              if not isinstance(row, dict) or row.get('portfolio_id') not in target_ids:
+              if not isinstance(row, dict):
+                  continue
+              pid = str(row.get('portfolio_id') or '')
+              state = items.get(pid) if isinstance(items.get(pid), dict) else None
+              if state is None:
+                  queue_never_attempted += 1
+                  queue_status_counts['NEVER_ATTEMPTED'] += 1
+              else:
+                  queue_attempted += 1
+                  status = str(state.get('status') or 'UNKNOWN')
+                  queue_status_counts[status] += 1
+                  if status == 'ERROR':
+                      queue_errors += 1
+                  if status == 'VERIFIED':
+                      current_verified.append({
+                          'portfolio_id': pid,
+                          'username': state.get('username'),
+                          'wallet': state.get('wallet'),
+                          'attempted_at': state.get('attempted_at'),
+                      })
+                  elif status == 'UNRESOLVED':
+                      retry = parse_time(state.get('next_retry_at'))
+                      if retry is None or retry <= now:
+                          queue_retry_due += 1
+                      else:
+                          queue_cooldown += 1
+
+              if pid not in target_ids:
                   continue
               csv_path = Path(str(row.get('resolver_csv') or ''))
-              digest = None
-              if csv_path.is_file():
-                  digest = hashlib.sha256(csv_path.read_bytes()).hexdigest()
-                  current_sha[str(row['portfolio_id'])] = digest
+              digest = hashlib.sha256(csv_path.read_bytes()).hexdigest() if csv_path.is_file() else None
               queue_rows.append({
-                  'portfolio_id': row.get('portfolio_id'),
+                  'portfolio_id': pid,
                   'username': row.get('username'),
-                  'portfolio_name': row.get('portfolio_name'),
                   'evidence_count': row.get('evidence_count'),
                   'distinct_coin_count': row.get('distinct_coin_count'),
                   'current_evidence_sha256': digest,
               })
 
-          identifier = load(state_path)
-          items = identifier.get('items', {}) if isinstance(identifier, dict) else {}
           state_rows = []
           for pid in sorted(target_ids):
               row = items.get(pid)
@@ -81,11 +121,9 @@ jobs:
                   'username': row.get('username'),
                   'status': row.get('status'),
                   'wallet': row.get('wallet'),
-                  'candidate': row.get('candidate'),
                   'evidence_sha256': row.get('evidence_sha256'),
                   'attempted_at': row.get('attempted_at'),
                   'discovery_matches': result.get('discovery_matches'),
-                  'discovery_anchors': result.get('discovery_anchors'),
                   'historical_matches': result.get('historical_matches'),
                   'historical_attempted': result.get('historical_attempted'),
               })
@@ -115,51 +153,34 @@ jobs:
                   universe_rows.append({
                       'portfolio_id': row.get('portfolio_id'),
                       'username': row.get('username'),
-                      'name': row.get('name'),
                       'closed_positions': row.get('closed_positions'),
                       'win_rate': row.get('win_rate'),
                       'percent_change': row.get('percent_change'),
-                      'evidence_count': row.get('evidence_count'),
-                      'tracking_stage': row.get('tracking_stage'),
                   })
 
           cutoff = datetime.fromisoformat('2026-08-26T13:07:04+00:00')
-          recent = []
-          status_counts = Counter()
-          for pid, row in items.items():
+          recent_counts = Counter()
+          for row in items.values():
               if not isinstance(row, dict):
                   continue
-              raw = row.get('attempted_at')
-              if not raw:
-                  continue
-              try:
-                  dt = datetime.fromisoformat(str(raw).replace('Z', '+00:00'))
-              except ValueError:
-                  continue
-              if dt.tzinfo is None:
-                  dt = dt.replace(tzinfo=timezone.utc)
-              if dt < cutoff:
-                  continue
-              status = str(row.get('status') or 'UNKNOWN')
-              status_counts[status] += 1
-              if status == 'VERIFIED':
-                  recent.append({
-                      'portfolio_id': pid,
-                      'username': row.get('username'),
-                      'wallet': row.get('wallet'),
-                      'attempted_at': raw,
-                  })
+              attempted = parse_time(row.get('attempted_at'))
+              if attempted is not None and attempted >= cutoff:
+                  recent_counts[str(row.get('status') or 'UNKNOWN')] += 1
 
           output = {
-              'queue_collision_rows': queue_rows,
-              'identifier_collision_rows': state_rows,
-              'verified_collision_reports': report_rows,
-              'universe_collision_rows': universe_rows,
-              'recent_since_parallel_deploy': {
-                  'status_counts': dict(status_counts),
-                  'verified': recent,
-                  'total': sum(status_counts.values()),
-              },
+              'queue_total': len(queue),
+              'queue_attempted': queue_attempted,
+              'queue_never_attempted': queue_never_attempted,
+              'queue_status_counts': dict(queue_status_counts),
+              'queue_unresolved_retry_due': queue_retry_due,
+              'queue_unresolved_in_cooldown': queue_cooldown,
+              'queue_errors': queue_errors,
+              'current_verified': current_verified,
+              'collision_queue_rows': queue_rows,
+              'collision_identifier_rows': state_rows,
+              'collision_reports': report_rows,
+              'collision_universe_rows': universe_rows,
+              'recent_parallel_status_counts': dict(recent_counts),
           }
-          print('IDENTITY_COLLISION_JSON=' + json.dumps(output, sort_keys=True))
+          print('IDENTITY_QUEUE_JSON=' + json.dumps(output, sort_keys=True))
           PY
