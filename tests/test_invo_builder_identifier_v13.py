@@ -45,12 +45,12 @@ def _signal(
 
 def test_parse_builder_csv_exposes_actual_user_wallet() -> None:
     raw = (
-        "time,user,coin,side,px,sz,crossed,special_trade_type,tif,is_trigger,"
-        "counterparty,closed_pnl,twap_id,builder_fee\n"
-        "2026-08-25T00:00:05Z,0xd6bbd9a3e9a736782a03ce5d0cb1ff532e0e160b,"
-        "ETH,Ask,2481.3,0.3184,true,Na,Ioc,false,"
-        "0x6f7aa825d69692aa57f65b60a596f077f2a8b561,0.09552,0,0.276516\n"
-    ).encode()
+        b"time,user,coin,side,px,sz,crossed,special_trade_type,tif,is_trigger,"
+        b"counterparty,closed_pnl,twap_id,builder_fee\n"
+        b"2026-08-25T00:00:05Z,0xd6bbd9a3e9a736782a03ce5d0cb1ff532e0e160b,"
+        b"ETH,Ask,2481.3,0.3184,true,Na,Ioc,false,"
+        b"0x6f7aa825d69692aa57f65b60a596f077f2a8b561,0.09552,0,0.276516\n"
+    )
     rows = parse_builder_csv(raw)
     assert len(rows) == 1
     assert rows[0].user == "0xd6bbd9a3e9a736782a03ce5d0cb1ff532e0e160b"
@@ -147,3 +147,25 @@ def test_verified_winner_requires_gap_and_quality() -> None:
         matched_signal_ids=tuple(f"r{i}" for i in range(7)),
     )
     assert _select_verified_winner([winner, too_close]) is None
+
+
+def test_zero_clock_and_price_error_are_best_not_missing() -> None:
+    exact = BuilderCandidateVerification(
+        address="0x1111111111111111111111111111111111111111",
+        attempted=12,
+        matched=8,
+        ratio=D("0.6666666667"),
+        clock_offset_mad_ms=0.0,
+        median_price_bps=D("0"),
+        matched_signal_ids=tuple(f"s{i}" for i in range(8)),
+    )
+    noisier = BuilderCandidateVerification(
+        address="0x2222222222222222222222222222222222222222",
+        attempted=12,
+        matched=5,
+        ratio=D("0.4166666667"),
+        clock_offset_mad_ms=1_000.0,
+        median_price_bps=D("2"),
+        matched_signal_ids=tuple(f"r{i}" for i in range(5)),
+    )
+    assert _select_verified_winner([noisier, exact]) == exact
