@@ -6,11 +6,10 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-EXPECTED_REPORT_VERSION = 12
-EXPECTED_MODE = "SIZE_AGNOSTIC_SEQUENCE"
-EXPECTED_RULE = "generic-sqd-fill-wallet-identity-v12-size-agnostic-sequence"
-_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
-_REQUIRED_SAFETY = (
+LEGACY_REPORT_VERSION = 12
+LEGACY_MODE = "SIZE_AGNOSTIC_SEQUENCE"
+LEGACY_RULE = "generic-sqd-fill-wallet-identity-v12-size-agnostic-sequence"
+LEGACY_REQUIRED_SAFETY = (
     "discovery_cannot_verify",
     "held_out_full_lifecycle_required",
     "flat_to_open_boundary_required",
@@ -21,6 +20,23 @@ _REQUIRED_SAFETY = (
     "one_vote_per_sqd_lifecycle_in_verification",
     "unique_held_out_winner_required",
 )
+
+BUILDER_REPORT_VERSION = 13
+BUILDER_MODE = "INVO_BUILDER_CLOSE_SIGNATURE"
+BUILDER_RULE = "invo-hyperliquid-builder-close-proof-v13"
+BUILDER_REQUIRED_SAFETY = (
+    "builder_discovery_cannot_verify",
+    "held_out_signals_disjoint_from_discovery",
+    "official_user_fills_verification_required",
+    "final_flatten_start_position_required",
+    "close_price_required",
+    "close_clock_offset_consistency_required",
+    "one_vote_per_official_execution",
+    "unique_held_out_winner_required",
+    "cross_identity_collision_quarantine_required",
+)
+
+_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 
 def _empty_publication() -> dict[str, Any]:
@@ -74,6 +90,19 @@ def _load_queue(path: Path) -> dict[str, dict[str, str]]:
     return output
 
 
+def _proof_spec(payload: Mapping[str, Any]) -> tuple[str, tuple[str, ...]] | None:
+    key = (
+        payload.get("version"),
+        payload.get("mode"),
+        str(payload.get("resolver_rule_version") or "").strip(),
+    )
+    if key == (LEGACY_REPORT_VERSION, LEGACY_MODE, LEGACY_RULE):
+        return LEGACY_RULE, LEGACY_REQUIRED_SAFETY
+    if key == (BUILDER_REPORT_VERSION, BUILDER_MODE, BUILDER_RULE):
+        return BUILDER_RULE, BUILDER_REQUIRED_SAFETY
+    return None
+
+
 def _verified_report(path: Path) -> dict[str, str] | None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -83,17 +112,14 @@ def _verified_report(path: Path) -> dict[str, str] | None:
         raise ValueError(f"wallet identification report is not an object: {path}")
     if payload.get("status") != "VERIFIED":
         return None
-    if payload.get("version") != EXPECTED_REPORT_VERSION:
+    spec = _proof_spec(payload)
+    if spec is None:
         return None
-    if payload.get("mode") != EXPECTED_MODE:
-        return None
-    resolver_rule = str(payload.get("resolver_rule_version") or "").strip()
-    if resolver_rule != EXPECTED_RULE:
-        return None
+    resolver_rule, required_safety = spec
     safety = payload.get("safety")
     missing_safety = (
         not isinstance(safety, Mapping)
-        or any(safety.get(key) is not True for key in _REQUIRED_SAFETY)
+        or any(safety.get(key) is not True for key in required_safety)
     )
     if missing_safety:
         raise ValueError(f"verified report lacks required identity safety proof: {path}")
@@ -130,8 +156,6 @@ def _collect_attestations(reports_dir: Path) -> dict[str, dict[str, str]]:
     for identity, rows in sorted(by_identity.items()):
         wallets = {row["wallet"] for row in rows}
         if len(wallets) != 1:
-            # Contradictory proofs for one Invo identity invalidate the full
-            # publication because we cannot know which address owns that identity.
             raise ValueError(
                 f"conflicting verified Hyperliquid wallets for Invo portfolio {identity}: "
                 + ", ".join(sorted(wallets))
@@ -145,13 +169,10 @@ def publish_durable_verified_identities(*, state_dir: Path) -> dict[str, Any]:
     reports_dir = state_dir / "wallet_identifications"
     identities_path = state_dir / "identified_wallets.json"
 
-    # Any malformed queue/report set must revoke the public view before failing.
     _write_atomic(identities_path, _empty_publication())
     queue = _load_queue(queue_path)
     attestations = _collect_attestations(reports_dir)
 
-    # Only current queue identities participate in cross-identity uniqueness.
-    # Historical/disappeared identities must not freeze unrelated current wallets.
     selected: dict[str, dict[str, str]] = {
         portfolio_id: proof
         for portfolio_id, proof in attestations.items()
