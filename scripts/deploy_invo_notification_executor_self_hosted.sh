@@ -41,31 +41,60 @@ git merge --ff-only origin/main
 
 install -d -m 0700 "$STATE" /etc/hyperliquid-copy-engine
 if [[ ! -e "$EXEC_ENV" ]]; then
-  cat > "$EXEC_ENV" <<'ENV'
-# Safe defaults. Live promotion requires BOTH live flags plus HL_AGENT_KEY.
-REAL_TRADING_ENABLED=NO
-NOTIFICATION_TRADER_LIVE=false
-NOTIFICATION_TRADER_ALLOW=carmine,bones
-NOTIFICATION_TRADER_COPY_ALL_FOLLOWED=false
-NOTIFICATION_TRADER_POLL_MS=1000
-NOTIFICATION_TRADER_MAX_SIGNAL_AGE_MS=5000
-NOTIFICATION_TRADER_MAX_LEVERAGE=20
-NOTIFICATION_TRADER_MARGIN_PCT=1
-NOTIFICATION_TRADER_MAX_NOTIONAL_USD=500
-NOTIFICATION_TRADER_MAX_SLIPPAGE_PCT=0.005
-NOTIFICATION_TRADER_MAX_CHASE_BPS=25
-NOTIFICATION_TRADER_MAX_POSITIONS=5
-NOTIFICATION_TRADER_HOST=127.0.0.1
-NOTIFICATION_TRADER_PORT=8787
-NOTIFICATION_TRADER_STATE_PATH=/var/lib/hyperliquid-copy-engine/invo-notification-executor/state.json
-NOTIFICATION_TRADER_AUDIT_PATH=/var/lib/hyperliquid-copy-engine/invo-notification-executor/audit.jsonl
-ENV
-  chmod 0600 "$EXEC_ENV"
+  install -m 0600 /dev/null "$EXEC_ENV"
 fi
+chmod 0600 "$EXEC_ENV"
+
+# Update only executor configuration keys and preserve any local bridge/secrets settings.
+set_env() {
+  local key="$1"
+  local value="$2"
+  local tmp
+  tmp="$(mktemp)"
+  grep -v -E "^${key}=" "$EXEC_ENV" > "$tmp" || true
+  printf '%s=%s\n' "$key" "$value" >> "$tmp"
+  cat "$tmp" > "$EXEC_ENV"
+  rm -f "$tmp"
+}
+
+# Wide research mode: no live orders. Capture every followed leaderboard trader,
+# accept signals up to 25s old, mirror source leverage, and include re-ups.
+set_env REAL_TRADING_ENABLED NO
+set_env NOTIFICATION_TRADER_LIVE false
+set_env NOTIFICATION_TRADER_ALLOW ''
+set_env NOTIFICATION_TRADER_COPY_ALL_FOLLOWED true
+set_env NOTIFICATION_TRADER_FEED_FILTER following
+set_env NOTIFICATION_TRADER_FEED_LIMIT 30
+set_env NOTIFICATION_TRADER_POLL_MS 1000
+set_env NOTIFICATION_TRADER_MAX_SIGNAL_AGE_MS 25000
+set_env NOTIFICATION_TRADER_MARGIN_PCT 1
+set_env NOTIFICATION_TRADER_DRY_EQUITY_USD 1000
+
+# Retained for future live execution only; these do not gate wide shadow research.
+set_env NOTIFICATION_TRADER_MAX_NOTIONAL_USD 500
+set_env NOTIFICATION_TRADER_MAX_SLIPPAGE_PCT 0.005
+set_env NOTIFICATION_TRADER_MAX_CHASE_BPS 25
+set_env NOTIFICATION_TRADER_MAX_POSITIONS 5
+set_env NOTIFICATION_TRADER_HOST 127.0.0.1
+set_env NOTIFICATION_TRADER_PORT 8787
+set_env NOTIFICATION_TRADER_STATE_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/state.json
+set_env NOTIFICATION_TRADER_AUDIT_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/audit.jsonl
+
+# Remove the obsolete artificial leverage cap; source leverage is used directly.
+sed -i '/^NOTIFICATION_TRADER_MAX_LEVERAGE=/d' "$EXEC_ENV"
 
 cd "$SERVICE_DIR"
 npm install --ignore-scripts --no-audit --no-fund
 npm run check
+
+# Start the widened experiment from a clean ledger while preserving the old evidence.
+stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+if [[ -f "$STATE/state.json" ]]; then
+  mv "$STATE/state.json" "$STATE/state.pre-wide-shadow-${stamp}.json"
+fi
+if [[ -f "$STATE/audit.jsonl" ]]; then
+  mv "$STATE/audit.jsonl" "$STATE/audit.pre-wide-shadow-${stamp}.jsonl"
+fi
 
 install -m 0644 "$REPO/deploy/systemd/$UNIT" "/etc/systemd/system/$UNIT"
 systemctl daemon-reload

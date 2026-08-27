@@ -6,7 +6,7 @@ import { validateEnv, INVO_TOKEN, INVO_REFRESH_TOKEN, HL_AGENT_KEY, resolveWalle
 import * as invo from './invo-client.js';
 import * as hl from './hl-client.js';
 import { extractNotificationHints, hintsMatchSignal, InvoSignal, NotificationHints, signalFromFeedPost } from './notification-signal.js';
-import { NotificationState } from './notification-state.js';
+import { ManagedPosition, NotificationState } from './notification-state.js';
 
 if (INVO_TOKEN) invo.setToken(INVO_TOKEN);
 if (INVO_REFRESH_TOKEN) invo.setRefreshToken(INVO_REFRESH_TOKEN);
@@ -27,18 +27,25 @@ function b(name: string, fallback: boolean): boolean {
 function loadConfig() {
   const allow = (process.env.NOTIFICATION_TRADER_ALLOW ?? '')
     .split(',').map(v => v.trim().replace(/^@/, '').toLowerCase()).filter(Boolean);
+  const feedFilter = (process.env.NOTIFICATION_TRADER_FEED_FILTER ?? 'following').trim().toLowerCase();
+  if (!['following', 'all', 'trending'].includes(feedFilter)) {
+    throw new Error(`Invalid NOTIFICATION_TRADER_FEED_FILTER: ${feedFilter}`);
+  }
   return {
     live: b('NOTIFICATION_TRADER_LIVE', false),
     host: process.env.NOTIFICATION_TRADER_HOST ?? '127.0.0.1',
     port: n('NOTIFICATION_TRADER_PORT', 8787),
     pollMs: Math.max(500, n('NOTIFICATION_TRADER_POLL_MS', 1000)),
-    maxSignalAgeMs: Math.max(1000, n('NOTIFICATION_TRADER_MAX_SIGNAL_AGE_MS', 5_000)),
-    maxLeverage: Math.max(1, Math.trunc(n('NOTIFICATION_TRADER_MAX_LEVERAGE', 20))),
+    // Research requirement: accept canonical Invo signals up to 25 seconds old.
+    maxSignalAgeMs: Math.max(1000, n('NOTIFICATION_TRADER_MAX_SIGNAL_AGE_MS', 25_000)),
+    feedFilter,
+    feedLimit: Math.max(1, Math.min(100, Math.trunc(n('NOTIFICATION_TRADER_FEED_LIMIT', 100)))),
     marginPct: Math.max(0.01, n('NOTIFICATION_TRADER_MARGIN_PCT', 1)),
+    // These are live-account safety controls only. Shadow research is intentionally uncapped.
     maxNotionalUsd: Math.max(10, n('NOTIFICATION_TRADER_MAX_NOTIONAL_USD', 500)),
     maxSlippagePct: Math.max(0.0001, n('NOTIFICATION_TRADER_MAX_SLIPPAGE_PCT', 0.005)),
     maxChaseBps: Math.max(0, n('NOTIFICATION_TRADER_MAX_CHASE_BPS', 25)),
-    copyAllFollowed: b('NOTIFICATION_TRADER_COPY_ALL_FOLLOWED', false),
+    copyAllFollowed: b('NOTIFICATION_TRADER_COPY_ALL_FOLLOWED', true),
     maxPositions: Math.max(1, Math.trunc(n('NOTIFICATION_TRADER_MAX_POSITIONS', 5))),
     bridgeToken: process.env.NOTIFICATION_BRIDGE_TOKEN ?? '',
     packageName: process.env.NOTIFICATION_TRADER_PACKAGE_NAME ?? 'com.involio.app',
@@ -90,51 +97,216 @@ function roundSize(raw: number, decimals: number): string {
   return rounded.toFixed(decimals).replace(/\.?0+$/, '');
 }
 
+function positive(v: number | null | undefined): number | null {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null;
+}
+
+function validateSourceLeverage(signal: InvoSignal, asset: any): number | null {
+  const leverage = Math.max(1, Math.trunc(signal.leverage));
+  const assetMax = Number(asset?.maxLeverage);
+  if (Number.isFinite(assetMax) && assetMax > 0 && leverage > assetMax) return null;
+  return leverage;
+}
+
+function baseShadowSlice(equity: number, mid: number, leverage: number) {
+  const marginUsd = equity * (cfg.marginPct / 100);
+  const notionalUsd = marginUsd * leverage;
+  const size = notionalUsd / mid;
+  if (!(marginUsd > 0) || !(notionalUsd > 0) || !(size > 0)) {
+    throw new Error(`Invalid shadow sizing equity=${equity} mid=${mid} leverage=${leverage}`);
+  }
+  return { marginUsd, notionalUsd, size };
+}
+
+function shadowReupSize(managed: ManagedPosition, signal: InvoSignal, fallbackSize: number) {
+  const sourceIncrementSize = positive(signal.entrySize);
+  const priorSourceSize = positive(managed.sourceSize);
+  const priorCopySize = positive(managed.size);
+  if (sourceIncrementSize && priorSourceSize && priorCopySize) {
+    const copyPerSourceUnit = priorCopySize / priorSourceSize;
+    return {
+      addSize: sourceIncrementSize * copyPerSourceUnit,
+      sourceIncrementSize,
+      sizingModel: 'relative_source_increment',
+      copyPerSourceUnit,
+    };
+  }
+  return {
+    addSize: fallbackSize,
+    sourceIncrementSize,
+    sizingModel: 'fallback_equal_shadow_slice',
+    copyPerSourceUnit: null,
+  };
+}
+
+async function marketSnapshot(signal: InvoSignal) {
+  const [meta, mids] = await Promise.all([hl.getMeta(), hl.getAllMids()]);
+  const assetIndex = meta.universe.findIndex((a: any) => a.name === signal.coin);
+  if (assetIndex < 0) return null;
+  const asset = meta.universe[assetIndex];
+  const mid = Number(mids[signal.coin]);
+  if (!(mid > 0)) throw new Error(`No mid for ${signal.coin}`);
+  return { meta, mids, assetIndex, asset, mid };
+}
+
+async function shadowOpen(signal: InvoSignal, wakeSource: string, receivedAtMs: number, openedFromIncrease: boolean) {
+  const snap = await marketSnapshot(signal);
+  if (!snap) {
+    state.markSeen(signal.key);
+    log({ type: 'skip', reason: 'unknown_hl_asset', signal, wakeSource });
+    return;
+  }
+  const leverage = validateSourceLeverage(signal, snap.asset);
+  if (leverage == null) {
+    state.markSeen(signal.key);
+    log({ type: 'skip', reason: 'source_leverage_unexecutable_on_hl', sourceLeverage: signal.leverage, assetMaxLeverage: snap.asset.maxLeverage, signal, wakeSource });
+    return;
+  }
+
+  const equity = await hl.getAccountEquity(WALLET_ADDRESS);
+  const sizing = baseShadowSlice(equity, snap.mid, leverage);
+  const chase = chaseBps(signal, snap.mid);
+  const sourceSize = positive(signal.entrySize) ?? undefined;
+  state.setManaged({
+    coin: signal.coin,
+    sourceBaseId: signal.sourceBaseId,
+    sourceBaseShortId: signal.sourceBaseShortId,
+    sourcePostId: signal.postId,
+    username: signal.username,
+    side: signal.side,
+    openedAtMs: Date.now(),
+    paper: true,
+    entryMid: snap.mid,
+    notionalUsd: sizing.notionalUsd,
+    marginUsd: sizing.marginUsd,
+    leverage,
+    size: sizing.size,
+    sourceSize,
+    addCount: 0,
+  });
+  state.markSeen(signal.key);
+  log({
+    type: openedFromIncrease ? 'shadow_opened_from_increase' : 'shadow_opened',
+    signal,
+    wakeSource,
+    equity,
+    entryMid: snap.mid,
+    chaseBps: chase,
+    leverage,
+    marginUsd: sizing.marginUsd,
+    notionalUsd: sizing.notionalUsd,
+    size: sizing.size,
+    sourceSize,
+    detectionLatencyMs: detectionLatencyMs(signal, receivedAtMs),
+    decisionLatencyMs: Date.now() - receivedAtMs,
+  });
+}
+
+async function shadowReup(managed: ManagedPosition, signal: InvoSignal, wakeSource: string, receivedAtMs: number) {
+  if (managed.side !== signal.side || managed.coin !== signal.coin) {
+    state.markSeen(signal.key);
+    log({ type: 'skip', reason: 'source_reup_direction_or_coin_mismatch', managed, signal, wakeSource });
+    return;
+  }
+  const snap = await marketSnapshot(signal);
+  if (!snap) {
+    state.markSeen(signal.key);
+    log({ type: 'skip', reason: 'unknown_hl_asset', signal, wakeSource });
+    return;
+  }
+  const leverage = validateSourceLeverage(signal, snap.asset);
+  if (leverage == null) {
+    state.markSeen(signal.key);
+    log({ type: 'skip', reason: 'source_leverage_unexecutable_on_hl', sourceLeverage: signal.leverage, assetMaxLeverage: snap.asset.maxLeverage, signal, wakeSource });
+    return;
+  }
+
+  const equity = await hl.getAccountEquity(WALLET_ADDRESS);
+  const fallback = baseShadowSlice(equity, snap.mid, leverage);
+  const reup = shadowReupSize(managed, signal, fallback.size);
+  const priorSize = positive(managed.size) ?? 0;
+  const priorEntryMid = positive(managed.entryMid) ?? snap.mid;
+  if (!(priorSize > 0) || !(reup.addSize > 0)) throw new Error('Invalid shadow re-up size');
+  const newSize = priorSize + reup.addSize;
+  const newEntryMid = ((priorEntryMid * priorSize) + (snap.mid * reup.addSize)) / newSize;
+  const addNotionalUsd = snap.mid * reup.addSize;
+  const addMarginUsd = addNotionalUsd / leverage;
+  const newSourceSize = reup.sourceIncrementSize
+    ? (positive(managed.sourceSize) ?? 0) + reup.sourceIncrementSize
+    : managed.sourceSize;
+
+  state.setManaged({
+    ...managed,
+    sourcePostId: signal.postId,
+    sourceBaseShortId: signal.sourceBaseShortId || managed.sourceBaseShortId,
+    leverage,
+    entryMid: newEntryMid,
+    size: newSize,
+    sourceSize: newSourceSize,
+    notionalUsd: (managed.notionalUsd ?? priorEntryMid * priorSize) + addNotionalUsd,
+    marginUsd: (managed.marginUsd ?? 0) + addMarginUsd,
+    addCount: (managed.addCount ?? 0) + 1,
+  });
+  state.markSeen(signal.key);
+  log({
+    type: 'shadow_reupped',
+    username: managed.username ?? signal.username,
+    coin: signal.coin,
+    side: signal.side,
+    sourceBaseId: signal.sourceBaseId,
+    leverage,
+    priorSize,
+    addedSize: reup.addSize,
+    newSize,
+    priorEntryMid,
+    addMid: snap.mid,
+    newEntryMid,
+    addNotionalUsd,
+    addMarginUsd,
+    sourceIncrementSize: reup.sourceIncrementSize,
+    priorSourceSize: managed.sourceSize,
+    newSourceSize,
+    sizingModel: reup.sizingModel,
+    copyPerSourceUnit: reup.copyPerSourceUnit,
+    chaseBps: chaseBps(signal, snap.mid),
+    signal,
+    wakeSource,
+    detectionLatencyMs: detectionLatencyMs(signal, receivedAtMs),
+    decisionLatencyMs: Date.now() - receivedAtMs,
+  });
+}
+
 async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: number) {
   if (state.hasSeen(signal.key) || inFlight.has(signal.key)) return;
   inFlight.add(signal.key);
   const decisionAtMs = Date.now();
 
   try {
-    if (signal.action !== 'close' && cfg.allow.size && !cfg.allow.has(signal.username)) {
+    // Wide shadow research deliberately includes every trader in the selected Invo feed.
+    // Trader scope restrictions remain live-only.
+    if (cfg.live && signal.action !== 'close' && cfg.allow.size && !cfg.allow.has(signal.username)) {
       state.markSeen(signal.key);
       log({ type: 'skip', reason: 'trader_not_allowlisted', signal, wakeSource });
       return;
     }
-    if (signal.action !== 'close' && !cfg.allow.size && !cfg.copyAllFollowed) {
+    if (cfg.live && signal.action !== 'close' && !cfg.allow.size && !cfg.copyAllFollowed) {
       state.markSeen(signal.key);
       log({ type: 'skip', reason: 'no_live_trader_scope', signal, wakeSource });
       return;
     }
 
     const ageMs = signal.sourceTimeMs == null ? null : decisionAtMs - signal.sourceTimeMs;
-    if (signal.action !== 'close' && signal.sourceTimeMs == null) {
-      state.markSeen(signal.key);
-      log({ type: 'skip', reason: 'missing_source_timestamp', signal, wakeSource });
-      return;
-    }
-    if (signal.action !== 'close' && (signal.entryPrice == null || signal.entryPrice <= 0)) {
-      state.markSeen(signal.key);
-      log({ type: 'skip', reason: 'missing_source_entry_price', signal, wakeSource });
-      return;
-    }
     if (signal.action !== 'close' && ageMs != null && ageMs > cfg.maxSignalAgeMs) {
       state.markSeen(signal.key);
-      log({ type: 'skip', reason: 'stale_signal', ageMs, signal, wakeSource });
-      return;
-    }
-
-    if (signal.action === 'increase') {
-      state.markSeen(signal.key);
-      log({ type: 'skip', reason: 'increase_not_supported_fail_closed', signal, wakeSource });
+      log({ type: 'skip', reason: 'stale_signal_over_25s_window', ageMs, maxSignalAgeMs: cfg.maxSignalAgeMs, signal, wakeSource });
       return;
     }
 
     if (signal.action === 'close') {
-      const managed = state.getManaged(signal.coin);
-      if (!managed || managed.sourceBaseId !== signal.sourceBaseId) {
+      const managed = state.getManagedBySource(signal.sourceBaseId);
+      if (!managed) {
         state.markSeen(signal.key);
-        log({ type: 'skip', reason: 'close_not_owned_by_service', managed, signal, wakeSource });
+        log({ type: 'skip', reason: 'close_not_owned_by_service', managed: null, signal, wakeSource });
         return;
       }
 
@@ -144,7 +316,7 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
         const entryMid = Number(managed.entryMid);
         const size = Number(managed.size);
         if (!(exitMid > 0) || !(entryMid > 0) || !(size > 0)) {
-          state.clearManaged(signal.coin);
+          state.clearManagedBySource(signal.sourceBaseId);
           state.markSeen(signal.key);
           log({ type: 'shadow_close_unpriced', reason: 'missing_shadow_economics', managed, signal, exitMid, wakeSource });
           return;
@@ -156,7 +328,7 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
           ? (grossPnlUsd / managed.marginUsd) * 100
           : null;
         const heldMs = Date.now() - managed.openedAtMs;
-        state.clearManaged(signal.coin);
+        state.clearManagedBySource(signal.sourceBaseId);
         state.markSeen(signal.key);
         log({
           type: 'shadow_closed',
@@ -168,6 +340,8 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
           exitMid,
           sourceClosingPrice: signal.closingPrice,
           size,
+          sourceSize: managed.sourceSize,
+          addCount: managed.addCount ?? 0,
           notionalUsd: managed.notionalUsd,
           marginUsd: managed.marginUsd,
           leverage: managed.leverage,
@@ -183,10 +357,14 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
         return;
       }
 
+      const sameCoinManaged = state.getManagedForCoin(signal.coin);
+      if (sameCoinManaged.some(p => p.sourceBaseId !== signal.sourceBaseId)) {
+        throw new Error(`Live close cannot isolate ${signal.sourceBaseId}; ${signal.coin} has multiple managed source positions`);
+      }
       const before = await hl.getPositions(WALLET_ADDRESS);
       const pos = before.find((p: any) => p.coin === signal.coin);
       if (!pos) {
-        state.clearManaged(signal.coin);
+        state.clearManagedBySource(signal.sourceBaseId);
         state.markSeen(signal.key);
         log({ type: 'close_already_flat', signal, wakeSource });
         return;
@@ -203,7 +381,7 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
       let invoResult: unknown = null;
       if (managed.localBaseShortId) {
         const meta = await hl.getMeta();
-        const assetIndex = meta.universe.findIndex(a => a.name === signal.coin);
+        const assetIndex = meta.universe.findIndex((a: any) => a.name === signal.coin);
         if (assetIndex >= 0) {
           try {
             invoResult = await invo.recordClose({
@@ -219,7 +397,7 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
         }
       }
 
-      state.clearManaged(signal.coin);
+      state.clearManagedBySource(signal.sourceBaseId);
       state.markSeen(signal.key);
       log({
         type: 'closed', signal, wakeSource, result, invoResult,
@@ -230,48 +408,124 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
       return;
     }
 
-    const existingManaged = state.getManaged(signal.coin);
-    if (existingManaged?.sourceBaseId === signal.sourceBaseId) {
+    const existingManaged = state.getManagedBySource(signal.sourceBaseId);
+    if (signal.action === 'increase' && existingManaged) {
+      if (!cfg.live) {
+        await shadowReup(existingManaged, signal, wakeSource, receivedAtMs);
+        return;
+      }
+
+      const snap = await marketSnapshot(signal);
+      if (!snap) {
+        state.markSeen(signal.key);
+        log({ type: 'skip', reason: 'unknown_hl_asset', signal, wakeSource });
+        return;
+      }
+      const leverage = validateSourceLeverage(signal, snap.asset);
+      if (leverage == null) {
+        state.markSeen(signal.key);
+        log({ type: 'skip', reason: 'source_leverage_unexecutable_on_hl', sourceLeverage: signal.leverage, assetMaxLeverage: snap.asset.maxLeverage, signal, wakeSource });
+        return;
+      }
+      const chase = chaseBps(signal, snap.mid);
+      if (chase != null && chase > cfg.maxChaseBps) {
+        state.markSeen(signal.key);
+        log({ type: 'skip', reason: 'entry_chased_too_far_live_only', chaseBps: chase, mid: snap.mid, signal, wakeSource });
+        return;
+      }
+      const before = await hl.getPositions(WALLET_ADDRESS);
+      const beforePos = before.find((p: any) => p.coin === signal.coin);
+      if (!beforePos || Math.sign(Number(beforePos.szi)) !== (signal.side === 'long' ? 1 : -1)) {
+        throw new Error(`Live re-up position mismatch for ${signal.coin}`);
+      }
+      const equity = await hl.getAccountEquity(WALLET_ADDRESS);
+      const fallbackNotional = Math.min(equity * (cfg.marginPct / 100) * leverage, cfg.maxNotionalUsd);
+      const fallbackSize = fallbackNotional / snap.mid;
+      const reup = shadowReupSize(existingManaged, signal, fallbackSize);
+      const size = roundSize(reup.addSize, snap.asset.szDecimals);
+      await hl.setLeverage(signal.coin, leverage);
+      const orderAtMs = Date.now();
+      const result = await hl.placeMarketOrder(signal.coin, signal.side === 'long', size, cfg.maxSlippagePct);
+      const after = await hl.getPositions(WALLET_ADDRESS);
+      const afterPos = after.find((p: any) => p.coin === signal.coin);
+      const beforeQty = Number(beforePos.szi);
+      const afterQty = Number(afterPos?.szi ?? 0);
+      const deltaQty = afterQty - beforeQty;
+      const expectedSign = signal.side === 'long' ? 1 : -1;
+      if (!Number.isFinite(deltaQty) || deltaQty === 0 || Math.sign(deltaQty) !== expectedSign || Math.sign(afterQty) !== expectedSign) {
+        throw new Error(`Re-up verification failed; before=${beforeQty} after=${afterQty}`);
+      }
+      const addSize = Math.abs(deltaQty);
+      const priorSize = positive(existingManaged.size) ?? Math.abs(beforeQty);
+      const priorEntry = positive(existingManaged.entryMid) ?? snap.mid;
+      const newSize = priorSize + addSize;
+      const newEntryMid = ((priorEntry * priorSize) + (snap.mid * addSize)) / newSize;
+      state.setManaged({
+        ...existingManaged,
+        sourcePostId: signal.postId,
+        sourceBaseShortId: signal.sourceBaseShortId || existingManaged.sourceBaseShortId,
+        leverage,
+        entryMid: newEntryMid,
+        size: newSize,
+        sourceSize: reup.sourceIncrementSize ? (positive(existingManaged.sourceSize) ?? 0) + reup.sourceIncrementSize : existingManaged.sourceSize,
+        notionalUsd: (existingManaged.notionalUsd ?? priorEntry * priorSize) + snap.mid * addSize,
+        marginUsd: (existingManaged.marginUsd ?? 0) + (snap.mid * addSize) / leverage,
+        addCount: (existingManaged.addCount ?? 0) + 1,
+      });
+      state.markSeen(signal.key);
+      log({
+        type: 'reupped', signal, wakeSource, result, leverage, size, sizingModel: reup.sizingModel,
+        detectionLatencyMs: detectionLatencyMs(signal, receivedAtMs),
+        decisionLatencyMs: orderAtMs - receivedAtMs,
+        executionLatencyMs: Date.now() - orderAtMs,
+      });
+      return;
+    }
+
+    if (existingManaged) {
       state.markSeen(signal.key);
       log({ type: 'skip', reason: 'source_already_managed', existingManaged, signal, wakeSource });
       return;
     }
-    if (existingManaged && existingManaged.sourceBaseId !== signal.sourceBaseId) {
-      state.markSeen(signal.key);
-      log({ type: 'skip', reason: 'same_coin_source_conflict', existingManaged, signal, wakeSource });
+
+    if (!cfg.live) {
+      await shadowOpen(signal, wakeSource, receivedAtMs, signal.action === 'increase');
       return;
     }
 
-    const meta = await hl.getMeta();
-    const assetIndex = meta.universe.findIndex(a => a.name === signal.coin);
-    if (assetIndex < 0) {
+    // A single Hyperliquid account nets same-coin exposure. Keep this physical live constraint;
+    // wide independent same-coin experimentation is handled by the shadow ledger above.
+    const sameCoinManaged = state.getManagedForCoin(signal.coin);
+    if (sameCoinManaged.length) {
+      state.markSeen(signal.key);
+      log({ type: 'skip', reason: 'same_coin_source_conflict_live_only', sameCoinManaged, signal, wakeSource });
+      return;
+    }
+
+    const snap = await marketSnapshot(signal);
+    if (!snap) {
       state.markSeen(signal.key);
       log({ type: 'skip', reason: 'unknown_hl_asset', signal, wakeSource });
       return;
     }
-    const asset = meta.universe[assetIndex];
-    const leverage = Math.min(signal.leverage, cfg.maxLeverage, asset.maxLeverage);
-    if (signal.leverage > leverage) {
+    const leverage = validateSourceLeverage(signal, snap.asset);
+    if (leverage == null) {
       state.markSeen(signal.key);
-      log({ type: 'skip', reason: 'source_leverage_above_limit', sourceLeverage: signal.leverage, allowedLeverage: leverage, signal, wakeSource });
+      log({ type: 'skip', reason: 'source_leverage_unexecutable_on_hl', sourceLeverage: signal.leverage, assetMaxLeverage: snap.asset.maxLeverage, signal, wakeSource });
       return;
     }
 
-    const [equity, mids, positions] = await Promise.all([
-      hl.getAccountEquity(WALLET_ADDRESS),
-      hl.getAllMids(),
-      hl.getPositions(WALLET_ADDRESS),
-    ]);
-    const mid = Number(mids[signal.coin]);
-    if (!(mid > 0)) throw new Error(`No mid for ${signal.coin}`);
-
-    const chase = chaseBps(signal, mid);
+    const chase = chaseBps(signal, snap.mid);
     if (chase != null && chase > cfg.maxChaseBps) {
       state.markSeen(signal.key);
-      log({ type: 'skip', reason: 'entry_chased_too_far', chaseBps: chase, mid, signal, wakeSource });
+      log({ type: 'skip', reason: 'entry_chased_too_far_live_only', chaseBps: chase, mid: snap.mid, signal, wakeSource });
       return;
     }
 
+    const [equity, positions] = await Promise.all([
+      hl.getAccountEquity(WALLET_ADDRESS),
+      hl.getPositions(WALLET_ADDRESS),
+    ]);
     const marginUsd = equity * (cfg.marginPct / 100);
     const notionalUsd = Math.min(marginUsd * leverage, cfg.maxNotionalUsd);
     if (notionalUsd < 10) {
@@ -279,43 +533,17 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
       log({ type: 'skip', reason: 'below_hl_min_notional', notionalUsd, signal, wakeSource });
       return;
     }
-    const size = roundSize(notionalUsd / mid, asset.szDecimals);
+    const size = roundSize(notionalUsd / snap.mid, snap.asset.szDecimals);
 
-    const existing = positions.find((p: any) => p.coin === signal.coin);
-    if (Object.keys(state.snapshot().managed).length >= cfg.maxPositions) {
+    if (state.managedCount() >= cfg.maxPositions) {
       state.markSeen(signal.key);
-      log({ type: 'skip', reason: 'max_managed_positions', maxPositions: cfg.maxPositions, signal, wakeSource });
+      log({ type: 'skip', reason: 'max_managed_positions_live_only', maxPositions: cfg.maxPositions, signal, wakeSource });
       return;
     }
+    const existing = positions.find((p: any) => p.coin === signal.coin);
     if (existing) {
       state.markSeen(signal.key);
       log({ type: 'skip', reason: 'unmanaged_existing_coin_position', existing, signal, wakeSource });
-      return;
-    }
-
-    if (!cfg.live) {
-      state.setManaged({
-        coin: signal.coin,
-        sourceBaseId: signal.sourceBaseId,
-        sourceBaseShortId: signal.sourceBaseShortId,
-        sourcePostId: signal.postId,
-        username: signal.username,
-        side: signal.side,
-        openedAtMs: Date.now(),
-        paper: true,
-        entryMid: mid,
-        notionalUsd,
-        marginUsd,
-        leverage,
-        size: Number(size),
-      });
-      state.markSeen(signal.key);
-      log({
-        type: 'shadow_opened', signal, wakeSource, equity, entryMid: mid, chaseBps: chase,
-        leverage, marginUsd, notionalUsd, size: Number(size),
-        detectionLatencyMs: detectionLatencyMs(signal, receivedAtMs),
-        decisionLatencyMs: Date.now() - receivedAtMs,
-      });
       return;
     }
 
@@ -344,7 +572,7 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
       invoResult = await invo.recordOpen({
         clientTxId: randomUUID(),
         coin: signal.coin,
-        assetIndex,
+        assetIndex: snap.assetIndex,
         entry: { side: signal.side, marginMode: 'isolated', leverage, tpPx: null, slPx: null },
         submission: { hlOrder: result, nonceMs: orderAtMs, hlResponse: result },
         summary: { qtyBefore, qtyAfter, intendedLeverage: leverage },
@@ -369,15 +597,18 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
       openedAtMs: Date.now(),
       localBaseShortId: invoResult?.baseShortId ?? invoResult?.investment?.baseShortId,
       paper: false,
-      entryMid: mid,
+      entryMid: snap.mid,
       notionalUsd,
       marginUsd,
       leverage,
-      size: Number(size),
+      size: Math.abs(deltaQty),
+      sourceSize: positive(signal.entrySize) ?? undefined,
+      addCount: 0,
     });
     state.markSeen(signal.key);
     log({
-      type: 'opened', signal, wakeSource, equity, mid, chaseBps: chase, leverage,
+      type: signal.action === 'increase' ? 'opened_from_increase' : 'opened',
+      signal, wakeSource, equity, mid: snap.mid, chaseBps: chase, leverage,
       marginUsd, notionalUsd, size, qtyBefore, qtyAfter, result, invoResult,
       detectionLatencyMs: detectionLatencyMs(signal, receivedAtMs),
       decisionLatencyMs: orderAtMs - receivedAtMs,
@@ -391,7 +622,7 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
 }
 
 async function fetchAndProcess(source: string, hints: NotificationHints | undefined, receivedAtMs: number): Promise<number> {
-  const data = await invo.getFeed('following', null, 30);
+  const data = await invo.getFeed(cfg.feedFilter, null, cfg.feedLimit);
   const posts = data?.items ?? [];
 
   if (!initialized) {
@@ -399,13 +630,13 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
     for (const post of posts) {
       const signal = signalFromFeedPost(post);
       if (!signal) continue;
-      const managed = signal.action === 'close' ? state.getManaged(signal.coin) : null;
-      if (managed?.sourceBaseId === signal.sourceBaseId) recoverableCloses.push(signal);
+      const managed = signal.action === 'close' ? state.getManagedBySource(signal.sourceBaseId) : null;
+      if (managed) recoverableCloses.push(signal);
       else state.markSeen(signal.key);
     }
     initialized = true;
     lastSuccessPollMs = Date.now();
-    log({ type: 'baseline_indexed', posts: posts.length, recoverableCloses: recoverableCloses.length, live: cfg.live });
+    log({ type: 'baseline_indexed', posts: posts.length, recoverableCloses: recoverableCloses.length, live: cfg.live, feedFilter: cfg.feedFilter, feedLimit: cfg.feedLimit });
     for (const signal of recoverableCloses) await execute(signal, 'startup_recovery', receivedAtMs);
     return recoverableCloses.length;
   }
@@ -419,7 +650,12 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
   const matching = hints ? signals.filter(s => hintsMatchSignal(hints, s)) : [];
   const ordered = matching.length ? [...matching, ...signals.filter(s => !matching.includes(s))] : signals;
 
-  for (const signal of ordered) await execute(signal, source, receivedAtMs);
+  // In shadow, sources are independent and can be hydrated in parallel. Live remains sequential.
+  if (cfg.live) {
+    for (const signal of ordered) await execute(signal, source, receivedAtMs);
+  } else {
+    await Promise.all(ordered.map(signal => execute(signal, source, receivedAtMs)));
+  }
   lastSuccessPollMs = Date.now();
   return ordered.length;
 }
@@ -478,7 +714,17 @@ function json(res: ServerResponse, status: number, body: any) {
 function startServer() {
   const server = createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/health') {
-      return json(res, 200, { ok: true, initialized, live: cfg.live, lastSuccessPollMs, managed: state.snapshot().managed });
+      return json(res, 200, {
+        ok: true,
+        initialized,
+        live: cfg.live,
+        researchWide: !cfg.live,
+        feedFilter: cfg.feedFilter,
+        maxSignalAgeMs: cfg.maxSignalAgeMs,
+        lastSuccessPollMs,
+        managedCount: state.managedCount(),
+        managed: state.snapshot().managed,
+      });
     }
 
     if (req.method === 'POST' && req.url === '/invo-notification') {
@@ -527,11 +773,24 @@ async function main() {
   await wake('startup_baseline', undefined, Date.now());
   startServer();
   log({
-    type: 'service_started', live: cfg.live, pollMs: cfg.pollMs,
-    maxSignalAgeMs: cfg.maxSignalAgeMs, maxLeverage: cfg.maxLeverage,
-    marginPct: cfg.marginPct, maxNotionalUsd: cfg.maxNotionalUsd,
-    maxChaseBps: cfg.maxChaseBps, copyAllFollowed: cfg.copyAllFollowed,
-    maxPositions: cfg.maxPositions, allow: [...cfg.allow],
+    type: 'service_started',
+    live: cfg.live,
+    researchWide: !cfg.live,
+    pollMs: cfg.pollMs,
+    maxSignalAgeMs: cfg.maxSignalAgeMs,
+    feedFilter: cfg.feedFilter,
+    feedLimit: cfg.feedLimit,
+    leverageMode: 'source_exact_up_to_hl_asset_max',
+    reups: true,
+    shadowChaseGate: false,
+    shadowPositionCap: false,
+    shadowNotionalCap: false,
+    marginPct: cfg.marginPct,
+    copyAllFollowed: cfg.copyAllFollowed,
+    liveMaxNotionalUsd: cfg.maxNotionalUsd,
+    liveMaxChaseBps: cfg.maxChaseBps,
+    liveMaxPositions: cfg.maxPositions,
+    allow: [...cfg.allow],
   });
   await pollLoop();
 }
