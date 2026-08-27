@@ -4,7 +4,6 @@ import asyncio
 import csv
 import hashlib
 import io
-import json
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -27,7 +26,10 @@ from hlcopy.resolver.identifier import (
 )
 from hlcopy.resolver.matcher import select_anchor_trades
 from hlcopy.resolver.provenance import EvidenceSnapshot, jsonable_config
-from hlcopy.resolver.public_trade_index import DEFAULT_PUBLIC_TRADE_CONFIG, PublicTradeDiscoveryConfig
+from hlcopy.resolver.public_trade_index import (
+    DEFAULT_PUBLIC_TRADE_CONFIG,
+    PublicTradeDiscoveryConfig,
+)
 from hlcopy.resolver.reverse_index import AnchorMatch, CandidateFingerprint, rank_candidates
 from hlcopy.signals.invo import CopySignal
 
@@ -58,8 +60,6 @@ BUILDER_VERIFY_WINDOW_MS = 45_000
 BUILDER_VERIFY_PRICE_BPS = D("35")
 BUILDER_CLOSE_OFFSET_DRIFT_MS = 15_000
 
-_DAY_LOCKS: dict[str, asyncio.Lock] = {}
-_DAY_ROWS: OrderedDict[str, tuple["BuilderFill", ...]] = OrderedDict()
 _DAY_ROWS_LIMIT = 3
 
 
@@ -75,6 +75,10 @@ class BuilderFill:
     counterparty: str
     builder_fee: Decimal
     execution_id: str
+
+
+_DAY_LOCKS: dict[str, asyncio.Lock] = {}
+_DAY_ROWS: OrderedDict[str, tuple[BuilderFill, ...]] = OrderedDict()
 
 
 @dataclass(frozen=True, slots=True)
@@ -520,22 +524,26 @@ async def _verify_builder_candidate(
     )
 
 
+def _verification_sort_key(
+    item: BuilderCandidateVerification,
+) -> tuple[int, Decimal, float, Decimal, str]:
+    clock_mad = (
+        item.clock_offset_mad_ms
+        if item.clock_offset_mad_ms is not None
+        else float("inf")
+    )
+    median_price = (
+        item.median_price_bps if item.median_price_bps is not None else D("Infinity")
+    )
+    return item.matched, item.ratio, -clock_mad, -median_price, item.address
+
+
 def _select_verified_winner(
     results: Sequence[BuilderCandidateVerification],
 ) -> BuilderCandidateVerification | None:
     if not results:
         return None
-    ranked = sorted(
-        results,
-        key=lambda item: (
-            item.matched,
-            item.ratio,
-            -(item.clock_offset_mad_ms or float("inf")),
-            -(item.median_price_bps or D("Infinity")),
-            item.address,
-        ),
-        reverse=True,
-    )
+    ranked = sorted(results, key=_verification_sort_key, reverse=True)
     best = ranked[0]
     if best.matched < BUILDER_MIN_VERIFY_MATCHES or best.ratio < BUILDER_MIN_VERIFY_RATIO:
         return None
