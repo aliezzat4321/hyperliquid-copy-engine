@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from hlcopy.resolver.invo_builder_identifier import identify_invo_wallet_builder_first
 from hlcopy.resolver.provenance import EvidenceSnapshot
 from hlcopy.resolver.size_agnostic_identifier import (
     identify_wallet_from_csv_size_aware as identify_wallet_from_csv,
@@ -19,7 +20,7 @@ from hlcopy.resolver.sqd_position_aware import SqdHyperliquidFillsClient
 DEFAULT_STATE_DIR = Path("/var/lib/hyperliquid-copy-engine/invo")
 DEFAULT_PRIORITY_TRADERS = ("carmine", "bones")
 DEFAULT_UNRESOLVED_RETRY_MINUTES = 60
-RESOLVER_RULE_VERSION = "sqd-public-trade-v3-size-aware-sequence"
+RESOLVER_RULE_VERSION = "invo-builder-v13-then-sqd-public-trade-v3"
 
 
 class PortfolioResolutionBatchError(RuntimeError):
@@ -182,26 +183,41 @@ async def _identify_one(
         portfolio_id = str(row["portfolio_id"])
         attempted_at = datetime.now(tz=UTC).isoformat()
         report_key = hashlib.sha256(portfolio_id.encode("utf-8")).hexdigest()[:16]
+        report_dir = reports_dir / report_key
+        builder_error: str | None = None
         try:
-            # One client per active portfolio keeps HTTP/session state isolated while
-            # the semaphore bounds aggregate pressure on SQD.
+            builder_result = await identify_invo_wallet_builder_first(
+                evidence_path,
+                output_dir=report_dir,
+                cache_dir=reports_dir.parent / "builder_fills_cache",
+                snapshot=snapshot,
+                expected_source_identity=portfolio_id,
+            )
+            if builder_result.status == "VERIFIED":
+                return row, snapshot, attempted_at, builder_result, None
+        except Exception as exc:
+            # Builder files are an acceleration/discovery source. A transient stats
+            # failure must never block the independent finalized-fill fallback.
+            builder_error = f"{type(exc).__name__}: {exc}"
+
+        try:
             async with SqdHyperliquidFillsClient() as client:
                 result = await identify_wallet_from_csv(
                     evidence_path,
-                    output_dir=reports_dir / report_key,
+                    output_dir=report_dir,
                     client=client,
                     snapshot=snapshot,
                     expected_source_identity=portfolio_id,
                 )
             return row, snapshot, attempted_at, result, None
         except Exception as exc:
-            return (
-                row,
-                snapshot,
-                attempted_at,
-                None,
-                f"{type(exc).__name__}: {exc}",
+            fallback_error = f"{type(exc).__name__}: {exc}"
+            combined = (
+                f"builder={builder_error}; fallback={fallback_error}"
+                if builder_error is not None
+                else fallback_error
             )
+            return row, snapshot, attempted_at, None, combined
 
 
 async def run_once(args: argparse.Namespace) -> dict[str, object]:
@@ -211,8 +227,6 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
     identities_path = state_dir / "identified_wallets.json"
     reports_dir = state_dir / "wallet_identifications"
 
-    # Revoke the published view before parsing queue/state or reading evidence. Any
-    # malformed or missing input must fail closed instead of preserving old output.
     _save_object(
         identities_path,
         _summary_payload(
@@ -258,8 +272,6 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
                 continue
         pending.append((row, evidence_path, snapshot))
 
-    # Revoke stale digests and resolver-rule versions before any network await. A
-    # slow or failed SQD lookup must never leave a legacy identity published.
     _save_object(
         identities_path,
         _summary_payload(
@@ -293,8 +305,6 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
             )
         )
 
-        # Network work is concurrent, but all durable state publication remains
-        # single-writer and deterministic in queue order.
         for row, snapshot, attempted_at, result, error in outcomes:
             portfolio_id = str(row["portfolio_id"])
             evidence_sha = snapshot.sha256
