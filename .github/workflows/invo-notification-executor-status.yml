@@ -1,0 +1,135 @@
+name: invo-notification-executor-status
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/invo-notification-executor-status.yml
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: invo-notification-executor-status
+  cancel-in-progress: true
+
+jobs:
+  status:
+    if: github.repository == 'aliezzat4321/hyperliquid-copy-engine'
+    runs-on:
+      - self-hosted
+      - hyperliquid
+    timeout-minutes: 5
+    steps:
+      - name: Report Invo notification executor status
+        shell: bash
+        run: |
+          set -u
+          UNIT=hyperliquid-invo-notification-executor.service
+          STATE=/var/lib/hyperliquid-copy-engine/invo-notification-executor/state.json
+          AUDIT=/var/lib/hyperliquid-copy-engine/invo-notification-executor/audit.jsonl
+
+          echo "========== TIME =========="
+          date -u
+
+          echo
+          echo "========== SERVICE =========="
+          systemctl is-active "$UNIT" || true
+          systemctl show "$UNIT" -p ActiveState -p SubState -p Result -p ExecMainStatus -p MainPID -p MemoryCurrent -p CPUUsageNSec 2>/dev/null || true
+
+          echo
+          echo "========== HEALTH =========="
+          curl -fsS --max-time 3 http://127.0.0.1:8787/health || true
+          echo
+
+          echo
+          echo "========== AUDIT SUMMARY =========="
+          python3 - <<'PY'
+          import json, statistics
+          from collections import Counter, defaultdict
+          from datetime import datetime, timezone, timedelta
+          from pathlib import Path
+
+          audit = Path('/var/lib/hyperliquid-copy-engine/invo-notification-executor/audit.jsonl')
+          state = Path('/var/lib/hyperliquid-copy-engine/invo-notification-executor/state.json')
+          rows=[]
+          bad=0
+          if audit.exists():
+              for line in audit.read_text(errors='replace').splitlines():
+                  if not line.strip():
+                      continue
+                  try: rows.append(json.loads(line))
+                  except Exception: bad += 1
+          now=datetime.now(timezone.utc)
+          def parse_ts(v):
+              if not isinstance(v,str): return None
+              try: return datetime.fromisoformat(v.replace('Z','+00:00'))
+              except Exception: return None
+          last24=[r for r in rows if (t:=parse_ts(r.get('ts'))) and t >= now-timedelta(hours=24)]
+
+          print(f'audit_rows={len(rows)} bad_rows={bad} last24h_rows={len(last24)}')
+          print('event_counts=' + json.dumps(Counter(r.get('type','?') for r in rows), sort_keys=True))
+          print('last24h_event_counts=' + json.dumps(Counter(r.get('type','?') for r in last24), sort_keys=True))
+          skips=Counter(r.get('reason','?') for r in rows if r.get('type')=='skip')
+          print('skip_reasons=' + json.dumps(skips, sort_keys=True))
+
+          opens=[r for r in rows if r.get('type')=='shadow_opened']
+          closes=[r for r in rows if r.get('type')=='shadow_closed']
+          print(f'shadow_opens={len(opens)} shadow_closes={len(closes)}')
+
+          by_user=defaultdict(lambda: {'opens':0,'closes':0,'wins':0,'losses':0,'pnl':0.0,'ret_bps':[]})
+          for r in opens:
+              u=(r.get('signal') or {}).get('username') or r.get('username') or '?'
+              by_user[u]['opens'] += 1
+          for r in closes:
+              u=r.get('username') or (r.get('signal') or {}).get('username') or '?'
+              d=by_user[u]; d['closes'] += 1
+              try: pnl=float(r.get('grossPnlUsd') or 0)
+              except Exception: pnl=0.0
+              d['pnl'] += pnl
+              if pnl > 0: d['wins'] += 1
+              elif pnl < 0: d['losses'] += 1
+              try: d['ret_bps'].append(float(r.get('grossReturnBps')))
+              except Exception: pass
+          for u in sorted(by_user):
+              d=by_user[u]
+              med=statistics.median(d['ret_bps']) if d['ret_bps'] else None
+              print(f'USER {u} opens={d["opens"]} closes={d["closes"]} wins={d["wins"]} losses={d["losses"]} gross_pnl_usd={d["pnl"]:.6f} median_return_bps={med}')
+
+          if closes:
+              pnls=[float(r.get('grossPnlUsd') or 0) for r in closes]
+              rets=[float(r.get('grossReturnBps') or 0) for r in closes]
+              print(f'TOTAL gross_pnl_usd={sum(pnls):.6f} wins={sum(x>0 for x in pnls)} losses={sum(x<0 for x in pnls)} median_return_bps={statistics.median(rets):.4f}')
+
+          open_lats=[float(r['detectionLatencyMs']) for r in opens if isinstance(r.get('detectionLatencyMs'),(int,float))]
+          open_chase=[float(r['chaseBps']) for r in opens if isinstance(r.get('chaseBps'),(int,float))]
+          if open_lats: print(f'OPEN_LATENCY median_ms={statistics.median(open_lats):.1f} max_ms={max(open_lats):.1f}')
+          if open_chase: print(f'OPEN_CHASE median_bps={statistics.median(open_chase):.3f} max_bps={max(open_chase):.3f}')
+
+          print('recent_shadow_events:')
+          for r in [x for x in rows if x.get('type') in ('shadow_opened','shadow_closed')][-12:]:
+              s=r.get('signal') or {}
+              print(json.dumps({
+                  'ts':r.get('ts'),'type':r.get('type'),'user':r.get('username') or s.get('username'),
+                  'coin':r.get('coin') or s.get('coin'),'side':r.get('side') or s.get('side'),
+                  'pnl':r.get('grossPnlUsd'),'return_bps':r.get('grossReturnBps'),
+                  'latency_ms':r.get('detectionLatencyMs'),'chase_bps':r.get('chaseBps')
+              }, sort_keys=True))
+
+          print('managed_state:')
+          if state.exists():
+              try:
+                  d=json.loads(state.read_text())
+                  managed=d.get('managed') or {}
+                  safe={k:{kk:vv for kk,vv in v.items() if kk not in ('localBaseShortId',)} for k,v in managed.items()}
+                  print(json.dumps(safe, sort_keys=True))
+              except Exception as exc: print('state_error='+repr(exc))
+          else: print('{}')
+          PY
+
+          echo
+          echo "========== RECENT SERVICE LOG =========="
+          journalctl -u "$UNIT" -n 30 --no-pager 2>/dev/null || true
