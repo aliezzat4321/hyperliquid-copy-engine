@@ -1,0 +1,21 @@
+name: probe-prospective-status-v2
+on:
+  push:
+    paths:
+      - '.github/workflows/probe-prospective-status-v2.yml'
+jobs:
+  probe:
+    runs-on: [self-hosted, linux]
+    steps:
+      - name: Read prospective champion status
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '=== TIMER ==='
+          systemctl is-active hyperliquid-prospective-champions.timer || true
+          echo '=== SERVICE ==='
+          systemctl is-active hyperliquid-prospective-champions.service || true
+          echo '=== REPORT ==='
+          cat /root/hyperliquid-audit/prospective-champions/report.json || true
+          echo '=== RECENT LOGS ==='
+          journalctl -u hyperliquid-prospective-champions.service -n 40 --no-pager || true
