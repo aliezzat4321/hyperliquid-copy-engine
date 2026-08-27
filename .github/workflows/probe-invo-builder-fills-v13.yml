@@ -26,20 +26,20 @@ jobs:
           else
             python3 -m venv "$TMP/venv"
             "$TMP/venv/bin/pip" -q install lz4
-            "$TMP/venv/bin/python" - <<'PY' "$TMP/fills.lz4" "$TMP/fills.csv"
-import lz4.frame, pathlib, sys
-src, dst = map(pathlib.Path, sys.argv[1:])
-dst.write_bytes(lz4.frame.decompress(src.read_bytes()))
-PY
+            "$TMP/venv/bin/python" - "$TMP/fills.lz4" "$TMP/fills.csv" <<'PY'
+          import lz4.frame, pathlib, sys
+          src, dst = map(pathlib.Path, sys.argv[1:])
+          dst.write_bytes(lz4.frame.decompress(src.read_bytes()))
+          PY
           fi
-          python3 - <<'PY' "$TMP/fills.csv"
-import csv, json, pathlib, sys
-p=pathlib.Path(sys.argv[1])
-with p.open(newline='') as f:
-    r=csv.reader(f)
-    rows=[]
-    for i,row in enumerate(r):
-        rows.append(row)
-        if i>=2: break
-print('BUILDER_SCHEMA_JSON='+json.dumps({'rows':rows,'line_count':sum(1 for _ in p.open())}))
-PY
+          python3 - "$TMP/fills.csv" <<'PY'
+          import csv, json, pathlib, sys
+          p=pathlib.Path(sys.argv[1])
+          with p.open(newline='') as f:
+              r=csv.reader(f)
+              rows=[]
+              for i,row in enumerate(r):
+                  rows.append(row)
+                  if i>=2: break
+          print('BUILDER_SCHEMA_JSON='+json.dumps({'rows':rows,'line_count':sum(1 for _ in p.open())}))
+          PY
