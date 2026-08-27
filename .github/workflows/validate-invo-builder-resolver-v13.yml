@@ -1,0 +1,116 @@
+name: validate-invo-builder-resolver-v13
+on:
+  push:
+    branches: [wallet-pipeline/multibatch-close-proof-v13]
+    paths: [.github/workflows/validate-invo-builder-resolver-v13.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          clean: true
+      - name: Validate read-only builder identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          PY=/root/hyperliquid-copy-engine/.venv/bin/python
+          "$PY" -m pip install --disable-pip-version-check -q 'lz4>=4.3,<5'
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          TMP=$(mktemp -d /tmp/invo-builder-validation.XXXXXX)
+          trap 'rm -rf "$TMP"' EXIT
+          "$PY" - "$TMP" <<'PY'
+          import asyncio
+          import json
+          import sys
+          from pathlib import Path
+
+          from hlcopy.resolver.invo_builder_identifier import (
+              InvoBuilderFillsClient,
+              identify_invo_wallet_builder_first,
+          )
+
+          STATE = Path('/var/lib/hyperliquid-copy-engine/invo')
+          TMP = Path(sys.argv[1])
+          TARGETS = {'bones', 'booobsas', 'carmine', 'carterdee68', 'szoltysik'}
+
+          queue_payload = json.loads(
+              (STATE / 'resolution_queue' / 'resolution_queue.json').read_text()
+          )
+          queue = [
+              row for row in queue_payload.get('queue', [])
+              if isinstance(row, dict)
+              and str(row.get('username') or '').strip().casefold() in TARGETS
+          ]
+          publication = json.loads((STATE / 'identified_wallets.json').read_text())
+          known = {
+              str(row.get('portfolio_id')): str(row.get('wallet') or '').lower()
+              for row in publication.get('identities', [])
+              if isinstance(row, dict)
+          }
+
+          async def main():
+              results = []
+              async with InvoBuilderFillsClient(cache_dir=TMP / 'cache') as builder:
+                  for row in queue:
+                      pid = str(row['portfolio_id'])
+                      username = str(row.get('username') or '')
+                      try:
+                          result = await identify_invo_wallet_builder_first(
+                              Path(str(row['resolver_csv'])),
+                              output_dir=TMP / 'reports' / pid,
+                              cache_dir=TMP / 'cache',
+                              expected_source_identity=pid,
+                              builder_client=builder,
+                          )
+                          item = {
+                              'portfolio_id': pid,
+                              'username': username,
+                              'known_wallet': known.get(pid),
+                              'status': result.status,
+                              'wallet': result.wallet,
+                              'candidate': result.candidate,
+                              'discovery': f'{result.discovery_matches}/{result.discovery_anchors}',
+                              'heldout': f'{result.historical_matches}/{result.historical_attempted}',
+                              'clock_mad_ms': result.median_clock_offset_ms,
+                              'price_bps': str(result.median_price_bps),
+                          }
+                      except Exception as exc:
+                          item = {
+                              'portfolio_id': pid,
+                              'username': username,
+                              'known_wallet': known.get(pid),
+                              'status': 'ERROR',
+                              'error': f'{type(exc).__name__}: {exc}',
+                          }
+                      results.append(item)
+
+              contradictions = [
+                  row for row in results
+                  if row.get('known_wallet')
+                  and row.get('status') == 'VERIFIED'
+                  and str(row.get('wallet') or '').lower() != row['known_wallet']
+              ]
+              correctly_reproduced = [
+                  row for row in results
+                  if row.get('known_wallet')
+                  and row.get('status') == 'VERIFIED'
+                  and str(row.get('wallet') or '').lower() == row['known_wallet']
+              ]
+              print('BUILDER_LIVE_VALIDATION_JSON=' + json.dumps({
+                  'tested': len(results),
+                  'correct_known_reproductions': len(correctly_reproduced),
+                  'contradictions': contradictions,
+                  'results': results,
+                  'production_state_modified': False,
+              }, sort_keys=True))
+              if contradictions:
+                  raise SystemExit('builder resolver contradicted an existing durable identity')
+
+          asyncio.run(main())
+          PY
