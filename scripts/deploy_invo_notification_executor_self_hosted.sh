@@ -87,6 +87,15 @@ cd "$SERVICE_DIR"
 npm install --ignore-scripts --no-audit --no-fund
 npm run check
 
+# Start the widened experiment from a clean ledger while preserving the old evidence.
+stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+if [[ -f "$STATE/state.json" ]]; then
+  mv "$STATE/state.json" "$STATE/state.pre-wide-shadow-${stamp}.json"
+fi
+if [[ -f "$STATE/audit.jsonl" ]]; then
+  mv "$STATE/audit.jsonl" "$STATE/audit.pre-wide-shadow-${stamp}.jsonl"
+fi
+
 install -m 0644 "$REPO/deploy/systemd/$UNIT" "/etc/systemd/system/$UNIT"
 systemctl daemon-reload
 systemd-analyze verify "/etc/systemd/system/$UNIT"
