@@ -1,0 +1,137 @@
+name: edge-observability-watchdog
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/edge-observability-watchdog.yml'
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: edge-observability-watchdog
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 5
+    steps:
+      - name: Verify frozen and sourced edge state
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import shutil
+          import time
+          from pathlib import Path
+
+          champion_path = Path('/root/hyperliquid-audit/prospective-champions/report.json')
+          score_path = Path('/root/hyperliquid-audit/third-party/third_party_scorecard.json')
+          universe_path = Path('/var/lib/hyperliquid-copy-engine/invo/universe_candidates.json')
+          identities_path = Path('/var/lib/hyperliquid-copy-engine/invo/identified_wallets.json')
+          state_path = Path('/var/lib/hyperliquid-copy-engine/observability/edge_watchdog_state.json')
+          state_path.parent.mkdir(parents=True, exist_ok=True)
+
+          def read_json(path):
+              if not path.exists():
+                  raise SystemExit(f'EDGE_WATCHDOG_MISSING={path}')
+              try:
+                  value = json.loads(path.read_text())
+              except Exception as exc:
+                  raise SystemExit(f'EDGE_WATCHDOG_INVALID_JSON={path}:{exc}')
+              if not isinstance(value, dict):
+                  raise SystemExit(f'EDGE_WATCHDOG_INVALID_ROOT={path}')
+              return value
+
+          champion = read_json(champion_path)
+          score = read_json(score_path)
+          universe = read_json(universe_path)
+          identities = read_json(identities_path)
+
+          # The frozen experiment must remain frozen and non-live.
+          if champion.get('real_trading') not in (False, 0, None):
+              raise SystemExit('EDGE_WATCHDOG_FAIL=FROZEN_LANE_REAL_TRADING_ENABLED')
+          cutoff = champion.get('cutoff_ns')
+          if cutoff is None:
+              raise SystemExit('EDGE_WATCHDOG_FAIL=MISSING_FROZEN_CUTOFF')
+
+          current_targets = {}
+          for row in champion.get('targets') or []:
+              key = f"{row.get('wallet_address')}|{row.get('coin')}"
+              current_targets[key] = {
+                  'event_count': int(row.get('event_count') or 0),
+                  'actions_floor': int(row.get('actions_floor') or 0),
+              }
+
+          previous = {}
+          if state_path.exists():
+              try:
+                  previous = json.loads(state_path.read_text())
+              except Exception:
+                  previous = {}
+
+          previous_cutoff = previous.get('cutoff_ns')
+          if previous_cutoff is not None and previous_cutoff != cutoff:
+              raise SystemExit(f'EDGE_WATCHDOG_FAIL=FROZEN_CUTOFF_CHANGED old={previous_cutoff} new={cutoff}')
+
+          for key, now in current_targets.items():
+              old = (previous.get('targets') or {}).get(key)
+              if not isinstance(old, dict):
+                  continue
+              if now['event_count'] < int(old.get('event_count') or 0):
+                  raise SystemExit(f'EDGE_WATCHDOG_FAIL=EVENT_COUNT_REGRESSION target={key} old={old.get("event_count")} new={now["event_count"]}')
+              if now['actions_floor'] < int(old.get('actions_floor') or 0):
+                  raise SystemExit(f'EDGE_WATCHDOG_FAIL=ACTION_COUNT_REGRESSION target={key} old={old.get("actions_floor")} new={now["actions_floor"]}')
+
+          now_ts = time.time()
+          freshness = {}
+          for path in (champion_path, score_path, universe_path, identities_path):
+              age_min = (now_ts - path.stat().st_mtime) / 60.0
+              freshness[str(path)] = round(age_min, 1)
+
+          root = shutil.disk_usage('/')
+          root_pct = round(100.0 * root.used / root.total, 1)
+          data_mount = Path('/mnt/HC_Volume_106576526')
+          data_pct = None
+          if data_mount.exists():
+              data = shutil.disk_usage(data_mount)
+              data_pct = round(100.0 * data.used / data.total, 1)
+
+          verified_rows = identities.get('identified_wallets', identities.get('wallets', [])) or []
+          summary = {
+              'cutoff_ns': cutoff,
+              'approved_count': champion.get('approved_count'),
+              'frozen_targets': current_targets,
+              'third_party_wallet_count': score.get('wallet_count', 0),
+              'third_party_prospective_events': score.get('prospective_event_count', 0),
+              'candidate_portfolios': universe.get('candidate_portfolio_count', 0),
+              'resolution_ready': universe.get('ready_for_wallet_resolution', 0),
+              'published_identity_rows': len(verified_rows),
+              'freshness_minutes': freshness,
+              'root_usage_pct': root_pct,
+              'data_usage_pct': data_pct,
+              'checked_at_epoch': int(now_ts),
+          }
+          print('EDGE_WATCHDOG_JSON=' + json.dumps(summary, sort_keys=True))
+
+          state_path.write_text(json.dumps({
+              'cutoff_ns': cutoff,
+              'targets': current_targets,
+              'checked_at_epoch': int(now_ts),
+          }, sort_keys=True, indent=2) + '\n')
+
+          # Freshness is a reporting alarm, not a mutation. Give the upstream
+          # writers enough room for quiet markets while catching genuinely stale state.
+          stale = [p for p, age in freshness.items() if age > 180]
+          if stale:
+              raise SystemExit('EDGE_WATCHDOG_FAIL=STALE_STATE ' + ','.join(stale))
+          if root_pct >= 90:
+              raise SystemExit(f'EDGE_WATCHDOG_FAIL=ROOT_DISK_PRESSURE pct={root_pct}')
+          PY

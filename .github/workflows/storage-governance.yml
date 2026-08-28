@@ -7,6 +7,8 @@ on:
       - 'scripts/postgres_storage_audit.py'
       - 'scripts/hyperliquid_storage_guard.sh'
       - '.github/workflows/storage-governance.yml'
+  schedule:
+    - cron: '17 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -31,6 +33,25 @@ jobs:
           set -euo pipefail
           cd /root/hyperliquid-copy-engine
           .venv/bin/python scripts/postgres_storage_audit.py
+
+      - name: Safe root-pressure cleanup
+        shell: bash
+        run: |
+          set -euo pipefail
+          root_pct="$(df -P / | awk 'NR==2 {gsub(/%/,"",$5); print $5}')"
+          echo "ROOT_USAGE_BEFORE=${root_pct}%"
+          if [[ "$root_pct" =~ ^[0-9]+$ ]] && (( root_pct >= 90 )); then
+            # Reclaim only disposable caches. Never prune Docker volumes or
+            # anything under the Hyperliquid data/audit directories.
+            if command -v docker >/dev/null 2>&1; then
+              docker builder prune -af --filter 'until=168h' || true
+            fi
+            journalctl --vacuum-time=7d || true
+            if command -v apt-get >/dev/null 2>&1; then
+              apt-get clean || true
+            fi
+          fi
+          df -h / /mnt/HC_Volume_106576526 || true
 
       - name: Install disk pressure guard
         run: |
