@@ -79,8 +79,23 @@ jobs:
           open_types={'shadow_opened','shadow_opened_from_increase'}
           opens=[r for r in rows if r.get('type') in open_types]
           reups=[r for r in rows if r.get('type')=='shadow_reupped']
-          closes=[r for r in rows if r.get('type')=='shadow_closed']
-          print(f'shadow_opens={len(opens)} shadow_reups={len(reups)} shadow_closes={len(closes)} managed_now={len((json.loads(state.read_text()).get("managed") or {})) if state.exists() else 0}')
+          raw_closes=[r for r in rows if r.get('type')=='shadow_closed']
+
+          # Invo can emit more than one close post for the same source position. The
+          # shadow engine historically allowed two such posts through concurrently.
+          # Score exactly one completed trade per underlying sourceBaseId.
+          unique_close_by_source={}
+          for r in raw_closes:
+              s=r.get('signal') or {}
+              source_id=r.get('sourceBaseId') or s.get('sourceBaseId')
+              if not source_id:
+                  source_id=f"legacy:{r.get('username') or s.get('username')}:{r.get('coin') or s.get('coin')}:{r.get('ts')}"
+              unique_close_by_source.setdefault(source_id, r)
+          closes=list(unique_close_by_source.values())
+          duplicate_close_rows=len(raw_closes)-len(closes)
+
+          managed_now=len((json.loads(state.read_text()).get('managed') or {})) if state.exists() else 0
+          print(f'shadow_opens={len(opens)} shadow_reups={len(reups)} raw_shadow_closes={len(raw_closes)} unique_shadow_closes={len(closes)} duplicate_close_rows={duplicate_close_rows} managed_now={managed_now}')
 
           by_user=defaultdict(lambda: {'opens':0,'reups':0,'closes':0,'wins':0,'losses':0,'pnl':0.0,'ret_bps':[]})
           for r in opens:
@@ -102,12 +117,12 @@ jobs:
           for u in sorted(by_user):
               d=by_user[u]
               med=statistics.median(d['ret_bps']) if d['ret_bps'] else None
-              print(f'USER {u} opens={d["opens"]} reups={d["reups"]} closes={d["closes"]} wins={d["wins"]} losses={d["losses"]} gross_pnl_usd={d["pnl"]:.6f} median_return_bps={med}')
+              print(f'USER {u} opens={d["opens"]} reups={d["reups"]} unique_closes={d["closes"]} wins={d["wins"]} losses={d["losses"]} gross_pnl_usd={d["pnl"]:.6f} median_return_bps={med}')
 
           if closes:
               pnls=[float(r.get('grossPnlUsd') or 0) for r in closes]
               rets=[float(r.get('grossReturnBps') or 0) for r in closes]
-              print(f'TOTAL gross_pnl_usd={sum(pnls):.6f} wins={sum(x>0 for x in pnls)} losses={sum(x<0 for x in pnls)} median_return_bps={statistics.median(rets):.4f}')
+              print(f'UNIQUE_TOTAL gross_pnl_usd={sum(pnls):.6f} wins={sum(x>0 for x in pnls)} losses={sum(x<0 for x in pnls)} median_return_bps={statistics.median(rets):.4f}')
 
           open_lats=[float(r['detectionLatencyMs']) for r in opens if isinstance(r.get('detectionLatencyMs'),(int,float))]
           open_chase=[float(r['chaseBps']) for r in opens if isinstance(r.get('chaseBps'),(int,float))]
@@ -123,6 +138,7 @@ jobs:
                   'ts':r.get('ts'),'type':r.get('type'),'user':r.get('username') or s.get('username'),
                   'coin':r.get('coin') or s.get('coin'),'side':r.get('side') or s.get('side'),
                   'leverage':r.get('leverage') or s.get('leverage'),
+                  'source_base_id':r.get('sourceBaseId') or s.get('sourceBaseId'),
                   'pnl':r.get('grossPnlUsd'),'return_bps':r.get('grossReturnBps'),
                   'latency_ms':r.get('detectionLatencyMs'),'chase_bps':r.get('chaseBps'),
                   'add_count':r.get('addCount'),'sizing_model':r.get('sizingModel')
