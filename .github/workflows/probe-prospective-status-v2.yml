@@ -3,6 +3,8 @@ on:
   push:
     paths:
       - '.github/workflows/probe-prospective-status-v2.yml'
+  schedule:
+    - cron: '7,22,37,52 * * * *'
 jobs:
   probe:
     runs-on: [self-hosted, linux]
