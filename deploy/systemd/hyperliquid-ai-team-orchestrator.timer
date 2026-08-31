@@ -1,0 +1,13 @@
+[Unit]
+Description=Poll GitHub for Hyperliquid AI-team work without waking models
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=60s
+AccuracySec=10s
+RandomizedDelaySec=5s
+Persistent=yes
+Unit=hyperliquid-ai-team-orchestrator.service
+
+[Install]
+WantedBy=timers.target
