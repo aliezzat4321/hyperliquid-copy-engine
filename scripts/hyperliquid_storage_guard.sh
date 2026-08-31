@@ -3,12 +3,17 @@ set -euo pipefail
 
 MOUNT="${HLCOPY_STORAGE_MOUNT:-/mnt/HC_Volume_106576526}"
 ROOT_MOUNT="${HLCOPY_ROOT_MOUNT:-/}"
-WARN_PCT="${HLCOPY_STORAGE_WARN_PCT:-75}"
-STOP_PCT="${HLCOPY_STORAGE_STOP_PCT:-85}"
-RESUME_PCT="${HLCOPY_STORAGE_RESUME_PCT:-78}"
+WARN_PCT="${HLCOPY_STORAGE_WARN_PCT:-85}"
+STOP_PCT="${HLCOPY_STORAGE_STOP_PCT:-92}"
+RESUME_PCT="${HLCOPY_STORAGE_RESUME_PCT:-89}"
 STATE_DIR="${HLCOPY_STORAGE_GUARD_STATE_DIR:-/run/hlcopy-storage-guard}"
 SENTINEL="$STATE_DIR/market_capture_paused"
 mkdir -p "$STATE_DIR"
+
+if (( WARN_PCT >= STOP_PCT || RESUME_PCT >= STOP_PCT )); then
+  echo "STORAGE_GUARD=ERROR invalid_thresholds warn=$WARN_PCT stop=$STOP_PCT resume=$RESUME_PCT" >&2
+  exit 2
+fi
 
 usage_for() {
   local mount="$1"
@@ -48,7 +53,7 @@ else
 fi
 
 # Hysteresis: only re-enable the timer if this guard was the component that
-# previously paused it, and both filesystems have fallen safely below resume.
+# previously paused it, and both filesystems have fallen below resume.
 if [[ -f "$SENTINEL" ]] && (( root_usage_pct <= RESUME_PCT )) && (( data_usage_pct <= RESUME_PCT )); then
   echo "STORAGE_GUARD=RESUME_MARKET_CAPTURE"
   systemctl start hyperliquid-market-capture.timer 2>/dev/null || true
