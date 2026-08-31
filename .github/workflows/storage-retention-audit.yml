@@ -2,12 +2,16 @@ name: storage-retention-audit
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "37 * * * *"
   push:
     branches:
       - main
     paths:
       - "scripts/storage_retention_audit.py"
+      - "scripts/storage_retention_apply.py"
       - "scripts/storage_volume_diagnostics.py"
+      - "scripts/hyperliquid_storage_guard.sh"
       - ".github/workflows/storage-retention-audit.yml"
 
 permissions:
@@ -21,7 +25,7 @@ jobs:
   audit:
     if: github.repository == 'aliezzat4321/hyperliquid-copy-engine'
     runs-on: self-hosted
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: Checkout canonical main
         uses: actions/checkout@v4
@@ -44,7 +48,7 @@ jobs:
           cd /root/hyperliquid-copy-engine
           python3 scripts/storage_volume_diagnostics.py
 
-      - name: Run dry-run retention planner
+      - name: Build fresh profitability-driven retention manifest
         shell: bash
         run: |
           set -euo pipefail
@@ -62,13 +66,42 @@ jobs:
           d=json.loads(p.read_text())
           rows=[r for r in d['market_shadow']['partitions'] if r['action']=='DELETE_CANDIDATE']
           rows.sort(key=lambda r:r['bytes'], reverse=True)
-          print('========== TOP DELETE CANDIDATES (DRY RUN) ==========')
+          print('========== TOP DELETE CANDIDATES (FRESH MANIFEST) ==========')
           for r in rows[:30]:
               print(f"{r['bytes']/1024**3:.3f} GiB | {r['date']} | {r['coin_dir']} | {r['path']}")
-          print('DELETION_PERFORMED=NO')
+          print(f"DELETE_CANDIDATE_TOTAL_GIB={sum(r['bytes'] for r in rows)/1024**3:.3f}")
           PY
 
+      - name: Apply reviewed delete candidates only under stop pressure
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /root/hyperliquid-copy-engine
+          DATA_PCT="$(df -P /mnt/HC_Volume_106576526 | awk 'NR==2 {gsub(/%/,"",$5); print $5}')"
+          if [[ ! "$DATA_PCT" =~ ^[0-9]+$ ]]; then
+            echo "unable to parse data-volume usage: $DATA_PCT" >&2
+            exit 2
+          fi
+          echo "data_volume_usage_before_apply=${DATA_PCT}%"
+          if (( DATA_PCT >= 92 )); then
+            echo "STORAGE_RETENTION=APPLY reason=data_volume_at_or_above_stop_threshold"
+            python3 scripts/storage_retention_apply.py --apply --target-used-pct 88
+          else
+            echo "STORAGE_RETENTION=NO_APPLY usage_below_stop_threshold"
+            python3 scripts/storage_retention_apply.py --target-used-pct 88
+          fi
+
+      - name: Install and run storage guard
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /root/hyperliquid-copy-engine
+          sudo install -m 0755 scripts/hyperliquid_storage_guard.sh /usr/local/sbin/hyperliquid-storage-guard
+          sudo /usr/local/sbin/hyperliquid-storage-guard
+
       - name: Filesystem after audit
+        if: always()
         shell: bash
         run: |
           df -h / /mnt/HC_Volume_106576526 || true
