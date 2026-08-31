@@ -27,15 +27,16 @@ jobs:
         run: |
           set -euo pipefail
           export PATH=/usr/local/bin:/usr/bin:/bin
+          command -v setpriv
           claude --version
           codex --version
           claude --help | grep -E -- '(-p, --print|--output-format|--resume)' | head -n 10
           codex exec --help | grep -E -- '(workspace-write|--json|resume)' | head -n 15 || true
 
-      - name: Check root and isolated-agent auth status without credentials
+      - name: Check and provision isolated-agent auth without exposing credentials
         shell: bash
         run: |
-          set -u
+          set -euo pipefail
           export PATH=/usr/local/bin:/usr/bin:/bin
 
           if codex login status >/tmp/codex-root-status 2>&1; then
@@ -46,21 +47,40 @@ jobs:
           sed -E 's/(token|key|secret|oauth)[^ ]*/REDACTED/Ig' /tmp/codex-root-status | head -n 3 || true
           rm -f /tmp/codex-root-status
 
-          CODEX_HOME=/var/lib/hyperliquid-ai-team/agents/codex/home/.codex \
-          HOME=/var/lib/hyperliquid-ai-team/agents/codex/home \
-          runuser -u hl-codex-agent --preserve-environment -- \
-            /usr/local/bin/codex login status >/tmp/codex-agent-status 2>&1
-          rc=$?
-          if [ "$rc" -eq 0 ]; then echo 'AGENT_CODEX_AUTH=READY'; else echo 'AGENT_CODEX_AUTH=NOT_READY'; fi
+          CODEX_HOME=/var/lib/hyperliquid-ai-team/agents/codex/home/.codex
+          CLAUDE_HOME=/var/lib/hyperliquid-ai-team/agents/claude/home
+          install -d -o hl-codex-agent -g hl-codex-agent -m 0700 "$CODEX_HOME"
+          install -d -o hl-claude-agent -g hl-claude-agent -m 0700 "$CLAUDE_HOME/.claude"
+
+          if [[ -f /root/.codex/auth.json ]]; then
+            echo 'ROOT_CODEX_AUTH_FILE=FOUND'
+            install -o hl-codex-agent -g hl-codex-agent -m 0600 /root/.codex/auth.json "$CODEX_HOME/auth.json"
+            echo 'CODEX_AUTH_CACHE_TRANSFER=LOCAL_SUPPORTED_FILE_COPY'
+          else
+            echo 'ROOT_CODEX_AUTH_FILE=NOT_FOUND'
+          fi
+
+          codex_uid="$(id -u hl-codex-agent)"
+          codex_gid="$(id -g hl-codex-agent)"
+          if env HOME=/var/lib/hyperliquid-ai-team/agents/codex/home CODEX_HOME="$CODEX_HOME" \
+            setpriv --reuid="$codex_uid" --regid="$codex_gid" --init-groups \
+            /usr/local/bin/codex login status >/tmp/codex-agent-status 2>&1; then
+            echo 'AGENT_CODEX_AUTH=READY'
+          else
+            echo 'AGENT_CODEX_AUTH=NOT_READY'
+          fi
           sed -E 's/(token|key|secret|oauth)[^ ]*/REDACTED/Ig' /tmp/codex-agent-status | head -n 3 || true
           rm -f /tmp/codex-agent-status
 
-          CLAUDE_CONFIG_DIR=/var/lib/hyperliquid-ai-team/agents/claude/home/.claude \
-          HOME=/var/lib/hyperliquid-ai-team/agents/claude/home \
-          runuser -u hl-claude-agent --preserve-environment -- \
-            /usr/bin/claude auth status --text >/tmp/claude-agent-status 2>&1
-          rc=$?
-          if [ "$rc" -eq 0 ]; then echo 'AGENT_CLAUDE_AUTH=READY'; else echo 'AGENT_CLAUDE_AUTH=NOT_READY'; fi
+          claude_uid="$(id -u hl-claude-agent)"
+          claude_gid="$(id -g hl-claude-agent)"
+          if env HOME="$CLAUDE_HOME" CLAUDE_CONFIG_DIR="$CLAUDE_HOME/.claude" \
+            setpriv --reuid="$claude_uid" --regid="$claude_gid" --init-groups \
+            /usr/bin/claude auth status --text >/tmp/claude-agent-status 2>&1; then
+            echo 'AGENT_CLAUDE_AUTH=READY'
+          else
+            echo 'AGENT_CLAUDE_AUTH=NOT_READY'
+          fi
           sed -E 's/(token|key|secret|oauth)[^ ]*/REDACTED/Ig' /tmp/claude-agent-status | head -n 3 || true
           rm -f /tmp/claude-agent-status
 
