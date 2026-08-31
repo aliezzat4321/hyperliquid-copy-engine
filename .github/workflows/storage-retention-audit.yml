@@ -7,6 +7,7 @@ on:
       - main
     paths:
       - "scripts/storage_retention_audit.py"
+      - "scripts/storage_volume_diagnostics.py"
       - ".github/workflows/storage-retention-audit.yml"
 
 permissions:
@@ -35,6 +36,13 @@ jobs:
           cd /root/hyperliquid-copy-engine
           git fetch origin main
           git reset --hard origin/main
+
+      - name: Attribute data-volume usage and recent writers
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /root/hyperliquid-copy-engine
+          python3 scripts/storage_volume_diagnostics.py
 
       - name: Run dry-run retention planner
         shell: bash
