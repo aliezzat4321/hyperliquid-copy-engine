@@ -1,0 +1,46 @@
+name: invo-notification-edge
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/invo-notification-edge.yml'
+      - 'src/hlcopy/profitability/notification_edge.py'
+      - 'src/hlcopy/profitability/notification_edge_cli.py'
+  schedule:
+    - cron: '41 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: invo-notification-edge
+  cancel-in-progress: true
+
+jobs:
+  report:
+    if: github.repository == 'aliezzat4321/hyperliquid-copy-engine'
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 10
+    steps:
+      - name: Sync server checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /root/hyperliquid-copy-engine
+          git fetch origin main
+          git reset --hard origin/main
+
+      - name: Attribute net copy edge across the notification ledger
+        shell: bash
+        env:
+          REAL_TRADING_ENABLED: "NO"
+        run: |
+          set -euo pipefail
+          cd /root/hyperliquid-copy-engine
+          .venv/bin/python -m hlcopy.profitability.notification_edge_cli \
+            --audit /var/lib/hyperliquid-copy-engine/invo-notification-executor/audit.jsonl \
+            --output /root/hyperliquid-audit/invo-notification/edge_report.json \
+            --reference-cost-bps 15 \
+            --top 25

@@ -104,3 +104,7 @@ That POST only wakes canonical API hydration.
 ## Promotion criterion
 
 Run shadow first and rank traders by **prospective copied results**: signal count, median/p95 detection latency, adverse chase bps, stale/chase rejection rate, copied gross return at the source exit, and then measured execution/funding/fee costs. Only positive copied cohorts after those costs should enter the live allowlist.
+
+That ranking is produced by `hlcopy.profitability.notification_edge`, which reads this service's audit stream and attributes net-of-cost edge across trader, coin, direction, signal age, hold time and leverage. It reports each slice's breakeven round-trip cost and a bootstrap lower bound, and only marks a slice `ELIGIBLE_FOR_MICRO_LIVE` when that lower bound clears the cost the slice must actually pay. See [`docs/INVO_NOTIFICATION_NET_EDGE.md`](../../docs/INVO_NOTIFICATION_NET_EDGE.md).
+
+The gross figures this service logs are inputs to that engine, not a promotion signal on their own.
