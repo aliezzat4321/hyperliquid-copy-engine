@@ -62,4 +62,11 @@ select = ["E", "F", "I", "UP", "B"]
 "src/hlcopy/profitability/parquet_stream_evaluator.py" = ["E501"]
 "src/hlcopy/profitability/selective_path_truth_fast_cli.py" = ["E501"]
 "tests/test_attribution_round_trip_fee_gate_v1.py" = ["E501"]
+# Legacy operational scripts intentionally remain dense because formatting/refactoring
+# them can change production semantics. Keep these lint exemptions isolated here until
+# each script is safely rewritten under its own issue and runtime-equivalence tests.
+"scripts/edge_temporal_validation.py" = ["E501", "E701", "E702"]
+"scripts/prospective_champion_lane.py" = ["E401", "E501", "E701", "E702", "I001"]
+"scripts/postgres_storage_audit.py" = ["E501", "UP017", "UP022"]
+"scripts/storage_retention_audit.py" = ["E501", "UP017"]
 "tests/test_parquet_stream_evaluator_v4.py" = ["E501"]
