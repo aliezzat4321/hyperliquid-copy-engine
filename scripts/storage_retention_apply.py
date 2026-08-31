@@ -230,11 +230,13 @@ def validate_manifest(
         )
     if candidate_total != expected_total:
         raise ValueError(
-            f"delete-candidate byte total mismatch: rows={candidate_total} manifest={expected_total}"
+            "delete-candidate byte total mismatch: "
+            f"rows={candidate_total} manifest={expected_total}"
         )
     if candidate_total > delete_budget_bytes:
         raise ValueError(
-            f"delete-candidate pool exceeds reviewed budget: {candidate_total} > {delete_budget_bytes}"
+            "delete-candidate pool exceeds reviewed budget: "
+            f"{candidate_total} > {delete_budget_bytes}"
         )
 
     candidates.sort(key=lambda item: (item.day, -item.bytes_planned, str(item.path)))
