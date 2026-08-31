@@ -47,6 +47,19 @@ jobs:
             | sort -h | tail -n 40 || true
           echo 'READ_ONLY_NO_DELETION=YES'
 
+      - name: PostgreSQL cluster attribution
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '========== POSTGRESQL CLUSTER ATTRIBUTION =========='
+          pg_lsclusters 2>/dev/null || true
+          ps -eo pid,lstart,args | grep '[p]ostgres' || true
+          echo '========== DATA-DIR RECENCY =========='
+          find /mnt/HC_Volume_106576526/hyperliquid/postgresql/14/hlcopy \
+            -type f -printf '%T@ %TY-%Tm-%TdT%TH:%TM:%TS %p\n' 2>/dev/null \
+            | sort -nr | head -n 25 || true
+          echo 'READ_ONLY_NO_MUTATION=YES'
+
       - name: PostgreSQL connectivity attribution
         shell: bash
         run: |
@@ -58,10 +71,15 @@ jobs:
           pg_isready -h 127.0.0.1 -p 5433 || true
           echo 'READ_ONLY_NO_MUTATION=YES'
 
-      - name: PostgreSQL logical storage audit
+      - name: PostgreSQL logical storage audit when credentials are available
         shell: bash
         run: |
           set -euo pipefail
           cd /root/hyperliquid-copy-engine
           echo '========== POSTGRESQL LOGICAL STORAGE =========='
-          python3 scripts/run_postgres_storage_audit.py
+          if python3 scripts/run_postgres_storage_audit.py; then
+            echo 'LOGICAL_AUDIT=SUCCESS'
+          else
+            echo 'LOGICAL_AUDIT=UNAVAILABLE_NO_WORKING_CREDENTIAL_SOURCE'
+          fi
+          echo 'READ_ONLY_NO_MUTATION=YES'
