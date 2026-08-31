@@ -20,7 +20,7 @@ jobs:
   audit:
     if: github.repository == 'aliezzat4321/hyperliquid-copy-engine'
     runs-on: [self-hosted, linux]
-    timeout-minutes: 15
+    timeout-minutes: 12
     steps:
       - name: Checkout audit code only
         uses: actions/checkout@v4
@@ -48,7 +48,7 @@ jobs:
           echo '========== HYPERLIQUID CHECKOUT =========='
           if [[ -d /root/hyperliquid-copy-engine/.git ]]; then
             git -C /root/hyperliquid-copy-engine rev-parse HEAD || true
-            git -C /root/hyperliquid-copy-engine status --short --branch || true
+            git -C /root/hyperliquid-copy-engine symbolic-ref --short -q HEAD || true
           else
             echo 'HYPERLIQUID_RUNTIME_CHECKOUT_MISSING=YES'
           fi
@@ -56,12 +56,10 @@ jobs:
           df -hT / || true
           df -hT /mnt/HC_Volume_106576526 || true
           findmnt /mnt/HC_Volume_106576526 || true
-          echo '========== HYPERLIQUID PATH SIZES =========='
-          du -sh /root/hyperliquid-copy-engine 2>/dev/null || true
-          du -sh /var/lib/hyperliquid-copy-engine 2>/dev/null || true
-          du -sh /mnt/HC_Volume_106576526/hyperliquid 2>/dev/null || true
-          du -sh /mnt/HC_Volume_106576526/hyperliquid/market-shadow 2>/dev/null || true
-          du -sh /mnt/HC_Volume_106576526/hyperliquid/postgresql 2>/dev/null || true
+          echo '========== HYPERLIQUID PATH SIZES (BOUNDED) =========='
+          timeout 15 du -sh /var/lib/hyperliquid-copy-engine 2>/dev/null || true
+          timeout 15 du -sh /mnt/HC_Volume_106576526/hyperliquid/market-shadow 2>/dev/null || true
+          timeout 15 du -sh /mnt/HC_Volume_106576526/hyperliquid/postgresql 2>/dev/null || true
           echo 'READ_ONLY_NO_DELETION=YES'
 
       - name: Hyperliquid systemd inventory
