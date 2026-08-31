@@ -46,6 +46,17 @@ jobs:
             | sort -h | tail -n 40 || true
           echo 'READ_ONLY_NO_DELETION=YES'
 
+      - name: PostgreSQL connectivity attribution
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '========== POSTGRESQL CONNECTIVITY =========='
+          ss -ltn 2>/dev/null | grep -E ':(5432|5433)[[:space:]]' || true
+          docker ps --format '{{.Names}} {{.Ports}}' 2>/dev/null | grep -i postgres || true
+          pg_isready -h 127.0.0.1 -p 5432 || true
+          pg_isready -h 127.0.0.1 -p 5433 || true
+          echo 'READ_ONLY_NO_MUTATION=YES'
+
       - name: PostgreSQL logical storage audit
         shell: bash
         run: |
@@ -58,6 +69,19 @@ jobs:
           if [[ -z "$DB_URL" ]]; then
             echo 'POSTGRES_STORAGE_AUDIT_FAIL=no database URL in .env' >&2
             exit 2
+          fi
+          if ! pg_isready -d "$DB_URL" >/dev/null 2>&1; then
+            if [[ "$DB_URL" == *':5433/'* ]]; then
+              ALT_DB_URL="${DB_URL/:5433\//:5432/}"
+            else
+              ALT_DB_URL="${DB_URL/:5432\//:5433/}"
+            fi
+            if pg_isready -d "$ALT_DB_URL" >/dev/null 2>&1; then
+              DB_URL="$ALT_DB_URL"
+            else
+              echo 'POSTGRES_STORAGE_AUDIT_FAIL=configured and alternate local ports unavailable' >&2
+              exit 2
+            fi
           fi
           echo '========== POSTGRESQL LOGICAL STORAGE =========='
           psql "$DB_URL" -X -v ON_ERROR_STOP=1 -f scripts/postgres_storage_audit.sql
