@@ -6,7 +6,7 @@ import json
 import shutil
 import subprocess
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 
@@ -196,7 +196,7 @@ def main() -> None:
     recent = _recent_writes(mount, args.recent_minutes)
     report = {
         "mode": "READ_ONLY_NO_DELETION",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "mount": str(mount),
         "filesystem": {
             "total_bytes": usage.total,
