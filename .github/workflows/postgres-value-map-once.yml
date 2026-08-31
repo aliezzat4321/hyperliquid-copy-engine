@@ -1,0 +1,72 @@
+name: postgres-value-map-once
+
+on:
+  push:
+    branches:
+      - codex/111-postgres-recovery
+    paths:
+      - ".github/workflows/postgres-value-map-once.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 20
+    steps:
+      - name: Read-only value map of Hyperliquid PostgreSQL
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o SOURCE /mnt/HC_Volume_106576526)" = /dev/sdc
+          test "$(findmnt -n -o SOURCE -T /root/polymarket-smart-wallet)" = /dev/sda1
+          sudo -n -u postgres /usr/lib/postgresql/14/bin/pg_isready -p 5433
+          PSQL="sudo -n -u postgres psql -X -v ON_ERROR_STOP=1 -p 5433 -d hlcopy -P pager=off"
+
+          echo '========== RELATION MAP =========='
+          $PSQL -c "
+            SELECT c.relname,
+                   c.reltuples::bigint AS estimated_rows,
+                   pg_size_pretty(pg_total_relation_size(c.oid)) AS total,
+                   pg_size_pretty(pg_relation_size(c.oid)) AS heap,
+                   pg_size_pretty(pg_indexes_size(c.oid)) AS indexes,
+                   pg_size_pretty(COALESCE(pg_total_relation_size(c.reltoastrelid),0)) AS toast_total
+            FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname='public' AND c.relname IN ('leaderboard_snapshots','raw_api_responses','fills')
+            ORDER BY pg_total_relation_size(c.oid) DESC;"
+
+          echo '========== LEADERBOARD RANGE / CADENCE =========='
+          $PSQL -c "SELECT snapshot_at AS oldest FROM leaderboard_snapshots ORDER BY snapshot_at ASC LIMIT 1;"
+          $PSQL -c "SELECT snapshot_at AS newest FROM leaderboard_snapshots ORDER BY snapshot_at DESC LIMIT 1;"
+          $PSQL -c "SELECT ranking_period, count(*) AS sampled_rows FROM leaderboard_snapshots TABLESAMPLE SYSTEM (0.02) GROUP BY ranking_period ORDER BY sampled_rows DESC;"
+          $PSQL -c "
+            SELECT count(*) AS sampled_rows,
+                   round(avg(pg_column_size(raw_json))) AS avg_raw_json_bytes,
+                   percentile_cont(0.5) WITHIN GROUP (ORDER BY pg_column_size(raw_json))::bigint AS median_raw_json_bytes,
+                   max(pg_column_size(raw_json)) AS max_raw_json_bytes
+            FROM leaderboard_snapshots TABLESAMPLE SYSTEM (0.02);"
+
+          echo '========== RAW API EXACT METADATA =========='
+          $PSQL -c "SELECT count(*) AS rows FROM raw_api_responses;"
+          $PSQL -c "SELECT fetched_at AS oldest, source, endpoint FROM raw_api_responses ORDER BY id ASC LIMIT 1;"
+          $PSQL -c "SELECT fetched_at AS newest, source, endpoint FROM raw_api_responses ORDER BY id DESC LIMIT 1;"
+          $PSQL -c "SELECT source, endpoint, count(*) AS rows FROM raw_api_responses GROUP BY source, endpoint ORDER BY rows DESC LIMIT 30;"
+          $PSQL -c "
+            SELECT count(*) AS sampled_rows,
+                   round(avg(pg_column_size(response_json))) AS avg_response_json_bytes,
+                   percentile_cont(0.5) WITHIN GROUP (ORDER BY pg_column_size(response_json))::bigint AS median_response_json_bytes,
+                   max(pg_column_size(response_json)) AS max_response_json_bytes
+            FROM raw_api_responses TABLESAMPLE SYSTEM (2);"
+          $PSQL -c "SELECT count(*) AS duplicate_hash_groups, COALESCE(sum(n-1),0) AS duplicate_rows FROM (SELECT content_sha256, count(*) n FROM raw_api_responses GROUP BY content_sha256 HAVING count(*)>1) d;"
+
+          echo '========== FILLS RANGE =========='
+          $PSQL -c "SELECT c.reltuples::bigint AS estimated_rows FROM pg_class c WHERE c.oid='public.fills'::regclass;"
+          $PSQL -c "SELECT timestamp AS oldest FROM fills ORDER BY timestamp ASC LIMIT 1;" || true
+          $PSQL -c "SELECT timestamp AS newest FROM fills ORDER BY timestamp DESC LIMIT 1;" || true
+
+          echo '========== SPACE / SAFETY =========='
+          df -hT /mnt/HC_Volume_106576526
+          echo 'DATABASE_MUTATION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
