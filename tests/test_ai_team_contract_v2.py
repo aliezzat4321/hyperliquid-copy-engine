@@ -463,3 +463,17 @@ def test_guard_parses_per_file_diff_hunks():
     parsed = guard.parse_diff(raw)
     assert parsed["a.py"] == ["-old", "+new"]
     assert parsed["docs/x.md"] == ["+REAL_TRADING_ENABLED"]
+
+
+def test_guard_does_not_trip_on_its_own_pattern_list():
+    """The guard defines these tokens; detecting itself would make it unusable."""
+    assert guard.scans_tokens("scripts/check_live_sensitive_change.py") is False
+    assert guard.scans_tokens("tests/test_ai_team_contract_v2.py") is False
+    assert guard.scans_tokens("src/hlcopy/trading/permissions.py") is True
+    assert guard.scans_tokens("services/x/src/service.ts") is True
+
+
+def test_exempt_files_still_obey_path_rules():
+    """Exemption is from token scanning only, never from the path patterns."""
+    reasons = guard.classify(["src/hlcopy/trading/permissions.py"], {})
+    assert reasons

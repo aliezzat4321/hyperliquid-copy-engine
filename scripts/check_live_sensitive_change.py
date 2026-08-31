@@ -56,6 +56,14 @@ LIVE_SENSITIVE_TOKENS = (
 #: for tokens; path rules still apply to every file.
 DOC_SUFFIXES = frozenset({".md", ".rst", ".txt"})
 
+#: Token scanning skips these because they *define* or *assert* the token list rather
+#: than changing behaviour: this guard trips on itself otherwise. Neither can alter a
+#: production code path, and the path rules above still apply to both.
+TOKEN_SCAN_EXEMPT = (
+    "scripts/check_live_sensitive_change.py",
+    "tests/*",
+)
+
 CLASSIFICATION_RE = re.compile(r"^\s*LIVE-SENSITIVE:\s*(YES|NO)\s*$", re.IGNORECASE | re.MULTILINE)
 
 MARKER = "LIVE-SENSITIVE: YES"
@@ -103,7 +111,9 @@ def parse_diff(raw: str) -> dict[str, list[str]]:
 
 def scans_tokens(name: str) -> bool:
     """Documentation may discuss live flags; only code and config can change them."""
-    return Path(name).suffix.lower() not in DOC_SUFFIXES
+    if Path(name).suffix.lower() in DOC_SUFFIXES:
+        return False
+    return not any(fnmatch.fnmatch(name, pattern) for pattern in TOKEN_SCAN_EXEMPT)
 
 
 def classify(files: list[str], lines_by_file: dict[str, list[str]]) -> list[str]:
