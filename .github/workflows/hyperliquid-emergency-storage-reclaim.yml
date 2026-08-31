@@ -1,0 +1,119 @@
+name: hyperliquid-emergency-storage-reclaim
+
+on:
+  push:
+    branches:
+      - main
+      - codex/109-emergency-storage-reclaim
+    paths:
+      - "scripts/storage_retention_apply.py"
+      - "scripts/storage_retention_audit.py"
+      - "tests/test_storage_retention_apply.py"
+      - ".github/workflows/hyperliquid-emergency-storage-reclaim.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hyperliquid-emergency-storage-reclaim
+  cancel-in-progress: false
+
+jobs:
+  reclaim:
+    if: github.repository == 'aliezzat4321/hyperliquid-copy-engine'
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 25
+    steps:
+      - name: Checkout exact reviewed code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          clean: true
+
+      - name: Assert project and safety boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '========== EMERGENCY RECLAIM SCOPE =========='
+          echo "ref=$GITHUB_REF sha=$GITHUB_SHA"
+          echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
+          echo 'ALLOWED_DELETE_ROOT=/mnt/HC_Volume_106576526/hyperliquid/market-shadow/date=*/coin=*'
+          echo 'POSTGRESQL_FILESYSTEM_DELETION=NO'
+          echo 'POLYMARKET_INSPECTION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'MARKET_CAPTURE_AUTO_RESUME=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+          df -hT /mnt/HC_Volume_106576526
+          test -d /mnt/HC_Volume_106576526/hyperliquid/market-shadow
+          test -d /mnt/HC_Volume_106576526/hyperliquid/postgresql
+
+      - name: Keep Hyperliquid market capture quiesced
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == 'refs/heads/main' ]]; then
+            systemctl stop hyperliquid-market-capture.timer 2>/dev/null || true
+            systemctl stop hyperliquid-market-capture.service 2>/dev/null || true
+            echo 'MARKET_CAPTURE_QUIESCED=YES'
+          else
+            echo 'MARKET_CAPTURE_MUTATION=NO branch_dry_run_only'
+          fi
+
+      - name: Build fresh profitability-driven manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /root/hyperliquid-audit/storage-retention
+          python3 scripts/storage_retention_audit.py --recent-days 3
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          p=Path('/root/hyperliquid-audit/storage-retention/storage_retention_manifest.json')
+          d=json.loads(p.read_text())
+          rows=[r for r in d['market_shadow']['partitions'] if r['action']=='DELETE_CANDIDATE']
+          rows.sort(key=lambda r:(r['date'], -int(r['bytes'])))
+          print('========== REVIEWED CLASSIFICATION INPUT =========')
+          print('generated_at='+str(d['generated_at']))
+          print('recent_days='+str(d['recent_days_kept_full_fidelity']))
+          print('robust_alias_safety='+str(d['safety']['robust_alias_safety_passed']))
+          print('postgres_delete_allowed='+str(d['safety']['postgres_filesystem_deletion_allowed']))
+          print('delete_candidate_count='+str(len(rows)))
+          print('delete_candidate_total_gib='+f"{sum(int(r['bytes']) for r in rows)/1024**3:.3f}")
+          print('oldest_candidates:')
+          for r in rows[:30]:
+              print(f"{r['date']} {r['canonical_coin']} {int(r['bytes'])/1024**2:.1f}MiB {r['path']}")
+          PY
+
+      - name: Dry run exact deletion plan on review branch
+        if: github.ref != 'refs/heads/main'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/storage_retention_apply.py --target-used-pct 92
+          echo 'BRANCH_REVIEW_MODE=DRY_RUN_ONLY'
+          echo 'DELETION_PERFORMED=NO'
+
+      - name: Apply exact reviewed deletion plan after merge to main
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/storage_retention_apply.py --apply --target-used-pct 92
+          echo 'MAIN_RECOVERY_MODE=APPLY_REVIEWED_DELETE_CANDIDATES'
+
+      - name: Keep market capture paused and report recovery headroom
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == 'refs/heads/main' ]]; then
+            systemctl stop hyperliquid-market-capture.timer 2>/dev/null || true
+            systemctl stop hyperliquid-market-capture.service 2>/dev/null || true
+          fi
+          echo '========== AFTER =========='
+          df -hT /mnt/HC_Volume_106576526 || true
+          pg_lsclusters 2>/dev/null || true
+          echo 'POSTGRES_START_ATTEMPTED=NO'
+          echo 'MARKET_CAPTURE_RESUMED=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
