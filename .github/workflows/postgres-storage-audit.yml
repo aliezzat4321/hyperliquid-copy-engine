@@ -60,6 +60,30 @@ jobs:
             | sort -nr | head -n 25 || true
           echo 'READ_ONLY_NO_MUTATION=YES'
 
+      - name: Compare active and offline cluster provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          OLD=/mnt/HC_Volume_106576526/hyperliquid/postgresql/14/hlcopy
+          ACTIVE=/var/lib/postgresql/14/main
+          echo '========== POSTGRESQL CLUSTER PROVENANCE =========='
+          echo "offline_data_dir=$OLD"
+          echo "active_data_dir=$ACTIVE"
+          du -sh "$OLD" "$ACTIVE" 2>/dev/null || true
+          echo '--- offline pg_controldata ---'
+          /usr/lib/postgresql/14/bin/pg_controldata "$OLD" 2>/dev/null \
+            | grep -E 'Database system identifier|Database cluster state|Latest checkpoint|Time of latest checkpoint|Database block size|WAL block size' || true
+          echo '--- active pg_controldata ---'
+          /usr/lib/postgresql/14/bin/pg_controldata "$ACTIVE" 2>/dev/null \
+            | grep -E 'Database system identifier|Database cluster state|Latest checkpoint|Time of latest checkpoint|Database block size|WAL block size' || true
+          echo '--- offline hlcopy log lifecycle ---'
+          grep -E 'starting PostgreSQL|database system is ready|database system is shut down|received .*shutdown|shutting down' \
+            /var/log/postgresql/postgresql-14-hlcopy.log 2>/dev/null | tail -n 40 || true
+          echo '--- active main log lifecycle ---'
+          grep -E 'starting PostgreSQL|database system is ready|database system is shut down|received .*shutdown|shutting down' \
+            /var/log/postgresql/postgresql-14-main.log 2>/dev/null | tail -n 40 || true
+          echo 'READ_ONLY_NO_MUTATION=YES'
+
       - name: PostgreSQL connectivity attribution
         shell: bash
         run: |
