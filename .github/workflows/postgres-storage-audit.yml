@@ -51,14 +51,16 @@ jobs:
         run: |
           set -euo pipefail
           echo '========== POSTGRESQL CONNECTIVITY =========='
+          echo "runner_uid=$(id -u) runner_user=$(id -un)"
           ss -ltn 2>/dev/null | grep -E ':(5432|5433)[[:space:]]' || true
           docker ps --format '{{.Names}} {{.Ports}}' 2>/dev/null | grep -i postgres || true
           pg_isready -h 127.0.0.1 -p 5432 || true
           pg_isready -h 127.0.0.1 -p 5433 || true
-          if sudo -n -u postgres psql -d hlcopy -X -Atqc 'SELECT 1' >/dev/null 2>&1; then
-            echo 'LOCAL_PEER_AUDIT_ACCESS=YES'
+          if command -v runuser >/dev/null 2>&1 \
+            && runuser -u postgres -- psql -d hlcopy -X -Atqc 'SELECT 1' >/dev/null 2>&1; then
+            echo 'LOCAL_RUNUSER_AUDIT_ACCESS=YES'
           else
-            echo 'LOCAL_PEER_AUDIT_ACCESS=NO'
+            echo 'LOCAL_RUNUSER_AUDIT_ACCESS=NO'
           fi
           echo 'READ_ONLY_NO_MUTATION=YES'
 
@@ -73,16 +75,14 @@ jobs:
           DB_URL="${RESEARCH_DATABASE_URL:-${DATABASE_URL:-}}"
           echo '========== POSTGRESQL LOGICAL STORAGE =========='
 
-          # Prefer the configured connection only when it actually authenticates.
           if [[ -n "$DB_URL" ]] && psql "$DB_URL" -X -Atqc 'SELECT 1' >/dev/null 2>&1; then
             psql "$DB_URL" -X -v ON_ERROR_STOP=1 -f scripts/postgres_storage_audit.sql
             echo 'AUDIT_CONNECTION=configured_url'
-          # Production host PostgreSQL can also be audited through local peer auth
-          # without exposing, changing, or inventing an application password.
-          elif sudo -n -u postgres psql -d hlcopy -X -Atqc 'SELECT 1' >/dev/null 2>&1; then
-            sudo -n -u postgres psql -d hlcopy -X -v ON_ERROR_STOP=1 \
+          elif command -v runuser >/dev/null 2>&1 \
+            && runuser -u postgres -- psql -d hlcopy -X -Atqc 'SELECT 1' >/dev/null 2>&1; then
+            runuser -u postgres -- psql -d hlcopy -X -v ON_ERROR_STOP=1 \
               -f scripts/postgres_storage_audit.sql
-            echo 'AUDIT_CONNECTION=local_peer_postgres'
+            echo 'AUDIT_CONNECTION=local_runuser_postgres'
           else
             echo 'POSTGRES_STORAGE_AUDIT_FAIL=no authenticated read-only connection available' >&2
             exit 2
