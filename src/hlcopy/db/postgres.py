@@ -75,20 +75,40 @@ class Database:
         response_payload: Any,
         fetched_at_ms: int,
     ) -> None:
+        """Persist raw provenance without repeating an identical observation.
+
+        The content hash is indexed. We only suppress a row when source, endpoint,
+        request JSON and response hash all match a prior observation. The request is
+        part of the identity deliberately: identical empty responses for two wallets
+        are separate observations and must not be collapsed.
+        """
         canonical = json.dumps(response_payload, sort_keys=True, separators=(",", ":"))
         digest = hashlib.sha256(canonical.encode()).hexdigest()
+        request_json = Jsonb(request_payload) if request_payload is not None else None
         await self._require().execute(
             """
             INSERT INTO raw_api_responses
               (source, endpoint, request_json, response_json, fetched_at, content_sha256)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            SELECT %s, %s, %s, %s, %s, %s
+            WHERE NOT EXISTS (
+              SELECT 1
+              FROM raw_api_responses
+              WHERE source = %s
+                AND endpoint = %s
+                AND request_json IS NOT DISTINCT FROM %s
+                AND content_sha256 = %s
+            )
             """,
             (
                 source,
                 endpoint,
-                Jsonb(request_payload) if request_payload is not None else None,
+                request_json,
                 Jsonb(response_payload),
                 _dt(fetched_at_ms),
+                digest,
+                source,
+                endpoint,
+                request_json,
                 digest,
             ),
         )
@@ -171,7 +191,11 @@ class Database:
                         stats.roi,
                         stats.volume,
                         candidate.account_value,
-                        Jsonb(candidate.raw),
+                        # The complete source response is stored once in
+                        # raw_api_responses. Repeating candidate.raw in every one of
+                        # ~40k leaderboard rows inflated the table by gigabytes with
+                        # no consumer in this repository.
+                        Jsonb({}),
                     ),
                 )
             if progress is not None and (
