@@ -28,10 +28,9 @@ class Settings:
     market_data_dir: Path = Path("data/market")
     market_coins: tuple[str, ...] = ("BTC", "ETH", "SOL")
     market_flush_rows: int = 5_000
-    # Low-volume partitions may stay in memory until this durability deadline;
-    # high-volume partitions still flush independently at market_flush_rows.
-    # This replaces the old five-second global flush that produced ~1.5M tiny
-    # Parquet files on the validation host.
+    # Busy partitions flush at market_flush_rows; this is only the maximum
+    # durability interval for low-volume partitions. The old five-second global
+    # flush produced ~1.5M tiny files on the research volume.
     market_flush_seconds: float = 120.0
     market_queue_size: int = 50_000
     ws_heartbeat_seconds: float = 30.0
