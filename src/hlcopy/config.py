@@ -28,7 +28,11 @@ class Settings:
     market_data_dir: Path = Path("data/market")
     market_coins: tuple[str, ...] = ("BTC", "ETH", "SOL")
     market_flush_rows: int = 5_000
-    market_flush_seconds: float = 5.0
+    # Low-volume partitions may stay in memory until this durability deadline;
+    # high-volume partitions still flush independently at market_flush_rows.
+    # This replaces the old five-second global flush that produced ~1.5M tiny
+    # Parquet files on the validation host.
+    market_flush_seconds: float = 120.0
     market_queue_size: int = 50_000
     ws_heartbeat_seconds: float = 30.0
     ws_reconnect_base_seconds: float = 1.0
@@ -76,8 +80,8 @@ class Settings:
             market_coins=_market_coins_from_env(),
             market_flush_rows=max(1, int(os.getenv("HLCOPY_MARKET_FLUSH_ROWS", "5000"))),
             market_flush_seconds=max(
-                0.1,
-                float(os.getenv("HLCOPY_MARKET_FLUSH_SECONDS", "5")),
+                1.0,
+                float(os.getenv("HLCOPY_MARKET_FLUSH_SECONDS", "120")),
             ),
             market_queue_size=max(100, int(os.getenv("HLCOPY_MARKET_QUEUE_SIZE", "50000"))),
             ws_heartbeat_seconds=max(
