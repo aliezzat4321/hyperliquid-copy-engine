@@ -126,21 +126,37 @@ def validate_manifest(
         raise ValueError("manifest source_evidence.complete is not true")
     if safety.get("robust_set_nonempty") is not True:
         raise ValueError("manifest robust set is not explicitly non-empty")
+    if safety.get("profitability_protection_set_nonempty") is not True:
+        raise ValueError("manifest profitability protection set is not explicitly non-empty")
     if safety.get("robust_alias_safety_passed") is not True:
         raise ValueError("robust alias safety did not pass")
+    if safety.get("profitability_protection_safety_passed") is not True:
+        raise ValueError("profitability protection safety did not pass")
     if normalization.get("robust_alias_safety_passed") is not True:
         raise ValueError("normalization robust alias safety did not pass")
+    if normalization.get("profitability_protection_safety_passed") is not True:
+        raise ValueError("normalization profitability protection safety did not pass")
 
     recent_days = int(manifest.get("recent_days_kept_full_fidelity") or 0)
     if recent_days < 3:
         raise ValueError("emergency reclaim requires at least 3 recent UTC days protected")
 
-    robust_raw = (manifest.get("funnel") or {}).get("robust_coins")
+    funnel = manifest.get("funnel") or {}
+    robust_raw = funnel.get("robust_coins")
     if not isinstance(robust_raw, list) or not robust_raw:
         raise ValueError("robust_coins must be a non-empty reviewed list")
     robust = {str(value).upper() for value in robust_raw if str(value).strip()}
     if not robust:
         raise ValueError("robust_coins canonical set is empty")
+
+    protected_raw = funnel.get("profitability_protected_coins")
+    if not isinstance(protected_raw, list) or not protected_raw:
+        raise ValueError("profitability_protected_coins must be a non-empty reviewed list")
+    profitability_protected = {
+        str(value).upper() for value in protected_raw if str(value).strip()
+    }
+    if not profitability_protected or not robust.issubset(profitability_protected):
+        raise ValueError("profitability protection set must be non-empty and include robust coins")
 
     market_shadow = manifest.get("market_shadow") or {}
     rows = market_shadow.get("partitions") or []
@@ -164,8 +180,12 @@ def validate_manifest(
         if not _is_direct_partition(resolved, resolved_market):
             raise ValueError(f"candidate escapes direct market partition layout: {raw}")
         canonical = str(row.get("canonical_coin") or "").upper()
-        if not canonical or canonical in robust:
-            raise ValueError(f"candidate is missing canonical coin or is robust: {raw}")
+        if not canonical:
+            raise ValueError(f"candidate is missing canonical coin: {raw}")
+        if canonical in robust:
+            raise ValueError(f"candidate is robust: {raw}")
+        if canonical in profitability_protected:
+            raise ValueError(f"candidate has profitability evidence and is protected: {raw}")
         day = str(row.get("date") or "")
         try:
             partition_day = datetime.fromisoformat(day).date()
