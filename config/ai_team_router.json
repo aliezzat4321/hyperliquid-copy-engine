@@ -1,0 +1,52 @@
+{
+  "protocol_version": 1,
+  "repository": "aliezzat4321/hyperliquid-copy-engine",
+  "routing": {
+    "BUILD": {"agent": "CODEX_CHATGPT", "model_class": "CODEX_DEFAULT"},
+    "REPAIR": {"agent": "CODEX_CHATGPT", "model_class": "CODEX_DEFAULT"},
+    "REVIEW": {"agent": "CLAUDE", "model_class": "SONNET"},
+    "RESEARCH": {"agent": "CLAUDE", "model_class": "SONNET"}
+  },
+  "opus_allowed_task_classes": [
+    "QUANT_PROFITABILITY",
+    "STATISTICAL_METHODOLOGY",
+    "MAJOR_ARCHITECTURE",
+    "UNRESOLVED_DISAGREEMENT",
+    "CAPITAL_SENSITIVE_METHODOLOGY"
+  ],
+  "opus_allowed_reasons": [
+    "QUANT_PROFITABILITY",
+    "STATISTICAL_METHODOLOGY",
+    "MAJOR_ARCHITECTURE",
+    "UNRESOLVED_DISAGREEMENT",
+    "CAPITAL_SENSITIVE_METHODOLOGY"
+  ],
+  "auto_merge_task_classes": ["ROUTINE"],
+  "max_attempts": 3,
+  "poll_seconds": 60,
+  "default_rate_limit_retry_seconds": 3600,
+  "review_timeout_seconds": 1200,
+  "build_timeout_seconds": 1800,
+  "trusted_author_associations": ["OWNER", "MEMBER", "COLLABORATOR"],
+  "labels": {
+    "ready": "ai-team:ready",
+    "pending": "ai-team:pending",
+    "running": "ai-team:running",
+    "waiting_review": "ai-team:waiting-review",
+    "blocked": "ai-team:blocked",
+    "done": "ai-team:done"
+  },
+  "safety": {
+    "real_trading_required_value": "NO",
+    "forbidden_enable_patterns": [
+      "REAL_TRADING_ENABLED\\s*=\\s*(YES|TRUE|1)",
+      "LIVE_TRADING_ENABLED\\s*=\\s*(YES|TRUE|1)"
+    ],
+    "no_auto_merge_path_prefixes": [
+      "src/hlcopy/trading/",
+      "docs/ai-team/LIVE_TRADING_GATE.md",
+      "services/invo-notification-executor/src/hl-client.ts"
+    ],
+    "agent_hidden_paths": ["/root", "/mnt"]
+  }
+}
