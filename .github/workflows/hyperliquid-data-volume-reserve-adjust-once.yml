@@ -1,0 +1,56 @@
+name: hyperliquid-data-volume-reserve-adjust-once
+
+on:
+  push:
+    branches:
+      - codex/111-postgres-recovery
+    paths:
+      - '.github/workflows/hyperliquid-data-volume-reserve-adjust-once.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  adjust:
+    runs-on: [self-hosted, linux]
+    steps:
+      - name: Verify dedicated Hyperliquid data volume boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          MOUNT=/mnt/HC_Volume_106576526
+          DEVICE="$(findmnt -n -o SOURCE "$MOUNT")"
+          FSTYPE="$(findmnt -n -o FSTYPE "$MOUNT")"
+          test "$DEVICE" = /dev/sdc
+          test "$FSTYPE" = ext4
+          test "$(findmnt -n -o SOURCE -T /root/polymarket-smart-wallet)" = /dev/sda1
+          echo "HYPERLIQUID_DEVICE=$DEVICE"
+          echo "POLYMARKET_DEVICE=/dev/sda1"
+          echo 'POLYMARKET_MUTATION=NO'
+
+      - name: Reduce ext4 reserved blocks from 5 percent to 1 percent
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEVICE=/dev/sdc
+          BEFORE_COUNT="$(sudo -n tune2fs -l "$DEVICE" | awk -F: '/Reserved block count:/ {gsub(/ /,"",$2); print $2}')"
+          BLOCK_COUNT="$(sudo -n tune2fs -l "$DEVICE" | awk -F: '/^Block count:/ {gsub(/ /,"",$2); print $2}')"
+          EXPECTED_BEFORE=$(( BLOCK_COUNT * 5 / 100 ))
+          if (( BEFORE_COUNT < EXPECTED_BEFORE - 2 || BEFORE_COUNT > EXPECTED_BEFORE + 2 )); then
+            echo "unexpected reserved block count before change: $BEFORE_COUNT expected about $EXPECTED_BEFORE" >&2
+            exit 2
+          fi
+          sudo -n tune2fs -m 1 "$DEVICE"
+          AFTER_COUNT="$(sudo -n tune2fs -l "$DEVICE" | awk -F: '/Reserved block count:/ {gsub(/ /,"",$2); print $2}')"
+          EXPECTED_AFTER=$(( BLOCK_COUNT / 100 ))
+          if (( AFTER_COUNT < EXPECTED_AFTER - 2 || AFTER_COUNT > EXPECTED_AFTER + 2 )); then
+            echo "unexpected reserved block count after change: $AFTER_COUNT expected about $EXPECTED_AFTER" >&2
+            sudo -n tune2fs -m 5 "$DEVICE" || true
+            exit 3
+          fi
+          echo "RESERVED_BLOCKS_BEFORE=$BEFORE_COUNT"
+          echo "RESERVED_BLOCKS_AFTER=$AFTER_COUNT"
+          echo 'FILES_DELETED=NO'
+          echo 'POSTGRESQL_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+          df -hT /mnt/HC_Volume_106576526
