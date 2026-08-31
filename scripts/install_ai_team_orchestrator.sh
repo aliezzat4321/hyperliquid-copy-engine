@@ -23,18 +23,26 @@ echo 'POLYMARKET_INSPECTION=NO'
 echo 'POLYMARKET_MUTATION=NO'
 echo 'REAL_TRADING_CHANGE=NO'
 
+# Parent directories permit traversal only; per-agent roots remain private and owned by
+# their service identity. This lets an agent reach its own HOME without exposing the
+# sibling agent's contents or the root-only orchestrator ledger.
+install -d -m 0711 "$STATE"
+install -d -m 0711 "$STATE/agents"
 for spec in 'hl-codex-agent:codex' 'hl-claude-agent:claude'; do
   user="${spec%%:*}"
   agent="${spec##*:}"
-  home="$STATE/agents/$agent/home"
+  agent_root="$STATE/agents/$agent"
+  home="$agent_root/home"
   if ! id "$user" >/dev/null 2>&1; then
     useradd --system --home-dir "$home" --create-home --shell /usr/sbin/nologin "$user"
   fi
+  install -d -o "$user" -g "$user" -m 0710 "$agent_root"
   install -d -o "$user" -g "$user" -m 0700 "$home"
-  install -d -o "$user" -g "$user" -m 0750 "$STATE/agents/$agent/worktrees"
-  install -d -o "$user" -g "$user" -m 0750 "$STATE/agents/$agent/logs"
+  install -d -o "$user" -g "$user" -m 0750 "$agent_root/worktrees"
+  install -d -o "$user" -g "$user" -m 0750 "$agent_root/logs"
 done
-install -d -m 0700 "$STATE/orchestrator" /run/hyperliquid-ai-team "$OPT/scripts" "$OPT/config" "$ETC"
+install -d -m 0700 "$STATE/orchestrator"
+install -d -m 0700 /run/hyperliquid-ai-team "$OPT/scripts" "$OPT/config" "$ETC"
 
 # OpenAI documents copying auth.json as a supported headless fallback. Keep it local,
 # mode 0600, and do not copy any GitHub credential to the model user.
