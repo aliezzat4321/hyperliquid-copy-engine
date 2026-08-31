@@ -1,0 +1,90 @@
+name: hyperliquid-runtime-stabilize
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - codex/109-hyperliquid-runtime-stabilize
+    paths:
+      - ".github/workflows/hyperliquid-runtime-stabilize.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hyperliquid-runtime-stabilize
+  cancel-in-progress: true
+
+jobs:
+  stabilize:
+    if: github.repository == 'aliezzat4321/hyperliquid-copy-engine'
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 5
+    steps:
+      - name: Checkout safety context
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          clean: true
+
+      - name: Assert Hyperliquid-only emergency scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
+          echo 'POLYMARKET_INSPECTION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'DATA_DELETION=NO'
+          echo 'POSTGRES_START_STOP=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+          df -hT /mnt/HC_Volume_106576526 || true
+
+      - name: Quiesce only known failing Hyperliquid loops
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '========== BEFORE =========='
+          systemctl show hyperliquid-shadow-validation.service \
+            -p ActiveState -p SubState -p Result --no-pager || true
+          systemctl show hyperliquid-wide-trade-watch-live.service \
+            -p ActiveState -p SubState -p Result --no-pager || true
+
+          # These components are currently unable to make useful progress while
+          # the Hyperliquid data volume is full and/or 14/hlcopy:5433 is down.
+          # Stop retries only; do not disable units and do not touch healthy Invo miners/executor.
+          systemctl stop hyperliquid-shadow-validation.service || true
+          systemctl stop hyperliquid-wide-trade-watch-live.service || true
+          systemctl stop hyperliquid-wide-live-scoreboard.timer || true
+          systemctl stop hyperliquid-external-coverage.timer || true
+          systemctl stop hyperliquid-universe-scout.timer || true
+
+          # Keep the storage guard active so market capture stays paused at 100%.
+          systemctl start hyperliquid-storage-guard.service || true
+
+          echo '========== AFTER =========='
+          for unit in \
+            hyperliquid-shadow-validation.service \
+            hyperliquid-wide-trade-watch-live.service \
+            hyperliquid-wide-live-scoreboard.timer \
+            hyperliquid-external-coverage.timer \
+            hyperliquid-universe-scout.timer \
+            hyperliquid-storage-guard.service; do
+            echo "--- $unit ---"
+            systemctl show "$unit" -p ActiveState -p SubState -p Result --no-pager || true
+          done
+
+          echo 'HEALTHY_INVO_NOTIFICATION_EXECUTOR='
+          systemctl show hyperliquid-invo-notification-executor.service \
+            -p ActiveState -p SubState -p Result --no-pager || true
+          echo 'QUIESCE_COMPLETE=YES'
+
+      - name: Reassert trading safety and project boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -RHE '^(REAL_TRADING_ENABLED|NOTIFICATION_TRADER_LIVE)=' \
+            /etc/hyperliquid-copy-engine 2>/dev/null || true
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'DATA_DELETION=NO'
+          echo 'POSTGRES_START_STOP=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
