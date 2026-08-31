@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import importlib.util
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from scripts.storage_retention_apply import validate_manifest
+MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "storage_retention_apply.py"
+SPEC = importlib.util.spec_from_file_location("storage_retention_apply_under_test", MODULE_PATH)
+assert SPEC is not None and SPEC.loader is not None
+MODULE = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = MODULE
+SPEC.loader.exec_module(MODULE)
+validate_manifest = MODULE.validate_manifest
 
 NOW = datetime(2026, 8, 31, 14, 0, tzinfo=UTC)
 
