@@ -1,0 +1,100 @@
+name: ai-team-vm-toolchain-bootstrap
+
+on:
+  push:
+    branches:
+      - codex/126-ai-orchestrator
+    paths:
+      - ".github/workflows/ai-team-vm-toolchain-bootstrap.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-team-vm-toolchain-bootstrap
+  cancel-in-progress: false
+
+jobs:
+  bootstrap:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 15
+    steps:
+      - name: Assert hard project boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "aliezzat4321/hyperliquid-copy-engine"
+          test "$(id -u)" = "0"
+          echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
+          echo 'POLYMARKET_INSPECTION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+          echo 'MUTATION_SCOPE=AI_CLI_PACKAGES_AND_HYPERLIQUID_AI_USERS_ONLY'
+
+      - name: Install Claude Code from Anthropic signed apt repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl gnupg ca-certificates
+          install -d -m 0755 /etc/apt/keyrings
+          curl -fsSL https://downloads.claude.ai/keys/claude-code.asc -o /etc/apt/keyrings/claude-code.asc
+          FPR="$(gpg --show-keys --with-colons /etc/apt/keyrings/claude-code.asc | awk -F: '$1=="fpr" {print $10; exit}')"
+          test "$FPR" = "31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE"
+          printf '%s\n' 'deb [signed-by=/etc/apt/keyrings/claude-code.asc] https://downloads.claude.ai/claude-code/apt/stable stable main' > /etc/apt/sources.list.d/claude-code.list
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq claude-code
+          claude --version
+
+      - name: Install current Codex CLI from OpenAI standalone installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://chatgpt.com/codex/install.sh -o /tmp/openai-codex-install.sh
+          sh /tmp/openai-codex-install.sh
+          rm -f /tmp/openai-codex-install.sh
+          CANDIDATE=''
+          for p in /root/.local/bin/codex /usr/local/bin/codex /usr/bin/codex; do
+            if [[ -x "$p" ]]; then
+              CANDIDATE="$p"
+              break
+            fi
+          done
+          test -n "$CANDIDATE"
+          if [[ "$CANDIDATE" = "/root/.local/bin/codex" ]]; then
+            install -m 0755 -T "$(readlink -f "$CANDIDATE")" /usr/local/bin/codex
+          fi
+          export PATH=/usr/local/bin:/root/.local/bin:/usr/bin:/bin
+          codex --version
+
+      - name: Create isolated non-root agent identities and state roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -d -m 0750 /var/lib/hyperliquid-ai-team
+          install -d -m 0750 /var/lib/hyperliquid-ai-team/agents
+          for spec in 'hl-codex-agent:codex' 'hl-claude-agent:claude'; do
+            user="${spec%%:*}"
+            agent="${spec##*:}"
+            home="/var/lib/hyperliquid-ai-team/agents/${agent}/home"
+            if ! id "$user" >/dev/null 2>&1; then
+              useradd --system --home-dir "$home" --create-home --shell /usr/sbin/nologin "$user"
+            fi
+            install -d -o "$user" -g "$user" -m 0700 "$home"
+            install -d -o "$user" -g "$user" -m 0750 "/var/lib/hyperliquid-ai-team/agents/${agent}/worktrees"
+            install -d -o "$user" -g "$user" -m 0750 "/var/lib/hyperliquid-ai-team/agents/${agent}/logs"
+          done
+          install -d -m 0750 /var/lib/hyperliquid-ai-team/orchestrator
+          install -d -m 0750 /run/hyperliquid-ai-team
+          echo 'AGENT_USERS_CREATED=YES'
+          echo 'GITHUB_CREDENTIALS_COPIED_TO_AGENTS=NO'
+          echo 'MODEL_CREDENTIALS_CONFIGURED=NO'
+
+      - name: Verify no live configuration mutation
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -R --include='*.env' --include='*.service' --include='*.conf' -nE '^REAL_TRADING_ENABLED=(YES|TRUE|1)$' /etc/systemd/system/hyperliquid-* /var/lib/hyperliquid-copy-engine 2>/dev/null && exit 1 || true
+          echo 'TOOLCHAIN_BOOTSTRAP_COMPLETE=YES'
+          echo 'POLYMARKET_TOUCHED=NO'
+          echo 'REAL_TRADING_TOUCHED=NO'
