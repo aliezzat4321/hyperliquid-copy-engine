@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
-  "snapshot_at": "2026-08-31T11:56:01Z",
+  "snapshot_at": "2026-08-31T12:32:51Z",
   "updated_by": "CLAUDE",
-  "head_observed": "26cc8805a55685e236870b89ff2e6a8c8e889d55",
+  "head_observed": "316918cd5df171b8f27b13495c64cf0fafa7a06e",
   "mission": "Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.",
   "live_trading": {
     "authorized": false,
@@ -73,9 +73,9 @@
         {"key": "published_identity_rows", "label": "published verified identities", "value": 0, "unit": "count", "observed_at": "2026-08-31T11:40:40Z", "source_type": "WORKFLOW_RUN", "source_ref": "33388075503"},
         {"key": "tracked_third_party_wallets", "label": "tracked third-party wallets", "value": 12, "unit": "count", "observed_at": "2026-08-31T11:40:40Z", "source_type": "WORKFLOW_RUN", "source_ref": "33388075503"},
         {"key": "third_party_prospective_events", "label": "third-party prospective events", "value": 610, "unit": "count", "observed_at": "2026-08-31T11:40:40Z", "source_type": "WORKFLOW_RUN", "source_ref": "33388075503"},
-        {"key": "builder_first_resolver_state", "label": "builder-first resolver PR state", "value": "OPEN_DRAFT_CI_FAILING_ON_INHERITED_LINT", "unit": "text", "observed_at": "2026-08-31T11:26:40Z", "source_type": "PULL_REQUEST", "source_ref": "#86"}
+        {"key": "builder_first_resolver_state", "label": "builder-first resolver PR state", "value": "OPEN_DRAFT_HEAD_PREDATES_LINT_BASELINE_NEEDS_REBASE", "unit": "text", "observed_at": "2026-08-31T12:32:51Z", "source_type": "PULL_REQUEST", "source_ref": "#86"}
       ],
-      "blocker": "The Tier B identity gate has published zero identities against 174 resolution-ready portfolios; throughput is not the limit, the seven-clause conjunction is. The builder-first path in PR #86 is unvalidated and its only failing check is lint inherited from main.",
+      "blocker": "The Tier B identity gate has published zero identities against 174 resolution-ready portfolios; throughput is not the limit, the seven-clause conjunction is. The builder-first path in PR #86 is unvalidated and its head predates the repository lint baseline, so its last CI result no longer reflects its true state.",
       "next": "Issue #92"
     },
     "lane_3": {

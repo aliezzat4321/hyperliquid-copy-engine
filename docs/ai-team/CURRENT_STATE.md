@@ -2,9 +2,9 @@
 
 Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
-**Snapshot:** 2026-08-31T11:56:01Z  
+**Snapshot:** 2026-08-31T12:32:51Z  
 **Updated by:** CLAUDE  
-**Observed main head:** `26cc8805a55685e236870b89ff2e6a8c8e889d55`  
+**Observed main head:** `316918cd5df171b8f27b13495c64cf0fafa7a06e`  
 **Mission:** Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.
 
 ## Live trading
@@ -45,9 +45,9 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 | published verified identities | 0 | `2026-08-31T11:40:40Z` | run `33388075503` |
 | tracked third-party wallets | 12 | `2026-08-31T11:40:40Z` | run `33388075503` |
 | third-party prospective events | 610 | `2026-08-31T11:40:40Z` | run `33388075503` |
-| builder-first resolver PR state | OPEN_DRAFT_CI_FAILING_ON_INHERITED_LINT | `2026-08-31T11:26:40Z` | PR `#86` |
+| builder-first resolver PR state | OPEN_DRAFT_HEAD_PREDATES_LINT_BASELINE_NEEDS_REBASE | `2026-08-31T12:32:51Z` | PR `#86` |
 
-**Blocker:** The Tier B identity gate has published zero identities against 174 resolution-ready portfolios; throughput is not the limit, the seven-clause conjunction is. The builder-first path in PR #86 is unvalidated and its only failing check is lint inherited from main.  
+**Blocker:** The Tier B identity gate has published zero identities against 174 resolution-ready portfolios; throughput is not the limit, the seven-clause conjunction is. The builder-first path in PR #86 is unvalidated and its head predates the repository lint baseline, so its last CI result no longer reflects its true state.  
 **Next:** Issue #92.
 
 ## Lane 3 — Direct Invo notification shadow copying
