@@ -1,0 +1,36 @@
+name: market-capture-unit-audit-once
+
+on:
+  push:
+    branches:
+      - codex/111-postgres-recovery
+    paths:
+      - .github/workflows/market-capture-unit-audit-once.yml
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 5
+    steps:
+      - name: Inspect market capture unit read only
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
+          systemctl show hyperliquid-market-capture.service \
+            -p KillSignal \
+            -p TimeoutStopUSec \
+            -p TimeoutStopFailureMode \
+            -p SendSIGKILL \
+            -p ActiveState \
+            -p SubState \
+            -p FragmentPath \
+            -p ExecStart
+          echo '--- unit ---'
+          systemctl cat hyperliquid-market-capture.service --no-pager || true
+          echo 'SERVICE_MUTATION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
