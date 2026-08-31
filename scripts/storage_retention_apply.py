@@ -241,7 +241,9 @@ def main() -> None:
     print(f"audit_log={args.audit_log}")
     print(f"DELETION_PERFORMED={'YES' if args.apply else 'NO'}")
     if args.apply and not result["target_reached"]:
-        raise SystemExit("reviewed delete-candidate pool exhausted before target headroom was reached")
+        raise SystemExit(
+            "reviewed delete-candidate pool exhausted before target headroom was reached"
+        )
 
 
 if __name__ == "__main__":
