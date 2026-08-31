@@ -1,0 +1,82 @@
+name: storage-value-audit
+
+on:
+  push:
+    branches:
+      - codex/112-value-aware-storage-lifecycle
+    paths:
+      - 'scripts/storage_value_audit.py'
+      - 'tests/test_storage_value_audit.py'
+      - '.github/workflows/storage-value-audit.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: storage-value-audit
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 25
+    steps:
+      - name: Checkout exact audit code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          clean: true
+
+      - name: Assert read-only boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "AUDIT_SHA=$GITHUB_SHA"
+          echo 'TARGET=HYPERLIQUID_STORAGE_ONLY'
+          echo 'DATA_VOLUME_MUTATION=NO'
+          echo 'POSTGRESQL_MUTATION=NO'
+          echo 'POLYMARKET_INSPECTION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'RUNTIME_SERVICE_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+          test -d /mnt/HC_Volume_106576526/hyperliquid
+          df -P -B1 /mnt/HC_Volume_106576526
+
+      - name: Run value-aware storage inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/storage_value_audit.py
+
+      - name: Observe storage guard and likely writers
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '========== GUARD =========='
+          systemctl is-enabled hyperliquid-storage-guard.timer 2>/dev/null || true
+          systemctl is-active hyperliquid-storage-guard.timer 2>/dev/null || true
+          systemctl is-active hyperliquid-storage-guard.service 2>/dev/null || true
+          systemctl list-timers --all --no-pager 2>/dev/null \
+            | grep -E 'hyperliquid|hlcopy' \
+            | head -100 || true
+          echo '========== RUNNING HYPERLIQUID SERVICES =========='
+          systemctl list-units --type=service --state=running --no-pager 2>/dev/null \
+            | grep -E 'hyperliquid|hlcopy' \
+            | head -100 || true
+          echo '========== CAPTURE STATUS =========='
+          systemctl is-active hyperliquid-market-capture.timer 2>/dev/null || true
+          systemctl is-active hyperliquid-market-capture.service 2>/dev/null || true
+          echo 'RUNTIME_SERVICE_MUTATION=NO'
+
+      - name: Confirm no destructive action
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          echo 'DESTRUCTIVE_ACTION_PERFORMED=NO'
+          echo 'DATA_VOLUME_MUTATION=NO'
+          echo 'POSTGRESQL_MUTATION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+          df -hT /mnt/HC_Volume_106576526 || true
