@@ -80,6 +80,7 @@ async def run_pipeline(settings: Settings) -> Path:
             await db.upsert_leaderboard(
                 candidates,
                 leaderboard_response.fetched_at_ms,
+                snapshot_min_interval_minutes=settings.leaderboard_snapshot_interval_minutes,
                 progress=leaderboard_progress,
             )
             print(
@@ -129,7 +130,6 @@ async def run_pipeline(settings: Settings) -> Path:
                     if isinstance(response.response_payload, list)
                     else []
                 )
-                # Leaderboard research is perp-focused; userFills may also include spot.
                 perp_rows = [
                     row
                     for row in rows
