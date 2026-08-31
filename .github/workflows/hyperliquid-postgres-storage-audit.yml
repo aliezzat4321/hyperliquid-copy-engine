@@ -1,0 +1,75 @@
+name: hyperliquid-postgres-storage-audit
+
+on:
+  push:
+    branches:
+      - codex/111-postgres-storage-audit
+    paths:
+      - ".github/workflows/hyperliquid-postgres-storage-audit.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    if: github.repository == 'aliezzat4321/hyperliquid-copy-engine'
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 15
+    steps:
+      - name: Checkout audit branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          clean: true
+
+      - name: Read-only Hyperliquid PostgreSQL filesystem audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          PGROOT=/mnt/HC_Volume_106576526/hyperliquid/postgresql
+          PGDATA="$PGROOT/14/hlcopy"
+
+          echo '========== AUDIT SCOPE =========='
+          echo 'TARGET=HYPERLIQUID_POSTGRESQL_ONLY'
+          echo "PGDATA=$PGDATA"
+          echo 'POLYMARKET_INSPECTION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'POSTGRES_START_ATTEMPTED=NO'
+          echo 'POSTGRES_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+          test -d "$PGDATA"
+
+          echo '========== DISK =========='
+          df -hT /mnt/HC_Volume_106576526
+          du -sx -B1 "$PGROOT" "$PGDATA" | sort -nr
+
+          echo '========== CLUSTER STATUS =========='
+          pg_lsclusters 2>/dev/null || true
+
+          echo '========== TOP-LEVEL PGDATA BREAKDOWN BY BYTES =========='
+          du -x -B1 --max-depth=1 "$PGDATA" 2>/dev/null | sort -nr
+
+          echo '========== IMPORTANT POSTGRES AREAS =========='
+          for p in base global pg_wal pg_tblspc pg_stat_tmp pg_replslot pg_logical pg_twophase pg_xact pg_multixact; do
+            if [[ -e "$PGDATA/$p" ]]; then
+              du -sx -B1 "$PGDATA/$p" 2>/dev/null || true
+            fi
+          done | sort -nr
+
+          echo '========== DATABASE OID DIRECTORIES =========='
+          if [[ -d "$PGDATA/base" ]]; then
+            du -x -B1 --max-depth=1 "$PGDATA/base" 2>/dev/null | sort -nr | head -50
+          fi
+
+          echo '========== LARGEST FILES =========='
+          find "$PGDATA" -xdev -type f -printf '%s\t%p\n' 2>/dev/null | sort -nr | head -100 || true
+
+          echo '========== CONTROL DATA =========='
+          pg_controldata "$PGDATA" 2>/dev/null | sed -n '1,80p' || true
+
+          echo '========== SAFETY CONFIRMATION =========='
+          echo 'AUDIT_MODE=READ_ONLY'
+          echo 'POSTGRES_START_ATTEMPTED=NO'
+          echo 'POSTGRES_MUTATION=NO'
+          echo 'POLYMARKET_INSPECTION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
