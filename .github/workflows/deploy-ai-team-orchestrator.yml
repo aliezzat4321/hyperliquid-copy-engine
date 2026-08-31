@@ -1,0 +1,66 @@
+name: deploy-ai-team-orchestrator
+
+on:
+  push:
+    branches:
+      - main
+      - codex/126-ai-orchestrator
+    paths:
+      - "scripts/ai_team_orchestrator.py"
+      - "scripts/ai_team_auth_claude.sh"
+      - "scripts/install_ai_team_orchestrator.sh"
+      - "config/ai_team_router.json"
+      - "deploy/systemd/hyperliquid-ai-team-orchestrator.service"
+      - "deploy/systemd/hyperliquid-ai-team-orchestrator.timer"
+      - ".github/workflows/deploy-ai-team-orchestrator.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-ai-team-orchestrator
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+          persist-credentials: false
+
+      - name: Assert hard boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "aliezzat4321/hyperliquid-copy-engine"
+          test "$(id -u)" = 0
+          echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
+          echo 'POLYMARKET_INSPECTION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+
+      - name: Static verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile scripts/ai_team_orchestrator.py
+          python3 -m json.tool config/ai_team_router.json >/dev/null
+          bash -n scripts/ai_team_auth_claude.sh
+          bash -n scripts/install_ai_team_orchestrator.sh
+          systemd-analyze verify \
+            deploy/systemd/hyperliquid-ai-team-orchestrator.service \
+            deploy/systemd/hyperliquid-ai-team-orchestrator.timer
+
+      - name: Install namespaced Hyperliquid AI team components
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/install_ai_team_orchestrator.sh
+          systemctl start hyperliquid-ai-team-orchestrator.service
+          systemctl is-enabled hyperliquid-ai-team-orchestrator.timer
+          hl-ai-team-status
+          echo 'POLYMARKET_TOUCHED=NO'
+          echo 'REAL_TRADING_TOUCHED=NO'
