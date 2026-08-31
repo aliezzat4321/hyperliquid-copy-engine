@@ -1,0 +1,37 @@
+name: leaderboard-4h-compaction-estimate-once
+
+on:
+  push:
+    branches:
+      - codex/111-postgres-recovery
+    paths:
+      - ".github/workflows/leaderboard-4h-compaction-estimate-once.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 25
+    steps:
+      - name: Estimate exact 4h structured leaderboard retention read only
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo -n -u postgres /usr/lib/postgresql/14/bin/pg_isready -p 5433
+          sudo -n -u postgres psql -X -v ON_ERROR_STOP=1 -p 5433 -d hlcopy -P pager=off -c "
+            WITH keep_times AS (
+              SELECT max(snapshot_at) AS snapshot_at
+              FROM (SELECT DISTINCT snapshot_at FROM leaderboard_snapshots) t
+              GROUP BY date_bin('4 hours', snapshot_at, TIMESTAMPTZ '2000-01-01 00:00:00+00')
+            )
+            SELECT count(*) AS keep_snapshot_times,
+                   (SELECT count(*) FROM leaderboard_snapshots l JOIN keep_times k USING(snapshot_at)) AS keep_rows,
+                   (SELECT count(*) FROM leaderboard_snapshots) AS source_rows,
+                   min(snapshot_at) AS oldest_kept,
+                   max(snapshot_at) AS newest_kept
+            FROM keep_times;"
+          echo 'DATABASE_MUTATION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
