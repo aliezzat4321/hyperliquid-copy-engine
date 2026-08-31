@@ -7,6 +7,8 @@ CREATE TABLE IF NOT EXISTS raw_api_responses (
     fetched_at TIMESTAMPTZ NOT NULL,
     content_sha256 TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_raw_api_responses_content_sha256
+    ON raw_api_responses(content_sha256);
 
 CREATE TABLE IF NOT EXISTS wallets (
     address TEXT PRIMARY KEY,
