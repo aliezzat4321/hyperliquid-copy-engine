@@ -1,0 +1,126 @@
+name: hyperliquid-postgres-compaction
+
+on:
+  push:
+    branches:
+      - codex/113-postgres-compaction-v1
+    paths:
+      - "scripts/postgres_storage_compact_v1.py"
+      - ".github/workflows/hyperliquid-postgres-compaction.yml"
+  workflow_dispatch:
+    inputs:
+      reviewed_code_sha:
+        description: "Exact independently reviewed commit SHA"
+        required: true
+        type: string
+      reviewed_plan_sha256:
+        description: "Exact immutable plan SHA-256"
+        required: true
+        type: string
+      confirm_apply:
+        description: "Type APPLY_HYPERLIQUID_POSTGRES_COMPACTION"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hyperliquid-postgres-compaction
+  cancel-in-progress: false
+
+env:
+  REVIEW_ROOT: /root/hyperliquid-audit/postgres-compaction/reviewed
+
+jobs:
+  prepare-reviewed-plan:
+    if: github.event_name == 'push'
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          clean: true
+      - name: Assert Hyperliquid-only read boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o SOURCE /mnt/HC_Volume_106576526)" = /dev/sdc
+          test "$(findmnt -n -o SOURCE -T /root/polymarket-smart-wallet)" = /dev/sda1
+          sudo -n -u postgres /usr/lib/postgresql/14/bin/pg_isready -p 5433
+          echo 'PLAN_MODE=READ_ONLY'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+      - name: Build immutable compaction plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$REVIEW_ROOT"
+          PLAN=/root/hyperliquid-audit/postgres-compaction/plan.json
+          python3 scripts/postgres_storage_compact_v1.py --plan-output "$PLAN"
+          HASH="$(sha256sum "$PLAN" | awk '{print $1}')"
+          REVIEWED="$REVIEW_ROOT/$GITHUB_SHA.json"
+          if [[ -e "$REVIEWED" ]]; then
+            test "$(sha256sum "$REVIEWED" | awk '{print $1}')" = "$HASH"
+          else
+            install -m 0444 "$PLAN" "$REVIEWED"
+          fi
+          echo "REVIEWED_CODE_SHA=$GITHUB_SHA"
+          echo "REVIEWED_PLAN_SHA256=$HASH"
+          echo "REVIEWED_PLAN=$REVIEWED"
+          echo 'DATABASE_MUTATION=NO'
+
+  apply-reviewed-plan:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.confirm_apply == 'APPLY_HYPERLIQUID_POSTGRES_COMPACTION'
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.reviewed_code_sha }}
+          persist-credentials: false
+          clean: true
+      - name: Assert exact reviewed artifacts and project boundary
+        shell: bash
+        env:
+          REVIEWED_CODE_SHA: ${{ inputs.reviewed_code_sha }}
+          REVIEWED_PLAN_SHA256: ${{ inputs.reviewed_plan_sha256 }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$REVIEWED_CODE_SHA"
+          PLAN="$REVIEW_ROOT/$REVIEWED_CODE_SHA.json"
+          test -f "$PLAN"
+          test "$(sha256sum "$PLAN" | awk '{print $1}')" = "$REVIEWED_PLAN_SHA256"
+          test "$(findmnt -n -o SOURCE /mnt/HC_Volume_106576526)" = /dev/sdc
+          test "$(findmnt -n -o SOURCE -T /root/polymarket-smart-wallet)" = /dev/sda1
+          systemctl stop hyperliquid-market-capture.timer 2>/dev/null || true
+          systemctl stop hyperliquid-market-capture.service 2>/dev/null || true
+          echo 'MARKET_CAPTURE_QUIESCED=YES'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+      - name: Apply exact reviewed compaction plan
+        shell: bash
+        env:
+          REVIEWED_CODE_SHA: ${{ inputs.reviewed_code_sha }}
+          REVIEWED_PLAN_SHA256: ${{ inputs.reviewed_plan_sha256 }}
+        run: |
+          set -euo pipefail
+          PLAN="$REVIEW_ROOT/$REVIEWED_CODE_SHA.json"
+          python3 scripts/postgres_storage_compact_v1.py \
+            --manifest "$PLAN" \
+            --expected-sha256 "$REVIEWED_PLAN_SHA256" \
+            --apply
+      - name: Keep capture paused and report recovery
+        if: always()
+        shell: bash
+        run: |
+          systemctl stop hyperliquid-market-capture.timer 2>/dev/null || true
+          systemctl stop hyperliquid-market-capture.service 2>/dev/null || true
+          df -hT /mnt/HC_Volume_106576526 || true
+          pg_lsclusters || true
+          echo 'MARKET_CAPTURE_RESUMED=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
