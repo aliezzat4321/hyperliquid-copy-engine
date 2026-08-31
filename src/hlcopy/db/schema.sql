@@ -1,3 +1,9 @@
+CREATE TABLE IF NOT EXISTS raw_api_payloads (
+    content_sha256 TEXT PRIMARY KEY,
+    response_json JSONB NOT NULL,
+    first_seen TIMESTAMPTZ NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS raw_api_responses (
     id BIGSERIAL PRIMARY KEY,
     source TEXT NOT NULL,
