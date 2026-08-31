@@ -9,13 +9,34 @@ This directory is the compact durable memory and governance layer shared by Chat
 - **Claude:** default independent quant/engineering challenger; may be builder when explicitly assigned.
 - **User:** sole authority for capital deployment / live-trading authorization.
 
+## Files
+
+| File | Kind | Purpose |
+|---|---|---|
+| `state.json` | hand-maintained | Compact project snapshot; every fact carries provenance |
+| `CURRENT_STATE.md` | generated | Human view of `state.json` |
+| `SYSTEM_MAP.md` | rarely changing | Where each lane's code, services, stores and workflows live |
+| `PROFITABILITY_STANDARD.md` | policy | What must be reported before calling anything profitable |
+| `PROMOTION_POLICY.md` + `.json` | versioned policy | The numeric floors a slice must clear |
+| `LIVE_TRADING_GATE.md` | policy | Structured capital authorization; user-only |
+| `REVIEW_PROVENANCE.md` | policy | What review independence does and does not prove |
+| `DECISIONS.md` | append-only | Accepted architecture/policy decisions |
+| `experiments/registry.json` | hand-maintained | Machine-readable experiment record |
+| `experiments/INDEX.md` | generated | Human view; check before proposing a hypothesis |
+
+Regenerate both generated files with `python scripts/render_ai_team_state.py`.
+Validate everything with `python scripts/validate_ai_team_contract.py`.
+
 ## What changes often
-`state.json` is the only manually updated compact project snapshot. `CURRENT_STATE.md` is generated from it.
+`state.json` and `experiments/registry.json` are the manually updated records.
+`CURRENT_STATE.md` and `experiments/INDEX.md` are generated from them.
 
 Update `state.json` in the same PR whenever a change materially alters a lane status, blocker, priority, accepted profitability evidence, runtime state used for decisions, or live-readiness status.
 
 ## What changes rarely
-`AGENTS.md`, `CLAUDE.md`, `PROFITABILITY_STANDARD.md` and `LIVE_TRADING_GATE.md` are policy. Change them only through a dedicated reviewed governance PR.
+`AGENTS.md`, `CLAUDE.md`, `SYSTEM_MAP.md`, `PROFITABILITY_STANDARD.md`,
+`PROMOTION_POLICY.md`, `LIVE_TRADING_GATE.md` and `REVIEW_PROVENANCE.md` are policy.
+Change them only through a dedicated reviewed governance PR.
 
 ## Research memory
 Material experiments get one file under `experiments/` using `TEMPLATE.md`. Record failures and inconclusive results too, so agents do not repeat work.

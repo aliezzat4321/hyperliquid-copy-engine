@@ -47,5 +47,13 @@ Use measured fee tier, book/spread, slippage and funding whenever available. If 
 
 Report trade-weighted and dollar/notional-weighted metrics separately when sizing differs materially.
 
+## Promotion thresholds
+This document defines *what must be reported and how it must be reasoned about*. The
+numeric floors a slice must clear are versioned separately in
+`PROMOTION_POLICY.md` / `promotion_policy.json`, so both agents gate on the same
+numbers and a threshold change is a reviewed decision rather than a silent code edit.
+
+Report the `policy_version` alongside any promotion verdict.
+
 ## Live gate
 Profitability evidence alone never enables trading. `LIVE_TRADING_GATE.md` governs capital authorization.

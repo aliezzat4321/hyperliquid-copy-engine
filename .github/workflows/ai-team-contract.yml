@@ -4,14 +4,6 @@ on:
   pull_request:
   push:
     branches: [main]
-    paths:
-      - AGENTS.md
-      - CLAUDE.md
-      - docs/ai-team/**
-      - scripts/render_ai_team_state.py
-      - scripts/validate_ai_team_contract.py
-      - .github/pull_request_template.md
-      - .github/workflows/ai-team-contract.yml
 
 permissions:
   contents: read
@@ -21,6 +13,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history so head_observed can be verified as a real commit.
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'

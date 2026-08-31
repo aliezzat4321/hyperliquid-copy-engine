@@ -1,0 +1,28 @@
+name: live-sensitive-guard
+
+# Classifies changes that could affect real orders. This guard never authorizes
+# trading; capital authorization is the user's alone under LIVE_TRADING_GATE.md.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  classify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Require visible classification of live-sensitive changes
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          LIVE_GUARD_BASE: origin/${{ github.event.pull_request.base.ref }}
+        run: |
+          git fetch --no-tags origin "${{ github.event.pull_request.base.ref }}"
+          python scripts/check_live_sensitive_change.py

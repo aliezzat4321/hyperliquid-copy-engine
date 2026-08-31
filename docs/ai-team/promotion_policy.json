@@ -1,0 +1,19 @@
+{
+  "policy_id": "quant-promotion-policy",
+  "policy_version": "v1",
+  "status": "PROVISIONAL",
+  "adopted_at": "2026-08-31T11:56:01Z",
+  "adopted_by": "CLAUDE",
+  "reviewer": "CODEX_CHATGPT",
+  "supersedes": null,
+  "review_trigger": "First run of the net-edge engine over a complete lane ledger, or 60 days, whichever comes first.",
+  "thresholds": {
+    "min_closed_trades": 30,
+    "min_distinct_days": 5,
+    "confidence_level": 0.90,
+    "require_lower_bound_above_cost": true,
+    "reference_round_trip_cost_bps": 15,
+    "max_profit_concentration": 0.50,
+    "max_unresolved_share": 0.35
+  }
+}
