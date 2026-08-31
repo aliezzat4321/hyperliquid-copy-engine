@@ -25,6 +25,7 @@ class Settings:
     output_dir: Path = Path("outputs")
     profile_candidates: int = 20
     profile_lookback_days: int = 90
+    leaderboard_snapshot_interval_minutes: int = 240
     market_data_dir: Path = Path("data/market")
     market_coins: tuple[str, ...] = ("BTC", "ETH", "SOL")
     market_flush_rows: int = 5_000
@@ -74,6 +75,10 @@ class Settings:
             profile_lookback_days=max(
                 1,
                 int(os.getenv("HLCOPY_PROFILE_LOOKBACK_DAYS", "90")),
+            ),
+            leaderboard_snapshot_interval_minutes=max(
+                1,
+                int(os.getenv("HLCOPY_LEADERBOARD_SNAPSHOT_INTERVAL_MINUTES", "240")),
             ),
             market_data_dir=Path(os.getenv("HLCOPY_MARKET_DATA_DIR", "data/market")),
             market_coins=_market_coins_from_env(),
