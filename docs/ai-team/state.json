@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "snapshot_at": "2026-08-31T10:46:53Z",
+  "updated_by": "coordination-bootstrap",
+  "head_observed": "26cc8805a55685e236870b89ff2e6a8c8e889d55",
+  "mission": "Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.",
+  "live_trading": {
+    "authorized": false,
+    "status": "DISABLED",
+    "approval_reference": null
+  },
+  "priorities": [
+    {"priority":"P0","issue":90,"title":"Restore market-data capture and storage headroom","owner":"Codex/ChatGPT","reviewer":"Claude","status":"OPEN"},
+    {"priority":"P0","issue":91,"title":"Build Lane 3 notification-edge v2 profitability gate","owner":"Claude","reviewer":"Codex/ChatGPT","status":"OPEN"},
+    {"priority":"P0","issue":92,"title":"Validate and land builder-first Invo wallet resolver","owner":"Codex/ChatGPT","reviewer":"Claude","status":"OPEN"},
+    {"priority":"P1","issue":93,"title":"Automate Lane 1 research-to-prospective validation handoff","owner":"UNASSIGNED_ONE_BUILDER","reviewer":"OTHER_AI_AGENT","status":"OPEN"}
+  ],
+  "lanes": {
+    "lane_1": {
+      "name": "Hyperliquid native discovery and prospective copying research",
+      "status": "RESEARCH_ACTIVE_HANDOFF_MANUAL",
+      "facts": ["1551 screened cohorts", "284 positive screens", "800 confirmation rows", "186 robust candidates", "4 hard-coded prospective wallet-by-coin targets", "2 targets approved in latest observed frozen report"],
+      "blocker": "Existing broad research funnel is not automatically feeding a frozen prospective challenger queue.",
+      "next": "Issue #93"
+    },
+    "lane_2": {
+      "name": "Third-party identity resolution",
+      "status": "ZERO_CURRENT_PUBLICATION_YIELD",
+      "facts": ["about 174 portfolios observed resolution-ready", "0 currently published identity rows", "PR #86 builder-first resolver open/draft/mergeable"],
+      "blocker": "Active identity publication gate yields no current identities; builder-first path requires independent validation.",
+      "next": "Issue #92"
+    },
+    "lane_3": {
+      "name": "Direct Invo notification shadow copying",
+      "status": "SHADOW_EVIDENCE_MEASUREMENT_INCOMPLETE",
+      "facts": ["55 opens", "49 unique closes", "6 open positions", "+$37.77 gross mid-to-mid PnL at latest observed probe", "v1 notification-edge patch is not merge-ready"],
+      "blocker": "No accepted execution-cost-adjusted, prospective-safe profitability gate yet.",
+      "next": "Issue #91"
+    }
+  },
+  "infrastructure": {
+    "data_volume": "/mnt/HC_Volume_106576526",
+    "data_volume_usage_pct_observed": 100.0,
+    "data_volume_observed_at": "2026-08-31T07:37:45Z",
+    "status": "P0_STORAGE_PRESSURE",
+    "next": "Issue #90"
+  }
+}
