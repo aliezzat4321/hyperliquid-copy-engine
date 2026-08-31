@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from scripts.storage_retention_apply import validate_manifest
 
-NOW = datetime(2026, 8, 31, 14, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 31, 14, 0, tzinfo=UTC)
 
 
 def _manifest(path: Path, *, action: str = "DELETE_CANDIDATE", canonical: str = "DOGE") -> dict:
