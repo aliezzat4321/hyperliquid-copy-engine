@@ -3,13 +3,26 @@ name: hyperliquid-emergency-storage-reclaim
 on:
   push:
     branches:
-      - main
       - codex/109-emergency-storage-reclaim
     paths:
       - "scripts/storage_retention_apply.py"
       - "scripts/storage_retention_audit.py"
       - "tests/test_storage_retention_apply.py"
       - ".github/workflows/hyperliquid-emergency-storage-reclaim.yml"
+  workflow_dispatch:
+    inputs:
+      reviewed_code_sha:
+        description: "Exact independently reviewed commit SHA to execute"
+        required: true
+        type: string
+      reviewed_manifest_sha256:
+        description: "Exact SHA-256 printed by the reviewed dry-run manifest"
+        required: true
+        type: string
+      confirm_apply:
+        description: "Type APPLY_HYPERLIQUID_MARKET_SHADOW_RECLAIM"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -18,53 +31,60 @@ concurrency:
   group: hyperliquid-emergency-storage-reclaim
   cancel-in-progress: false
 
+env:
+  MARKET_ROOT: /mnt/HC_Volume_106576526/hyperliquid/market-shadow
+  PG_ROOT: /mnt/HC_Volume_106576526/hyperliquid/postgresql
+  REVIEW_ROOT: /root/hyperliquid-audit/storage-retention/reviewed
+
 jobs:
-  reclaim:
-    if: github.repository == 'aliezzat4321/hyperliquid-copy-engine'
+  prepare-reviewed-manifest:
+    if: github.event_name == 'push' && github.repository == 'aliezzat4321/hyperliquid-copy-engine'
     runs-on: [self-hosted, linux]
     timeout-minutes: 25
     steps:
-      - name: Checkout exact reviewed code
+      - name: Checkout exact review-branch code
         uses: actions/checkout@v4
         with:
           persist-credentials: false
           clean: true
 
-      - name: Assert project and safety boundary
+      - name: Assert dry-run safety boundary
         shell: bash
         run: |
           set -euo pipefail
-          echo '========== EMERGENCY RECLAIM SCOPE =========='
+          echo '========== EMERGENCY RECLAIM PREPARE =========='
           echo "ref=$GITHUB_REF sha=$GITHUB_SHA"
           echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
           echo 'ALLOWED_DELETE_ROOT=/mnt/HC_Volume_106576526/hyperliquid/market-shadow/date=*/coin=*'
           echo 'POSTGRESQL_FILESYSTEM_DELETION=NO'
           echo 'POLYMARKET_INSPECTION=NO'
           echo 'POLYMARKET_MUTATION=NO'
-          echo 'MARKET_CAPTURE_AUTO_RESUME=NO'
+          echo 'RUNTIME_SERVICE_MUTATION=NO'
           echo 'REAL_TRADING_CHANGE=NO'
           df -hT /mnt/HC_Volume_106576526
-          test -d /mnt/HC_Volume_106576526/hyperliquid/market-shadow
-          test -d /mnt/HC_Volume_106576526/hyperliquid/postgresql
+          test -d "$MARKET_ROOT"
+          test -d "$PG_ROOT"
 
-      - name: Keep Hyperliquid market capture quiesced
+      - name: Build bounded fail-closed profitability manifest
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "$GITHUB_REF" == 'refs/heads/main' ]]; then
-            systemctl stop hyperliquid-market-capture.timer 2>/dev/null || true
-            systemctl stop hyperliquid-market-capture.service 2>/dev/null || true
-            echo 'MARKET_CAPTURE_QUIESCED=YES'
+          mkdir -p /root/hyperliquid-audit/storage-retention "$REVIEW_ROOT"
+          python3 scripts/storage_retention_audit.py \
+            --recent-days 3 \
+            --max-delete-candidate-gib 6.0
+          MANIFEST=/root/hyperliquid-audit/storage-retention/storage_retention_manifest.json
+          HASH="$(sha256sum "$MANIFEST" | awk '{print $1}')"
+          REVIEWED="$REVIEW_ROOT/$GITHUB_SHA.json"
+          if [[ -e "$REVIEWED" ]]; then
+            EXISTING_HASH="$(sha256sum "$REVIEWED" | awk '{print $1}')"
+            test "$EXISTING_HASH" = "$HASH"
           else
-            echo 'MARKET_CAPTURE_MUTATION=NO branch_dry_run_only'
+            install -m 0444 "$MANIFEST" "$REVIEWED"
           fi
-
-      - name: Build fresh profitability-driven manifest
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p /root/hyperliquid-audit/storage-retention
-          python3 scripts/storage_retention_audit.py --recent-days 3
+          echo "REVIEWED_CODE_SHA=$GITHUB_SHA"
+          echo "REVIEWED_MANIFEST=$REVIEWED"
+          echo "REVIEWED_MANIFEST_SHA256=$HASH"
           python3 - <<'PY'
           import json
           from pathlib import Path
@@ -72,48 +92,104 @@ jobs:
           d=json.loads(p.read_text())
           rows=[r for r in d['market_shadow']['partitions'] if r['action']=='DELETE_CANDIDATE']
           rows.sort(key=lambda r:(r['date'], -int(r['bytes'])))
-          print('========== REVIEWED CLASSIFICATION INPUT =========')
+          total=sum(int(r['bytes']) for r in rows)
+          print('========== REVIEW CLASSIFICATION =========')
           print('generated_at='+str(d['generated_at']))
-          print('recent_days='+str(d['recent_days_kept_full_fidelity']))
+          print('source_evidence_complete='+str(d['source_evidence']['complete']))
+          print('robust_set_nonempty='+str(d['safety']['robust_set_nonempty']))
           print('robust_alias_safety='+str(d['safety']['robust_alias_safety_passed']))
           print('postgres_delete_allowed='+str(d['safety']['postgres_filesystem_deletion_allowed']))
           print('delete_candidate_count='+str(len(rows)))
-          print('delete_candidate_total_gib='+f"{sum(int(r['bytes']) for r in rows)/1024**3:.3f}")
+          print('delete_candidate_total_gib='+f"{total/1024**3:.3f}")
+          print('delete_budget_gib='+f"{int(d['deletion_budget_bytes'])/1024**3:.3f}")
           print('oldest_candidates:')
           for r in rows[:30]:
               print(f"{r['date']} {r['canonical_coin']} {int(r['bytes'])/1024**2:.1f}MiB {r['path']}")
           PY
 
-      - name: Dry run exact deletion plan on review branch
-        if: github.ref != 'refs/heads/main'
+      - name: Dry-run exact reviewed manifest
         shell: bash
         run: |
           set -euo pipefail
-          python3 scripts/storage_retention_apply.py --target-used-pct 92
+          MANIFEST="$REVIEW_ROOT/$GITHUB_SHA.json"
+          HASH="$(sha256sum "$MANIFEST" | awk '{print $1}')"
+          python3 scripts/storage_retention_apply.py \
+            --manifest "$MANIFEST" \
+            --expected-manifest-sha256 "$HASH" \
+            --target-used-pct 92
           echo 'BRANCH_REVIEW_MODE=DRY_RUN_ONLY'
           echo 'DELETION_PERFORMED=NO'
+          echo 'RUNTIME_SERVICE_MUTATION=NO'
 
-      - name: Apply exact reviewed deletion plan after merge to main
-        if: github.ref == 'refs/heads/main'
+  apply-reviewed-manifest:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.repository == 'aliezzat4321/hyperliquid-copy-engine' &&
+      inputs.confirm_apply == 'APPLY_HYPERLIQUID_MARKET_SHADOW_RECLAIM'
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 25
+    steps:
+      - name: Checkout exact independently reviewed code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.reviewed_code_sha }}
+          persist-credentials: false
+          clean: true
+
+      - name: Assert exact reviewed code and manifest
+        shell: bash
+        env:
+          REVIEWED_CODE_SHA: ${{ inputs.reviewed_code_sha }}
+          REVIEWED_MANIFEST_SHA256: ${{ inputs.reviewed_manifest_sha256 }}
+        run: |
+          set -euo pipefail
+          ACTUAL_SHA="$(git rev-parse HEAD)"
+          test "$ACTUAL_SHA" = "$REVIEWED_CODE_SHA"
+          MANIFEST="$REVIEW_ROOT/$REVIEWED_CODE_SHA.json"
+          test -f "$MANIFEST"
+          ACTUAL_HASH="$(sha256sum "$MANIFEST" | awk '{print $1}')"
+          test "$ACTUAL_HASH" = "$REVIEWED_MANIFEST_SHA256"
+          echo "EXECUTING_REVIEWED_CODE_SHA=$ACTUAL_SHA"
+          echo "EXECUTING_REVIEWED_MANIFEST_SHA256=$ACTUAL_HASH"
+          echo 'POSTGRESQL_FILESYSTEM_DELETION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+
+      - name: Quiesce Hyperliquid capture immediately before apply
         shell: bash
         run: |
           set -euo pipefail
-          python3 scripts/storage_retention_apply.py --apply --target-used-pct 92
-          echo 'MAIN_RECOVERY_MODE=APPLY_REVIEWED_DELETE_CANDIDATES'
+          systemctl stop hyperliquid-market-capture.timer 2>/dev/null || true
+          systemctl stop hyperliquid-market-capture.service 2>/dev/null || true
+          echo 'MARKET_CAPTURE_QUIESCED=YES'
 
-      - name: Keep market capture paused and report recovery headroom
+      - name: Apply only the exact reviewed immutable manifest
+        shell: bash
+        env:
+          REVIEWED_CODE_SHA: ${{ inputs.reviewed_code_sha }}
+          REVIEWED_MANIFEST_SHA256: ${{ inputs.reviewed_manifest_sha256 }}
+        run: |
+          set -euo pipefail
+          MANIFEST="$REVIEW_ROOT/$REVIEWED_CODE_SHA.json"
+          python3 scripts/storage_retention_apply.py \
+            --manifest "$MANIFEST" \
+            --expected-manifest-sha256 "$REVIEWED_MANIFEST_SHA256" \
+            --max-manifest-age-minutes 360 \
+            --apply \
+            --target-used-pct 92
+          echo 'RECOVERY_MODE=APPLY_EXACT_REVIEWED_MANIFEST'
+
+      - name: Keep capture paused and report bounded recovery headroom
         if: always()
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "$GITHUB_REF" == 'refs/heads/main' ]]; then
-            systemctl stop hyperliquid-market-capture.timer 2>/dev/null || true
-            systemctl stop hyperliquid-market-capture.service 2>/dev/null || true
-          fi
+          systemctl stop hyperliquid-market-capture.timer 2>/dev/null || true
+          systemctl stop hyperliquid-market-capture.service 2>/dev/null || true
           echo '========== AFTER =========='
           df -hT /mnt/HC_Volume_106576526 || true
           pg_lsclusters 2>/dev/null || true
-          echo 'POSTGRES_START_ATTEMPTED=NO'
           echo 'MARKET_CAPTURE_RESUMED=NO'
+          echo 'POSTGRESQL_FILESYSTEM_DELETION=NO'
           echo 'POLYMARKET_MUTATION=NO'
           echo 'REAL_TRADING_CHANGE=NO'
