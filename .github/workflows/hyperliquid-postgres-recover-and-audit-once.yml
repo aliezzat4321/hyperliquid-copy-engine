@@ -1,0 +1,101 @@
+name: hyperliquid-postgres-recover-and-audit-once
+
+on:
+  push:
+    branches:
+      - codex/111-postgres-recovery
+    paths:
+      - '.github/workflows/hyperliquid-postgres-recover-and-audit-once.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    runs-on: [self-hosted, linux]
+    steps:
+      - name: Checkout canonical tooling
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          clean: true
+
+      - name: Assert recovery boundary and headroom
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(findmnt -n -o SOURCE /mnt/HC_Volume_106576526)" = /dev/sdc
+          test "$(findmnt -n -o SOURCE -T /root/polymarket-smart-wallet)" = /dev/sda1
+          AVAIL="$(df -P -B1 /mnt/HC_Volume_106576526 | awk 'NR==2 {print $4}')"
+          test "$AVAIL" -ge $((3 * 1024 * 1024 * 1024))
+          systemctl stop hyperliquid-market-capture.timer 2>/dev/null || true
+          systemctl stop hyperliquid-market-capture.service 2>/dev/null || true
+          echo "AVAILABLE_BEFORE=$AVAIL"
+          echo 'MARKET_CAPTURE_QUIESCED=YES'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+
+      - name: Start Hyperliquid PostgreSQL cluster once
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo -n systemctl start postgresql@14-hlcopy.service
+          ready=0
+          for _ in $(seq 1 20); do
+            if sudo -n -u postgres /usr/lib/postgresql/14/bin/pg_isready -p 5433 >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [[ "$ready" != 1 ]]; then
+            echo 'POSTGRES_RECOVERY=FAILED_NOT_READY' >&2
+            systemctl --no-pager --full status postgresql@14-hlcopy.service || true
+            sudo -n tail -n 200 /var/log/postgresql/postgresql-14-hlcopy.log || true
+            exit 2
+          fi
+          echo 'POSTGRES_RECOVERY=READY'
+          pg_lsclusters
+          df -hT /mnt/HC_Volume_106576526
+
+      - name: Read-only logical PostgreSQL storage audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '========== DATABASE SIZES =========='
+          DBS="$(sudo -n -u postgres psql -X -p 5433 -d postgres -At -c "SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate ORDER BY pg_database_size(datname) DESC")"
+          sudo -n -u postgres psql -X -p 5433 -d postgres -P pager=off -c "SELECT datname, pg_size_pretty(pg_database_size(datname)) AS size FROM pg_database WHERE datallowconn AND NOT datistemplate ORDER BY pg_database_size(datname) DESC;"
+          for db in $DBS; do
+            echo "========== DATABASE $db TOP RELATIONS =========="
+            sudo -n -u postgres psql -X -p 5433 -d "$db" -P pager=off -c "
+              SELECT
+                n.nspname AS schema,
+                c.relname AS relation,
+                c.relkind,
+                pg_size_pretty(pg_total_relation_size(c.oid)) AS total,
+                pg_size_pretty(pg_relation_size(c.oid)) AS heap,
+                pg_size_pretty(pg_indexes_size(c.oid)) AS indexes,
+                COALESCE(s.n_live_tup,0) AS live_rows_est,
+                COALESCE(s.n_dead_tup,0) AS dead_rows_est,
+                COALESCE(s.seq_scan,0) AS seq_scans,
+                COALESCE(s.idx_scan,0) AS idx_scans
+              FROM pg_class c
+              JOIN pg_namespace n ON n.oid=c.relnamespace
+              LEFT JOIN pg_stat_user_tables s ON s.relid=c.oid
+              WHERE c.relkind IN ('r','m')
+                AND n.nspname NOT IN ('pg_catalog','information_schema')
+              ORDER BY pg_total_relation_size(c.oid) DESC
+              LIMIT 30;"
+            echo "========== DATABASE $db TOP INDEXES =========="
+            sudo -n -u postgres psql -X -p 5433 -d "$db" -P pager=off -c "
+              SELECT schemaname, relname AS table_name, indexrelname AS index_name,
+                     pg_size_pretty(pg_relation_size(indexrelid)) AS size,
+                     COALESCE(idx_scan,0) AS scans
+              FROM pg_stat_user_indexes
+              ORDER BY pg_relation_size(indexrelid) DESC
+              LIMIT 25;"
+          done
+          echo 'DATABASE_CHANGES_PERFORMED=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+          df -hT /mnt/HC_Volume_106576526
