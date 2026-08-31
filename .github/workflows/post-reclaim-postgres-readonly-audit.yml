@@ -1,0 +1,39 @@
+name: post-reclaim-postgres-readonly-audit
+
+on:
+  push:
+    branches:
+      - codex/112-value-aware-storage-lifecycle
+    paths:
+      - '.github/workflows/post-reclaim-postgres-readonly-audit.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: [self-hosted, linux]
+    steps:
+      - name: Read-only post-reclaim PostgreSQL and mount audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '========== MOUNTS =========='
+          findmnt -T /mnt/HC_Volume_106576526 || true
+          findmnt -T /root/polymarket-smart-wallet || true
+          echo '========== SPACE =========='
+          df -hT / /mnt/HC_Volume_106576526
+          echo '========== CLUSTERS =========='
+          pg_lsclusters || true
+          echo '========== HLCOPY PGDATA =========='
+          PGDATA=/mnt/HC_Volume_106576526/hyperliquid/postgresql/14/hlcopy
+          sudo -n du -sh "$PGDATA" "$PGDATA/pg_wal" 2>/dev/null || true
+          sudo -n -u postgres /usr/lib/postgresql/14/bin/pg_controldata "$PGDATA" 2>/dev/null \
+            | grep -E 'Database cluster state:|Latest checkpoint|REDO location|Time of latest checkpoint' || true
+          echo '========== HLCOPY POSTGRES LOG TAIL =========='
+          sudo -n tail -n 250 /var/log/postgresql/postgresql-14-hlcopy.log 2>/dev/null || true
+          echo '========== HLCOPY UNIT =========='
+          systemctl --no-pager --full status postgresql@14-hlcopy.service 2>/dev/null || true
+          echo 'POSTGRESQL_MUTATION=NO'
+          echo 'FILESYSTEM_MUTATION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
