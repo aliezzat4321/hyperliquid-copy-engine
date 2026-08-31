@@ -73,7 +73,7 @@ def _human(num: int) -> str:
     return f"{value:.2f}TiB"
 
 
-def _require_nonempty_robust_evidence(report: dict) -> list[dict]:
+def _require_nonempty_robust_evidence(report: dict) -> tuple[list[dict], int, bool]:
     raw = report.get("robust_candidates")
     if not isinstance(raw, list) or not raw:
         raise SystemExit(
@@ -84,12 +84,20 @@ def _require_nonempty_robust_evidence(report: dict) -> list[dict]:
             raise SystemExit(f"SAFETY_FAIL robust candidate {index} has no coin")
         if not str(row.get("wallet_address") or "").strip():
             raise SystemExit(f"SAFETY_FAIL robust candidate {index} has no wallet_address")
-    reported = report.get("robust_candidate_count")
-    if reported is not None and int(reported) != len(raw):
+    try:
+        reported = int(report.get("robust_candidate_count"))
+    except (TypeError, ValueError) as exc:
+        raise SystemExit("SAFETY_FAIL robust_candidate_count is missing/invalid") from exc
+    if reported <= 0 or reported < len(raw):
         raise SystemExit(
-            "SAFETY_FAIL robust candidate count disagrees with robust_candidates payload"
+            "SAFETY_FAIL robust_candidate_count cannot be smaller than robust_candidates payload"
         )
-    return raw
+    # incremental_funnel_cli intentionally caps robust_candidates at 100 while
+    # robust_candidate_count is the full count. A larger count therefore means
+    # the payload is a preview, not corruption. We compensate below by protecting
+    # EVERY positive screening coin from deletion, and we require screening.jsonl
+    # to exactly match screened_cohort_count.
+    return raw, reported, reported > len(raw)
 
 
 def main() -> None:
@@ -126,7 +134,14 @@ def main() -> None:
         raise SystemExit(f"missing funnel report: {report_path}")
 
     report = _read_json(report_path)
-    robust_rows = _require_nonempty_robust_evidence(report)
+    if report.get("mode") != "INCREMENTAL_PROFITABILITY_FUNNEL_V1":
+        raise SystemExit("SAFETY_FAIL unexpected profitability funnel mode")
+    if report.get("real_trading") is not False:
+        raise SystemExit("SAFETY_FAIL funnel report must explicitly record real_trading=false")
+
+    robust_rows, robust_candidate_count, robust_payload_truncated = (
+        _require_nonempty_robust_evidence(report)
+    )
     robust_coins_raw = {str(row["coin"]) for row in robust_rows}
     robust_coins = {_canonical_coin(c) for c in robust_coins_raw}
     robust_wallets = {str(row["wallet_address"]).lower() for row in robust_rows}
@@ -134,18 +149,25 @@ def main() -> None:
         raise SystemExit("SAFETY_FAIL robust coin set is empty")
 
     screening = _read_required_jsonl(screening_path)
-    reported_screened = report.get("screened_cohort_count")
-    if reported_screened is not None and int(reported_screened) != len(screening):
+    try:
+        reported_screened = int(report.get("screened_cohort_count"))
+    except (TypeError, ValueError) as exc:
+        raise SystemExit("SAFETY_FAIL screened_cohort_count is missing/invalid") from exc
+    if reported_screened <= 0 or reported_screened != len(screening):
         raise SystemExit(
             "SAFETY_FAIL screening row count disagrees with funnel screened_cohort_count; "
             "screening may be truncated"
         )
 
+    # Deliberately conservative: any cohort that was profitable at all with at
+    # least one realized action protects its entire coin from raw-tape deletion.
+    # This is a superset of every robust cohort regardless of the funnel's
+    # min-screen-actions setting, so a >100 robust preview cannot create a hole.
     positive_rows = [
         row
         for row in screening
         if float(row.get("net_return_bps") or 0) > 0
-        and int(row.get("realized_actions") or 0) >= 3
+        and int(row.get("realized_actions") or 0) >= 1
     ]
     positive_coins_raw = {
         str(row["coin"]) for row in positive_rows if str(row.get("coin") or "").strip()
@@ -156,6 +178,15 @@ def main() -> None:
         for row in positive_rows
         if str(row.get("wallet_address") or "").strip()
     }
+    profitability_protected_coins = robust_coins | positive_coins
+    if not profitability_protected_coins:
+        raise SystemExit("SAFETY_FAIL profitability protection set is empty")
+    missing_from_positive = robust_coins - positive_coins
+    if missing_from_positive:
+        raise SystemExit(
+            "SAFETY_FAIL listed robust coins are absent from conservative positive screening set: "
+            f"{sorted(missing_from_positive)}"
+        )
 
     today = datetime.now(timezone.utc).date()
     keep_cutoff = today.toordinal() - max(1, args.recent_days) + 1
@@ -184,12 +215,12 @@ def main() -> None:
             elif canonical in robust_coins:
                 action, reason = (
                     "KEEP_ROBUST_FULL_FIDELITY",
-                    "canonical coin appears in robust funnel candidate set",
+                    "canonical coin appears in robust funnel preview",
                 )
             elif canonical in positive_coins:
                 action, reason = (
                     "COMPRESS_CANDIDATE",
-                    "canonical coin screened positive but is not currently robust",
+                    "canonical coin has positive profitability evidence; never emergency-delete raw tape",
                 )
             else:
                 action, reason = (
@@ -209,22 +240,39 @@ def main() -> None:
             )
             totals[action] += size
 
-    robust_present = robust_coins & set(observed_aliases)
+    protected_present = profitability_protected_coins & set(observed_aliases)
     unsafe = [
+        row
+        for row in rows
+        if row["canonical_coin"] in protected_present
+        and row["action"] == "DELETE_CANDIDATE"
+    ]
+    profitability_safety_passed = bool(profitability_protected_coins) and not unsafe
+    if not profitability_safety_passed:
+        examples = [
+            (row["coin_dir"], row["canonical_coin"], row["action"])
+            for row in unsafe[:20]
+        ]
+        raise SystemExit(
+            f"SAFETY_FAIL profitability-protected coin aliases classified for delete: {examples}"
+        )
+
+    robust_present = robust_coins & set(observed_aliases)
+    robust_unsafe = [
         row
         for row in rows
         if row["canonical_coin"] in robust_present
         and row["action"]
         not in {"KEEP_RECENT_FULL_FIDELITY", "KEEP_ROBUST_FULL_FIDELITY"}
     ]
-    robust_alias_safety_passed = bool(robust_coins) and not unsafe
+    robust_alias_safety_passed = bool(robust_coins) and not robust_unsafe
     if not robust_alias_safety_passed:
         examples = [
             (row["coin_dir"], row["canonical_coin"], row["action"])
-            for row in unsafe[:20]
+            for row in robust_unsafe[:20]
         ]
         raise SystemExit(
-            f"SAFETY_FAIL robust coin aliases classified destructively: {examples}"
+            f"SAFETY_FAIL listed robust coin aliases classified destructively: {examples}"
         )
 
     delete_budget_bytes = int(args.max_delete_candidate_gib * GIB)
@@ -269,7 +317,13 @@ def main() -> None:
 
     aliases = {k: sorted(v) for k, v in observed_aliases.items() if len(v) > 1}
     delete_count = sum(1 for row in rows if row["action"] == "DELETE_CANDIDATE")
-    source_evidence_complete = bool(robust_rows and screening and robust_coins)
+    source_evidence_complete = bool(
+        robust_rows
+        and screening
+        and robust_coins
+        and profitability_protected_coins
+        and profitability_safety_passed
+    )
     manifest = {
         "mode": "DRY_RUN_ONLY_NO_DELETION",
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -281,22 +335,30 @@ def main() -> None:
             "funnel_report": str(report_path),
             "screening": str(screening_path),
             "screening_row_count": len(screening),
-            "robust_row_count": len(robust_rows),
+            "reported_screened_cohort_count": reported_screened,
+            "robust_preview_row_count": len(robust_rows),
+            "reported_robust_candidate_count": robust_candidate_count,
+            "robust_payload_truncated": robust_payload_truncated,
         },
         "normalization": {
             "scheme": "canonical namespace:symbol uppercase",
             "alias_groups": aliases,
             "robust_alias_safety_passed": robust_alias_safety_passed,
+            "profitability_protection_safety_passed": profitability_safety_passed,
         },
         "funnel": {
-            "screened_cohorts": report.get("screened_cohort_count"),
+            "screened_cohorts": reported_screened,
             "positive_screens": report.get("positive_screen_count"),
-            "robust_candidates": report.get("robust_candidate_count"),
+            "robust_candidates": robust_candidate_count,
+            "robust_preview_count": len(robust_rows),
+            "robust_payload_truncated": robust_payload_truncated,
             "robust_coin_count": len(robust_coins),
             "positive_coin_count": len(positive_coins),
+            "profitability_protected_coin_count": len(profitability_protected_coins),
             "robust_wallet_count": len(robust_wallets),
             "positive_wallet_count": len(positive_wallets),
             "robust_coins": sorted(robust_coins),
+            "profitability_protected_coins": sorted(profitability_protected_coins),
         },
         "market_shadow": {
             "partition_count": len(rows),
@@ -314,7 +376,9 @@ def main() -> None:
             "apply_requires_separate_explicit_reviewed_manifest": True,
             "source_evidence_complete": source_evidence_complete,
             "robust_set_nonempty": bool(robust_coins),
+            "profitability_protection_set_nonempty": bool(profitability_protected_coins),
             "robust_alias_safety_passed": robust_alias_safety_passed,
+            "profitability_protection_safety_passed": profitability_safety_passed,
         },
     }
 
@@ -328,11 +392,17 @@ def main() -> None:
     print("mode=DRY_RUN_ONLY_NO_DELETION")
     print(f"source_evidence_complete={source_evidence_complete}")
     print(f"screening_rows={len(screening)}")
-    print(f"robust_candidates={len(robust_rows)}")
-    print(f"robust_coins={len(robust_coins)}")
-    print(f"positive_coins={len(positive_coins)}")
+    print(f"robust_candidates_reported={robust_candidate_count}")
+    print(f"robust_preview_rows={len(robust_rows)}")
+    print(f"robust_payload_truncated={robust_payload_truncated}")
+    print(f"robust_coins_preview={len(robust_coins)}")
+    print(f"positive_coins_conservative={len(positive_coins)}")
+    print(f"profitability_protected_coins={len(profitability_protected_coins)}")
     print(f"alias_groups={len(aliases)}")
     print(f"ROBUST_ALIAS_SAFETY={'PASS' if robust_alias_safety_passed else 'FAIL'}")
+    print(
+        f"PROFITABILITY_PROTECTION_SAFETY={'PASS' if profitability_safety_passed else 'FAIL'}"
+    )
     print(f"market_partitions={len(rows)}")
     for action in (
         "KEEP_RECENT_FULL_FIDELITY",
