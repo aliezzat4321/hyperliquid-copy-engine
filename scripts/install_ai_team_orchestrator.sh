@@ -36,6 +36,17 @@ for spec in 'hl-codex-agent:codex' 'hl-claude-agent:claude'; do
 done
 install -d -m 0700 "$STATE/orchestrator" /run/hyperliquid-ai-team "$OPT/scripts" "$OPT/config" "$ETC"
 
+# OpenAI documents copying auth.json as a supported headless fallback. Keep it local,
+# mode 0600, and do not copy any GitHub credential to the model user.
+CODEX_HOME="$STATE/agents/codex/home/.codex"
+install -d -o hl-codex-agent -g hl-codex-agent -m 0700 "$CODEX_HOME"
+if [[ -f /root/.codex/auth.json ]]; then
+  install -o hl-codex-agent -g hl-codex-agent -m 0600 /root/.codex/auth.json "$CODEX_HOME/auth.json"
+  echo 'CODEX_AUTH_CACHE=PROVISIONED_LOCALLY'
+else
+  echo 'CODEX_AUTH_CACHE=ROOT_FILE_NOT_FOUND'
+fi
+
 install -m 0755 "$ROOT/scripts/ai_team_orchestrator.py" "$OPT/scripts/ai_team_orchestrator.py"
 install -m 0755 "$ROOT/scripts/ai_team_auth_claude.sh" "$OPT/scripts/ai_team_auth_claude.sh"
 install -m 0644 "$ROOT/config/ai_team_router.json" "$OPT/config/ai_team_router.json"
@@ -71,10 +82,10 @@ for label in "${!colors[@]}"; do
 done
 
 systemctl daemon-reload
-systemctl enable hyperliquid-ai-team-orchestrator.timer >/dev/null
+systemctl enable --now hyperliquid-ai-team-orchestrator.timer >/dev/null
 
 echo 'AI_TEAM_INSTALL=OK'
-echo 'TIMER_ENABLED=YES'
+echo 'TIMER_ENABLED_AND_ACTIVE=YES'
 echo 'MODEL_IDLE_BEHAVIOR=NO_MODEL_CALLS_WITHOUT_DUE_TASK'
 echo 'POLYMARKET_TOUCHED=NO'
 echo 'REAL_TRADING_TOUCHED=NO'
