@@ -31,8 +31,14 @@ def _manifest(
         "recent_days_kept_full_fidelity": 3,
         "deletion_budget_bytes": 6 * 1024**3,
         "source_evidence": {"complete": True},
-        "normalization": {"robust_alias_safety_passed": True},
-        "funnel": {"robust_coins": ["BTC", "XYZ:KORU"]},
+        "normalization": {
+            "robust_alias_safety_passed": True,
+            "profitability_protection_safety_passed": True,
+        },
+        "funnel": {
+            "robust_coins": ["BTC", "XYZ:KORU"],
+            "profitability_protected_coins": ["BTC", "ETH", "XYZ:KORU"],
+        },
         "market_shadow": {
             "delete_candidate_count": 1,
             "recoverable_delete_candidate_bytes": 1234,
@@ -53,7 +59,9 @@ def _manifest(
             "apply_requires_separate_explicit_reviewed_manifest": True,
             "source_evidence_complete": True,
             "robust_set_nonempty": True,
+            "profitability_protection_set_nonempty": True,
             "robust_alias_safety_passed": True,
+            "profitability_protection_safety_passed": True,
         },
     }
 
@@ -97,11 +105,33 @@ def test_rejects_robust_coin_even_if_manifest_marks_delete(tmp_path: Path) -> No
         _validate(_manifest(candidate, canonical="BTC"), market, tmp_path)
 
 
+def test_rejects_profitability_protected_coin_even_if_not_robust(tmp_path: Path) -> None:
+    market, candidate = _layout(tmp_path)
+    with pytest.raises(ValueError, match="profitability evidence"):
+        _validate(_manifest(candidate, canonical="ETH"), market, tmp_path)
+
+
 def test_rejects_empty_robust_coin_evidence(tmp_path: Path) -> None:
     market, candidate = _layout(tmp_path)
     manifest = _manifest(candidate)
     manifest["funnel"]["robust_coins"] = []
     with pytest.raises(ValueError, match="non-empty reviewed list"):
+        _validate(manifest, market, tmp_path)
+
+
+def test_rejects_empty_profitability_protection_set(tmp_path: Path) -> None:
+    market, candidate = _layout(tmp_path)
+    manifest = _manifest(candidate)
+    manifest["funnel"]["profitability_protected_coins"] = []
+    with pytest.raises(ValueError, match="profitability_protected_coins"):
+        _validate(manifest, market, tmp_path)
+
+
+def test_rejects_profitability_set_that_omits_robust_coin(tmp_path: Path) -> None:
+    market, candidate = _layout(tmp_path)
+    manifest = _manifest(candidate)
+    manifest["funnel"]["profitability_protected_coins"] = ["ETH"]
+    with pytest.raises(ValueError, match="include robust coins"):
         _validate(manifest, market, tmp_path)
 
 
@@ -153,6 +183,14 @@ def test_rejects_failed_alias_safety(tmp_path: Path) -> None:
     manifest = _manifest(candidate)
     manifest["safety"]["robust_alias_safety_passed"] = False
     with pytest.raises(ValueError, match="robust alias safety"):
+        _validate(manifest, market, tmp_path)
+
+
+def test_rejects_failed_profitability_protection_safety(tmp_path: Path) -> None:
+    market, candidate = _layout(tmp_path)
+    manifest = _manifest(candidate)
+    manifest["safety"]["profitability_protection_safety_passed"] = False
+    with pytest.raises(ValueError, match="profitability protection safety"):
         _validate(manifest, market, tmp_path)
 
 
