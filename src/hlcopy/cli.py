@@ -188,6 +188,7 @@ def _run_capture(settings: Settings, coins: list[str] | None) -> None:
                 flush_rows=settings.market_flush_rows,
                 flush_seconds=settings.market_flush_seconds,
                 queue_size=settings.market_queue_size,
+                max_buffered_rows=settings.market_max_buffered_rows,
                 heartbeat_seconds=settings.ws_heartbeat_seconds,
                 reconnect_base_seconds=settings.ws_reconnect_base_seconds,
                 reconnect_max_seconds=settings.ws_reconnect_max_seconds,
