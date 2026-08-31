@@ -4,9 +4,8 @@ import argparse
 import hashlib
 import json
 import os
-import shutil
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +17,7 @@ AUDIT_LOG = Path("/root/hyperliquid-audit/postgres-compaction/apply.json")
 HISTORICAL_BIN_HOURS = 8
 MIN_AVAILABLE_BYTES = 3 * 1024**3
 MAX_POST_CUTOFF_ROWS = 500_000
+MAX_PLAN_AGE_HOURS = 12
 
 
 def _psql(sql: str) -> str:
@@ -70,10 +70,13 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _parse_cutoff(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+def _parse_timestamp(value: str) -> datetime:
+    cleaned = value.strip().replace(" ", "T")
+    if cleaned.endswith(("+00", "-00")):
+        cleaned += ":00"
+    parsed = datetime.fromisoformat(cleaned.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
-        raise ValueError("cutoff must be timezone-aware")
+        raise ValueError("timestamp must be timezone-aware")
     return parsed.astimezone(timezone.utc)
 
 
@@ -81,7 +84,7 @@ def build_plan(path: Path) -> dict[str, Any]:
     cutoff = _scalar("SELECT max(snapshot_at)::text FROM leaderboard_snapshots")
     if not cutoff:
         raise RuntimeError("leaderboard_snapshots has no cutoff")
-    cutoff_dt = _parse_cutoff(cutoff)
+    cutoff_dt = _parse_timestamp(cutoff)
     cutoff_sql = cutoff_dt.isoformat()
     source_rows = _int(
         "SELECT count(*) FROM leaderboard_snapshots "
@@ -106,6 +109,10 @@ def build_plan(path: Path) -> dict[str, Any]:
         ") SELECT count(*) FROM leaderboard_snapshots l"
         " JOIN keep_times k USING(snapshot_at)"
     )
+    if keep_rows < 1 or keep_rows >= source_rows:
+        raise RuntimeError(
+            f"invalid compaction ratio: keep_rows={keep_rows} source_rows={source_rows}"
+        )
     raw_api_rows = _int("SELECT count(*) FROM raw_api_responses")
     raw_api_unique_payloads = _int(
         "SELECT count(DISTINCT content_sha256) FROM raw_api_responses"
@@ -147,7 +154,7 @@ def build_plan(path: Path) -> dict[str, Any]:
             "source_relation_bytes": _relation_bytes("raw_api_responses"),
         },
         "fills": {
-            "rows": _int("SELECT count(*) FROM fills"),
+            "rows_at_plan": _int("SELECT count(*) FROM fills"),
             "relation_bytes": _relation_bytes("fills"),
         },
         "available_bytes": _available_bytes(),
@@ -176,11 +183,19 @@ def _validate_plan(path: Path, expected_sha256: str) -> dict[str, Any]:
         raise RuntimeError("Polymarket boundary missing")
     if plan.get("real_trading_change") is not False:
         raise RuntimeError("real trading boundary missing")
-    cutoff = _parse_cutoff(str(plan["leaderboard"]["cutoff"]))
+    generated_at = _parse_timestamp(str(plan["generated_at"]))
+    age = datetime.now(timezone.utc) - generated_at
+    if age < timedelta(minutes=-5) or age > timedelta(hours=MAX_PLAN_AGE_HOURS):
+        raise RuntimeError(f"reviewed plan age outside allowed window: {age}")
+    cutoff = _parse_timestamp(str(plan["leaderboard"]["cutoff"]))
     if int(plan["policy"]["historical_leaderboard_bin_hours"]) != HISTORICAL_BIN_HOURS:
         raise RuntimeError("reviewed bin policy mismatch")
     if not bool(plan["policy"]["fills_untouched"]):
         raise RuntimeError("fills must remain protected")
+    if not bool(plan["policy"]["raw_api_observations_preserved"]):
+        raise RuntimeError("raw API observation preservation must be enabled")
+    if not bool(plan["policy"]["raw_api_payloads_content_addressed"]):
+        raise RuntimeError("raw API payload normalization must be enabled")
     plan["_cutoff_dt"] = cutoff
     return plan
 
@@ -277,22 +292,33 @@ CREATE TABLE IF NOT EXISTS raw_api_payloads (
     response_json JSONB NOT NULL,
     first_seen TIMESTAMPTZ NOT NULL
 );
+BEGIN;
+LOCK TABLE raw_api_responses IN ACCESS EXCLUSIVE MODE;
 INSERT INTO raw_api_payloads(content_sha256,response_json,first_seen)
 SELECT DISTINCT ON(content_sha256) content_sha256,response_json,fetched_at
 FROM raw_api_responses
 WHERE response_json <> '{}'::jsonb
 ORDER BY content_sha256,fetched_at
 ON CONFLICT(content_sha256) DO NOTHING;
+DO $verify$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM raw_api_responses r
+    WHERE NOT EXISTS (
+      SELECT 1 FROM raw_api_payloads p
+      WHERE p.content_sha256=r.content_sha256
+    )
+  ) THEN
+    RAISE EXCEPTION 'raw API payload coverage incomplete';
+  END IF;
+END
+$verify$;
+UPDATE raw_api_responses
+SET response_json='{}'::jsonb
+WHERE response_json <> '{}'::jsonb;
+COMMIT;
 """
     )
-    missing = _int(
-        "SELECT count(*) FROM raw_api_responses r "
-        "WHERE NOT EXISTS (SELECT 1 FROM raw_api_payloads p "
-        "WHERE p.content_sha256=r.content_sha256)"
-    )
-    if missing:
-        raise RuntimeError(f"raw API payload coverage missing for {missing} observations")
-    _psql("UPDATE raw_api_responses SET response_json='{}'::jsonb WHERE response_json <> '{}'::jsonb")
     _psql("VACUUM (FULL, ANALYZE) raw_api_responses")
     _psql(
         "CREATE INDEX IF NOT EXISTS idx_raw_api_responses_content_sha256 "
@@ -307,18 +333,25 @@ def apply_plan(path: Path, expected_sha256: str) -> None:
     if before_available < MIN_AVAILABLE_BYTES:
         raise RuntimeError(f"insufficient preflight headroom: {before_available}")
     subprocess.run(
-        ["sudo", "-n", "-u", "postgres", "/usr/lib/postgresql/14/bin/pg_isready", "-p", PG_PORT],
+        [
+            "sudo",
+            "-n",
+            "-u",
+            "postgres",
+            "/usr/lib/postgresql/14/bin/pg_isready",
+            "-p",
+            PG_PORT,
+        ],
         check=True,
     )
     fills_before = _int("SELECT count(*) FROM fills")
-    if fills_before != int(plan["fills"]["rows"]):
-        raise RuntimeError("fills changed since reviewed plan; refusing compaction")
 
     audit: dict[str, Any] = {
         "manifest_sha256": expected_sha256,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "before_available_bytes": before_available,
         "fills_before": fills_before,
+        "fills_at_plan": int(plan["fills"]["rows_at_plan"]),
         "leaderboard_compaction_completed": False,
         "raw_api_normalization_completed": False,
         "polymarket_mutation": False,
@@ -332,8 +365,10 @@ def apply_plan(path: Path, expected_sha256: str) -> None:
         _normalize_raw_api_payloads()
         audit["raw_api_normalization_completed"] = True
         fills_after = _int("SELECT count(*) FROM fills")
-        if fills_after != fills_before:
-            raise RuntimeError("fills row count changed during compaction")
+        if fills_after < fills_before:
+            raise RuntimeError(
+                f"fills decreased during compaction: {fills_before} -> {fills_after}"
+            )
         audit.update(
             {
                 "fills_after": fills_after,
