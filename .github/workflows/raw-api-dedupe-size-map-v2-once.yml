@@ -1,0 +1,47 @@
+name: raw-api-dedupe-size-map-v2-once
+
+on:
+  push:
+    branches:
+      - codex/111-postgres-recovery
+    paths:
+      - ".github/workflows/raw-api-dedupe-size-map-v2-once.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 20
+    steps:
+      - name: Measure true unique payload bytes read only
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo -n -u postgres /usr/lib/postgresql/14/bin/pg_isready -p 5433
+          sudo -n -u postgres psql -X -v ON_ERROR_STOP=1 -p 5433 -d hlcopy -P pager=off -c "
+            WITH observed AS (
+              SELECT endpoint,
+                     count(*) AS observations,
+                     sum(pg_column_size(response_json))::bigint AS observed_bytes
+              FROM raw_api_responses GROUP BY endpoint
+            ), unique_payloads AS (
+              SELECT endpoint, content_sha256,
+                     max(pg_column_size(response_json))::bigint AS payload_bytes
+              FROM raw_api_responses
+              GROUP BY endpoint, content_sha256
+            ), unique_totals AS (
+              SELECT endpoint, count(*) AS unique_payloads,
+                     sum(payload_bytes)::bigint AS unique_bytes
+              FROM unique_payloads GROUP BY endpoint
+            )
+            SELECT o.endpoint, o.observations, u.unique_payloads,
+                   pg_size_pretty(o.observed_bytes) AS observed_payload_bytes,
+                   pg_size_pretty(u.unique_bytes) AS true_unique_payload_bytes,
+                   pg_size_pretty(o.observed_bytes-u.unique_bytes) AS dedupe_savings
+            FROM observed o JOIN unique_totals u USING(endpoint)
+            ORDER BY o.observed_bytes DESC;"
+          echo 'DATABASE_MUTATION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
