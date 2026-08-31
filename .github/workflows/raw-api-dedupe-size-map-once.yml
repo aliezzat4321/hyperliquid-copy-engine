@@ -1,0 +1,38 @@
+name: raw-api-dedupe-size-map-once
+
+on:
+  push:
+    branches:
+      - codex/111-postgres-recovery
+    paths:
+      - ".github/workflows/raw-api-dedupe-size-map-once.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 20
+    steps:
+      - name: Measure payload dedupe opportunity read only
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo -n -u postgres /usr/lib/postgresql/14/bin/pg_isready -p 5433
+          PSQL="sudo -n -u postgres psql -X -v ON_ERROR_STOP=1 -p 5433 -d hlcopy -P pager=off"
+          $PSQL -c "
+            SELECT endpoint,
+                   count(*) AS observations,
+                   count(DISTINCT content_sha256) AS unique_payloads,
+                   pg_size_pretty(sum(pg_column_size(response_json))::bigint) AS observed_payload_bytes,
+                   pg_size_pretty(sum(unique_size)::bigint) AS unique_payload_bytes
+            FROM raw_api_responses r
+            JOIN (
+              SELECT content_sha256, max(pg_column_size(response_json)) AS unique_size
+              FROM raw_api_responses GROUP BY content_sha256
+            ) u USING (content_sha256)
+            GROUP BY endpoint ORDER BY sum(pg_column_size(response_json)) DESC;"
+          echo 'DATABASE_MUTATION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
