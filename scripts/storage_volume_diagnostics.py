@@ -6,8 +6,10 @@ import json
 import shutil
 import subprocess
 from collections import defaultdict
-from datetime import UTC, datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+UTC_TZ = timezone(timedelta(0))
 
 
 def _run(command: list[str], *, timeout: int = 180) -> str:
@@ -196,7 +198,7 @@ def main() -> None:
     recent = _recent_writes(mount, args.recent_minutes)
     report = {
         "mode": "READ_ONLY_NO_DELETION",
-        "generated_at": datetime.now(UTC).isoformat(),
+        "generated_at": datetime.now(UTC_TZ).isoformat(),
         "mount": str(mount),
         "filesystem": {
             "total_bytes": usage.total,
