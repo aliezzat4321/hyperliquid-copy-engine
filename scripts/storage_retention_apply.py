@@ -188,7 +188,9 @@ def apply_candidates(
             continue
         _revalidate_identity(candidate, market_root)
         actual_bytes = sum(
-            p.stat().st_size for p in candidate.path.rglob("*") if p.is_file() and not p.is_symlink()
+            p.stat().st_size
+            for p in candidate.path.rglob("*")
+            if p.is_file() and not p.is_symlink()
         )
         if apply:
             shutil.rmtree(candidate.path)
@@ -289,7 +291,9 @@ def main() -> None:
     print("MARKET_CAPTURE_RESUMED=NO")
     print(f"DELETION_PERFORMED={'YES' if args.apply else 'NO'}")
     if args.apply and not result["target_reached"]:
-        raise SystemExit("reviewed delete-candidate pool exhausted before target headroom was reached")
+        raise SystemExit(
+            "reviewed delete-candidate pool exhausted before target headroom was reached"
+        )
 
 
 if __name__ == "__main__":
