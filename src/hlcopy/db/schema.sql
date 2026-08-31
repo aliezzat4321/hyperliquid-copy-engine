@@ -13,8 +13,10 @@ CREATE TABLE IF NOT EXISTS raw_api_responses (
     fetched_at TIMESTAMPTZ NOT NULL,
     content_sha256 TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_raw_api_responses_content_sha256
-    ON raw_api_responses(content_sha256);
+-- Post-normalization observation rows preserve request/time/hash identity while the
+-- canonical response body lives once in raw_api_payloads. Do not add a large
+-- observation-table hash index during storage recovery; the write path uses the
+-- raw_api_payloads primary key instead.
 
 CREATE TABLE IF NOT EXISTS wallets (
     address TEXT PRIMARY KEY,
