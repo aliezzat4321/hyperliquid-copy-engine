@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-08-31T11:56:01Z",
+  "experiments": [
+    {
+      "id": "EXP-001",
+      "lane": "lane_3",
+      "hypothesis": "The Lane 3 gross mid-to-mid shadow PnL survives realistic round-trip execution cost, and its edge is not concentrated in a subset of coins.",
+      "slice": "All Invo notification shadow trades; sub-sliced by coin (BTC vs alt-coin).",
+      "status": "IN_REVIEW",
+      "evidence_level": "EXPLORATORY",
+      "result": "INCONCLUSIVE",
+      "issue": 91,
+      "pr": 95,
+      "builder": "CLAUDE",
+      "reviewer": "CODEX_CHATGPT",
+      "reviewed_commit": null,
+      "retest_condition": "Rerun on the full 49-close ledger rather than the 10 rows visible in probe run 33376459723, with measured book spread instead of the 9/15/25/40 bps scenario grid, and a clustered bootstrap that accounts for per-trader and per-day dependence.",
+      "updated_at": "2026-08-31T11:26:40Z"
+    }
+  ]
+}

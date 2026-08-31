@@ -1,0 +1,109 @@
+{
+  "schema_version": 2,
+  "snapshot_at": "2026-08-31T12:32:51Z",
+  "updated_by": "CLAUDE",
+  "head_observed": "316918cd5df171b8f27b13495c64cf0fafa7a06e",
+  "mission": "Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.",
+  "live_trading": {
+    "authorized": false,
+    "status": "DISABLED",
+    "authorization": null
+  },
+  "priorities": [
+    {
+      "priority": "P0",
+      "issue": 90,
+      "title": "Restore market-data capture and storage headroom",
+      "owner": "CODEX_CHATGPT",
+      "reviewer": "CLAUDE",
+      "status": "OPEN",
+      "profitability_critical": true
+    },
+    {
+      "priority": "P0",
+      "issue": 91,
+      "title": "Build Lane 3 notification-edge v2 profitability gate",
+      "owner": "CLAUDE",
+      "reviewer": "CODEX_CHATGPT",
+      "status": "OPEN",
+      "profitability_critical": true
+    },
+    {
+      "priority": "P0",
+      "issue": 92,
+      "title": "Validate and land builder-first Invo wallet resolver",
+      "owner": "CODEX_CHATGPT",
+      "reviewer": "CLAUDE",
+      "status": "OPEN",
+      "profitability_critical": true
+    },
+    {
+      "priority": "P1",
+      "issue": 93,
+      "title": "Automate Lane 1 research-to-prospective validation handoff",
+      "owner": "CODEX_CHATGPT",
+      "reviewer": "CLAUDE",
+      "status": "OPEN",
+      "profitability_critical": true
+    }
+  ],
+  "lanes": {
+    "lane_1": {
+      "name": "Hyperliquid native discovery and prospective copying research",
+      "status": "RESEARCH_ACTIVE_HANDOFF_MANUAL",
+      "facts": [
+        {"key": "screened_cohorts", "label": "screened cohorts", "value": 1551, "unit": "count", "observed_at": "2026-08-31T07:37:45Z", "source_type": "WORKFLOW_RUN", "source_ref": "33369211976"},
+        {"key": "positive_screens", "label": "positive screens", "value": 284, "unit": "count", "observed_at": "2026-08-31T07:37:45Z", "source_type": "WORKFLOW_RUN", "source_ref": "33369211976"},
+        {"key": "confirmed_rows", "label": "confirmation rows", "value": 800, "unit": "count", "observed_at": "2026-08-31T07:37:45Z", "source_type": "WORKFLOW_RUN", "source_ref": "33369211976"},
+        {"key": "robust_candidates", "label": "robust candidates", "value": 186, "unit": "count", "observed_at": "2026-08-31T07:37:45Z", "source_type": "WORKFLOW_RUN", "source_ref": "33369211976"},
+        {"key": "realized_slice_rows", "label": "realized slice rows", "value": 26238, "unit": "count", "observed_at": "2026-08-31T07:37:45Z", "source_type": "WORKFLOW_RUN", "source_ref": "33369211976"},
+        {"key": "frozen_prospective_targets", "label": "hard-coded prospective wallet-by-coin targets", "value": 4, "unit": "count", "observed_at": "2026-08-31T11:40:40Z", "source_type": "WORKFLOW_RUN", "source_ref": "33388075503"},
+        {"key": "frozen_targets_approved", "label": "frozen targets approved", "value": 2, "unit": "count", "observed_at": "2026-08-31T11:40:40Z", "source_type": "WORKFLOW_RUN", "source_ref": "33388075503"},
+        {"key": "frozen_target_zero_evidence", "label": "frozen targets with zero observed events", "value": 1, "unit": "count", "observed_at": "2026-08-31T11:40:40Z", "source_type": "WORKFLOW_RUN", "source_ref": "33388075503"}
+      ],
+      "blocker": "The broad research funnel (1551 screened cohorts) does not feed the frozen prospective queue, which remains a hard-coded four-row constant in scripts/prospective_champion_lane.py.",
+      "next": "Issue #93"
+    },
+    "lane_2": {
+      "name": "Third-party identity resolution",
+      "status": "ZERO_CURRENT_PUBLICATION_YIELD",
+      "facts": [
+        {"key": "candidate_portfolios", "label": "candidate portfolios discovered", "value": 324, "unit": "count", "observed_at": "2026-08-31T11:40:40Z", "source_type": "WORKFLOW_RUN", "source_ref": "33388075503"},
+        {"key": "resolution_ready_portfolios", "label": "portfolios resolution-ready", "value": 174, "unit": "count", "observed_at": "2026-08-31T11:40:40Z", "source_type": "WORKFLOW_RUN", "source_ref": "33388075503"},
+        {"key": "published_identity_rows", "label": "published verified identities", "value": 0, "unit": "count", "observed_at": "2026-08-31T11:40:40Z", "source_type": "WORKFLOW_RUN", "source_ref": "33388075503"},
+        {"key": "tracked_third_party_wallets", "label": "tracked third-party wallets", "value": 12, "unit": "count", "observed_at": "2026-08-31T11:40:40Z", "source_type": "WORKFLOW_RUN", "source_ref": "33388075503"},
+        {"key": "third_party_prospective_events", "label": "third-party prospective events", "value": 610, "unit": "count", "observed_at": "2026-08-31T11:40:40Z", "source_type": "WORKFLOW_RUN", "source_ref": "33388075503"},
+        {"key": "builder_first_resolver_state", "label": "builder-first resolver PR state", "value": "OPEN_DRAFT_HEAD_PREDATES_LINT_BASELINE_NEEDS_REBASE", "unit": "text", "observed_at": "2026-08-31T12:32:51Z", "source_type": "PULL_REQUEST", "source_ref": "#86"}
+      ],
+      "blocker": "The Tier B identity gate has published zero identities against 174 resolution-ready portfolios; throughput is not the limit, the seven-clause conjunction is. The builder-first path in PR #86 is unvalidated and its head predates the repository lint baseline, so its last CI result no longer reflects its true state.",
+      "next": "Issue #92"
+    },
+    "lane_3": {
+      "name": "Direct Invo notification shadow copying",
+      "status": "SHADOW_EVIDENCE_MEASUREMENT_INCOMPLETE",
+      "facts": [
+        {"key": "shadow_opens", "label": "shadow opens", "value": 55, "unit": "count", "observed_at": "2026-08-31T09:11:47Z", "source_type": "WORKFLOW_RUN", "source_ref": "33376459723"},
+        {"key": "unique_shadow_closes", "label": "unique shadow closes", "value": 49, "unit": "count", "observed_at": "2026-08-31T09:11:47Z", "source_type": "WORKFLOW_RUN", "source_ref": "33376459723"},
+        {"key": "open_shadow_positions", "label": "unresolved open shadow positions", "value": 6, "unit": "count", "observed_at": "2026-08-31T09:11:47Z", "source_type": "WORKFLOW_RUN", "source_ref": "33376459723"},
+        {"key": "gross_mid_to_mid_pnl_usd", "label": "gross mid-to-mid shadow PnL (NOT net; no fee, spread, impact or funding)", "value": 37.771087, "unit": "usd", "observed_at": "2026-08-31T09:11:47Z", "source_type": "WORKFLOW_RUN", "source_ref": "33376459723"},
+        {"key": "median_gross_return_bps", "label": "median gross return per closed trade", "value": 27.4256, "unit": "bps", "observed_at": "2026-08-31T09:11:47Z", "source_type": "WORKFLOW_RUN", "source_ref": "33376459723"},
+        {"key": "median_open_detection_latency_ms", "label": "median open detection latency", "value": 11032, "unit": "count", "observed_at": "2026-08-31T09:11:47Z", "source_type": "WORKFLOW_RUN", "source_ref": "33376459723"},
+        {"key": "stale_signal_rejections", "label": "signals rejected by the 25s freshness gate", "value": 41, "unit": "count", "observed_at": "2026-08-31T09:11:47Z", "source_type": "WORKFLOW_RUN", "source_ref": "33376459723"},
+        {"key": "net_edge_engine_state", "label": "net-edge attribution engine PR state", "value": "OPEN_FOR_REVIEW_CI_GREEN_MERGEABLE", "unit": "text", "observed_at": "2026-08-31T11:26:40Z", "source_type": "PULL_REQUEST", "source_ref": "#95"}
+      ],
+      "blocker": "No accepted execution-cost-adjusted, prospective-safe profitability gate. The headline PnL above is gross mid-to-mid and survivorship-biased: the 6 open positions never emit a close and are absent from it.",
+      "next": "Issue #91"
+    }
+  },
+  "infrastructure": {
+    "name": "Research VM, market tape and storage",
+    "status": "P0_STORAGE_PRESSURE",
+    "facts": [
+      {"key": "data_volume_usage_pct", "label": "/mnt/HC_Volume_106576526 usage", "value": 100.0, "unit": "pct", "observed_at": "2026-08-31T11:40:40Z", "source_type": "WORKFLOW_RUN", "source_ref": "33388075503"},
+      {"key": "data_volume_bytes_available", "label": "/mnt/HC_Volume_106576526 bytes available", "value": 0, "unit": "count", "observed_at": "2026-08-31T07:37:45Z", "source_type": "WORKFLOW_RUN", "source_ref": "33369211976"},
+      {"key": "root_volume_usage_pct", "label": "root filesystem usage", "value": 71.3, "unit": "pct", "observed_at": "2026-08-31T11:40:40Z", "source_type": "WORKFLOW_RUN", "source_ref": "33388075503"}
+    ],
+    "blocker": "The data volume is full and the storage guard cannot recover it: the guard stops only hyperliquid-market-capture, nothing prunes the data mount, and the 78% resume threshold is therefore unreachable.",
+    "next": "Issue #90"
+  }
+}
