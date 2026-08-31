@@ -1,0 +1,69 @@
+name: ai-team-auth-capability-audit
+
+on:
+  push:
+    branches: [codex/126-ai-orchestrator]
+    paths: [".github/workflows/ai-team-auth-capability-audit.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 5
+    steps:
+      - name: Assert boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "aliezzat4321/hyperliquid-copy-engine"
+          echo 'POLYMARKET_INSPECTION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+
+      - name: Verify CLI versions and non-interactive flags
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH=/usr/local/bin:/usr/bin:/bin
+          claude --version
+          codex --version
+          claude --help | grep -E -- '(-p, --print|--output-format|--resume)' | head -n 10
+          codex exec --help | grep -E -- '(workspace-write|--json|resume)' | head -n 15 || true
+
+      - name: Check root and isolated-agent auth status without credentials
+        shell: bash
+        run: |
+          set -u
+          export PATH=/usr/local/bin:/usr/bin:/bin
+
+          if codex login status >/tmp/codex-root-status 2>&1; then
+            echo 'ROOT_CODEX_AUTH=READY'
+          else
+            echo 'ROOT_CODEX_AUTH=NOT_READY'
+          fi
+          sed -E 's/(token|key|secret|oauth)[^ ]*/REDACTED/Ig' /tmp/codex-root-status | head -n 3 || true
+          rm -f /tmp/codex-root-status
+
+          CODEX_HOME=/var/lib/hyperliquid-ai-team/agents/codex/home/.codex \
+          HOME=/var/lib/hyperliquid-ai-team/agents/codex/home \
+          runuser -u hl-codex-agent --preserve-environment -- \
+            /usr/local/bin/codex login status >/tmp/codex-agent-status 2>&1
+          rc=$?
+          if [ "$rc" -eq 0 ]; then echo 'AGENT_CODEX_AUTH=READY'; else echo 'AGENT_CODEX_AUTH=NOT_READY'; fi
+          sed -E 's/(token|key|secret|oauth)[^ ]*/REDACTED/Ig' /tmp/codex-agent-status | head -n 3 || true
+          rm -f /tmp/codex-agent-status
+
+          CLAUDE_CONFIG_DIR=/var/lib/hyperliquid-ai-team/agents/claude/home/.claude \
+          HOME=/var/lib/hyperliquid-ai-team/agents/claude/home \
+          runuser -u hl-claude-agent --preserve-environment -- \
+            /usr/bin/claude auth status --text >/tmp/claude-agent-status 2>&1
+          rc=$?
+          if [ "$rc" -eq 0 ]; then echo 'AGENT_CLAUDE_AUTH=READY'; else echo 'AGENT_CLAUDE_AUTH=NOT_READY'; fi
+          sed -E 's/(token|key|secret|oauth)[^ ]*/REDACTED/Ig' /tmp/claude-agent-status | head -n 3 || true
+          rm -f /tmp/claude-agent-status
+
+          echo 'AUTH_AUDIT_COMPLETE=YES'
+          echo 'POLYMARKET_TOUCHED=NO'
+          echo 'REAL_TRADING_TOUCHED=NO'
