@@ -1,0 +1,165 @@
+name: hyperliquid-runtime-recovery-audit
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - codex/109-hyperliquid-runtime-audit
+    paths:
+      - ".github/workflows/hyperliquid-runtime-recovery-audit.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hyperliquid-runtime-recovery-audit
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    if: github.repository == 'aliezzat4321/hyperliquid-copy-engine'
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 15
+    steps:
+      - name: Checkout audit code only
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          clean: true
+
+      - name: Assert hard project boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '========== SCOPE =========='
+          echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
+          echo 'POLYMARKET_INSPECTION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+          echo 'DELETION_PERFORMED=NO'
+          echo "runner_user=$(id -un) runner_uid=$(id -u) host=$(hostname)"
+          echo "utc_now=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+      - name: Hyperliquid checkout and disk state
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '========== HYPERLIQUID CHECKOUT =========='
+          if [[ -d /root/hyperliquid-copy-engine/.git ]]; then
+            git -C /root/hyperliquid-copy-engine rev-parse HEAD || true
+            git -C /root/hyperliquid-copy-engine status --short --branch || true
+          else
+            echo 'HYPERLIQUID_RUNTIME_CHECKOUT_MISSING=YES'
+          fi
+          echo '========== FILESYSTEMS =========='
+          df -hT / || true
+          df -hT /mnt/HC_Volume_106576526 || true
+          findmnt /mnt/HC_Volume_106576526 || true
+          echo '========== HYPERLIQUID PATH SIZES =========='
+          du -sh /root/hyperliquid-copy-engine 2>/dev/null || true
+          du -sh /var/lib/hyperliquid-copy-engine 2>/dev/null || true
+          du -sh /mnt/HC_Volume_106576526/hyperliquid 2>/dev/null || true
+          du -sh /mnt/HC_Volume_106576526/hyperliquid/market-shadow 2>/dev/null || true
+          du -sh /mnt/HC_Volume_106576526/hyperliquid/postgresql 2>/dev/null || true
+          echo 'READ_ONLY_NO_DELETION=YES'
+
+      - name: Hyperliquid systemd inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '========== HYPERLIQUID UNIT FILES =========='
+          systemctl list-unit-files 'hyperliquid-*' 'hlcopy-*' --no-pager || true
+          echo '========== HYPERLIQUID LOADED UNITS =========='
+          systemctl list-units --all 'hyperliquid-*' 'hlcopy-*' --no-pager || true
+          echo '========== HYPERLIQUID TIMERS =========='
+          systemctl list-timers --all 'hyperliquid-*' 'hlcopy-*' --no-pager || true
+          echo '========== PER-UNIT STATE =========='
+          mapfile -t units < <(systemctl list-unit-files 'hyperliquid-*.service' 'hlcopy-*.service' --no-legend 2>/dev/null | awk '{print $1}' | sort -u)
+          for unit in "${units[@]}"; do
+            echo "--- $unit ---"
+            systemctl show "$unit" --no-pager \
+              -p LoadState -p UnitFileState -p ActiveState -p SubState -p Result \
+              -p ExecMainCode -p ExecMainStatus -p ActiveEnterTimestamp \
+              -p InactiveEnterTimestamp -p FragmentPath || true
+          done
+          echo 'READ_ONLY_NO_SERVICE_CHANGE=YES'
+
+      - name: Hyperliquid safety flags only
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '========== LIVE SAFETY FLAGS =========='
+          grep -RHE '^(REAL_TRADING_ENABLED|NOTIFICATION_TRADER_LIVE)=' \
+            /etc/hyperliquid-copy-engine 2>/dev/null || true
+          echo 'NO_OTHER_ENV_VALUES_PRINTED=YES'
+
+      - name: Hyperliquid PostgreSQL cluster diagnosis
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '========== POSTGRESQL CLUSTERS =========='
+          pg_lsclusters 2>/dev/null || true
+          echo '========== PORTS =========='
+          ss -ltn 2>/dev/null | grep -E ':(5432|5433)[[:space:]]' || true
+          pg_isready -h 127.0.0.1 -p 5432 || true
+          pg_isready -h 127.0.0.1 -p 5433 || true
+          echo '========== HLCOPY UNIT STATE =========='
+          systemctl show postgresql@14-hlcopy.service --no-pager \
+            -p LoadState -p UnitFileState -p ActiveState -p SubState -p Result \
+            -p ExecMainCode -p ExecMainStatus -p ActiveEnterTimestamp \
+            -p InactiveEnterTimestamp -p FragmentPath || true
+          echo '========== HLCOPY CONTROL DATA =========='
+          /usr/lib/postgresql/14/bin/pg_controldata \
+            /mnt/HC_Volume_106576526/hyperliquid/postgresql/14/hlcopy 2>/dev/null \
+            | grep -E 'Database system identifier|Database cluster state|Latest checkpoint|Time of latest checkpoint|Minimum recovery ending location|wal_level' || true
+          echo '========== HLCOPY JOURNAL =========='
+          journalctl -u postgresql@14-hlcopy.service --since '2026-08-17 00:00:00 UTC' -n 300 --no-pager || true
+          echo '========== HLCOPY LOG TAIL =========='
+          tail -n 400 /var/log/postgresql/postgresql-14-hlcopy.log 2>/dev/null || true
+          echo '========== HLCOPY ERROR SIGNALS =========='
+          grep -Ei 'no space left|disk full|could not write|input/output|panic|fatal|error|shutdown|shutting down|read-only file system|checkpoint' \
+            /var/log/postgresql/postgresql-14-hlcopy.log 2>/dev/null | tail -n 250 || true
+          echo 'READ_ONLY_NO_POSTGRES_START_STOP=YES'
+
+      - name: Hyperliquid recent state and tape freshness
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '========== STATE FILE FRESHNESS =========='
+          find /var/lib/hyperliquid-copy-engine -maxdepth 5 -type f \
+            -printf '%T@ %TY-%Tm-%TdT%TH:%TM:%TS %s %p\n' 2>/dev/null \
+            | sort -nr | head -n 120 || true
+          echo '========== MARKET TAPE FRESHNESS =========='
+          find /mnt/HC_Volume_106576526/hyperliquid/market-shadow -maxdepth 5 -type f \
+            -printf '%T@ %TY-%Tm-%TdT%TH:%TM:%TS %s %p\n' 2>/dev/null \
+            | sort -nr | head -n 80 || true
+          echo 'READ_ONLY_NO_STATE_MUTATION=YES'
+
+      - name: Recent Hyperliquid service failures
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '========== RECENT HYPERLIQUID SERVICE JOURNALS =========='
+          mapfile -t units < <(systemctl list-unit-files 'hyperliquid-*.service' 'hlcopy-*.service' --no-legend 2>/dev/null | awk '{print $1}' | sort -u)
+          for unit in "${units[@]}"; do
+            state=$(systemctl show "$unit" -p ActiveState --value 2>/dev/null || true)
+            result=$(systemctl show "$unit" -p Result --value 2>/dev/null || true)
+            if [[ "$state" == "failed" || ( -n "$result" && "$result" != "success" ) ]]; then
+              echo "--- $unit state=$state result=$result ---"
+              journalctl -u "$unit" --since '2026-08-18 00:00:00 UTC' -n 120 --no-pager || true
+            fi
+          done
+          echo 'READ_ONLY_NO_SERVICE_CHANGE=YES'
+
+      - name: Final safety assertion
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '========== AUDIT COMPLETE =========='
+          echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'DELETION_PERFORMED=NO'
+          echo 'POSTGRES_START_STOP=NO'
+          echo 'SYSTEMD_START_STOP=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
