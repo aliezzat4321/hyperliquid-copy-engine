@@ -15,8 +15,8 @@ CREATE TABLE IF NOT EXISTS raw_api_responses (
 );
 -- Post-normalization observation rows preserve request/time/hash identity while the
 -- canonical response body lives once in raw_api_payloads. Do not add a large
--- observation-table hash index during storage recovery; the write path uses the
--- raw_api_payloads primary key instead.
+-- observation-table hash index during storage recovery because the write path uses
+-- the raw_api_payloads primary key instead.
 
 CREATE TABLE IF NOT EXISTS wallets (
     address TEXT PRIMARY KEY,
