@@ -266,3 +266,34 @@ def test_commit_and_push_restores_agent_ownership_before_staging(
         tmp_path, {"issue_number": 1, "task_type": "BUILD"}, "codex/test"
     )
     assert normalized == [(tmp_path, orch.CODEX_USER)]
+
+
+def test_codex_resume_places_exec_options_before_resume_subcommand(
+    tmp_path: Path, monkeypatch
+) -> None:
+    seen = {}
+    team = object.__new__(orch.Orchestrator)
+    team.cfg = {"build_timeout_seconds": 30}
+
+    def fake_sandbox(*, unit, user, home, workdir, command):
+        seen["command"] = command
+        return command
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(orch, "model_sandbox_command", fake_sandbox)
+    monkeypatch.setattr(orch, "run", fake_run)
+    team.invoke_codex(
+        {"session_id": "session-123"}, tmp_path, "continue", "unit-test"
+    )
+    assert seen["command"] == [
+        "/usr/local/bin/codex",
+        "exec",
+        "--json",
+        "--sandbox",
+        "workspace-write",
+        "resume",
+        "session-123",
+        "-",
+    ]

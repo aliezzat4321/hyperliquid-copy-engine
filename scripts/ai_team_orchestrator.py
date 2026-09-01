@@ -1208,11 +1208,11 @@ class Orchestrator:
             command = [
                 "/usr/local/bin/codex",
                 "exec",
-                "resume",
-                str(task["session_id"]),
                 "--json",
                 "--sandbox",
                 "workspace-write",
+                "resume",
+                str(task["session_id"]),
                 "-",
             ]
         else:
