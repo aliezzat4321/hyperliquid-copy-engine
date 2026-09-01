@@ -679,7 +679,7 @@ def model_sandbox_command(
 
 def codex_runtime_preflight(
     codex_path: Path = Path("/usr/local/bin/codex"),
-    bwrap_path: Path = Path("/usr/bin/bwrap"),
+    bwrap_path: Path = Path("/usr/local/bin/bwrap"),
 ) -> Path:
     """Refuse a model call if Codex or its Linux sandbox dependencies are missing."""
     if not codex_path.is_file() or not os.access(codex_path, os.X_OK):
