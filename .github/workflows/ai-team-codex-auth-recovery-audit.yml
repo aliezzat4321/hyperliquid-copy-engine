@@ -1,0 +1,43 @@
+name: ai-team-codex-auth-recovery-audit
+
+on:
+  push:
+    branches: [codex/126-ai-orchestrator]
+    paths:
+      - .github/workflows/ai-team-codex-auth-recovery-audit.yml
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: [self-hosted, linux]
+    steps:
+      - name: Compare Codex auth capability without reading credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
+          echo 'POLYMARKET_INSPECTION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+          systemctl stop hyperliquid-ai-team-orchestrator.timer || true
+          echo 'AI_TEAM_TIMER=PAUSED_FOR_AUTH_AUDIT'
+          echo '--- root login status ---'
+          HOME=/root CODEX_HOME=/root/.codex /usr/local/bin/codex login status || true
+          echo '--- isolated agent login status ---'
+          setpriv --reuid="$(id -u hl-codex-agent)" --regid="$(id -g hl-codex-agent)" --init-groups \
+            env HOME=/var/lib/hyperliquid-ai-team/agents/codex/home \
+                CODEX_HOME=/var/lib/hyperliquid-ai-team/agents/codex/home/.codex \
+                /usr/local/bin/codex login status || true
+          echo '--- auth cache metadata only ---'
+          for f in /root/.codex/auth.json /var/lib/hyperliquid-ai-team/agents/codex/home/.codex/auth.json; do
+            if [[ -f "$f" ]]; then
+              stat -c 'AUTH_META path=%n size=%s mtime=%Y owner=%U:%G mode=%a' "$f"
+              sha256sum "$f" | sed 's/  .*/  [AUTH_CACHE]/'
+            else
+              echo "AUTH_META missing=$f"
+            fi
+          done
+          echo 'POLYMARKET_TOUCHED=NO'
+          echo 'REAL_TRADING_TOUCHED=NO'
