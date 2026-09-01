@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,15 +20,32 @@ validate_target_used_pct = MODULE.validate_target_used_pct
 NOW = datetime(2026, 8, 31, 14, 0, tzinfo=UTC)
 
 
-@pytest.mark.parametrize("target", [70.0, 75.0, 79.999])
+@pytest.mark.parametrize("target", [70.0, 75.0, 79.999, 92.0])
 def test_accepts_storage_closure_target(target: float) -> None:
     assert validate_target_used_pct(target) == target
 
 
-@pytest.mark.parametrize("target", [69.999, 80.0, 92.0])
+@pytest.mark.parametrize("target", [69.999, 92.001, float("inf"), float("nan")])
 def test_rejects_target_outside_storage_closure_band(target: float) -> None:
-    with pytest.raises(ValueError, match="at least 70 and below 80"):
+    with pytest.raises(ValueError, match="between 70 and 92 inclusive"):
         validate_target_used_pct(target)
+
+
+def test_workflow_target_literals_are_accepted_by_apply_validator() -> None:
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "hyperliquid-emergency-storage-reclaim.yml"
+    )
+    targets = re.findall(
+        r"--target-used-pct\s+([0-9]+(?:\.[0-9]+)?)",
+        workflow.read_text(encoding="utf-8"),
+    )
+    assert targets, "workflow must declare at least one explicit --target-used-pct"
+    for target in targets:
+        value = float(target)
+        assert validate_target_used_pct(value) == value
 
 
 def _manifest(

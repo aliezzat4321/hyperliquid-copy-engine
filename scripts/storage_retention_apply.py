@@ -16,6 +16,8 @@ EXPECTED_MARKET_ROOT = Path("/mnt/HC_Volume_106576526/hyperliquid/market-shadow"
 EXPECTED_MOUNT = Path("/mnt/HC_Volume_106576526")
 GIB = 1024**3
 MAX_DELETE_CANDIDATE_BYTES = 12 * GIB
+MIN_TARGET_USED_PCT = 70.0
+MAX_TARGET_USED_PCT = 92.0
 
 
 @dataclass(frozen=True)
@@ -311,9 +313,12 @@ def apply_candidates(
 
 
 def validate_target_used_pct(value: float) -> float:
-    """Validate the closure target shared by dry-run and apply callers."""
-    if not (70.0 <= value < 80.0):
-        raise ValueError("closure target-used-pct must be at least 70 and below 80")
+    """Validate the bounded target shared by dry-run and emergency apply callers."""
+    if not (MIN_TARGET_USED_PCT <= value <= MAX_TARGET_USED_PCT):
+        raise ValueError(
+            "target-used-pct must be between "
+            f"{MIN_TARGET_USED_PCT:g} and {MAX_TARGET_USED_PCT:g} inclusive"
+        )
     return value
 
 
