@@ -17,8 +17,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 REPOSITORY = "aliezzat4321/hyperliquid-copy-engine"
 BOARD_ID = "6a9713c265a75ed50d4181d7"
@@ -53,7 +54,7 @@ FALLBACKS = {
 
 
 def utcnow() -> dt.datetime:
-    return dt.datetime.now(dt.timezone.utc)
+    return dt.datetime.now(dt.UTC)
 
 
 def iso(value: dt.datetime) -> str:
@@ -65,7 +66,7 @@ def parse_time(value: Any) -> dt.datetime | None:
         return None
     try:
         parsed = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.timezone.utc)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.UTC)
     except ValueError:
         return None
 

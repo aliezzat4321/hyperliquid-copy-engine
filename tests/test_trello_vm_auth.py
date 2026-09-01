@@ -59,8 +59,7 @@ def test_main_uses_hidden_inputs_prints_url_and_ready_after_verify(
     monkeypatch.setattr(auth.getpass, "getpass", lambda _prompt: next(answers))
     verified = []
     monkeypatch.setattr(auth, "verify", lambda key, token: verified.append((key, token)))
-    monkeypatch.setattr(auth.sys, "argv", ["trello_vm_auth.py", "--output", str(tmp_path / "env")])
-    assert auth.main() == 0
+    assert auth.main(["--output", str(tmp_path / "env")]) == 0
     output = capsys.readouterr().out
     assert "api-token" not in output
     assert "api-key" in output  # authorization URL necessarily contains the public API key

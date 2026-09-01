@@ -7,11 +7,11 @@ import argparse
 import getpass
 import json
 import os
-import sys
 import urllib.parse
 import urllib.request
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 BOARD_ID = "6a9713c265a75ed50d4181d7"
 LIST_IDS = {
@@ -65,10 +65,10 @@ def store(path: Path, key: str, token: str) -> None:
             tmp.unlink()
 
 
-def main() -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=ENV_PATH, help=argparse.SUPPRESS)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if os.geteuid() != 0:
         raise SystemExit("run as root; credential must be root-owned")
     key = getpass.getpass("Trello API key (hidden): ").strip()
