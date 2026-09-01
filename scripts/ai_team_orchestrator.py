@@ -101,6 +101,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
             r"LIVE_TRADING_ENABLED\s*=\s*(YES|TRUE|1)",
         ],
         "no_auto_merge_path_prefixes": [
+            ".github/workflows/",
+            "config/ai_team_router.json",
+            "deploy/systemd/",
+            "scripts/ai_team_",
+            "scripts/install_codex_code_mode_host.sh",
+            "scripts/install_ai_team_orchestrator.sh",
             "src/hlcopy/trading/",
             "docs/ai-team/LIVE_TRADING_GATE.md",
             "services/invo-notification-executor/src/hl-client.ts",
@@ -491,6 +497,12 @@ class Ledger:
 
 
 def parse_task_class(body: str) -> tuple[str, str | None]:
+    """Parse an explicit task class, failing closed when absent or invalid.
+
+    UNCLASSIFIED uses the routine Sonnet review route but is deliberately absent
+    from auto_merge_task_classes, so only an explicitly declared ROUTINE task can
+    reach automatic merge.
+    """
     allowed = {
         "ROUTINE",
         "QUANT_PROFITABILITY",
@@ -500,7 +512,7 @@ def parse_task_class(body: str) -> tuple[str, str | None]:
         "CAPITAL_SENSITIVE_METHODOLOGY",
     }
     m = re.search(r"(?mi)^\s*(?:AI_)?TASK_CLASS\s*=\s*([A-Z_]+)\s*$", body or "")
-    task_class = m.group(1) if m and m.group(1) in allowed else "ROUTINE"
+    task_class = m.group(1) if m and m.group(1) in allowed else "UNCLASSIFIED"
     e = re.search(r"(?mi)^\s*OPUS_ESCALATION_REASON\s*=\s*([A-Z_]+)\s*$", body or "")
     return task_class, e.group(1) if e else None
 

@@ -39,8 +39,10 @@ def test_unknown_opus_reason_fails_closed():
         orch.route_review(orch.DEFAULT_CONFIG, "MAJOR_ARCHITECTURE", "BECAUSE_I_WANT_IT")
 
 
-def test_task_class_defaults_to_routine_and_parses_explicit_class():
-    assert orch.parse_task_class("ordinary issue") == ("ROUTINE", None)
+def test_task_class_fails_closed_and_parses_explicit_class():
+    assert orch.parse_task_class("ordinary issue") == ("UNCLASSIFIED", None)
+    assert orch.parse_task_class("TASK_CLASS=NOT_A_CLASS") == ("UNCLASSIFIED", None)
+    assert orch.parse_task_class("TASK_CLASS=ROUTINE") == ("ROUTINE", None)
     assert orch.parse_task_class(
         "AI_TASK_CLASS=STATISTICAL_METHODOLOGY\nOPUS_ESCALATION_REASON=STATISTICAL_METHODOLOGY\n"
     ) == ("STATISTICAL_METHODOLOGY", "STATISTICAL_METHODOLOGY")
@@ -166,6 +168,30 @@ def test_forbidden_live_enablement_patterns_are_present():
 def test_live_sensitive_path_is_not_auto_mergeable():
     protected = orch.DEFAULT_CONFIG["safety"]["no_auto_merge_path_prefixes"]
     assert any("src/hlcopy/trading/permissions.py".startswith(p) for p in protected)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "deploy/systemd/hyperliquid-ai-team-orchestrator.service",
+        ".github/workflows/deploy-ai-team-orchestrator.yml",
+        "config/ai_team_router.json",
+        "scripts/ai_team_orchestrator.py",
+        "scripts/ai_team_runtime_ledger.py",
+        "scripts/install_codex_code_mode_host.sh",
+        "scripts/install_ai_team_orchestrator.sh",
+    ],
+)
+def test_orchestrator_control_plane_paths_are_not_auto_mergeable(path):
+    protected = orch.DEFAULT_CONFIG["safety"]["no_auto_merge_path_prefixes"]
+    assert any(path.startswith(prefix) for prefix in protected)
+
+
+def test_only_explicit_routine_class_is_auto_merge_eligible():
+    auto_merge = orch.DEFAULT_CONFIG["auto_merge_task_classes"]
+    assert orch.parse_task_class("TASK_CLASS=ROUTINE")[0] in auto_merge
+    assert orch.parse_task_class("missing classification")[0] not in auto_merge
+    assert orch.parse_task_class("TASK_CLASS=INVALID")[0] not in auto_merge
 
 
 def test_result_marker_is_machine_readable_json_blockers():
