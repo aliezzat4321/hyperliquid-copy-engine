@@ -1,0 +1,47 @@
+name: ai-team-codex-auth-smoke-temp
+
+on:
+  push:
+    branches: [codex/126-ai-orchestrator]
+    paths:
+      - .github/workflows/ai-team-codex-auth-smoke-temp.yml
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 3
+    steps:
+      - name: Verify isolated Codex subscription auth
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
+          echo 'POLYMARKET_INSPECTION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+          systemctl stop hyperliquid-ai-team-orchestrator.timer || true
+          work=/var/lib/hyperliquid-ai-team/agents/codex/worktrees/auth-smoke
+          rm -rf "$work"
+          install -d -o hl-codex-agent -g hl-codex-agent -m 0700 "$work"
+          uid=$(id -u hl-codex-agent)
+          gid=$(id -g hl-codex-agent)
+          set +e
+          out=$(printf '%s\n' 'Reply exactly: CODEX_AGENT_AUTH_OK' | timeout 90s \
+            setpriv --reuid="$uid" --regid="$gid" --init-groups \
+            env HOME=/var/lib/hyperliquid-ai-team/agents/codex/home \
+                CODEX_HOME=/var/lib/hyperliquid-ai-team/agents/codex/home/.codex \
+                /usr/local/bin/codex exec --json --sandbox workspace-write --skip-git-repo-check - 2>&1)
+          rc=$?
+          set -e
+          printf '%s\n' "$out" | sed -E 's/(token|authorization|cookie|secret|password)[=:][^ ,]*/\1=[REDACTED]/Ig'
+          test "$rc" -eq 0
+          printf '%s\n' "$out" | grep -q 'CODEX_AGENT_AUTH_OK'
+          rm -rf "$work"
+          systemctl start hyperliquid-ai-team-orchestrator.timer
+          echo 'CODEX_AGENT_AUTH=READY'
+          echo 'AI_TEAM_TIMER=ACTIVE'
+          echo 'POLYMARKET_TOUCHED=NO'
+          echo 'REAL_TRADING_TOUCHED=NO'
