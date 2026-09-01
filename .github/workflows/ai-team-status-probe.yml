@@ -23,6 +23,7 @@ jobs:
           echo 'REAL_TRADING_CHANGE=NO'
           hl-ai-team-status
           systemctl status hyperliquid-ai-team-orchestrator.service --no-pager -l || true
-          journalctl -u hyperliquid-ai-team-orchestrator.service -n 80 --no-pager -l || true
+          journalctl -u hyperliquid-ai-team-orchestrator.service -n 120 --no-pager -l || true
+          echo 'PROBE_REVISION=2'
           echo 'POLYMARKET_TOUCHED=NO'
           echo 'REAL_TRADING_TOUCHED=NO'
