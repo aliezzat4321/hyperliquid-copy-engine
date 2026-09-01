@@ -24,11 +24,6 @@ jobs:
           CLAUDE_HOME=/var/lib/hyperliquid-ai-team/agents/claude/home
           UID_C="$(id -u hl-claude-agent)"
           GID_C="$(id -g hl-claude-agent)"
-          test -d "$CLAUDE_HOME"
-          echo "CLAUDE_HOME_OWNER=$(stat -c '%U:%G' "$CLAUDE_HOME")"
-          for p in "$CLAUDE_HOME/.claude" "$CLAUDE_HOME/.config"; do
-            if [[ -e "$p" ]]; then echo "CONFIG_PRESENT=$(basename "$p") owner=$(stat -c '%U:%G' "$p") mode=$(stat -c '%a' "$p")"; fi
-          done
           set +e
           timeout 45 setpriv --reuid="$UID_C" --regid="$GID_C" --init-groups \
             env -i HOME="$CLAUDE_HOME" CLAUDE_CONFIG_DIR="$CLAUDE_HOME/.claude" \
@@ -40,17 +35,33 @@ jobs:
           RC=$?
           set -e
           echo "CLAUDE_DIAGNOSTIC_RC=$RC"
-          echo "STDOUT_BYTES=$(wc -c </tmp/claude-diagnostic.out)"
-          echo "STDERR_BYTES=$(wc -c </tmp/claude-diagnostic.err)"
           python3 - <<'PY'
+          import json, re
           from pathlib import Path
-          text=(Path('/tmp/claude-diagnostic.out').read_text(errors='replace')+'\n'+Path('/tmp/claude-diagnostic.err').read_text(errors='replace')).lower()
+          raw=Path('/tmp/claude-diagnostic.out').read_text(errors='replace')
+          err=Path('/tmp/claude-diagnostic.err').read_text(errors='replace')
+          try:
+              row=json.loads(raw)
+          except Exception:
+              row={}
+          print('JSON_TYPE='+str(row.get('type','NONE'))[:80])
+          print('JSON_SUBTYPE='+str(row.get('subtype','NONE'))[:80])
+          print('JSON_IS_ERROR='+str(row.get('is_error','NONE'))[:20])
+          print('JSON_NUM_TURNS='+str(row.get('num_turns','NONE'))[:20])
+          result=str(row.get('result') or '')
+          # Emit only a tightly sanitized diagnostic message: remove URL/token-ish material and cap length.
+          safe=re.sub(r'https?://\S+','<url>',result)
+          safe=re.sub(r'(?i)(token|key|secret|authorization)\s*[:=]\s*\S+',r'\1=<redacted>',safe)
+          safe=' '.join(safe.split())[:500]
+          print('JSON_RESULT_SAFE='+safe)
+          combined=(raw+'\n'+err).lower()
           checks={
-            'AUTH_SIGNAL': any(x in text for x in ['not logged in','authentication','unauthorized','oauth','login required','invalid token']),
-            'RATE_SIGNAL': any(x in text for x in ['rate limit','usage limit','too many requests','capacity']),
-            'NETWORK_SIGNAL': any(x in text for x in ['network','connection','econn','timeout','timed out','dns']),
-            'MODEL_SIGNAL': any(x in text for x in ['model','sonnet']) and any(x in text for x in ['unavailable','not found','invalid']),
-            'SUCCESS_SIGNAL': 'claude_runtime_ok' in text,
+            'AUTH_SIGNAL': any(x in combined for x in ['not logged in','authentication','unauthorized','oauth','login required','invalid token']),
+            'RATE_SIGNAL': any(x in combined for x in ['rate limit','usage limit','too many requests','capacity','limit reached']),
+            'NETWORK_SIGNAL': any(x in combined for x in ['network','connection','econn','timeout','timed out','dns']),
+            'MODEL_SIGNAL': any(x in combined for x in ['model','sonnet']) and any(x in combined for x in ['unavailable','not found','invalid']),
+            'PERMISSION_SIGNAL': any(x in combined for x in ['permission','not allowed','access denied']),
+            'SUCCESS_SIGNAL': 'claude_runtime_ok' in combined,
           }
           for k,v in checks.items(): print(f'{k}={"YES" if v else "NO"}')
           PY
