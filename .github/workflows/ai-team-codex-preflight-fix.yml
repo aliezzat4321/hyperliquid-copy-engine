@@ -1,0 +1,63 @@
+name: ai-team-codex-preflight-fix
+
+on:
+  push:
+    branches: [codex/126-ai-orchestrator]
+    paths: [".github/workflows/ai-team-codex-preflight-fix.yml"]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/126-ai-orchestrator
+          fetch-depth: 0
+      - name: Add fail-fast Codex host preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('scripts/ai_team_orchestrator.py')
+          text = path.read_text()
+          helper = '''\n\ndef codex_runtime_preflight(\n    codex_path: Path = Path("/usr/local/bin/codex"),\n) -> Path:\n    """Refuse a model call if Codex or its required Code Mode host is missing."""\n    if not codex_path.is_file() or not os.access(codex_path, os.X_OK):\n        raise RuntimeError(f"Codex CLI missing or not executable: {codex_path}")\n    host = codex_path.with_name("codex-code-mode-host")\n    if not host.is_file() or not os.access(host, os.X_OK):\n        raise RuntimeError(\n            "Codex Code Mode host missing or not executable; refusing model call: "\n            f"{host}"\n        )\n    return host\n'''
+          anchor = '\n\ndef parse_codex_stream('
+          if 'def codex_runtime_preflight(' not in text:
+              if text.count(anchor) != 1:
+                  raise SystemExit('parse_codex_stream anchor mismatch')
+              text = text.replace(anchor, helper + anchor, 1)
+
+          call = '''        try:\n            codex_runtime_preflight()\n        except RuntimeError as exc:\n            self.block(task, f"CODEX_RUNTIME_PREFLIGHT: {exc}")\n            return\n'''
+          handle_anchor = '''        if str(issue.get("author_association") or "") not in self.trusted:\n            self.block(task, "issue author association no longer trusted")\n            return\n'''
+          if 'CODEX_RUNTIME_PREFLIGHT:' not in text:
+              if text.count(handle_anchor) != 1:
+                  raise SystemExit('handle_codex trust anchor mismatch')
+              text = text.replace(handle_anchor, handle_anchor + call, 1)
+          path.write_text(text)
+
+          tests = Path('tests/test_ai_team_orchestrator.py')
+          t = tests.read_text()
+          if 'test_codex_runtime_preflight_requires_companion_host' not in t:
+              t += '''\n\ndef test_codex_runtime_preflight_requires_companion_host(tmp_path):\n    codex = tmp_path / "codex"\n    codex.write_text("#!/bin/sh\\n")\n    codex.chmod(0o755)\n    with pytest.raises(RuntimeError, match="Code Mode host missing"):\n        orch.codex_runtime_preflight(codex)\n\n    host = tmp_path / "codex-code-mode-host"\n    host.write_text("#!/bin/sh\\n")\n    host.chmod(0o755)\n    assert orch.codex_runtime_preflight(codex) == host\n'''
+              tests.write_text(t)
+          PY
+          python3 -m py_compile scripts/ai_team_orchestrator.py
+          if command -v ruff >/dev/null 2>&1; then
+            ruff format scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
+            ruff check scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
+          fi
+      - name: Commit patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'hyperliquid-ai-team'
+          git config user.email 'hyperliquid-ai-team@users.noreply.github.com'
+          git add scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
+          git commit -m 'Fail fast when Codex Code Mode host is unavailable'
+          git push origin HEAD:codex/126-ai-orchestrator
