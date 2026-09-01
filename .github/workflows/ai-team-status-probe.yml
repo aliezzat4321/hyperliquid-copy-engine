@@ -22,8 +22,11 @@ jobs:
           echo 'POLYMARKET_MUTATION=NO'
           echo 'REAL_TRADING_CHANGE=NO'
           hl-ai-team-status
-          systemctl status hyperliquid-ai-team-orchestrator.service --no-pager -l || true
-          journalctl -u hyperliquid-ai-team-orchestrator.service -n 120 --no-pager -l || true
-          echo 'PROBE_REVISION=2'
+          echo '=== DRY RUN CODEX LOG ==='
+          find /var/lib/hyperliquid-ai-team/agents/codex/logs -maxdepth 1 -type f \
+            -name '5e939708d6ac4568-*' -print -exec tail -n 120 {} \; || true
+          echo '=== AI TEAM SERVICE JOURNAL ==='
+          journalctl -u hyperliquid-ai-team-orchestrator.service -n 60 --no-pager -l || true
+          echo 'PROBE_REVISION=3'
           echo 'POLYMARKET_TOUCHED=NO'
           echo 'REAL_TRADING_TOUCHED=NO'
