@@ -1,0 +1,49 @@
+name: ai-team-runtime-diagnose
+
+on:
+  push:
+    branches: [codex/126-ai-orchestrator]
+    paths:
+      - .github/workflows/ai-team-runtime-diagnose.yml
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: [self-hosted, linux]
+    steps:
+      - name: Inspect Hyperliquid AI-team runtime only
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
+          echo 'POLYMARKET_INSPECTION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+          echo '--- status ---'
+          hl-ai-team-status || true
+          echo '--- latest ledger tasks/runs ---'
+          python3 - <<'PY'
+          import sqlite3
+          p='/var/lib/hyperliquid-ai-team/orchestrator/ledger.sqlite3'
+          db=sqlite3.connect(p)
+          db.row_factory=sqlite3.Row
+          for r in db.execute('select id,issue_number,pr_number,task_type,agent,model_class,status,branch,target_sha,session_id,attempt,retry_at,last_error,updated_at from tasks order by created_at desc limit 8'):
+              print(dict(r))
+          print('RUNS')
+          for r in db.execute('select id,task_id,agent,model_class,started_at,ended_at,exit_code,session_id,input_tokens,output_tokens,cached_input_tokens,log_path,error from runs order by id desc limit 8'):
+              print(dict(r))
+          PY
+          echo '--- recent service journal ---'
+          journalctl -u hyperliquid-ai-team-orchestrator.service --since '6 hours ago' -n 120 --no-pager -o cat || true
+          echo '--- latest Codex log (redacted) ---'
+          latest="$(find /var/lib/hyperliquid-ai-team/agents/codex/logs -maxdepth 1 -type f -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2- || true)"
+          if [[ -n "$latest" ]]; then
+            echo "log=$(basename "$latest")"
+            tail -n 160 "$latest" | sed -E 's/(sk-ant-[A-Za-z0-9_-]+|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|Bearer [A-Za-z0-9._-]+)/[REDACTED]/g'
+          else
+            echo 'NO_CODEX_LOG'
+          fi
+          echo 'POLYMARKET_TOUCHED=NO'
+          echo 'REAL_TRADING_TOUCHED=NO'
