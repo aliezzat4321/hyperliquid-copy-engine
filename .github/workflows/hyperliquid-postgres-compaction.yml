@@ -6,6 +6,7 @@ on:
       - codex/113-postgres-compaction-v1
     paths:
       - "scripts/postgres_storage_compact_v1.py"
+      - "tests/test_postgres_storage_compact_v1.py"
       - ".github/workflows/hyperliquid-postgres-compaction.yml"
   workflow_dispatch:
     inputs:
@@ -25,9 +26,14 @@ on:
 permissions:
   contents: read
 
+# New pushes may cancel stale read-only planning runs, but they must never cancel
+# an already-authorized destructive apply. Keep plan/apply in separate groups.
 concurrency:
-  group: hyperliquid-postgres-compaction
-  cancel-in-progress: true
+  group: >-
+    ${{ github.event_name == 'workflow_dispatch'
+        && 'hyperliquid-postgres-compaction-apply'
+        || 'hyperliquid-postgres-compaction-plan' }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 env:
   REVIEW_ROOT: /root/hyperliquid-audit/postgres-compaction/reviewed
