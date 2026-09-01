@@ -5,7 +5,6 @@ import json
 import sqlite3
 from pathlib import Path
 
-
 MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "ai_team_runtime_ledger.py"
 SPEC = importlib.util.spec_from_file_location("ai_team_runtime_ledger", MODULE_PATH)
 assert SPEC and SPEC.loader
@@ -93,7 +92,15 @@ def make_db(path: Path) -> None:
         INSERT INTO runs(task_id,agent,model_class,started_at,exit_code,session_id,input_tokens)
         VALUES(?,?,?,?,?,?,?)
         """,
-        ("task123", "CODEX_CHATGPT", "CODEX_DEFAULT", "2026-09-01T10:01:00Z", 0, "session-abc", 123),
+        (
+            "task123",
+            "CODEX_CHATGPT",
+            "CODEX_DEFAULT",
+            "2026-09-01T10:01:00Z",
+            0,
+            "session-abc",
+            123,
+        ),
     )
     db.commit()
     db.close()

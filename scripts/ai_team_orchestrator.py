@@ -111,7 +111,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 
 def utcnow() -> str:
-    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    now = dt.datetime.now(dt.timezone.utc)
+    return now.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def parse_utc(value: str | None) -> dt.datetime | None:
@@ -1802,7 +1803,9 @@ The reviewed SHA must be exactly the target SHA.
             return
         state, detail = self.gh.check_state(target)
         if state == "PENDING":
-            retry = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=int(self.cfg["poll_seconds"]))
+            retry = dt.datetime.now(dt.timezone.utc) + dt.timedelta(
+                seconds=int(self.cfg["poll_seconds"])
+            )
             self.ledger.update(
                 task["id"],
                 status="WAITING_CI",

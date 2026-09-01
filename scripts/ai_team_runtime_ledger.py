@@ -37,7 +37,8 @@ _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 
 
 def utcnow() -> str:
-    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    now = dt.datetime.now(dt.timezone.utc)  # noqa: UP017 - VM supports Python 3.10
+    return now.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def redact(text: str | None) -> str:
@@ -388,7 +389,9 @@ class RuntimeLedgerFiles:
         checkpoint_data["session_id"] = session_id or data.get("session_id")
         checkpoint_data["retry_at"] = retry_after
         checkpoint_data["last_error"] = error
-        checkpoint_data["blockers_json"] = json.dumps(blockers or _safe_blockers(data.get("blockers_json")))
+        checkpoint_data["blockers_json"] = json.dumps(
+            blockers or _safe_blockers(data.get("blockers_json"))
+        )
         self.checkpoint(checkpoint_data, status=status, heartbeat_at=ended)
         self.event(
             "RUN_FINISHED",
@@ -549,12 +552,14 @@ class RuntimeLedgerFiles:
         body = (
             "<!-- AI_TEAM_RUNTIME_STATUS_V1 -->\n"
             "# AI TEAM RUNTIME STATUS\n\n"
-            "Canonical runtime handoff for #129. GitHub remains canonical for accepted code/tasks/reviews; "
+            "Canonical runtime handoff for #129. GitHub remains canonical for accepted "
+            "code/tasks/reviews; "
             "the VM ledger is canonical for transient execution.\n\n"
             "```json\n"
             + raw
             + "\n```\n\n"
-            "Fresh-session bootstrap: read this checkpoint and `AGENTS.md`, verify GitHub state, then continue "
+            "Fresh-session bootstrap: read this checkpoint and `AGENTS.md`, verify GitHub "
+            "state, then continue "
             "the listed next step. Do not rely on previous chat history.\n"
         )
         if len(body.encode("utf-8")) > MAX_HANDOFF_BYTES:
