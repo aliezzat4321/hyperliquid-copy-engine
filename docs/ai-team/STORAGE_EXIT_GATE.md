@@ -14,13 +14,17 @@ independent Claude Opus review is required before either apply step.
    using `--apply --manifest ... --expected-sha256 ...`. Preserve the audit output.
 3. Re-run the storage-retention audit against complete current funnel evidence. Record
    the manifest SHA-256 and obtain exact-SHA independent review. Apply only that exact
-   manifest with `scripts/storage_retention_apply.py`; the default target is 75% and the
-   script rejects targets at or above 80%.
+   manifest with `scripts/storage_retention_apply.py`; the default target is 79% and the
+   script rejects targets at or above 80%. Before deleting anything, apply verifies that
+   the reviewed candidate bytes can reach the requested target; otherwise it fails closed.
 4. Run `scripts/storage_controller.py` to create the baseline observation. Wire the
    manager-owned hourly job to provide the preceding successful observation and to stop
    **all** names in `controlled_writers` whenever the decision is
    `STOP_ALL_MATERIAL_WRITERS`. Resume only after a later `ALLOW` decision. Deployment or
    service-definition changes are owner-sensitive and are deliberately not in this PR.
+   The manager must also retire the incumbent `hyperliquid_storage_guard.sh` resume path:
+   it must never restart capture from mount percentages independently of a later controller
+   `ALLOW` decision.
 5. Restart capture/research/profitability loops through manager controls. Collect
    successive controller observations across at least the configured 24-hour history
    window.
@@ -32,6 +36,8 @@ independent Claude Opus review is required before either apply step.
 - Retention apply audit reaches below 80% (preferably at or below 75%) using only reviewed
   candidates. Recent and robust tape remains full fidelity. Older useful evidence is not
   deleted; compression/downsampling requires its own reviewed implementation evidence.
+- Manager-owned `hyperliquid-emergency-storage-reclaim.yml` invocations must pass a target
+  in the controller's exit band (79%, not 92%) for both dry-run and reviewed apply jobs.
 - Every policy dataset has a non-empty owner, writer, retention class, byte budget,
   growth budget and pressure control. No material writer is absent from the registry.
 - Successive observations report bounded bytes/hour, acceptable time-to-full, no budget

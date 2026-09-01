@@ -15,7 +15,7 @@ from pathlib import Path
 
 def _du(path: Path) -> int:
     if not path.exists():
-        return 0
+        raise FileNotFoundError(f"governed dataset path does not exist: {path}")
     return int(subprocess.check_output(["du", "-sb", str(path)], text=True).split()[0])
 
 
@@ -27,7 +27,7 @@ def _load(path: Path) -> dict:
 
 
 def decide(policy: dict, previous: dict | None, *, mount: Path, now: datetime) -> dict:
-    required = {"schema_version", "warn_used_pct", "stop_used_pct", "resume_used_pct", "minimum_forecast_hours", "datasets"}
+    required = {"schema_version", "warn_used_pct", "stop_used_pct", "resume_used_pct", "minimum_forecast_hours", "history_window_hours", "datasets"}
     missing = required - policy.keys()
     if missing:
         raise ValueError(f"policy missing fields: {sorted(missing)}")
@@ -37,6 +37,9 @@ def decide(policy: dict, previous: dict | None, *, mount: Path, now: datetime) -
     datasets = policy["datasets"]
     if not isinstance(datasets, list) or not datasets:
         raise ValueError("policy must govern at least one dataset")
+    maximum_age_hours = float(policy["history_window_hours"])
+    if maximum_age_hours <= 0:
+        raise ValueError("history_window_hours must be positive")
     names, rows = set(), []
     previous_rows = {r["name"]: r for r in (previous or {}).get("datasets", [])}
     previous_at = None
@@ -44,6 +47,12 @@ def decide(policy: dict, previous: dict | None, *, mount: Path, now: datetime) -
         previous_at = datetime.fromisoformat(str(previous["observed_at"]).replace("Z", "+00:00"))
         if previous_at.tzinfo is None or now <= previous_at:
             raise ValueError("previous observation time is invalid")
+        age_hours = (now - previous_at).total_seconds() / 3600
+        if age_hours > maximum_age_hours:
+            raise ValueError(
+                "previous observation is stale: "
+                f"age_hours={age_hours:.3f} history_window_hours={maximum_age_hours}"
+            )
     elapsed_hours = (now - previous_at).total_seconds() / 3600 if previous_at else None
     for item in datasets:
         for key in ("name", "path", "owner", "writer", "retention_class", "byte_budget", "growth_budget_bytes_per_hour", "pressure_control"):
