@@ -8,6 +8,7 @@ on:
     paths:
       - "scripts/ai_team_orchestrator.py"
       - "scripts/ai_team_runtime_ledger.py"
+      - "scripts/ai_team_auth_codex.sh"
       - "scripts/ai_team_auth_claude.sh"
       - "scripts/install_ai_team_orchestrator.sh"
       - "scripts/install_codex_code_mode_host.sh"
@@ -48,8 +49,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 -m py_compile scripts/ai_team_orchestrator.py
+          python3 -m py_compile scripts/ai_team_orchestrator.py scripts/ai_team_runtime_ledger.py
           python3 -m json.tool config/ai_team_router.json >/dev/null
+          bash -n scripts/ai_team_auth_codex.sh
           bash -n scripts/ai_team_auth_claude.sh
           bash -n scripts/install_ai_team_orchestrator.sh
           bash -n scripts/install_codex_code_mode_host.sh
@@ -63,6 +65,8 @@ jobs:
           set -euo pipefail
           bash scripts/install_ai_team_orchestrator.sh
           test -x /usr/local/bin/codex-code-mode-host
+          test -x /usr/local/bin/bwrap
+          test -x /usr/local/sbin/hl-ai-team-auth-codex
           systemctl start hyperliquid-ai-team-orchestrator.service
           systemctl is-enabled hyperliquid-ai-team-orchestrator.timer
           hl-ai-team-status
