@@ -671,6 +671,21 @@ def model_sandbox_command(
     return [*args, *command]
 
 
+def codex_runtime_preflight(
+    codex_path: Path = Path("/usr/local/bin/codex"),
+) -> Path:
+    """Refuse a model call if Codex or its required Code Mode host is missing."""
+    if not codex_path.is_file() or not os.access(codex_path, os.X_OK):
+        raise RuntimeError(f"Codex CLI missing or not executable: {codex_path}")
+    host = codex_path.with_name("codex-code-mode-host")
+    if not host.is_file() or not os.access(host, os.X_OK):
+        raise RuntimeError(
+            "Codex Code Mode host missing or not executable; refusing model call: "
+            f"{host}"
+        )
+    return host
+
+
 def parse_codex_stream(text: str) -> tuple[str | None, dict[str, int], str]:
     session_id = None
     usage: dict[str, int] = {}
@@ -847,6 +862,11 @@ class Orchestrator:
         issue = self.gh.issue(int(task["issue_number"]))
         if str(issue.get("author_association") or "") not in self.trusted:
             self.block(task, "issue author association no longer trusted")
+            return
+        try:
+            codex_runtime_preflight()
+        except RuntimeError as exc:
+            self.block(task, f"CODEX_RUNTIME_PREFLIGHT: {exc}")
             return
         if task["task_type"] == "BUILD":
             base_ref = "origin/main"

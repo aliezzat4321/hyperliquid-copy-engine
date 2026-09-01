@@ -194,3 +194,16 @@ def test_root_git_trust_is_scoped_to_exact_worktree(tmp_path, monkeypatch):
     assert captured["cmd"][:3] == ["git", "-c", f"safe.directory={tmp_path}"]
     assert captured["cmd"][3:] == ["-C", str(tmp_path), "rev-parse", "HEAD"]
     assert captured["check"] is True
+
+
+def test_codex_runtime_preflight_requires_companion_host(tmp_path):
+    codex = tmp_path / "codex"
+    codex.write_text("#!/bin/sh\n")
+    codex.chmod(0o755)
+    with pytest.raises(RuntimeError, match="Code Mode host missing"):
+        orch.codex_runtime_preflight(codex)
+
+    host = tmp_path / "codex-code-mode-host"
+    host.write_text("#!/bin/sh\n")
+    host.chmod(0o755)
+    assert orch.codex_runtime_preflight(codex) == host
