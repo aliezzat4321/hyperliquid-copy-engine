@@ -11,7 +11,7 @@ import argparse
 import json
 import shutil
 import subprocess
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -88,7 +88,7 @@ def evaluate(
     growth_bph: float | None = None
     if previous:
         prior_at = datetime.fromisoformat(str(previous["observed_at"]).replace("Z", "+00:00"))
-        elapsed = (now - prior_at.astimezone(timezone.utc)).total_seconds() / 3600
+        elapsed = (now - prior_at.astimezone(UTC)).total_seconds() / 3600
         if elapsed <= 0:
             raise ValueError("previous observation is not older than current observation")
         growth_bph = (used_bytes - int(previous["used_bytes"])) / elapsed
@@ -157,7 +157,7 @@ def main() -> None:
         total_bytes=usage.total,
         used_bytes=usage.used,
         previous=prior,
-        now=datetime.now(timezone.utc),
+        now=datetime.now(UTC),
         paused=paused,
     )
     if args.apply_pressure and result["state"] in {"PAUSE", "RESUME"}:

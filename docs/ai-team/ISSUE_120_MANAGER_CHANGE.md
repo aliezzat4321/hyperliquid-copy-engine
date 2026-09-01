@@ -1,7 +1,9 @@
 # Issue #120 protected workflow repair
 
-The autonomous builder may not edit `.github/workflows/**`. The manager must make the
-following exact protected-path change after exact-SHA independent review:
+`docs/ai-team/AUTONOMOUS_TEAM.md` permits workflow changes but requires non-automatic
+merge. However, Issue #120's explicit autonomous-builder boundary prohibits this builder
+from editing `.github/workflows/**`, so the manager must make the following exact
+protected-path change after exact-SHA independent review:
 
 ```diff
 diff --git a/.github/workflows/hyperliquid-emergency-storage-reclaim.yml b/.github/workflows/hyperliquid-emergency-storage-reclaim.yml
@@ -34,7 +36,8 @@ diff --git a/.github/workflows/hyperliquid-emergency-storage-reclaim.yml b/.gith
 
 Both occurrences are required: the first is the reviewed-manifest dry-run and the
 second is destructive apply. `75` is the executable's default, is inside its enforced
-`[70, 80)` closure band, and satisfies Issue #120's preferred post-cleanup target.
+`[70, 92]` inclusive validation range, and satisfies Issue #120's preferred post-cleanup
+target below 75--80%.
 
 The inserted step runs immediately before capture quiescence and invokes the same
 validation path without `--apply`. Normal step ordering makes quiescence depend on its
@@ -44,8 +47,9 @@ stopped before any reclaim attempt.
 After the protected edit, run:
 
 ```text
-python -m pytest tests/test_storage_retention_apply.py
-python -m ruff check scripts/storage_retention_apply.py tests/test_storage_retention_apply.py
+python -m pytest tests/test_storage_controller.py tests/test_storage_retention_apply.py
+python -m ruff check scripts/storage_controller.py scripts/storage_retention_apply.py \
+  tests/test_storage_controller.py tests/test_storage_retention_apply.py
 ```
 
 Do not dispatch apply until the resulting exact commit SHA has independent Claude Opus
