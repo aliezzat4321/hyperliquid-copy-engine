@@ -1,0 +1,29 @@
+name: ai-team-kick-temp
+
+on:
+  push:
+    branches: [codex/126-ai-orchestrator]
+    paths:
+      - .github/workflows/ai-team-kick-temp.yml
+
+permissions:
+  contents: read
+
+jobs:
+  kick:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 8
+    steps:
+      - name: Run one production orchestrator cycle
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
+          echo 'POLYMARKET_INSPECTION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+          systemctl start hyperliquid-ai-team-orchestrator.service
+          hl-ai-team-status
+          systemctl start hyperliquid-ai-team-orchestrator.timer
+          echo 'POLYMARKET_TOUCHED=NO'
+          echo 'REAL_TRADING_TOUCHED=NO'
