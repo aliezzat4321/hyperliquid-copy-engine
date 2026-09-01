@@ -4,7 +4,7 @@ import hashlib
 import json
 import math
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -24,14 +24,7 @@ def _dt(ms: int) -> datetime:
 
 
 def _json_safe(value: Any) -> Any:
-    """Return a strict RFC-8259-compatible value for PostgreSQL json/jsonb.
-
-    Python's json encoder can emit NaN/Infinity by default, but PostgreSQL's
-    JSON parser correctly rejects those tokens. Analytics can legitimately
-    produce non-finite sentinels (for example an infinite profit factor when a
-    sample has winners and zero losses), so persistence normalizes only those
-    values to null while leaving the in-memory metric available to ranking.
-    """
+    """Return a strict RFC-8259-compatible value for PostgreSQL json/jsonb."""
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     if isinstance(value, dict):
@@ -75,20 +68,37 @@ class Database:
         response_payload: Any,
         fetched_at_ms: int,
     ) -> None:
+        """Store every observation while storing each response body only once.
+
+        ``raw_api_responses`` remains the observation/provenance ledger: request,
+        endpoint, time and content hash. The potentially multi-megabyte body lives
+        once in ``raw_api_payloads`` keyed by its canonical SHA-256. This preserves
+        identical empty responses for different wallets as separate observations
+        without paying for the same response bytes repeatedly.
+        """
         canonical = json.dumps(response_payload, sort_keys=True, separators=(",", ":"))
         digest = hashlib.sha256(canonical.encode()).hexdigest()
-        await self._require().execute(
+        fetched_at = _dt(fetched_at_ms)
+        conn = self._require()
+        await conn.execute(
+            """
+            INSERT INTO raw_api_payloads(content_sha256, response_json, first_seen)
+            VALUES (%s, %s, %s)
+            ON CONFLICT(content_sha256) DO NOTHING
+            """,
+            (digest, Jsonb(response_payload), fetched_at),
+        )
+        await conn.execute(
             """
             INSERT INTO raw_api_responses
               (source, endpoint, request_json, response_json, fetched_at, content_sha256)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, '{}'::jsonb, %s, %s)
             """,
             (
                 source,
                 endpoint,
                 Jsonb(request_payload) if request_payload is not None else None,
-                Jsonb(response_payload),
-                _dt(fetched_at_ms),
+                fetched_at,
                 digest,
             ),
         )
@@ -98,12 +108,7 @@ class Database:
         candidate: LeaderboardCandidate,
         observed_at_ms: int,
     ) -> None:
-        """Ensure one leaderboard wallet exists without persisting a full snapshot.
-
-        External evidence coverage only needs a wallet row so candidate fills satisfy
-        the fills foreign key. The native research job owns full leaderboard snapshot
-        persistence; coverage should not rewrite ~40k wallets every batch.
-        """
+        """Ensure one leaderboard wallet exists without persisting a full snapshot."""
         observed_at = _dt(observed_at_ms)
         await self._require().execute(
             """
@@ -129,55 +134,80 @@ class Database:
         candidates: list[LeaderboardCandidate],
         snapshot_at_ms: int,
         *,
+        snapshot_min_interval_minutes: int = 240,
         progress: Callable[[int, int], None] | None = None,
         progress_every: int = 2_500,
     ) -> None:
+        """Refresh wallets and persist each selected leaderboard snapshot atomically."""
         conn = self._require()
         snapshot_at = _dt(snapshot_at_ms)
-        period_ranks: dict[str, dict[str, int]] = {}
-        periods = {period for candidate in candidates for period in candidate.windows}
-        for period in periods:
-            ordered = sorted(candidates, key=lambda c: c.window(period).pnl, reverse=True)
-            period_ranks[period] = {c.address: i for i, c in enumerate(ordered, start=1)}
-        total = len(candidates)
-        for index, candidate in enumerate(candidates, start=1):
-            await conn.execute(
-                """
-                INSERT INTO wallets(
-                  address, first_seen, last_seen, source, display_name, metadata_json
-                )
-                VALUES (%s, %s, %s, 'official_leaderboard', %s, %s)
-                ON CONFLICT(address) DO UPDATE SET
-                  last_seen = EXCLUDED.last_seen,
-                  display_name = COALESCE(EXCLUDED.display_name, wallets.display_name)
-                """,
-                (candidate.address, snapshot_at, snapshot_at, candidate.display_name, Jsonb({})),
+        minimum_gap = timedelta(minutes=max(1, snapshot_min_interval_minutes))
+
+        # The connection runs in autocommit mode for ordinary ingestion. Leaderboard
+        # snapshots are different: a partial cross-sectional snapshot can bias later
+        # research and, if committed, can incorrectly advance the cadence watermark.
+        # One explicit transaction makes the wallet refresh + selected snapshot an
+        # all-or-nothing unit; a mid-snapshot failure therefore leaves no new watermark.
+        async with conn.transaction():
+            cursor = await conn.execute("SELECT max(snapshot_at) FROM leaderboard_snapshots")
+            latest_row = await cursor.fetchone()
+            latest_snapshot = latest_row[0] if latest_row else None
+            persist_snapshot = (
+                latest_snapshot is None or snapshot_at - latest_snapshot >= minimum_gap
             )
-            for period, stats in candidate.windows.items():
+
+            period_ranks: dict[str, dict[str, int]] = {}
+            if persist_snapshot:
+                periods = {period for candidate in candidates for period in candidate.windows}
+                for period in periods:
+                    ordered = sorted(candidates, key=lambda c: c.window(period).pnl, reverse=True)
+                    period_ranks[period] = {c.address: i for i, c in enumerate(ordered, start=1)}
+
+            total = len(candidates)
+            for index, candidate in enumerate(candidates, start=1):
                 await conn.execute(
                     """
-                    INSERT INTO leaderboard_snapshots
-                      (snapshot_at, address, ranking_period, rank, pnl, roi, volume,
-                       account_value, raw_json)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                    ON CONFLICT DO NOTHING
+                    INSERT INTO wallets(
+                      address, first_seen, last_seen, source, display_name, metadata_json
+                    )
+                    VALUES (%s, %s, %s, 'official_leaderboard', %s, %s)
+                    ON CONFLICT(address) DO UPDATE SET
+                      last_seen = GREATEST(wallets.last_seen, EXCLUDED.last_seen),
+                      display_name = COALESCE(EXCLUDED.display_name, wallets.display_name)
                     """,
                     (
-                        snapshot_at,
                         candidate.address,
-                        period,
-                        period_ranks.get(period, {}).get(candidate.address),
-                        stats.pnl,
-                        stats.roi,
-                        stats.volume,
-                        candidate.account_value,
-                        Jsonb(candidate.raw),
+                        snapshot_at,
+                        snapshot_at,
+                        candidate.display_name,
+                        Jsonb({}),
                     ),
                 )
-            if progress is not None and (
-                index == total or index % max(1, progress_every) == 0
-            ):
-                progress(index, total)
+                if persist_snapshot:
+                    for period, stats in candidate.windows.items():
+                        await conn.execute(
+                            """
+                            INSERT INTO leaderboard_snapshots
+                              (snapshot_at, address, ranking_period, rank, pnl, roi, volume,
+                               account_value, raw_json)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'{}'::jsonb)
+                            ON CONFLICT DO NOTHING
+                            """,
+                            (
+                                snapshot_at,
+                                candidate.address,
+                                period,
+                                period_ranks.get(period, {}).get(candidate.address),
+                                stats.pnl,
+                                stats.roi,
+                                stats.volume,
+                                candidate.account_value,
+                            ),
+                        )
+                if progress is not None and (
+                    index == total or index % max(1, progress_every) == 0
+                ):
+                    progress(index, total)
 
     async def upsert_fills(self, fills: list[Fill]) -> None:
         conn = self._require()

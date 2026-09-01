@@ -25,11 +25,16 @@ class Settings:
     output_dir: Path = Path("outputs")
     profile_candidates: int = 20
     profile_lookback_days: int = 90
+    leaderboard_snapshot_interval_minutes: int = 240
     market_data_dir: Path = Path("data/market")
     market_coins: tuple[str, ...] = ("BTC", "ETH", "SOL")
     market_flush_rows: int = 5_000
-    market_flush_seconds: float = 5.0
+    # Busy partitions flush at market_flush_rows; this is only the maximum
+    # durability interval for low-volume partitions. The old five-second global
+    # flush produced ~1.5M tiny files on the research volume.
+    market_flush_seconds: float = 120.0
     market_queue_size: int = 50_000
+    market_max_buffered_rows: int = 100_000
     ws_heartbeat_seconds: float = 30.0
     ws_reconnect_base_seconds: float = 1.0
     ws_reconnect_max_seconds: float = 30.0
@@ -72,14 +77,22 @@ class Settings:
                 1,
                 int(os.getenv("HLCOPY_PROFILE_LOOKBACK_DAYS", "90")),
             ),
+            leaderboard_snapshot_interval_minutes=max(
+                1,
+                int(os.getenv("HLCOPY_LEADERBOARD_SNAPSHOT_INTERVAL_MINUTES", "240")),
+            ),
             market_data_dir=Path(os.getenv("HLCOPY_MARKET_DATA_DIR", "data/market")),
             market_coins=_market_coins_from_env(),
             market_flush_rows=max(1, int(os.getenv("HLCOPY_MARKET_FLUSH_ROWS", "5000"))),
             market_flush_seconds=max(
-                0.1,
-                float(os.getenv("HLCOPY_MARKET_FLUSH_SECONDS", "5")),
+                1.0,
+                float(os.getenv("HLCOPY_MARKET_FLUSH_SECONDS", "120")),
             ),
             market_queue_size=max(100, int(os.getenv("HLCOPY_MARKET_QUEUE_SIZE", "50000"))),
+            market_max_buffered_rows=max(
+                1,
+                int(os.getenv("HLCOPY_MARKET_MAX_BUFFERED_ROWS", "100000")),
+            ),
             ws_heartbeat_seconds=max(
                 5.0,
                 float(os.getenv("HLCOPY_WS_HEARTBEAT_SECONDS", "30")),

@@ -1,3 +1,9 @@
+CREATE TABLE IF NOT EXISTS raw_api_payloads (
+    content_sha256 TEXT PRIMARY KEY,
+    response_json JSONB NOT NULL,
+    first_seen TIMESTAMPTZ NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS raw_api_responses (
     id BIGSERIAL PRIMARY KEY,
     source TEXT NOT NULL,
@@ -7,6 +13,10 @@ CREATE TABLE IF NOT EXISTS raw_api_responses (
     fetched_at TIMESTAMPTZ NOT NULL,
     content_sha256 TEXT NOT NULL
 );
+-- Post-normalization observation rows preserve request/time/hash identity while the
+-- canonical response body lives once in raw_api_payloads. Do not add a large
+-- observation-table hash index during storage recovery because the write path uses
+-- the raw_api_payloads primary key instead.
 
 CREATE TABLE IF NOT EXISTS wallets (
     address TEXT PRIMARY KEY,

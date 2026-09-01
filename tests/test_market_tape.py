@@ -7,12 +7,12 @@ import polars as pl
 from hlcopy.market.tape import MarketTapeWriter
 
 
-def test_market_tape_writer_is_append_only_and_partitioned(tmp_path) -> None:
+def _bbo_row(*, coin: str = "BTC", exchange_ts_ms: int = 1_000) -> dict[str, object]:
     received_at_ns = int(datetime(2026, 8, 8, tzinfo=UTC).timestamp() * 1_000_000_000)
-    row = {
+    return {
         "channel": "bbo",
-        "coin": "BTC",
-        "exchange_ts_ms": 1_000,
+        "coin": coin,
+        "exchange_ts_ms": exchange_ts_ms,
         "received_at_ns": received_at_ns,
         "received_monotonic_ns": 123,
         "observed_event_lag_ms": 1.0,
@@ -28,6 +28,10 @@ def test_market_tape_writer_is_append_only_and_partitioned(tmp_path) -> None:
         "bbo_imbalance": 1 / 3,
         "microprice": 100.06666666666666,
     }
+
+
+def test_market_tape_writer_is_append_only_and_partitioned(tmp_path) -> None:
+    row = _bbo_row()
     writer = MarketTapeWriter(tmp_path)
     writer.append(row)
     first = writer.flush()
@@ -45,6 +49,37 @@ def test_market_tape_writer_is_append_only_and_partitioned(tmp_path) -> None:
     assert frame.height == 1
     assert frame["coin"][0] == "BTC"
     assert frame["bid_px"][0] == 100.0
+
+
+def test_market_tape_can_flush_one_hot_partition_without_tiny_neighbor_file(tmp_path) -> None:
+    writer = MarketTapeWriter(tmp_path)
+    btc_key = writer.append(_bbo_row(coin="BTC", exchange_ts_ms=1_000))
+    writer.append(_bbo_row(coin="BTC", exchange_ts_ms=1_001))
+    eth_key = writer.append(_bbo_row(coin="ETH", exchange_ts_ms=1_002))
+
+    paths = writer.flush((btc_key,))
+
+    assert len(paths) == 1
+    assert "coin=BTC" in paths[0].as_posix()
+    assert writer.partition_rows(btc_key) == 0
+    assert writer.partition_rows(eth_key) == 1
+    assert writer.buffered_rows() == 1
+
+    remaining = writer.flush()
+    assert len(remaining) == 1
+    assert "coin=ETH" in remaining[0].as_posix()
+
+
+def test_market_tape_largest_partition_keys_follow_buffer_pressure(tmp_path) -> None:
+    writer = MarketTapeWriter(tmp_path)
+    btc_key = writer.append(_bbo_row(coin="BTC", exchange_ts_ms=1_000))
+    writer.append(_bbo_row(coin="BTC", exchange_ts_ms=1_001))
+    eth_key = writer.append(_bbo_row(coin="ETH", exchange_ts_ms=1_002))
+
+    keys = writer.largest_partition_keys()
+
+    assert keys[0] == btc_key
+    assert keys[1] == eth_key
 
 
 def test_market_tape_preserves_hip3_namespace_for_evaluator_lookup(tmp_path) -> None:

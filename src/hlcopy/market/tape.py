@@ -6,6 +6,7 @@ import os
 import re
 import time
 import uuid
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 # Hyperliquid HIP-3 symbols (for example xyz:SNDK). Preserve it so the evaluator
 # can address the same coin string that appears on wallet fills.
 _PARTITION_SAFE = re.compile(r"[^A-Za-z0-9_.:-]+")
+PartitionKey = tuple[str, str, str]
 
 _BASE_COLUMNS = {
     "channel": pl.String,
@@ -104,24 +106,42 @@ class MarketTapeWriter:
 
     def __init__(self, root: Path) -> None:
         self.root = root
-        self._buffers: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+        self._buffers: dict[PartitionKey, list[dict[str, Any]]] = {}
 
-    def append(self, row: dict[str, Any]) -> None:
+    def append(self, row: dict[str, Any]) -> PartitionKey:
         received_at_ns = int(row["received_at_ns"])
         date = datetime.fromtimestamp(received_at_ns / 1_000_000_000, tz=UTC).date().isoformat()
         channel = _safe_partition(str(row.get("channel", "unknown")))
         coin = _safe_partition(str(row.get("coin", "unknown")))
-        self._buffers.setdefault((date, coin, channel), []).append(row)
+        key = (date, coin, channel)
+        self._buffers.setdefault(key, []).append(row)
+        return key
 
     def buffered_rows(self) -> int:
         return sum(len(rows) for rows in self._buffers.values())
 
-    def flush(self) -> list[Path]:
+    def partition_rows(self, key: PartitionKey) -> int:
+        return len(self._buffers.get(key, ()))
+
+    def largest_partition_keys(self) -> list[PartitionKey]:
+        return [
+            key
+            for key, _rows in sorted(
+                self._buffers.items(),
+                key=lambda item: len(item[1]),
+                reverse=True,
+            )
+        ]
+
+    def flush(self, keys: Iterable[PartitionKey] | None = None) -> list[Path]:
+        """Flush selected partitions, or all buffered partitions when keys is None."""
         written: list[Path] = []
-        for key, rows in list(self._buffers.items()):
-            date, coin, channel = key
+        selected = list(self._buffers) if keys is None else list(dict.fromkeys(keys))
+        for key in selected:
+            rows = self._buffers.get(key)
             if not rows:
                 continue
+            date, coin, channel = key
             directory = self.root / f"date={date}" / f"coin={coin}" / f"channel={channel}"
             directory.mkdir(parents=True, exist_ok=True)
             name = f"part-{time.time_ns()}-{uuid.uuid4().hex[:12]}.parquet"
@@ -139,7 +159,14 @@ class MarketTapeWriter:
 
 
 class AsyncMarketTapeSink:
-    """Bounded async queue keeps disk I/O off the WebSocket receive loop."""
+    """Bounded async queue with partition-aware disk batching.
+
+    High-volume partitions flush when they independently reach ``flush_rows``.
+    Low-volume partitions share a longer durability deadline instead of forcing
+    one tiny Parquet file per coin/channel every few seconds. A hard aggregate
+    row cap drains the largest partitions first so batching cannot grow memory
+    without bound.
+    """
 
     _STOP = object()
 
@@ -150,11 +177,14 @@ class AsyncMarketTapeSink:
         flush_rows: int,
         flush_seconds: float,
         queue_size: int,
+        max_buffered_rows: int | None = None,
     ) -> None:
         self.writer = writer
         self.flush_rows = max(1, flush_rows)
-        self.flush_seconds = max(0.1, flush_seconds)
+        self.flush_seconds = max(1.0, flush_seconds)
         self.queue: asyncio.Queue[dict[str, Any] | object] = asyncio.Queue(maxsize=queue_size)
+        default_cap = max(self.flush_rows * 20, queue_size * 2)
+        self.max_buffered_rows = max(self.flush_rows, max_buffered_rows or default_cap)
         self._task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
@@ -173,11 +203,32 @@ class AsyncMarketTapeSink:
         await self._task
         self._task = None
 
-    async def _flush(self) -> None:
-        rows = self.writer.buffered_rows()
-        if rows:
-            paths = await asyncio.to_thread(self.writer.flush)
-            logger.info("market tape flush rows=%d files=%d", rows, len(paths))
+    async def _flush(self, keys: Iterable[PartitionKey] | None = None) -> None:
+        before = self.writer.buffered_rows()
+        if not before:
+            return
+        paths = await asyncio.to_thread(self.writer.flush, keys)
+        after = self.writer.buffered_rows()
+        flushed_rows = before - after
+        if flushed_rows:
+            logger.info(
+                "market tape flush rows=%d files=%d buffered_after=%d",
+                flushed_rows,
+                len(paths),
+                after,
+            )
+
+    async def _relieve_memory_pressure(self) -> None:
+        target = int(self.max_buffered_rows * 0.75)
+        keys: list[PartitionKey] = []
+        projected = self.writer.buffered_rows()
+        for key in self.writer.largest_partition_keys():
+            if projected <= target:
+                break
+            projected -= self.writer.partition_rows(key)
+            keys.append(key)
+        if keys:
+            await self._flush(keys)
 
     async def _run(self) -> None:
         deadline = time.monotonic() + self.flush_seconds
@@ -194,8 +245,9 @@ class AsyncMarketTapeSink:
                 await self._flush()
                 return
             assert isinstance(item, dict)
-            self.writer.append(item)
+            key = self.writer.append(item)
             self.queue.task_done()
-            if self.writer.buffered_rows() >= self.flush_rows:
-                await self._flush()
-                deadline = time.monotonic() + self.flush_seconds
+            if self.writer.partition_rows(key) >= self.flush_rows:
+                await self._flush((key,))
+            if self.writer.buffered_rows() >= self.max_buffered_rows:
+                await self._relieve_memory_pressure()

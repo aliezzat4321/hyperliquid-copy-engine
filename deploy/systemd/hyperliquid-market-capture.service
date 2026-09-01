@@ -1,0 +1,21 @@
+[Unit]
+Description=Hyperliquid public market tape capture
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/hyperliquid-copy-engine
+EnvironmentFile=/root/hyperliquid-copy-engine/.env
+Environment=REAL_TRADING_ENABLED=NO
+ExecStart=/root/hyperliquid-copy-engine/.venv/bin/hlcopy capture-market
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=90
+SendSIGKILL=yes
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
