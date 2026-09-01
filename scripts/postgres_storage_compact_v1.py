@@ -134,6 +134,31 @@ def _kept_snapshot_sql(cutoff_sql: str) -> str:
     )
 
 
+def _missing_discarded_provenance(cutoff_sql: str) -> int:
+    keep_prefix = _kept_snapshot_sql(cutoff_sql)
+    return _int(
+        keep_prefix
+        + "SELECT count(*) FROM ("
+        " SELECT DISTINCT snapshot_at FROM leaderboard_snapshots"
+        f" WHERE snapshot_at <= TIMESTAMPTZ '{cutoff_sql}'"
+        ") d LEFT JOIN keep_times k USING(snapshot_at)"
+        " WHERE k.snapshot_at IS NULL AND NOT EXISTS ("
+        " SELECT 1 FROM raw_api_responses r"
+        " WHERE r.endpoint='leaderboard' AND r.fetched_at=d.snapshot_at)"
+    )
+
+
+def _source_payload_conflicts() -> int:
+    return _int(
+        "SELECT count(*) FROM ("
+        " SELECT content_sha256 FROM raw_api_responses"
+        " WHERE response_json <> '{}'::jsonb"
+        " GROUP BY content_sha256"
+        " HAVING count(DISTINCT response_json) > 1"
+        ") conflicts"
+    )
+
+
 def build_plan(path: Path) -> dict[str, Any]:
     cutoff = _scalar("SELECT max(snapshot_at)::text FROM leaderboard_snapshots")
     if not cutoff:
@@ -167,6 +192,12 @@ def build_plan(path: Path) -> dict[str, Any]:
             "retained leaderboard snapshots missing exact raw provenance: "
             f"{missing_retained_provenance}"
         )
+    missing_discarded_provenance = _missing_discarded_provenance(cutoff_sql)
+    if missing_discarded_provenance:
+        raise RuntimeError(
+            "discarded leaderboard snapshots missing exact raw provenance: "
+            f"{missing_discarded_provenance}"
+        )
 
     raw_api_rows = _int("SELECT count(*) FROM raw_api_responses")
     raw_api_unique_payloads = _int(
@@ -179,6 +210,13 @@ def build_plan(path: Path) -> dict[str, Any]:
         " FROM raw_api_responses WHERE response_json <> '{}'::jsonb"
         " ORDER BY content_sha256,fetched_at) payloads"
     )
+    source_payload_conflicts = _source_payload_conflicts()
+    if source_payload_conflicts:
+        raise RuntimeError(
+            "raw API source rows disagree on canonical content hash: "
+            f"{source_payload_conflicts}"
+        )
+
     existing_payload_conflicts = 0
     if _relation_exists("raw_api_payloads"):
         existing_payload_conflicts = _int(
@@ -256,16 +294,18 @@ def build_plan(path: Path) -> dict[str, Any]:
         )
 
     plan: dict[str, Any] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "mode": "REVIEW_ONLY_NO_MUTATION",
         "generated_at": datetime.now(UTC).isoformat(),
         "database": {"port": int(PG_PORT), "name": PG_DB},
         "policy": {
             "historical_leaderboard_bin_hours": HISTORICAL_BIN_HOURS,
             "keep_all_rows_after_cutoff": True,
+            "all_discarded_snapshot_times_require_raw_provenance": True,
             "leaderboard_raw_json_reconstructable_from_raw_api_payloads": True,
             "raw_api_observations_preserved": True,
             "raw_api_payloads_content_addressed": True,
+            "source_hash_identity_must_be_unique": True,
             "content_sha256_is_canonical_payload_identity": True,
             "fills_untouched": True,
             "raw_api_first_for_headroom": True,
@@ -284,6 +324,7 @@ def build_plan(path: Path) -> dict[str, Any]:
             "raw_api_observations": leaderboard_raw_observations,
             "exact_cutoff_raw_observations": exact_cutoff_raw,
             "missing_retained_provenance": missing_retained_provenance,
+            "missing_discarded_provenance": missing_discarded_provenance,
         },
         "raw_api": {
             "observation_rows": raw_api_rows,
@@ -295,6 +336,7 @@ def build_plan(path: Path) -> dict[str, Any]:
             "estimated_observation_relation_bytes_after": raw_observation_after_estimate,
             "required_peak_available_bytes": raw_api_phase_required,
             "projected_net_reclaim_bytes": projected_raw_api_net_reclaim,
+            "source_payload_conflicts": source_payload_conflicts,
             "existing_payload_conflicts": existing_payload_conflicts,
         },
         "fills": {
@@ -322,7 +364,7 @@ def _validate_plan(path: Path, expected_sha256: str) -> dict[str, Any]:
     if actual != expected_sha256:
         raise RuntimeError(f"manifest hash mismatch: {actual}")
     plan = json.loads(path.read_text())
-    if int(plan.get("schema_version", 0)) != 2:
+    if int(plan.get("schema_version", 0)) != 3:
         raise RuntimeError("unexpected plan schema")
     if plan.get("mode") != "REVIEW_ONLY_NO_MUTATION":
         raise RuntimeError("unexpected plan mode")
@@ -342,9 +384,11 @@ def _validate_plan(path: Path, expected_sha256: str) -> dict[str, Any]:
         raise RuntimeError("reviewed bin policy mismatch")
     required_true = (
         "keep_all_rows_after_cutoff",
+        "all_discarded_snapshot_times_require_raw_provenance",
         "leaderboard_raw_json_reconstructable_from_raw_api_payloads",
         "raw_api_observations_preserved",
         "raw_api_payloads_content_addressed",
+        "source_hash_identity_must_be_unique",
         "content_sha256_is_canonical_payload_identity",
         "fills_untouched",
         "raw_api_first_for_headroom",
@@ -355,7 +399,11 @@ def _validate_plan(path: Path, expected_sha256: str) -> dict[str, Any]:
     if policy.get("unnecessary_observation_hash_index") is not False:
         raise RuntimeError("observation hash index must remain disabled")
     if int(plan["leaderboard"]["missing_retained_provenance"]) != 0:
-        raise RuntimeError("reviewed leaderboard provenance is incomplete")
+        raise RuntimeError("reviewed retained leaderboard provenance is incomplete")
+    if int(plan["leaderboard"]["missing_discarded_provenance"]) != 0:
+        raise RuntimeError("reviewed discarded leaderboard provenance is incomplete")
+    if int(plan["raw_api"]["source_payload_conflicts"]) != 0:
+        raise RuntimeError("reviewed raw API source hash identity is inconsistent")
     if int(plan["raw_api"]["existing_payload_conflicts"]) != 0:
         raise RuntimeError("reviewed existing raw API payloads are inconsistent")
     plan["_cutoff_dt"] = cutoff
@@ -388,6 +436,19 @@ CREATE TABLE IF NOT EXISTS raw_api_payloads (
     response_json JSONB NOT NULL,
     first_seen TIMESTAMPTZ NOT NULL
 );
+DO $verify$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM raw_api_responses
+    WHERE response_json <> '{}'::jsonb
+    GROUP BY content_sha256
+    HAVING count(DISTINCT response_json) > 1
+  ) THEN
+    RAISE EXCEPTION 'source observations disagree on canonical content hash';
+  END IF;
+END
+$verify$;
 DO $verify$
 BEGIN
   IF EXISTS (
@@ -455,6 +516,13 @@ def _compact_leaderboard(plan: dict[str, Any]) -> None:
     )
     if post_cutoff > MAX_POST_CUTOFF_ROWS:
         raise RuntimeError(f"too many unreviewed post-cutoff rows: {post_cutoff}")
+
+    missing_discarded_provenance = _missing_discarded_provenance(cutoff)
+    if missing_discarded_provenance:
+        raise RuntimeError(
+            "discarded leaderboard snapshots lost raw provenance after planning: "
+            f"{missing_discarded_provenance}"
+        )
     missing_post_cutoff_provenance = _int(
         "SELECT count(*) FROM ("
         " SELECT DISTINCT snapshot_at FROM leaderboard_snapshots"
@@ -590,6 +658,13 @@ def apply_plan(path: Path, expected_sha256: str) -> None:
         audit["after_raw_api_available_bytes"] = _available_bytes()
         audit["phase"] = "RAW_API_NORMALIZATION_COMPLETE"
         _write_audit(audit)
+
+        other_sessions = _active_other_client_sessions()
+        if other_sessions:
+            raise RuntimeError(
+                "other hlcopy database client sessions appeared before leaderboard phase: "
+                f"{other_sessions}"
+            )
 
         audit["phase"] = "LEADERBOARD_COMPACTION_STARTED"
         _write_audit(audit)
