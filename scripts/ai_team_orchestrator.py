@@ -56,6 +56,16 @@ MACHINE_RESULT = "AI_TEAM_RESULT_V1"
 ACTIVE_STATUSES = {"PENDING", "RETRY", "WAITING_RATE_LIMIT", "WAITING_CI", "RUNNING"}
 TERMINAL_STATUSES = {"DONE", "FAILED", "BLOCKED", "STALE"}
 
+# Protected AI-control-plane files that Codex may propose, but never merge merely
+# because it changed them. Automatic apply additionally requires a trusted Issue
+# flag, independent exact-SHA Claude PASS, green CI, and ROUTINE task class.
+# Trading/live/capital/deployment paths are intentionally excluded.
+AUTO_APPLY_CONTROL_PLANE_PATHS = {
+    "config/ai_team_router.json",
+    "scripts/ai_team_orchestrator.py",
+    "scripts/ai_team_runtime_ledger.py",
+}
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "protocol_version": 1,
     "repository": REPO,
@@ -870,7 +880,12 @@ def validate_changes(cfg: dict[str, Any], workdir: Path, base_sha: str) -> tuple
         if name.startswith("/") or ".." in Path(name).parts:
             raise RuntimeError(f"unsafe changed path: {name}")
         if any(name.startswith(p) for p in cfg["safety"]["no_auto_merge_path_prefixes"]):
-            raise RuntimeError(f"autonomous task touched owner-sensitive live path: {name}")
+            # Only this tiny AI-control-plane allowlist can even be proposed by an
+            # autonomous builder. All other protected/live-sensitive paths still
+            # fail before commit/push. Merge is independently gated in handle_ci().
+            if name not in AUTO_APPLY_CONTROL_PLANE_PATHS:
+                raise RuntimeError(f"autonomous task touched owner-sensitive live path: {name}")
+            no_auto = True
     diff = change_scan_text(workdir, base_sha)
     for pat in cfg["safety"]["forbidden_enable_patterns"]:
         if re.search(pat, diff, flags=re.I):
@@ -1866,8 +1881,37 @@ The reviewed SHA must be exactly the target SHA.
             for prefix in self.cfg["safety"]["no_auto_merge_path_prefixes"]
         )
         if sensitive:
-            self.block(task, "owner-sensitive/live path cannot auto-merge")
-            return
+            issue = self.gh.issue(int(task["issue_number"]))
+            if str(issue.get("author_association") or "") not in self.trusted:
+                self.block(task, "protected AI-control-plane change lost trusted issue author")
+                return
+            protected_files = [
+                name
+                for name in files
+                if any(
+                    name.startswith(prefix)
+                    for prefix in self.cfg["safety"]["no_auto_merge_path_prefixes"]
+                )
+            ]
+            if not all(name in AUTO_APPLY_CONTROL_PLANE_PATHS for name in protected_files):
+                self.block(
+                    task,
+                    "protected change contains path outside AI control-plane allowlist",
+                )
+                return
+            if not acceptance_flag(str(issue.get("body") or ""), "AI_TEAM_PROTECTED_CHANGE"):
+                self.block(
+                    task,
+                    "protected AI-control-plane change lacks "
+                    "AI_TEAM_PROTECTED_CHANGE=YES",
+                )
+                return
+            self.gh.comment(
+                int(task["pr_number"]),
+                "AI_TEAM_PROTECTED_GATE=PASS\n"
+                "Trusted Issue authorization + independent exact-SHA Claude PASS + CI green; "
+                "all protected files are inside the narrow AI control-plane allowlist.",
+            )
         if str(task["task_class"]) not in self.cfg["auto_merge_task_classes"]:
             self.ledger.update(
                 task["id"],
