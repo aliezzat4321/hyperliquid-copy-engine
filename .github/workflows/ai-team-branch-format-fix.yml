@@ -32,6 +32,30 @@ jobs:
           ruff format \
             scripts/ai_team_orchestrator.py \
             tests/test_ai_team_orchestrator.py
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("scripts/ai_team_orchestrator.py")
+          text = path.read_text()
+          replacements = {
+              '            "SELECT * FROM tasks WHERE task_type=\'REVIEW\' AND status IN (\'DONE\',\'BLOCKED\',\'FAILED\') "\n            "ORDER BY updated_at DESC LIMIT 1"':
+              '            "SELECT * FROM tasks WHERE task_type=\'REVIEW\' "\n            "AND status IN (\'DONE\',\'BLOCKED\',\'FAILED\') "\n            "ORDER BY updated_at DESC LIMIT 1"',
+              '            "SELECT task_id,agent,error,ended_at FROM runs WHERE exit_code!=0 ORDER BY id DESC LIMIT 5"':
+              '            "SELECT task_id,agent,error,ended_at FROM runs WHERE exit_code!=0 "\n            "ORDER BY id DESC LIMIT 5"',
+              '                "\\nThis is a repair pass. Fix ONLY the review blockers below and necessary adjacent tests. "':
+              '                "\\nThis is a repair pass. Fix ONLY the review blockers below "\n                "and necessary adjacent tests. "',
+              'No profitability claim from this PR unless the Issue explicitly provides independently reviewed evidence.':
+              'No profitability claim from this PR unless the Issue explicitly provides\nindependently reviewed evidence.',
+          }
+          for old, new in replacements.items():
+              if old not in text:
+                  raise SystemExit(f"expected lint target missing: {old[:60]}")
+              text = text.replace(old, new, 1)
+          path.write_text(text)
+          PY
+          ruff format \
+            scripts/ai_team_orchestrator.py \
+            tests/test_ai_team_orchestrator.py
           ruff check \
             scripts/ai_team_orchestrator.py \
             tests/test_ai_team_orchestrator.py
