@@ -379,9 +379,11 @@ def _normalize_raw_api_payloads(plan: dict[str, Any]) -> None:
             f"raw API observation growth outside reviewed bound: {current_rows} vs {expected_rows}"
         )
     required = int(plan["raw_api"]["required_peak_available_bytes"])
-    if _available_bytes() < required:
+    available = _available_bytes()
+    if available < required:
         raise RuntimeError(
-            f"raw API phase headroom fell below reviewed requirement: {_available_bytes()} < {required}"
+            "raw API phase headroom fell below reviewed requirement: "
+            f"{available} < {required}"
         )
 
     _psql(
