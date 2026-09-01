@@ -106,7 +106,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 
 def utcnow() -> str:
-    return dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def parse_utc(value: str | None) -> dt.datetime | None:
@@ -729,7 +729,7 @@ def rate_limit_info(text: str, default_seconds: int) -> tuple[bool, str | None]:
     phrases = ("rate limit", "usage limit", "quota exceeded", "too many requests", "limit reached")
     if not any(p in low for p in phrases):
         return False, None
-    now = dt.datetime.now(dt.UTC)
+    now = dt.datetime.now(dt.timezone.utc)
     m = re.search(r"(?:try again|reset(?:s)?)(?: in)?\s+(\d+)\s*(minute|hour|second)s?", low)
     if m:
         n = int(m.group(1))
@@ -1468,7 +1468,7 @@ The reviewed SHA must be exactly the target SHA.
             return
         state, detail = self.gh.check_state(target)
         if state == "PENDING":
-            retry = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=int(self.cfg["poll_seconds"]))
+            retry = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=int(self.cfg["poll_seconds"]))
             self.ledger.update(
                 task["id"],
                 status="WAITING_CI",
@@ -1527,7 +1527,7 @@ The reviewed SHA must be exactly the target SHA.
         if attempts >= int(self.cfg["max_attempts"]):
             self.block(task, f"{error}; max attempts reached")
             return
-        retry = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=60 * max(1, attempts))
+        retry = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=60 * max(1, attempts))
         self.ledger.update(
             task["id"],
             status="WAITING_RATE_LIMIT" if rate_limited else "RETRY",
