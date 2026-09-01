@@ -2,77 +2,75 @@ name: ai-team-trello-manager-wire-temp
 
 on:
   push:
-    branches: [trigger/151-protected-bootstrap2]
+    branches: [trigger/151-protected-lint-fix]
 
 permissions:
   contents: write
-  pull-requests: write
 
 jobs:
-  bootstrap:
+  fix:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: manager/151-protected-self-change
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Build narrow protected control-plane PR
+      - name: Fix only known bootstrap lint and push
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           test "$GITHUB_REPOSITORY" = "aliezzat4321/hyperliquid-copy-engine"
-          BRANCH=manager/151-protected-self-change
-          git switch -C "$BRANCH"
+          test "$(git branch --show-current)" = "manager/151-protected-self-change"
           python3 - <<'PY'
           from pathlib import Path
           p = Path('scripts/ai_team_orchestrator.py')
           text = p.read_text(encoding='utf-8')
-          anchor = '''ACTIVE_STATUSES = {"PENDING", "RETRY", "WAITING_RATE_LIMIT", "WAITING_CI", "RUNNING"}\nTERMINAL_STATUSES = {"DONE", "FAILED", "BLOCKED", "STALE"}\n'''
-          addition = '''\n# Protected AI-control-plane files Codex may propose. Automatic apply still requires\n# trusted Issue authorization, independent exact-SHA Claude PASS, green CI and the\n# normal ROUTINE gate. Trading/live/capital/deployment paths are excluded.\nAUTO_APPLY_CONTROL_PLANE_PATHS = {\n    "config/ai_team_router.json",\n    "scripts/ai_team_orchestrator.py",\n    "scripts/ai_team_runtime_ledger.py",\n}\n'''
-          if 'AUTO_APPLY_CONTROL_PLANE_PATHS' not in text:
-              if anchor not in text:
-                  raise SystemExit('constant anchor missing')
-              text = text.replace(anchor, anchor + addition, 1)
-          old = '''        if any(name.startswith(p) for p in cfg["safety"]["no_auto_merge_path_prefixes"]):\n            raise RuntimeError(f"autonomous task touched owner-sensitive live path: {name}")\n'''
-          new = '''        if any(name.startswith(p) for p in cfg["safety"]["no_auto_merge_path_prefixes"]):\n            if name not in AUTO_APPLY_CONTROL_PLANE_PATHS:\n                raise RuntimeError(f"autonomous task touched owner-sensitive live path: {name}")\n            no_auto = True\n'''
-          if old in text:
-              text = text.replace(old, new, 1)
-          elif new not in text:
-              raise SystemExit('validate anchor missing')
-          old = '''        if sensitive:\n            self.block(task, "owner-sensitive/live path cannot auto-merge")\n            return\n        if str(task["task_class"]) not in self.cfg["auto_merge_task_classes"]:\n'''
-          new = '''        if sensitive:\n            issue = self.gh.issue(int(task["issue_number"]))\n            if str(issue.get("author_association") or "") not in self.trusted:\n                self.block(task, "protected AI-control-plane change lost trusted issue author")\n                return\n            protected_files = [\n                name for name in files\n                if any(name.startswith(prefix) for prefix in self.cfg["safety"]["no_auto_merge_path_prefixes"])\n            ]\n            if not all(name in AUTO_APPLY_CONTROL_PLANE_PATHS for name in protected_files):\n                self.block(task, "protected change contains path outside AI control-plane allowlist")\n                return\n            if not acceptance_flag(str(issue.get("body") or ""), "AI_TEAM_PROTECTED_CHANGE"):\n                self.block(task, "protected AI-control-plane change lacks AI_TEAM_PROTECTED_CHANGE=YES")\n                return\n            self.gh.comment(\n                int(task["pr_number"]),\n                "AI_TEAM_PROTECTED_GATE=PASS\\n"\n                "Trusted Issue authorization + independent exact-SHA Claude PASS + CI green; "\n                "protected files are inside the narrow AI control-plane allowlist.",\n            )\n        if str(task["task_class"]) not in self.cfg["auto_merge_task_classes"]:\n'''
-          if old in text:
-              text = text.replace(old, new, 1)
-          elif new not in text:
-              raise SystemExit('CI anchor missing')
+          text = text.replace(
+              '                if any(name.startswith(prefix) for prefix in self.cfg["safety"]["no_auto_merge_path_prefixes"])\n',
+              '                if any(\n'
+              '                    name.startswith(prefix)\n'
+              '                    for prefix in self.cfg["safety"]["no_auto_merge_path_prefixes"]\n'
+              '                )\n',
+          )
+          text = text.replace(
+              '            if not all(name in AUTO_APPLY_CONTROL_PLANE_PATHS for name in protected_files):\n'
+              '                self.block(task, "protected change contains path outside AI control-plane allowlist")\n',
+              '            if not all(\n'
+              '                name in AUTO_APPLY_CONTROL_PLANE_PATHS for name in protected_files\n'
+              '            ):\n'
+              '                self.block(\n'
+              '                    task, "protected change contains path outside AI control-plane allowlist"\n'
+              '                )\n',
+          )
+          text = text.replace(
+              '            if not acceptance_flag(str(issue.get("body") or ""), "AI_TEAM_PROTECTED_CHANGE"):\n'
+              '                self.block(task, "protected AI-control-plane change lacks AI_TEAM_PROTECTED_CHANGE=YES")\n',
+              '            if not acceptance_flag(\n'
+              '                str(issue.get("body") or ""), "AI_TEAM_PROTECTED_CHANGE"\n'
+              '            ):\n'
+              '                self.block(\n'
+              '                    task,\n'
+              '                    "protected AI-control-plane change lacks "\n'
+              '                    "AI_TEAM_PROTECTED_CHANGE=YES",\n'
+              '                )\n',
+          )
           p.write_text(text, encoding='utf-8')
-
-          p = Path('tests/test_ai_team_orchestrator.py')
-          tests = p.read_text(encoding='utf-8')
-          marker = 'def test_only_explicit_routine_class_is_auto_merge_eligible():'
-          addition = '''def test_protected_control_plane_allowlist_excludes_live_and_deploy_paths():\n    allowed = orch.AUTO_APPLY_CONTROL_PLANE_PATHS\n    assert "scripts/ai_team_orchestrator.py" in allowed\n    assert "scripts/ai_team_runtime_ledger.py" in allowed\n    assert "config/ai_team_router.json" in allowed\n    assert "src/hlcopy/trading/permissions.py" not in allowed\n    assert "docs/ai-team/LIVE_TRADING_GATE.md" not in allowed\n    assert ".github/workflows/deploy-ai-team-orchestrator.yml" not in allowed\n\n\n'''
-          if 'test_protected_control_plane_allowlist_excludes_live_and_deploy_paths' not in tests:
-              if marker not in tests:
-                  raise SystemExit('test anchor missing')
-              tests = tests.replace(marker, addition + marker, 1)
-          p.write_text(tests, encoding='utf-8')
           PY
+          python3 -m pip install 'ruff<1,>=0.9' >/dev/null
+          ruff check scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
           python3 -m py_compile scripts/ai_team_orchestrator.py
-          ! git diff -- scripts/ai_team_orchestrator.py | grep -E '^\+.*(REAL_TRADING_ENABLED|LIVE_TRADING_ENABLED)\s*=\s*(YES|TRUE|1)'
           git config user.name 'AI Team Control'
           git config user.email 'ai-team-control@localhost'
-          git add scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
-          git commit -m 'Allow reviewed protected AI control-plane changes'
+          git add scripts/ai_team_orchestrator.py
+          git diff --cached --check
+          git commit -m 'Fix protected control-plane bootstrap lint'
           gh auth setup-git
-          git push --force origin "$BRANCH"
-          existing="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --head "$BRANCH" --json number --jq '.[0].number // empty')"
-          if [[ -z "$existing" ]]; then
-            gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$BRANCH" \
-              --title 'P0 bootstrap: reviewed protected AI control-plane changes' \
-              --body $'Bootstrap for #151. Narrow AI-control-plane allowlist only. Exact-SHA Claude review + CI + trusted Issue authorization remain mandatory. Trading/live/capital/deploy paths remain excluded.\n\nREAL_TRADING_ENABLED remains disabled. Polymarket untouched.'
-          fi
-          echo 'BOOTSTRAP_PR_READY=YES'
+          git push origin HEAD:manager/151-protected-self-change
+          echo 'BOOTSTRAP_LINT_FIX_PUSHED=YES'
+          echo 'REAL_TRADING_TOUCHED=NO'
+          echo 'POLYMARKET_TOUCHED=NO'
