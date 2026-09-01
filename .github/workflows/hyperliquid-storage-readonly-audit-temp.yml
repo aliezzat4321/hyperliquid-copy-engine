@@ -1,0 +1,130 @@
+name: hyperliquid-storage-readonly-audit-temp
+
+on:
+  push:
+    branches: [ops/storage-readonly-audit-20260901]
+    paths:
+      - .github/workflows/hyperliquid-storage-readonly-audit-temp.yml
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Hyperliquid-only disk and PostgreSQL audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = 'aliezzat4321/hyperliquid-copy-engine'
+          MOUNT=/mnt/HC_Volume_106576526
+          HLROOT="$MOUNT/hyperliquid"
+          test -d "$HLROOT"
+
+          echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
+          echo 'POLYMARKET_INSPECTION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+          echo 'DESTRUCTIVE_ACTIONS=NO'
+
+          echo '=== FILESYSTEM ==='
+          df -B1 "$MOUNT"
+          echo '=== HYPERLIQUID ROOT BYTES ==='
+          du -sb "$HLROOT"
+          echo '=== HYPERLIQUID TOP-LEVEL DATASETS ==='
+          find "$HLROOT" -mindepth 1 -maxdepth 1 -type d -print0 \
+            | xargs -0 -r du -sb \
+            | sort -nr \
+            | head -n 40
+          echo '=== MARKET-SHADOW DATES ==='
+          if [ -d "$HLROOT/market-shadow" ]; then
+            find "$HLROOT/market-shadow" -mindepth 1 -maxdepth 1 -type d -name 'date=*' -print0 \
+              | xargs -0 -r du -sb \
+              | sort -nr \
+              | head -n 30
+          fi
+          echo '=== POSTGRESQL FILESYSTEM ==='
+          if [ -d "$HLROOT/postgresql" ]; then
+            du -sb "$HLROOT/postgresql"
+            du -B1 -d 3 "$HLROOT/postgresql" 2>/dev/null | sort -nr | head -n 40
+          fi
+
+          echo '=== POSTGRES 5433 HEALTH ==='
+          pg_isready -p 5433 || true
+          if sudo -u postgres psql -X -p 5433 -d postgres -Atqc 'SELECT 1' >/dev/null 2>&1; then
+            echo 'POSTGRES_5433_LOGICAL_AUDIT=AVAILABLE'
+            echo '=== DATABASE SIZES ==='
+            sudo -u postgres psql -X -p 5433 -d postgres -P pager=off -c "
+              SELECT datname, pg_database_size(datname) AS bytes,
+                     pg_size_pretty(pg_database_size(datname)) AS pretty
+              FROM pg_database
+              WHERE datallowconn AND NOT datistemplate
+              ORDER BY bytes DESC;
+            "
+            DB="$(sudo -u postgres psql -X -p 5433 -d postgres -Atqc "SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate ORDER BY pg_database_size(datname) DESC LIMIT 1")"
+            echo "AUDIT_DATABASE=$DB"
+            echo '=== LARGEST TABLES / MATERIALIZED VIEWS ==='
+            sudo -u postgres psql -X -p 5433 -d "$DB" -P pager=off -c "
+              SELECT n.nspname AS schema,
+                     c.relname,
+                     c.relkind,
+                     pg_relation_size(c.oid) AS heap_bytes,
+                     pg_indexes_size(c.oid) AS index_bytes,
+                     pg_total_relation_size(c.oid) AS total_bytes,
+                     COALESCE(s.n_live_tup,0) AS est_live_rows,
+                     COALESCE(s.n_dead_tup,0) AS est_dead_rows,
+                     s.last_vacuum,
+                     s.last_autovacuum,
+                     s.last_analyze,
+                     s.last_autoanalyze
+              FROM pg_class c
+              JOIN pg_namespace n ON n.oid=c.relnamespace
+              LEFT JOIN pg_stat_user_tables s ON s.relid=c.oid
+              WHERE n.nspname NOT IN ('pg_catalog','information_schema')
+                AND c.relkind IN ('r','m','p')
+              ORDER BY total_bytes DESC
+              LIMIT 50;
+            "
+            echo '=== LARGEST INDEXES AND USAGE ==='
+            sudo -u postgres psql -X -p 5433 -d "$DB" -P pager=off -c "
+              SELECT schemaname, relname, indexrelname,
+                     pg_relation_size(indexrelid) AS index_bytes,
+                     idx_scan, idx_tup_read, idx_tup_fetch
+              FROM pg_stat_user_indexes
+              ORDER BY index_bytes DESC
+              LIMIT 50;
+            "
+            echo '=== TIME-LIKE COLUMNS ON LARGE USER TABLES ==='
+            sudo -u postgres psql -X -p 5433 -d "$DB" -P pager=off -c "
+              WITH large AS (
+                SELECT n.nspname, c.relname, c.oid,
+                       pg_total_relation_size(c.oid) AS total_bytes
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid=c.relnamespace
+                WHERE n.nspname NOT IN ('pg_catalog','information_schema')
+                  AND c.relkind IN ('r','m','p')
+                ORDER BY total_bytes DESC
+                LIMIT 30
+              )
+              SELECT l.nspname AS schema, l.relname, l.total_bytes,
+                     a.attname AS column_name,
+                     format_type(a.atttypid,a.atttypmod) AS data_type
+              FROM large l
+              JOIN pg_attribute a ON a.attrelid=l.oid
+              WHERE a.attnum > 0 AND NOT a.attisdropped
+                AND (a.atttypid IN (1082,1114,1184)
+                     OR a.attname ~* '(time|date|created|updated|observed|received|timestamp|ts)$')
+              ORDER BY l.total_bytes DESC, a.attnum;
+            "
+          else
+            echo 'POSTGRES_5433_LOGICAL_AUDIT=UNAVAILABLE'
+          fi
+
+          echo 'POLYMARKET_TOUCHED=NO'
+          echo 'REAL_TRADING_TOUCHED=NO'
