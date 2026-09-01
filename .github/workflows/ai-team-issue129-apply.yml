@@ -1,0 +1,51 @@
+name: ai-team-issue129-apply
+
+on:
+  push:
+    branches: [codex/126-ai-orchestrator]
+    paths:
+      - .github/workflows/ai-team-issue129-apply.yml
+
+permissions:
+  contents: read
+
+jobs:
+  apply:
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Apply Issue 129 to existing orchestrator
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = 'aliezzat4321/hyperliquid-copy-engine'
+          echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
+          echo 'POLYMARKET_INSPECTION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+          python3 scripts/patch_issue129_runtime.py
+          python3 scripts/patch_issue129_review_fail.py
+          python3 -m py_compile scripts/ai_team_orchestrator.py scripts/ai_team_runtime_ledger.py
+          bash -n scripts/install_ai_team_orchestrator.sh
+          bash -n scripts/install_codex_code_mode_host.sh
+          grep -q '/usr/bin/bwrap' scripts/ai_team_orchestrator.py
+          grep -q 'RUNTIME_STATUS_ISSUE = 130' scripts/ai_team_orchestrator.py
+          grep -q 'AI_TEAM_TEST_CLAUDE_RATE_LIMIT_ONCE' scripts/ai_team_orchestrator.py
+          grep -q 'AI_TEAM_TEST_FORCE_FIRST_REVIEW_FAIL' scripts/ai_team_orchestrator.py
+          grep -q 'CLAUDE_CREDENTIALS' scripts/ai_team_orchestrator.py
+          ! grep -q 'env_file=CLAUDE_ENV_FILE' scripts/ai_team_orchestrator.py
+          rm -f scripts/patch_issue129_runtime.py scripts/patch_issue129_review_fail.py
+          rm -f .github/workflows/ai-team-issue129-apply.yml
+          git config user.name 'aliezzat4321'
+          git config user.email 'ali.ezzat4321@gmail.com'
+          git add scripts/ai_team_orchestrator.py scripts/patch_issue129_runtime.py scripts/patch_issue129_review_fail.py .github/workflows/ai-team-issue129-apply.yml
+          git commit -m 'Integrate durable AI runtime checkpoint and recovery'
+          git remote set-url origin git@github.com:aliezzat4321/hyperliquid-copy-engine.git
+          git push origin HEAD:codex/126-ai-orchestrator
+          echo 'ISSUE129_INTEGRATION_COMMITTED=YES'
+          echo 'POLYMARKET_TOUCHED=NO'
+          echo 'REAL_TRADING_TOUCHED=NO'
