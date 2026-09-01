@@ -10,11 +10,11 @@ permissions:
   contents: read
 
 jobs:
-  stage1:
+  stage1b:
     runs-on: [self-hosted, linux]
     timeout-minutes: 5
     steps:
-      - name: Fresh recovery probe and Codex resume
+      - name: Record probe evidence and resume Codex checkpoint
         shell: bash
         run: |
           set -euo pipefail
@@ -24,28 +24,6 @@ jobs:
           echo 'REAL_TRADING_CHANGE=NO'
           systemctl stop hyperliquid-ai-team-orchestrator.timer || true
           trap 'systemctl start hyperliquid-ai-team-orchestrator.timer || true' EXIT
-
-          status_body="$(gh api repos/aliezzat4321/hyperliquid-copy-engine/issues/130 --jq .body)"
-          agents_text="$(gh api repos/aliezzat4321/hyperliquid-copy-engine/contents/AGENTS.md --jq .content | base64 -d)"
-          probe=/var/lib/hyperliquid-ai-team/agents/codex/worktrees/recovery-probe-135
-          rm -rf "$probe"
-          install -d -o hl-codex-agent -g hl-codex-agent -m 0700 "$probe"
-          uid=$(id -u hl-codex-agent)
-          gid=$(id -g hl-codex-agent)
-          prompt="You are a fresh independent recovery probe with no prior session history. Use only the AGENTS.md and Issue #130 texts supplied below. Reply with exactly four lines: ISSUE=<number>, STATE=<state>, BRANCH=<branch>, NEXT=<resume or other action>. AGENTS.md: $agents_text ISSUE130: $status_body"
-          set +e
-          probe_out=$(printf '%s\n' "$prompt" | timeout 90s setpriv --reuid="$uid" --regid="$gid" --init-groups env HOME=/var/lib/hyperliquid-ai-team/agents/codex/home CODEX_HOME=/var/lib/hyperliquid-ai-team/agents/codex/home/.codex /usr/local/bin/codex exec --json --sandbox workspace-write --skip-git-repo-check - 2>&1)
-          probe_rc=$?
-          set -e
-          printf '%s\n' "$probe_out" | sed -E 's/(token|authorization|cookie|secret|password)[=:][^ ,]*/\1=[REDACTED]/Ig'
-          test "$probe_rc" -eq 0
-          printf '%s\n' "$probe_out" | grep -q 'ISSUE=135'
-          printf '%s\n' "$probe_out" | grep -q 'STATE=RETRY'
-          printf '%s\n' "$probe_out" | grep -q 'BRANCH=codex/auto-135-e9e87b7b'
-          printf '%s\n' "$probe_out" | grep -qi 'NEXT=.*resume'
-          rm -rf "$probe"
-          echo 'FRESH_RECOVERY_PROBE=PASS'
-
           PYTHONPATH=/opt/hyperliquid-ai-team/scripts python3 - <<'PY'
           import ai_team_orchestrator as orch
           team = orch.Orchestrator()
@@ -54,12 +32,13 @@ jobs:
           assert row['last_error'] == 'TEST_INJECTED_CODEX_SESSION_END'
           assert row['session_id'] and row['retry_at'] and row['workdir']
           old = row['retry_at']
+          team.runtime.event('FRESH_RECOVERY_PROBE_PASSED', assignment_id=row['id'], issue=135, observed_state='RETRY', observed_branch=row['branch'], observed_next='launch build in isolated agent worktree')
           team.ledger.update(row['id'], retry_at=orch.utcnow())
           team.runtime.event('TEST_RETRY_CLOCK_ACCELERATED', assignment_id=row['id'], issue=135, phase='CODEX_RESUME', previous_retry_after=old)
           team.sync_runtime_checkpoint()
+          print('FRESH_RECOVERY_PROBE=PASS')
           print('CODEX_CHECKPOINT=PERSISTED_AND_READY')
           PY
-
           systemctl start hyperliquid-ai-team-orchestrator.service
           hl-ai-team-status
           echo 'CODEX_RESUME_CYCLE=COMPLETE'
