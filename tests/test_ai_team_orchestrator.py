@@ -179,3 +179,18 @@ def test_result_marker_is_machine_readable_json_blockers():
     )
     line = next(x for x in text.splitlines() if x.startswith("BLOCKERS_JSON="))
     assert json.loads(line.split("=", 1)[1]) == ["one"]
+
+
+def test_root_git_trust_is_scoped_to_exact_worktree(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["check"] = kwargs.get("check")
+        return None
+
+    monkeypatch.setattr(orch, "run", fake_run)
+    orch.git_worktree(tmp_path, "rev-parse", "HEAD", check=True)
+    assert captured["cmd"][:3] == ["git", "-c", f"safe.directory={tmp_path}"]
+    assert captured["cmd"][3:] == ["-C", str(tmp_path), "rev-parse", "HEAD"]
+    assert captured["check"] is True

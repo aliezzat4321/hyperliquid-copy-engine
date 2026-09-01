@@ -155,6 +155,23 @@ def run(
     return cp
 
 
+def git_worktree(
+    workdir: Path, *args: str, check: bool = False
+) -> subprocess.CompletedProcess[str]:
+    """Run root-side Git only with this generated worktree explicitly trusted."""
+    return run(
+        [
+            "git",
+            "-c",
+            f"safe.directory={workdir}",
+            "-C",
+            str(workdir),
+            *args,
+        ],
+        check=check,
+    )
+
+
 class GitHub:
     def __init__(self, repo: str) -> None:
         if repo != REPO:
@@ -747,7 +764,7 @@ def extract_review(result: str, target_sha: str) -> tuple[str, list[str], str]:
 
 
 def changed_files(workdir: Path, base_sha: str) -> list[str]:
-    cp = run(["git", "-C", str(workdir), "diff", "--name-only", base_sha, "--"], check=True)
+    cp = git_worktree(workdir, "diff", "--name-only", base_sha, "--", check=True)
     return [x.strip() for x in cp.stdout.splitlines() if x.strip()]
 
 
@@ -761,7 +778,7 @@ def validate_changes(cfg: dict[str, Any], workdir: Path, base_sha: str) -> tuple
             raise RuntimeError(f"unsafe changed path: {name}")
         if any(name.startswith(p) for p in cfg["safety"]["no_auto_merge_path_prefixes"]):
             raise RuntimeError(f"autonomous task touched owner-sensitive live path: {name}")
-    diff = run(["git", "-C", str(workdir), "diff", base_sha, "--"], check=True).stdout
+    diff = git_worktree(workdir, "diff", base_sha, "--", check=True).stdout
     for pat in cfg["safety"]["forbidden_enable_patterns"]:
         if re.search(pat, diff, flags=re.I):
             raise RuntimeError(f"forbidden live-trading enablement pattern detected: {pat}")
@@ -861,7 +878,7 @@ class Orchestrator:
             attempt=int(task["attempt"]) + 1,
         )
         task = self.ledger.get(task["id"])
-        base_sha = run(["git", "-C", str(workdir), "rev-parse", "HEAD"], check=True).stdout.strip()
+        base_sha = git_worktree(workdir, "rev-parse", "HEAD", check=True).stdout.strip()
         comments = recent_human_comments(self.gh, int(task["issue_number"]), self.trusted)
         blockers = json.loads(task["blockers_json"] or "[]")
         prompt = self.codex_prompt(issue, task, comments, blockers)
@@ -913,9 +930,7 @@ class Orchestrator:
         try:
             files, _ = validate_changes(self.cfg, workdir, base_sha)
             self.commit_and_push(workdir, task, branch)
-            new_sha = run(
-                ["git", "-C", str(workdir), "rev-parse", "HEAD"], check=True
-            ).stdout.strip()
+            new_sha = git_worktree(workdir, "rev-parse", "HEAD", check=True).stdout.strip()
             if task["task_type"] == "BUILD":
                 pr = self.create_pr(issue, task, branch, new_sha, files)
                 pr_number = int(pr["number"])
