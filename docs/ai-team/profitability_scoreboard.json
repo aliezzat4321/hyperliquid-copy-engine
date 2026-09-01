@@ -11,7 +11,7 @@
       "rank": 1,
       "lane": "lane_3",
       "name": "Direct third-party notification copy",
-      "evidence_level": "EXPLORATORY_SHADOW",
+      "evidence_level": "EXPLORATORY",
       "promotion_verdict": "FAIL_INSUFFICIENT_EXECUTABLE_NET_EVIDENCE",
       "gross_theoretical_edge": {
         "pnl_usd": 37.771087,
@@ -67,7 +67,7 @@
       "rank": 2,
       "lane": "lane_1",
       "name": "Hyperliquid leaderboard selective wallet by asset copy",
-      "evidence_level": "FROZEN_PROSPECTIVE_INCOMPLETE",
+      "evidence_level": "FROZEN_PROSPECTIVE",
       "promotion_verdict": "FAIL_MISSING_PUBLISHED_PROSPECTIVE_ECONOMICS",
       "gross_theoretical_edge": {
         "pnl_usd": null,
@@ -129,7 +129,7 @@
       "rank": 3,
       "lane": "lane_2",
       "name": "Third-party wallet resolver then Hyperliquid copy",
-      "evidence_level": "IDENTITY_FUNNEL_ONLY",
+      "evidence_level": "EXPLORATORY",
       "promotion_verdict": "FAIL_ZERO_VERIFIED_IDENTITIES",
       "gross_theoretical_edge": {
         "pnl_usd": null,

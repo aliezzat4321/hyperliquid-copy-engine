@@ -20,7 +20,7 @@ Lane 3 ranks first for research effort because it alone has observed shadow clos
 
 ## 1. Direct third-party notification copy
 
-- Evidence: `EXPLORATORY_SHADOW`; verdict: `FAIL_INSUFFICIENT_EXECUTABLE_NET_EVIDENCE`.
+- Evidence: `EXPLORATORY`; verdict: `FAIL_INSUFFICIENT_EXECUTABLE_NET_EVIDENCE`.
 - Gross theoretical: 37.771087 USD PnL; — return; 0.770839 USD average PnL per close. Mid-to-mid gross shadow closes; excludes costs and six unresolved positions. Average PnL is derived as 37.771087 / 49.
 - Net executable: UNKNOWN — No accepted fee, spread, impact, funding, and unresolved-position-adjusted result.
 - Sample: — eligible signals; 55 opens; 49 closes; 6 unresolved; — distinct days.
@@ -33,7 +33,7 @@ Lane 3 ranks first for research effort because it alone has observed shadow clos
 
 ## 2. Hyperliquid leaderboard selective wallet by asset copy
 
-- Evidence: `FROZEN_PROSPECTIVE_INCOMPLETE`; verdict: `FAIL_MISSING_PUBLISHED_PROSPECTIVE_ECONOMICS`.
+- Evidence: `FROZEN_PROSPECTIVE`; verdict: `FAIL_MISSING_PUBLISHED_PROSPECTIVE_ECONOMICS`.
 - Gross theoretical: — PnL; — return; — average PnL per close. The funnel reports candidate counts but no current aggregate economics suitable for this scoreboard.
 - Net executable: UNKNOWN — Two targets are labelled approved, but the trusted observation does not publish per-target trades, costs, PnL, drawdown, or uncertainty.
 - Sample: — eligible signals; — opens; — closes; — unresolved; — distinct days.
@@ -46,7 +46,7 @@ Lane 3 ranks first for research effort because it alone has observed shadow clos
 
 ## 3. Third-party wallet resolver then Hyperliquid copy
 
-- Evidence: `IDENTITY_FUNNEL_ONLY`; verdict: `FAIL_ZERO_VERIFIED_IDENTITIES`.
+- Evidence: `EXPLORATORY`; verdict: `FAIL_ZERO_VERIFIED_IDENTITIES`.
 - Gross theoretical: — PnL; — return; — average PnL per close. No verified identity has entered an execution-aware comparison.
 - Net executable: NOT_OBSERVED — Zero published verified identities.
 - Sample: — eligible signals; — opens; 0 closes; — unresolved; — distinct days.

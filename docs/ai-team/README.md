@@ -23,8 +23,12 @@ This directory is the compact durable memory and governance layer shared by Chat
 | `DECISIONS.md` | append-only | Accepted architecture/policy decisions |
 | `experiments/registry.json` | hand-maintained | Machine-readable experiment record |
 | `experiments/INDEX.md` | generated | Human view; check before proposing a hypothesis |
+| `profitability_scoreboard.json` | hand-maintained | Issue #141 three-lane executable-edge decision record |
+| `PROFITABILITY_SCOREBOARD.md` | generated | Human view of the three-lane scoreboard |
 
-Regenerate both generated files with `python scripts/render_ai_team_state.py`.
+Regenerate `CURRENT_STATE.md` and `experiments/INDEX.md` with
+`python scripts/render_ai_team_state.py`. Regenerate `PROFITABILITY_SCOREBOARD.md`
+with `python scripts/render_profitability_scoreboard.py`.
 Validate everything with `python scripts/validate_ai_team_contract.py`.
 
 ## What changes often

@@ -102,6 +102,8 @@ provenance rather than re-deriving values.
 | Promotion thresholds | `docs/ai-team/PROMOTION_POLICY.md` |
 | Live capital gate | `docs/ai-team/LIVE_TRADING_GATE.md` |
 | Review provenance limits | `docs/ai-team/REVIEW_PROVENANCE.md` |
+| Three-lane profitability scoreboard | `docs/ai-team/profitability_scoreboard.json`, `docs/ai-team/PROFITABILITY_SCOREBOARD.md` |
+| Scoreboard validator / renderer | `scripts/render_profitability_scoreboard.py` |
 | Shadow architecture | `docs/SHADOW_ARCHITECTURE.md` |
 | Resolver design | `docs/WALLET_IDENTIFIER.md`, `docs/RESOLVER_SCANNING.md` |
 | Lane 3 net edge | `docs/INVO_NOTIFICATION_NET_EDGE.md` (arrives with PR #95) |
