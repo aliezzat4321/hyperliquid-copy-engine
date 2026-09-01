@@ -1,4 +1,4 @@
-name: ai-team-recover-pass-run-temp
+name: ai-team-fix-git-ownership-temp
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  recover:
+  fix:
     runs-on: [self-hosted, linux]
     timeout-minutes: 5
     steps:
@@ -19,7 +19,7 @@ jobs:
           clean: true
           persist-credentials: false
           fetch-depth: 0
-      - name: Finalize already-completed Codex run without another model call
+      - name: Fix agent Git metadata ownership boundary
         shell: bash
         run: |
           set -euo pipefail
@@ -29,67 +29,57 @@ jobs:
           echo 'POLYMARKET_MUTATION=NO'
           echo 'REAL_TRADING_CHANGE=NO'
           systemctl stop hyperliquid-ai-team-orchestrator.timer || true
-          PYTHONPATH=/opt/hyperliquid-ai-team/scripts python3 - <<'PY'
-          import json
+          trap 'systemctl start hyperliquid-ai-team-orchestrator.timer || true' EXIT
+          python3 - <<'PY'
           from pathlib import Path
-          import ai_team_orchestrator as orch
 
-          task_id = '8c5002599f2a40e9'
-          team = orch.Orchestrator()
-          task = team.ledger.get(task_id)
-          assert int(task['issue_number']) == 128
-          assert task['task_type'] == 'BUILD'
-          assert task['status'] == 'BLOCKED'
-          assert task['last_error'] == 'agent produced no file changes'
-          workdir = Path(task['workdir'])
-          assert workdir.is_dir()
-          branch = str(task['branch'])
-          base_sha = orch.git_worktree(workdir, 'rev-parse', 'HEAD', check=True).stdout.strip()
-          files, _ = orch.validate_changes(team.cfg, workdir, base_sha)
-          assert files == ['docs/ai-team/dry-run-pass.md'], files
-          proof = (workdir / files[0]).read_text()
-          assert proof.splitlines().count('AUTONOMOUS_PASS_DRILL=OK') == 1
-          assert 'This is a harmless orchestration proof only.' in proof
+          path = Path('scripts/ai_team_orchestrator.py')
+          s = path.read_text()
 
-          team.commit_and_push(workdir, task, branch)
-          new_sha = orch.git_worktree(workdir, 'rev-parse', 'HEAD', check=True).stdout.strip()
-          issue = team.gh.issue(128)
-          pr = team.create_pr(issue, task, branch, new_sha, files)
-          pr_number = int(pr['number'])
-          team.ledger.update(
-              task_id,
-              status='DONE',
-              target_sha=new_sha,
-              pr_number=pr_number,
-              retry_at=None,
-              last_error=None,
-          )
-          team.enqueue_review(task, pr_number, new_sha)
-          try:
-              team.gh.remove_label(128, team.cfg['labels']['blocked'])
-          except Exception:
-              pass
-          team.runtime.event(
-              'TASK_RECOVERED_AFTER_VALIDATOR_FIX',
-              assignment_id=task_id,
-              issue=128,
-              pr=pr_number,
-              target_sha=new_sha,
-              files=files,
-          )
-          team.sync_runtime_checkpoint()
-          print(f'RECOVERED_PR={pr_number}')
-          print(f'RECOVERED_SHA={new_sha}')
-          print('RECOVERED_FILES=' + json.dumps(files, separators=(',', ':')))
+          old = '''def git_worktree(\n    workdir: Path, *args: str, check: bool = False\n) -> subprocess.CompletedProcess[str]:\n    """Run root-side Git only with this generated worktree explicitly trusted."""\n    return run(\n        [\n            "git",\n            "-c",\n            f"safe.directory={workdir}",\n            "-C",\n            str(workdir),\n            *args,\n        ],\n        check=check,\n    )\n'''
+          new = '''def git_worktree(\n    workdir: Path, *args: str, check: bool = False\n) -> subprocess.CompletedProcess[str]:\n    """Run manager-side read-only Git without refreshing the agent-owned index."""\n    return run(\n        [\n            "git",\n            "-c",\n            f"safe.directory={workdir}",\n            "-C",\n            str(workdir),\n            *args,\n        ],\n        check=check,\n        env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},\n    )\n'''
+          assert s.count(old) == 1, s.count(old)
+          s = s.replace(old, new, 1)
+
+          marker = '''def prepare_checkout(\n    *, user: str, home: Path, base_dir: Path, task_id: str, ref: str, branch: str | None\n) -> Path:\n'''
+          helper = '''def normalize_worktree_ownership(workdir: Path, user: str) -> tuple[int, int]:\n    """Return a generated worktree fully to its dedicated non-root agent identity."""\n    uid = int(run(["id", "-u", user], check=True).stdout.strip())\n    gid = int(run(["id", "-g", user], check=True).stdout.strip())\n    os.chown(workdir, uid, gid)\n    for root, dirs, files in os.walk(workdir):\n        for name in dirs:\n            os.chown(Path(root) / name, uid, gid)\n        for name in files:\n            os.chown(Path(root) / name, uid, gid)\n    return uid, gid\n\n\n'''
+          assert s.count(marker) == 1
+          assert 'def normalize_worktree_ownership' not in s
+          s = s.replace(marker, helper + marker, 1)
+
+          old = '''    uid = int(run(["id", "-u", user], check=True).stdout.strip())\n    gid = int(run(["id", "-g", user], check=True).stdout.strip())\n    os.chown(workdir, uid, gid)\n    for root, dirs, files in os.walk(workdir):\n        for name in dirs:\n            os.chown(Path(root) / name, uid, gid)\n        for name in files:\n            os.chown(Path(root) / name, uid, gid)\n    run(\n'''
+          new = '''    uid, gid = normalize_worktree_ownership(workdir, user)\n    run(\n'''
+          assert s.count(old) == 1, s.count(old)
+          s = s.replace(old, new, 1)
+
+          old = '''    def commit_and_push(self, workdir: Path, task: sqlite3.Row, branch: str) -> None:\n        uid = int(run(["id", "-u", CODEX_USER], check=True).stdout.strip())\n        gid = int(run(["id", "-g", CODEX_USER], check=True).stdout.strip())\n        prefix = [\n'''
+          new = '''    def commit_and_push(self, workdir: Path, task: sqlite3.Row, branch: str) -> None:\n        uid, gid = normalize_worktree_ownership(workdir, CODEX_USER)\n        prefix = [\n'''
+          assert s.count(old) == 1, s.count(old)
+          s = s.replace(old, new, 1)
+          path.write_text(s)
+
+          tests = Path('tests/test_ai_team_orchestrator.py')
+          s = tests.read_text()
+          old = '''    def fake_run(cmd, **kwargs):\n        captured["cmd"] = cmd\n        captured["check"] = kwargs.get("check")\n        return None\n\n    monkeypatch.setattr(orch, "run", fake_run)\n    orch.git_worktree(tmp_path, "rev-parse", "HEAD", check=True)\n    assert captured["cmd"][:3] == ["git", "-c", f"safe.directory={tmp_path}"]\n    assert captured["cmd"][3:] == ["-C", str(tmp_path), "rev-parse", "HEAD"]\n    assert captured["check"] is True\n'''
+          new = '''    def fake_run(cmd, **kwargs):\n        captured["cmd"] = cmd\n        captured["check"] = kwargs.get("check")\n        captured["env"] = kwargs.get("env")\n        return None\n\n    monkeypatch.setattr(orch, "run", fake_run)\n    orch.git_worktree(tmp_path, "rev-parse", "HEAD", check=True)\n    assert captured["cmd"][:3] == ["git", "-c", f"safe.directory={tmp_path}"]\n    assert captured["cmd"][3:] == ["-C", str(tmp_path), "rev-parse", "HEAD"]\n    assert captured["check"] is True\n    assert captured["env"]["GIT_OPTIONAL_LOCKS"] == "0"\n'''
+          assert s.count(old) == 1, s.count(old)
+          s = s.replace(old, new, 1)
+          assert 'test_commit_and_push_restores_agent_ownership_before_staging' not in s
+          s += '''\n\ndef test_commit_and_push_restores_agent_ownership_before_staging(\n    tmp_path: Path, monkeypatch\n) -> None:\n    normalized = []\n\n    def fake_normalize(workdir, user):\n        normalized.append((workdir, user))\n        return 111, 222\n\n    def fake_run(cmd, **kwargs):\n        return subprocess.CompletedProcess(cmd, 0, "", "")\n\n    monkeypatch.setattr(orch, "normalize_worktree_ownership", fake_normalize)\n    monkeypatch.setattr(orch, "run", fake_run)\n    team = object.__new__(orch.Orchestrator)\n    team.commit_and_push(\n        tmp_path, {"issue_number": 1, "task_type": "BUILD"}, "codex/test"\n    )\n    assert normalized == [(tmp_path, orch.CODEX_USER)]\n'''
+          tests.write_text(s)
           PY
-          systemctl start hyperliquid-ai-team-orchestrator.timer
-          git rm .github/workflows/ai-team-kick-temp.yml
+          python3 -m py_compile scripts/ai_team_orchestrator.py
+          if [[ -x /root/hyperliquid-copy-engine/.venv/bin/python ]]; then
+            /root/hyperliquid-copy-engine/.venv/bin/python -m pytest -q \
+              tests/test_ai_team_orchestrator.py
+          fi
+          git diff --check
           git config user.name 'aliezzat4321'
           git config user.email 'ali.ezzat4321@gmail.com'
-          git commit -m 'Remove temporary AI-team recovery workflow'
+          git add scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
+          git commit -m 'Preserve agent ownership across manager Git reads'
           git remote set-url origin git@github.com:aliezzat4321/hyperliquid-copy-engine.git
           git push origin HEAD:codex/126-ai-orchestrator
-          echo 'PASS_RUN_RECOVERY=COMPLETE'
-          echo 'AI_TEAM_TIMER=ACTIVE'
+          echo 'GIT_OWNERSHIP_FIX=PUSHED'
           echo 'POLYMARKET_TOUCHED=NO'
           echo 'REAL_TRADING_TOUCHED=NO'
