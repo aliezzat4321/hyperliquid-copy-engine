@@ -3,25 +3,15 @@
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-try:
-    from scripts.ai_team_contract import EVIDENCE_LEVELS, MAX_SNAPSHOT_AGE_HOURS
-except ImportError:  # Python 3.10 local repair environment.
-    EVIDENCE_LEVELS = frozenset(
-        {
-            "EXPLORATORY",
-            "FROZEN_PROSPECTIVE",
-            "SHADOW_VALIDATED",
-            "MICRO_LIVE_CANDIDATE",
-            "MICRO_LIVE_VALIDATED",
-            "SCALED_CANDIDATE",
-        }
-    )
-    MAX_SNAPSHOT_AGE_HOURS = 72
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from ai_team_contract import EVIDENCE_LEVELS, MAX_SNAPSHOT_AGE_HOURS  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "docs/ai-team/profitability_scoreboard.json"
@@ -171,8 +161,8 @@ def _v(value: Any, suffix: str = "") -> str:
     return f"{value}{suffix}"
 
 
-def render(data: dict[str, Any]) -> str:
-    validate(data)
+def render(data: dict[str, Any], *, now: datetime | None = None) -> str:
+    validate(data, now=now)
     lines = [
         "# Three-Lane Profitability Scoreboard", "",
         "Generated from `docs/ai-team/profitability_scoreboard.json`. Do not hand-edit.", "",

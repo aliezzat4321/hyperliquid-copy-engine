@@ -31,6 +31,14 @@ Regenerate `CURRENT_STATE.md` and `experiments/INDEX.md` with
 with `python scripts/render_profitability_scoreboard.py`.
 Validate everything with `python scripts/validate_ai_team_contract.py`.
 
+The active Issue #141 builder owns refreshing the hand-maintained
+`profitability_scoreboard.json`; after Issue #141 closes, ownership returns to the
+ChatGPT/Codex lead. Before its 72-hour freshness bound expires, the owner must update
+`as_of` and any changed evidence with current source references and observation times,
+run `python scripts/render_profitability_scoreboard.py`, and run
+`pytest -q tests/test_profitability_scoreboard_v1.py`. Do not advance `as_of` without
+rechecking the underlying evidence.
+
 ## What changes often
 `state.json` and `experiments/registry.json` are the manually updated records.
 `CURRENT_STATE.md` and `experiments/INDEX.md` are generated from them.

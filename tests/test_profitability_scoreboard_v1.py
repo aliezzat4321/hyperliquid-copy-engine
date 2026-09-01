@@ -23,10 +23,16 @@ def _data() -> dict:
     return json.loads(SOURCE.read_text(encoding="utf-8"))
 
 
+def _fixture_now(data: dict) -> datetime:
+    as_of = datetime.fromisoformat(data["as_of"].replace("Z", "+00:00"))
+    return as_of.astimezone(UTC) + timedelta(hours=1)
+
+
 def test_scoreboard_is_complete_and_rendered_without_drift() -> None:
     data = _data()
-    renderer.validate(data)
-    assert renderer.render(data) == OUTPUT.read_text(encoding="utf-8")
+    now = _fixture_now(data)
+    renderer.validate(data, now=now)
+    assert renderer.render(data, now=now) == OUTPUT.read_text(encoding="utf-8")
 
 
 def test_scoreboard_covers_every_lane_once() -> None:
@@ -47,7 +53,7 @@ def test_missing_required_economics_fails_validation() -> None:
     data = copy.deepcopy(_data())
     del data["lanes"][0]["outcomes"]
     with pytest.raises(ValueError, match="missing fields"):
-        renderer.validate(data)
+        renderer.validate(data, now=_fixture_now(data))
 
 
 @pytest.mark.parametrize(
@@ -61,7 +67,7 @@ def test_missing_rendered_top_level_field_fails_validation(field: str) -> None:
     data = copy.deepcopy(_data())
     del data[field]
     with pytest.raises(ValueError, match="missing fields"):
-        renderer.validate(data)
+        renderer.validate(data, now=_fixture_now(data))
 
 
 @pytest.mark.parametrize("field", ["name", "evidence_level"])
@@ -69,14 +75,14 @@ def test_missing_rendered_lane_field_fails_validation(field: str) -> None:
     data = copy.deepcopy(_data())
     del data["lanes"][0][field]
     with pytest.raises(ValueError, match="missing fields"):
-        renderer.validate(data)
+        renderer.validate(data, now=_fixture_now(data))
 
 
 def test_malformed_lane_fails_with_value_error() -> None:
     data = copy.deepcopy(_data())
     data["lanes"][0] = None
     with pytest.raises(ValueError, match="must be an object"):
-        renderer.validate(data)
+        renderer.validate(data, now=_fixture_now(data))
 
 
 def test_malformed_as_of_fails_validation() -> None:
@@ -104,4 +110,4 @@ def test_unknown_evidence_level_fails_validation() -> None:
     data = copy.deepcopy(_data())
     data["lanes"][0]["evidence_level"] = "EXPLORATORY_SHADOW"
     with pytest.raises(ValueError, match="evidence_level"):
-        renderer.validate(data)
+        renderer.validate(data, now=_fixture_now(data))
