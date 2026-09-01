@@ -27,6 +27,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ai_team_runtime_ledger import RuntimeLedgerFiles, bounded_redacted
+
 REPO = "aliezzat4321/hyperliquid-copy-engine"
 STATE_ROOT = Path("/var/lib/hyperliquid-ai-team")
 DB_PATH = STATE_ROOT / "orchestrator" / "ledger.sqlite3"
@@ -45,6 +48,8 @@ CLAUDE_WORK = STATE_ROOT / "agents" / "claude" / "worktrees"
 CODEX_LOG = STATE_ROOT / "agents" / "codex" / "logs"
 CLAUDE_LOG = STATE_ROOT / "agents" / "claude" / "logs"
 CLAUDE_ENV_FILE = Path("/etc/hyperliquid-ai-team/claude.env")
+CLAUDE_CREDENTIALS = CLAUDE_HOME / ".claude" / ".credentials.json"
+RUNTIME_STATUS_ISSUE = 130
 GIT_PUSH_REMOTE = f"git@github.com:{REPO}.git"
 MACHINE_ASSIGNMENT = "AI_TEAM_ASSIGNMENT_V1"
 MACHINE_RESULT = "AI_TEAM_RESULT_V1"
@@ -674,7 +679,7 @@ def model_sandbox_command(
 def codex_runtime_preflight(
     codex_path: Path = Path("/usr/local/bin/codex"),
 ) -> Path:
-    """Refuse a model call if Codex or its required Code Mode host is missing."""
+    """Refuse a model call if Codex or its Linux sandbox dependencies are missing."""
     if not codex_path.is_file() or not os.access(codex_path, os.X_OK):
         raise RuntimeError(f"Codex CLI missing or not executable: {codex_path}")
     host = codex_path.with_name("codex-code-mode-host")
@@ -683,7 +688,31 @@ def codex_runtime_preflight(
             "Codex Code Mode host missing or not executable; refusing model call: "
             f"{host}"
         )
+    bwrap = Path("/usr/bin/bwrap")
+    if not bwrap.is_file() or not os.access(bwrap, os.X_OK):
+        raise RuntimeError("Codex Linux workspace sandbox dependency missing: /usr/bin/bwrap")
     return host
+
+
+def claude_runtime_preflight(
+    claude_path: Path = Path("/usr/bin/claude"),
+    credentials: Path = CLAUDE_CREDENTIALS,
+) -> Path:
+    """Use the isolated Claude subscription OAuth credential, never a copied setup-token."""
+    if not claude_path.is_file() or not os.access(claude_path, os.X_OK):
+        raise RuntimeError(f"Claude CLI missing or not executable: {claude_path}")
+    if not credentials.is_file():
+        raise RuntimeError(f"Claude subscription credential missing: {credentials}")
+    return credentials
+
+
+def acceptance_flag(body: str, name: str) -> bool:
+    return bool(re.search(rf"(?mi)^\s*{re.escape(name)}\s*=\s*YES\s*$", body))
+
+
+def retry_at_after(seconds: int) -> str:
+    value = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=seconds)
+    return value.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def parse_codex_stream(text: str) -> tuple[str | None, dict[str, int], str]:
@@ -805,7 +834,74 @@ class Orchestrator:
         self.cfg = load_config()
         self.gh = GitHub(REPO)
         self.ledger = Ledger(DB_PATH)
+        self.runtime = RuntimeLedgerFiles(STATE_ROOT, DB_PATH, REPO, RUNTIME_STATUS_ISSUE)
         self.trusted = set(self.cfg["trusted_author_associations"])
+
+    def sync_runtime_checkpoint(self) -> None:
+        """Project SQLite runtime state and mirror a compact chat-independent handoff."""
+        try:
+            main = self.gh.api("GET", f"repos/{REPO}/commits/main") or {}
+            rows = self.gh.api("GET", f"repos/{REPO}/issues?state=open&per_page=100") or []
+            priorities = []
+            for row in rows:
+                if "pull_request" in row:
+                    continue
+                title = str(row.get("title") or "")
+                if not title.upper().startswith(("P0", "P1")):
+                    continue
+                priorities.append({"issue": int(row["number"]), "title": title[:160]})
+            snap = self.ledger.status_snapshot()
+            cur = snap.get("current") or {}
+            pending_owner_action = None
+            if "AUTH_REQUIRED" in str(cur.get("last_error") or ""):
+                pending_owner_action = str(cur.get("last_error"))[:500]
+            body = self.runtime.handoff(
+                main_head=str(main.get("sha") or "UNKNOWN"),
+                active_priorities=priorities,
+                pending_owner_action=pending_owner_action,
+            )
+            status_issue = self.gh.issue(RUNTIME_STATUS_ISSUE)
+            if str(status_issue.get("body") or "") != body:
+                self.gh.api(
+                    "PATCH",
+                    f"repos/{REPO}/issues/{RUNTIME_STATUS_ISSUE}",
+                    {"body": body},
+                )
+        except Exception as exc:
+            self.runtime.event("CHECKPOINT_MIRROR_FAILED", error=str(exc))
+
+    def finish_runtime_run(
+        self,
+        run_id: int,
+        task_id: str,
+        *,
+        stdout: str | None,
+        stderr: str | None,
+        exit_code: int,
+        session_id: str | None,
+        usage: dict[str, int],
+        result: str | None,
+        error: str | None = None,
+        status: str | None = None,
+        blockers: list[str] | None = None,
+    ) -> None:
+        final = self.ledger.get(task_id)
+        final_error = error if error is not None else final["last_error"]
+        self.runtime.run_finished(
+            run_id,
+            final,
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=exit_code,
+            session_id=session_id,
+            usage=usage,
+            result=result,
+            error=final_error,
+            status=status or str(final["status"]),
+            retry_after=final["retry_at"],
+            blockers=blockers,
+        )
+        self.sync_runtime_checkpoint()
 
     def claim_ready_issue(self) -> bool:
         label = self.cfg["labels"]["ready"]
@@ -838,25 +934,37 @@ class Orchestrator:
             )
             self.gh.add_labels(number, [self.cfg["labels"]["pending"]])
             self.gh.remove_label(number, label)
+            self.runtime.event(
+                "TASK_ASSIGNED",
+                assignment_id=task_id,
+                issue=number,
+                agent="CODEX_CHATGPT",
+                task_type="BUILD",
+            )
+            self.sync_runtime_checkpoint()
             return True
         return False
 
     def cycle(self) -> None:
         self.ledger.recover_interrupted()
+        self.sync_runtime_checkpoint()
         task = self.ledger.due()
         if task is None:
             self.claim_ready_issue()
             task = self.ledger.due()
         if task is None:
             return
-        if task["status"] == "WAITING_CI":
-            self.handle_ci(task)
-        elif task["task_type"] in {"BUILD", "REPAIR"}:
-            self.handle_codex(task)
-        elif task["task_type"] == "REVIEW":
-            self.handle_review(task)
-        else:
-            self.block(task, f"unsupported task type {task['task_type']}")
+        try:
+            if task["status"] == "WAITING_CI":
+                self.handle_ci(task)
+            elif task["task_type"] in {"BUILD", "REPAIR"}:
+                self.handle_codex(task)
+            elif task["task_type"] == "REVIEW":
+                self.handle_review(task)
+            else:
+                self.block(task, f"unsupported task type {task['task_type']}")
+        finally:
+            self.sync_runtime_checkpoint()
 
     def handle_codex(self, task: sqlite3.Row) -> None:
         issue = self.gh.issue(int(task["issue_number"]))
@@ -905,12 +1013,15 @@ class Orchestrator:
         log_path = CODEX_LOG / f"{task['id']}-attempt-{task['attempt']}.jsonl"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         run_id = self.ledger.open_run(task, log_path)
+        unit = f"hl-ai-codex-{task['id'][:10]}-{int(time.time())}"
+        self.runtime.run_started(run_id, task, prompt=prompt, systemd_unit=unit)
+        self.sync_runtime_checkpoint()
         try:
-            cp = self.invoke_codex(task, workdir, prompt)
+            cp = self.invoke_codex(task, workdir, prompt, unit)
         except subprocess.TimeoutExpired as exc:
             text = (exc.stdout or "") + "\n" + (exc.stderr or "")
             session_id, usage, result = parse_codex_stream(text)
-            log_path.write_text(text)
+            log_path.write_text(bounded_redacted(text))
             self.ledger.close_run(
                 run_id,
                 exit_code=124,
@@ -920,9 +1031,20 @@ class Orchestrator:
                 error="Codex timeout",
             )
             self.retry_or_block(task, "Codex timeout", session_id=session_id, rate_limited=False)
+            self.finish_runtime_run(
+                run_id,
+                str(task["id"]),
+                stdout=exc.stdout or "",
+                stderr=exc.stderr or "",
+                exit_code=124,
+                session_id=session_id,
+                usage=usage,
+                result=result,
+                error="Codex timeout",
+            )
             return
         combined = cp.stdout + ("\n" + cp.stderr if cp.stderr else "")
-        log_path.write_text(combined)
+        log_path.write_text(bounded_redacted(combined))
         session_id, usage, result = parse_codex_stream(cp.stdout)
         limited, retry_at = rate_limit_info(
             combined, int(self.cfg["default_rate_limit_retry_seconds"])
@@ -944,8 +1066,61 @@ class Orchestrator:
                     session_id=session_id,
                     last_error="Codex rate/usage limit",
                 )
+                self.finish_runtime_run(
+                    run_id,
+                    str(task["id"]),
+                    stdout=cp.stdout,
+                    stderr=cp.stderr,
+                    exit_code=cp.returncode,
+                    session_id=session_id,
+                    usage=usage,
+                    result=result,
+                    error="Codex rate/usage limit",
+                )
                 return
             self.retry_or_block(task, f"Codex failed rc={cp.returncode}", session_id=session_id)
+            self.finish_runtime_run(
+                run_id,
+                str(task["id"]),
+                stdout=cp.stdout,
+                stderr=cp.stderr,
+                exit_code=cp.returncode,
+                session_id=session_id,
+                usage=usage,
+                result=result,
+            )
+            return
+        if (
+            acceptance_flag(str(issue.get("body") or ""), "AI_TEAM_TEST_CODEX_INTERRUPT_ONCE")
+            and int(task["attempt"]) == 1
+        ):
+            retry_at = retry_at_after(300)
+            self.ledger.update(
+                task["id"],
+                status="RETRY",
+                retry_at=retry_at,
+                session_id=session_id,
+                last_error="TEST_INJECTED_CODEX_SESSION_END",
+            )
+            self.runtime.event(
+                "TEST_CODEX_SESSION_INTERRUPTED",
+                assignment_id=task["id"],
+                issue=task["issue_number"],
+                session_id=session_id,
+                retry_after=retry_at,
+            )
+            self.finish_runtime_run(
+                run_id,
+                str(task["id"]),
+                stdout=cp.stdout,
+                stderr=cp.stderr,
+                exit_code=0,
+                session_id=session_id,
+                usage=usage,
+                result=result,
+                error="TEST_INJECTED_CODEX_SESSION_END",
+                status="RETRY",
+            )
             return
         try:
             files, _ = validate_changes(self.cfg, workdir, base_sha)
@@ -966,11 +1141,34 @@ class Orchestrator:
                 last_error=None,
             )
             self.enqueue_review(task, pr_number, new_sha)
+            self.finish_runtime_run(
+                run_id,
+                str(task["id"]),
+                stdout=cp.stdout,
+                stderr=cp.stderr,
+                exit_code=0,
+                session_id=session_id,
+                usage=usage,
+                result=result,
+                status="DONE",
+            )
         except Exception as exc:
             self.block(self.ledger.get(task["id"]), str(exc))
+            self.finish_runtime_run(
+                run_id,
+                str(task["id"]),
+                stdout=cp.stdout,
+                stderr=cp.stderr,
+                exit_code=1,
+                session_id=session_id,
+                usage=usage,
+                result=result,
+                error=str(exc),
+                status="BLOCKED",
+            )
 
     def invoke_codex(
-        self, task: sqlite3.Row, workdir: Path, prompt: str
+        self, task: sqlite3.Row, workdir: Path, prompt: str, unit: str
     ) -> subprocess.CompletedProcess[str]:
         command: list[str]
         if task["session_id"]:
@@ -994,7 +1192,6 @@ class Orchestrator:
                 "--skip-git-repo-check",
                 "-",
             ]
-        unit = f"hl-ai-codex-{task['id'][:10]}-{int(time.time())}"
         full = model_sandbox_command(
             unit=unit, user=CODEX_USER, home=CODEX_HOME, workdir=workdir, command=command
         )
@@ -1188,10 +1385,15 @@ TASK_CLASS={task["task_class"]}
             self.enqueue_replacement_review(task, current_sha)
             return
         model = str(task["model_class"])
+        issue = self.gh.issue(int(task["issue_number"]))
         if model == "OPUS":
-            issue = self.gh.issue(int(task["issue_number"]))
             _, reason = parse_task_class(str(issue.get("body") or ""))
             route_review(self.cfg, str(task["task_class"]), reason)
+        try:
+            claude_runtime_preflight()
+        except RuntimeError as exc:
+            self.block(task, f"CLAUDE_AUTH_REQUIRED: {exc}")
+            return
         workdir = (
             Path(task["workdir"])
             if task["workdir"]
@@ -1212,30 +1414,31 @@ TASK_CLASS={task["task_class"]}
         pr_comments = recent_human_comments(self.gh, int(task["pr_number"]), self.trusted)
         blockers = json.loads(task["blockers_json"] or "[]")
         prompt = self.review_prompt(pr, task, changed, pr_comments, blockers)
+        if (
+            acceptance_flag(str(issue.get("body") or ""), "AI_TEAM_TEST_FORCE_FIRST_REVIEW_FAIL")
+            and not task["previous_sha"]
+        ):
+            prompt += """
+
+ACCEPTANCE FAULT INJECTION — documentation-only orchestration test:
+This is the first review of an explicitly flagged acceptance-test Issue. Even if the
+implementation is otherwise correct, return VERDICT=FAIL with exactly one blocker:
+`Change the documentation-only acceptance marker REPAIR_STAGE=INITIAL to
+REPAIR_STAGE=REPAIRED.` Do not invent any other blocker. This fault injection must
+not run on re-review because previous_sha is then populated.
+"""
         log_path = CLAUDE_LOG / f"{task['id']}-attempt-{task['attempt']}.json"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         run_id = self.ledger.open_run(task, log_path)
-        if not CLAUDE_ENV_FILE.exists():
-            self.ledger.close_run(
-                run_id,
-                exit_code=78,
-                session_id=None,
-                usage={},
-                result=None,
-                error=f"Claude auth file missing: {CLAUDE_ENV_FILE}",
-            )
-            self.ledger.update(
-                task["id"],
-                status="BLOCKED",
-                last_error="CLAUDE_AUTH_REQUIRED: run owner setup-token helper",
-            )
-            return
+        unit = f"hl-ai-claude-{task['id'][:10]}-{int(time.time())}"
+        self.runtime.run_started(run_id, task, prompt=prompt, systemd_unit=unit)
+        self.sync_runtime_checkpoint()
         try:
-            cp = self.invoke_claude(task, workdir, prompt)
+            cp = self.invoke_claude(task, workdir, prompt, unit)
         except subprocess.TimeoutExpired as exc:
             text = (exc.stdout or "") + "\n" + (exc.stderr or "")
             session_id, usage, result = parse_claude_output(text)
-            log_path.write_text(text)
+            log_path.write_text(bounded_redacted(text))
             self.ledger.close_run(
                 run_id,
                 exit_code=124,
@@ -1245,9 +1448,20 @@ TASK_CLASS={task["task_class"]}
                 error="Claude timeout",
             )
             self.retry_or_block(task, "Claude timeout", session_id=session_id)
+            self.finish_runtime_run(
+                run_id,
+                str(task["id"]),
+                stdout=exc.stdout or "",
+                stderr=exc.stderr or "",
+                exit_code=124,
+                session_id=session_id,
+                usage=usage,
+                result=result,
+                error="Claude timeout",
+            )
             return
         combined = cp.stdout + ("\n" + cp.stderr if cp.stderr else "")
-        log_path.write_text(combined)
+        log_path.write_text(bounded_redacted(combined))
         session_id, usage, result = parse_claude_output(cp.stdout)
         limited, retry_at = rate_limit_info(
             combined, int(self.cfg["default_rate_limit_retry_seconds"])
@@ -1269,18 +1483,96 @@ TASK_CLASS={task["task_class"]}
                     session_id=session_id,
                     last_error="Claude rate/usage limit",
                 )
+                self.finish_runtime_run(
+                    run_id,
+                    str(task["id"]),
+                    stdout=cp.stdout,
+                    stderr=cp.stderr,
+                    exit_code=cp.returncode,
+                    session_id=session_id,
+                    usage=usage,
+                    result=result,
+                    error="Claude rate/usage limit",
+                )
                 return
             self.retry_or_block(task, f"Claude failed rc={cp.returncode}", session_id=session_id)
+            self.finish_runtime_run(
+                run_id,
+                str(task["id"]),
+                stdout=cp.stdout,
+                stderr=cp.stderr,
+                exit_code=cp.returncode,
+                session_id=session_id,
+                usage=usage,
+                result=result,
+            )
+            return
+        if (
+            acceptance_flag(str(issue.get("body") or ""), "AI_TEAM_TEST_CLAUDE_RATE_LIMIT_ONCE")
+            and int(task["attempt"]) == 1
+        ):
+            retry_at = retry_at_after(300)
+            self.ledger.update(
+                task["id"],
+                status="WAITING_RATE_LIMIT",
+                retry_at=retry_at,
+                session_id=session_id,
+                last_error="TEST_INJECTED_CLAUDE_RATE_LIMIT",
+            )
+            self.runtime.event(
+                "TEST_CLAUDE_RATE_LIMIT_INJECTED",
+                assignment_id=task["id"],
+                issue=task["issue_number"],
+                pr=task["pr_number"],
+                target_sha=target_sha,
+                session_id=session_id,
+                retry_after=retry_at,
+            )
+            self.finish_runtime_run(
+                run_id,
+                str(task["id"]),
+                stdout=cp.stdout,
+                stderr=cp.stderr,
+                exit_code=75,
+                session_id=session_id,
+                usage=usage,
+                result=result,
+                error="TEST_INJECTED_CLAUDE_RATE_LIMIT",
+                status="WAITING_RATE_LIMIT",
+            )
             return
         try:
             verdict, blockers, summary = extract_review(result, target_sha)
         except Exception as exc:
             self.retry_or_block(task, str(exc), session_id=session_id)
+            self.finish_runtime_run(
+                run_id,
+                str(task["id"]),
+                stdout=cp.stdout,
+                stderr=cp.stderr,
+                exit_code=1,
+                session_id=session_id,
+                usage=usage,
+                result=result,
+                error=str(exc),
+            )
             return
         after = self.gh.pr(int(task["pr_number"]))
         if str(after["head"]["sha"]) != target_sha:
             self.ledger.update(task["id"], status="STALE", last_error="PR changed during review")
             self.enqueue_replacement_review(task, str(after["head"]["sha"]))
+            self.finish_runtime_run(
+                run_id,
+                str(task["id"]),
+                stdout=cp.stdout,
+                stderr=cp.stderr,
+                exit_code=1,
+                session_id=session_id,
+                usage=usage,
+                result=result,
+                error="PR changed during review",
+                status="STALE",
+            )
             return
         self.gh.comment(
             int(task["pr_number"]),
@@ -1305,6 +1597,18 @@ TASK_CLASS={task["task_class"]}
                 last_error="review FAIL",
             )
             self.enqueue_repair(task, blockers)
+            self.finish_runtime_run(
+                run_id,
+                str(task["id"]),
+                stdout=cp.stdout,
+                stderr=cp.stderr,
+                exit_code=0,
+                session_id=session_id,
+                usage=usage,
+                result=result,
+                status="FAIL",
+                blockers=blockers,
+            )
         else:
             self.ledger.update(
                 task["id"],
@@ -1314,9 +1618,21 @@ TASK_CLASS={task["task_class"]}
                 retry_at=utcnow(),
                 last_error=None,
             )
+            self.finish_runtime_run(
+                run_id,
+                str(task["id"]),
+                stdout=cp.stdout,
+                stderr=cp.stderr,
+                exit_code=0,
+                session_id=session_id,
+                usage=usage,
+                result=result,
+                status="PASS",
+                blockers=[],
+            )
 
     def invoke_claude(
-        self, task: sqlite3.Row, workdir: Path, prompt: str
+        self, task: sqlite3.Row, workdir: Path, prompt: str, unit: str
     ) -> subprocess.CompletedProcess[str]:
         model = "opus" if task["model_class"] == "OPUS" else "sonnet"
         if task["session_id"]:
@@ -1345,14 +1661,12 @@ TASK_CLASS={task["task_class"]}
                 "--allowedTools",
                 "Read,Glob,Grep,Bash",
             ]
-        unit = f"hl-ai-claude-{task['id'][:10]}-{int(time.time())}"
         full = model_sandbox_command(
             unit=unit,
             user=CLAUDE_USER,
             home=CLAUDE_HOME,
             workdir=workdir,
             command=command,
-            env_file=CLAUDE_ENV_FILE,
         )
         return run(full, input_text=prompt, timeout=int(self.cfg["review_timeout_seconds"]))
 
@@ -1569,6 +1883,18 @@ The reviewed SHA must be exactly the target SHA.
             )
         except Exception:
             pass
+        try:
+            self.runtime.event(
+                "TASK_BLOCKED",
+                assignment_id=task["id"],
+                issue=task["issue_number"],
+                pr=task["pr_number"],
+                agent=task["agent"],
+                error=error,
+            )
+            self.sync_runtime_checkpoint()
+        except Exception:
+            pass
 
 
 def print_status(ledger: Ledger) -> None:
@@ -1606,6 +1932,19 @@ def print_status(ledger: Ledger) -> None:
         print("last_verdict=NONE")
     print(f"last_successful_run={snap['last_success'] or 'NONE'}")
     print("recent_failures=" + json.dumps(snap["failures"], separators=(",", ":")))
+    runtime = RuntimeLedgerFiles(STATE_ROOT, DB_PATH, REPO, RUNTIME_STATUS_ISSUE)
+    projection = runtime.project_current()
+    print(f"runtime_status_issue={RUNTIME_STATUS_ISSUE}")
+    for agent_key in ("codex", "claude"):
+        assignment = projection.get("assignment", {}).get(agent_key)
+        if assignment:
+            print(f"{agent_key}_current_step={assignment.get('current_step') or 'NONE'}")
+            print(f"{agent_key}_next_step={assignment.get('next_step') or 'NONE'}")
+            print(f"{agent_key}_checkpoint_retry={assignment.get('retry_after') or 'NONE'}")
+        else:
+            print(f"{agent_key}_current_step=IDLE")
+            print(f"{agent_key}_next_step=NONE")
+            print(f"{agent_key}_checkpoint_retry=NONE")
 
 
 def main() -> int:
