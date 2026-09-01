@@ -1,0 +1,151 @@
+name: ai-team-trello-manager-review-temp
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  review:
+    if: github.head_ref == 'manager/146-trello-vm-wire'
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          clean: true
+          persist-credentials: false
+
+      - name: Assert boundary and exact SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "aliezzat4321/hyperliquid-copy-engine"
+          test "$(id -u)" = 0
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
+          echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
+          echo 'POLYMARKET_INSPECTION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+
+      - name: Python 3.10 and focused tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            scripts/trello_team_bridge.py \
+            scripts/trello_vm_auth.py \
+            scripts/ai_team_runtime_ledger.py \
+            scripts/ai_team_orchestrator.py
+          python3 - <<'PY'
+          import scripts.trello_team_bridge as b
+          now = b.utcnow()
+          assert now.tzinfo is not None
+          print('PY310_TRELLO_RUNTIME=PASS')
+          PY
+          if [[ -x /root/hyperliquid-copy-engine/.venv/bin/python ]]; then
+            /root/hyperliquid-copy-engine/.venv/bin/python -m pytest -q \
+              tests/test_trello_team_bridge.py \
+              tests/test_trello_vm_auth.py \
+              tests/test_ai_team_orchestrator.py
+          fi
+
+      - name: Verify VM credential and existing-card reuse
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f /etc/hyperliquid-ai-team/trello.env
+          test "$(stat -c '%a' /etc/hyperliquid-ai-team/trello.env)" = 600
+          test "$(stat -c '%u' /etc/hyperliquid-ai-team/trello.env)" = 0
+          cat >/tmp/trello-manager-smoke.json <<'JSON'
+          {"repository":"aliezzat4321/hyperliquid-copy-engine","issue":146,"event":"SIGNIFICANT_RESULT","priority":"P0","title":"event-driven VM→Trello team board + ETA/notifications","task_type":"CI_MERGE","agent":"SYSTEM","model":"SYSTEM","owner":"AI Team Manager","reviewer_model":"Claude Sonnet","status":"DONE","result":"VM credential + Trello bridge acceptance smoke passed","next_action":"finish protected manager wiring and deploy","eta_minutes":1}
+          JSON
+          python3 scripts/trello_team_bridge.py --event-file /tmp/trello-manager-smoke.json | tee /tmp/trello-manager-smoke.out
+          grep -q '^TRELLO_SYNC=OK ' /tmp/trello-manager-smoke.out
+          rm -f /tmp/trello-manager-smoke.json /tmp/trello-manager-smoke.out
+          echo 'TRELLO_VM_CREDENTIAL=READY'
+
+      - name: Independent Claude Sonnet exact-SHA review
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          REVIEW_DIR="/var/lib/hyperliquid-ai-team/agents/claude/worktrees/manager-trello-${GITHUB_RUN_ID}"
+          rm -rf "$REVIEW_DIR"
+          mkdir -p "$REVIEW_DIR"
+          cp -a "$GITHUB_WORKSPACE/." "$REVIEW_DIR/"
+          chown -R hl-claude-agent:hl-claude-agent "$REVIEW_DIR"
+          CLAUDE_HOME=/var/lib/hyperliquid-ai-team/agents/claude/home
+          UID_C="$(id -u hl-claude-agent)"
+          GID_C="$(id -g hl-claude-agent)"
+          cat >/tmp/trello-review-prompt.txt <<EOF
+          You are the independent reviewer for Hyperliquid AI-team manager wiring.
+          Review EXACT commit SHA: $TARGET_SHA
+          Repository: aliezzat4321/hyperliquid-copy-engine
+          PR: #$PR_NUMBER
+
+          Read AGENTS.md and the relevant ai-team governance docs. Review the exact diff origin/main...HEAD and callers. Do not modify any file.
+
+          Acceptance focus:
+          - Trello is observability/task-management only and can never block engineering/trading research.
+          - No secret may enter GitHub, model homes, prompts, logs, or Trello cards.
+          - Existing SQLite/GitHub orchestrator remains canonical; no second orchestration framework.
+          - Material internal state transitions update Trello immediately from the VM.
+          - GitHub issue comments/PR/reviews converge through the same bridge without hourly polling.
+          - Existing Trello cards are reused rather than duplicated.
+          - ETA semantics are conservative and Python 3.10 compatible on the VM.
+          - No real trading enablement, keys, orders, capital/risk authorization, or Polymarket scope change.
+          - Installer/deploy wiring is bounded and does not expose Trello credentials to Codex or Claude.
+
+          Output at the end EXACTLY:
+          REVIEWED_SHA=$TARGET_SHA
+          VERDICT=PASS or VERDICT=FAIL
+          BLOCKERS_JSON=[] or a JSON array of concrete blockers
+          EOF
+          set +e
+          REVIEW_JSON="$({ setpriv --reuid="$UID_C" --regid="$GID_C" --init-groups \
+            env -i \
+              HOME="$CLAUDE_HOME" \
+              CLAUDE_CONFIG_DIR="$CLAUDE_HOME/.claude" \
+              XDG_CONFIG_HOME="$CLAUDE_HOME/.config" \
+              XDG_CACHE_HOME="$CLAUDE_HOME/.cache" \
+              PATH=/usr/local/bin:/usr/bin:/bin \
+              /usr/bin/claude -p "$(cat /tmp/trello-review-prompt.txt)" \
+                --model sonnet --output-format json --permission-mode dontAsk; } 2>/tmp/trello-review.err)"
+          RC=$?
+          set -e
+          printf '%s' "$REVIEW_JSON" >/tmp/trello-review.json
+          if [[ $RC -ne 0 ]]; then
+            echo "Claude review command failed rc=$RC" >&2
+            tail -c 1200 /tmp/trello-review.err >&2 || true
+            exit $RC
+          fi
+          python3 - "$TARGET_SHA" /tmp/trello-review.json >/tmp/trello-review-result.txt <<'PY'
+          import json, re, sys
+          sha = sys.argv[1]
+          row = json.load(open(sys.argv[2], encoding='utf-8'))
+          result = str(row.get('result') or '')
+          print(result)
+          sm = re.search(r'(?mi)^\s*REVIEWED_SHA\s*=\s*([0-9a-f]{40})\s*$', result)
+          vm = re.search(r'(?mi)^\s*VERDICT\s*=\s*(PASS|FAIL)\s*$', result)
+          if not sm or sm.group(1) != sha:
+              raise SystemExit('stale/missing reviewed SHA')
+          if not vm:
+              raise SystemExit('missing verdict')
+          if vm.group(1) != 'PASS':
+              raise SystemExit('Claude exact-SHA review returned FAIL')
+          PY
+          gh pr comment "$PR_NUMBER" --body-file /tmp/trello-review-result.txt
+          echo 'CLAUDE_EXACT_SHA_REVIEW=PASS'
+          rm -rf "$REVIEW_DIR" /tmp/trello-review-prompt.txt /tmp/trello-review.json /tmp/trello-review.err /tmp/trello-review-result.txt
+          echo 'POLYMARKET_TOUCHED=NO'
+          echo 'REAL_TRADING_TOUCHED=NO'
