@@ -14,8 +14,20 @@ MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 validate_manifest = MODULE.validate_manifest
+validate_target_used_pct = MODULE.validate_target_used_pct
 
 NOW = datetime(2026, 8, 31, 14, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("target", [70.0, 75.0, 79.999])
+def test_accepts_storage_closure_target(target: float) -> None:
+    assert validate_target_used_pct(target) == target
+
+
+@pytest.mark.parametrize("target", [69.999, 80.0, 92.0])
+def test_rejects_target_outside_storage_closure_band(target: float) -> None:
+    with pytest.raises(ValueError, match="at least 70 and below 80"):
+        validate_target_used_pct(target)
 
 
 def _manifest(
