@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-
 MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "ai_team_orchestrator.py"
 spec = importlib.util.spec_from_file_location("ai_team_orchestrator", MODULE_PATH)
 assert spec and spec.loader
@@ -42,8 +41,7 @@ def test_unknown_opus_reason_fails_closed():
 def test_task_class_defaults_to_routine_and_parses_explicit_class():
     assert orch.parse_task_class("ordinary issue") == ("ROUTINE", None)
     assert orch.parse_task_class(
-        "AI_TASK_CLASS=STATISTICAL_METHODOLOGY\n"
-        "OPUS_ESCALATION_REASON=STATISTICAL_METHODOLOGY\n"
+        "AI_TASK_CLASS=STATISTICAL_METHODOLOGY\nOPUS_ESCALATION_REASON=STATISTICAL_METHODOLOGY\n"
     ) == ("STATISTICAL_METHODOLOGY", "STATISTICAL_METHODOLOGY")
 
 
@@ -77,10 +75,7 @@ def test_review_parser_requires_exact_sha():
 
 def test_review_fail_preserves_machine_blockers():
     sha = "d" * 40
-    result = (
-        f"REVIEWED_SHA={sha}\nVERDICT=FAIL\n"
-        'BLOCKERS_JSON=["test is missing","stale state"]\n'
-    )
+    result = f'REVIEWED_SHA={sha}\nVERDICT=FAIL\nBLOCKERS_JSON=["test is missing","stale state"]\n'
     verdict, blockers, _ = orch.extract_review(result, sha)
     assert verdict == "FAIL"
     assert blockers == ["test is missing", "stale state"]

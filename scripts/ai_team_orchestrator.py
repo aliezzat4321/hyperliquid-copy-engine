@@ -106,7 +106,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 
 def utcnow() -> str:
-    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def parse_utc(value: str | None) -> dt.datetime | None:
@@ -141,8 +141,7 @@ def run(
         cmd,
         input=input_text,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         cwd=str(cwd) if cwd else None,
         timeout=timeout,
         env=env,
@@ -170,7 +169,9 @@ class GitHub:
             text = json.dumps(payload, separators=(",", ":"))
         cp = run(cmd, input_text=text, timeout=60)
         if cp.returncode != 0:
-            raise RuntimeError(f"GitHub unavailable/error: {cp.stderr[-1500:] or cp.stdout[-1500:]}")
+            raise RuntimeError(
+                f"GitHub unavailable/error: {cp.stderr[-1500:] or cp.stdout[-1500:]}"
+            )
         if not cp.stdout.strip():
             return None
         return json.loads(cp.stdout)
@@ -195,7 +196,9 @@ class GitHub:
 
     def remove_label(self, number: int, label: str) -> None:
         enc = urllib.parse.quote(label, safe="")
-        cp = run(["gh", "api", "--method", "DELETE", f"repos/{self.repo}/issues/{number}/labels/{enc}"])
+        cp = run(
+            ["gh", "api", "--method", "DELETE", f"repos/{self.repo}/issues/{number}/labels/{enc}"]
+        )
         if cp.returncode != 0 and "404" not in (cp.stderr + cp.stdout):
             raise RuntimeError(f"remove label failed: {cp.stderr[-800:]}")
 
@@ -214,10 +217,13 @@ class GitHub:
         return [str(row["filename"]) for row in rows]
 
     def check_state(self, sha: str) -> tuple[str, str]:
-        checks = self.api(
-            "GET",
-            f"repos/{self.repo}/commits/{sha}/check-runs?per_page=100",
-        ) or {}
+        checks = (
+            self.api(
+                "GET",
+                f"repos/{self.repo}/commits/{sha}/check-runs?per_page=100",
+            )
+            or {}
+        )
         runs = checks.get("check_runs", [])
         statuses = self.api("GET", f"repos/{self.repo}/commits/{sha}/status") or {}
         if not runs:
@@ -225,11 +231,7 @@ class GitHub:
         pending = [x for x in runs if x.get("status") != "completed"]
         if pending:
             return "PENDING", ", ".join(str(x.get("name")) for x in pending[:6])
-        bad = [
-            x
-            for x in runs
-            if x.get("conclusion") not in {"success", "neutral", "skipped"}
-        ]
+        bad = [x for x in runs if x.get("conclusion") not in {"success", "neutral", "skipped"}]
         if bad:
             return "FAIL", ", ".join(f"{x.get('name')}={x.get('conclusion')}" for x in bad[:6])
         if statuses.get("total_count", 0) and statuses.get("state") != "success":
@@ -445,14 +447,16 @@ class Ledger:
             """
         ).fetchone()
         last_review = self.db.execute(
-            "SELECT * FROM tasks WHERE task_type='REVIEW' AND status IN ('DONE','BLOCKED','FAILED') "
+            "SELECT * FROM tasks WHERE task_type='REVIEW' "
+            "AND status IN ('DONE','BLOCKED','FAILED') "
             "ORDER BY updated_at DESC LIMIT 1"
         ).fetchone()
         last_success = self.db.execute(
             "SELECT ended_at FROM runs WHERE exit_code=0 ORDER BY id DESC LIMIT 1"
         ).fetchone()
         failures = self.db.execute(
-            "SELECT task_id,agent,error,ended_at FROM runs WHERE exit_code!=0 ORDER BY id DESC LIMIT 5"
+            "SELECT task_id,agent,error,ended_at FROM runs WHERE exit_code!=0 "
+            "ORDER BY id DESC LIMIT 5"
         ).fetchall()
         return {
             "current": dict(current) if current else None,
@@ -543,9 +547,7 @@ def result_marker(
     return f"<!-- {MACHINE_RESULT}\n" + "\n".join(fields) + "\n-->"
 
 
-def recent_human_comments(
-    gh: GitHub, number: int, trusted: set[str], limit: int = 8
-) -> list[str]:
+def recent_human_comments(gh: GitHub, number: int, trusted: set[str], limit: int = 8) -> list[str]:
     rows = []
     for c in gh.comments(number):
         body = str(c.get("body") or "")
@@ -566,7 +568,9 @@ def prepare_checkout(
     if workdir.exists():
         return workdir
     workdir.parent.mkdir(parents=True, exist_ok=True)
-    cp = run(["git", "clone", "--quiet", f"https://github.com/{REPO}.git", str(workdir)], timeout=180)
+    cp = run(
+        ["git", "clone", "--quiet", f"https://github.com/{REPO}.git", str(workdir)], timeout=180
+    )
     if cp.returncode != 0:
         raise RuntimeError(f"clone failed: {cp.stderr[-1200:]}")
     run(["git", "-C", str(workdir), "checkout", "--quiet", ref], timeout=60, check=True)
@@ -581,13 +585,33 @@ def prepare_checkout(
         for name in files:
             os.chown(Path(root) / name, uid, gid)
     run(
-        ["setpriv", f"--reuid={uid}", f"--regid={gid}", "--init-groups",
-         "git", "-C", str(workdir), "config", "user.name", "AI Team"],
+        [
+            "setpriv",
+            f"--reuid={uid}",
+            f"--regid={gid}",
+            "--init-groups",
+            "git",
+            "-C",
+            str(workdir),
+            "config",
+            "user.name",
+            "AI Team",
+        ],
         check=True,
     )
     run(
-        ["setpriv", f"--reuid={uid}", f"--regid={gid}", "--init-groups",
-         "git", "-C", str(workdir), "config", "user.email", "ai-team@localhost"],
+        [
+            "setpriv",
+            f"--reuid={uid}",
+            f"--regid={gid}",
+            "--init-groups",
+            "git",
+            "-C",
+            str(workdir),
+            "config",
+            "user.email",
+            "ai-team@localhost",
+        ],
         check=True,
     )
     return workdir
@@ -688,7 +712,7 @@ def rate_limit_info(text: str, default_seconds: int) -> tuple[bool, str | None]:
     phrases = ("rate limit", "usage limit", "quota exceeded", "too many requests", "limit reached")
     if not any(p in low for p in phrases):
         return False, None
-    now = dt.datetime.now(dt.timezone.utc)
+    now = dt.datetime.now(dt.UTC)
     m = re.search(r"(?:try again|reset(?:s)?)(?: in)?\s+(\d+)\s*(minute|hour|second)s?", low)
     if m:
         n = int(m.group(1))
@@ -817,16 +841,25 @@ class Orchestrator:
             pr = self.gh.pr(int(task["pr_number"]))
             branch = str(pr["head"]["ref"])
             base_ref = branch
-        workdir = Path(task["workdir"]) if task["workdir"] else prepare_checkout(
-            user=CODEX_USER,
-            home=CODEX_HOME,
-            base_dir=CODEX_WORK,
-            task_id=str(task["id"]),
-            ref=base_ref,
-            branch=branch,
+        workdir = (
+            Path(task["workdir"])
+            if task["workdir"]
+            else prepare_checkout(
+                user=CODEX_USER,
+                home=CODEX_HOME,
+                base_dir=CODEX_WORK,
+                task_id=str(task["id"]),
+                ref=base_ref,
+                branch=branch,
+            )
         )
-        self.ledger.update(task["id"], status="RUNNING", branch=branch, workdir=str(workdir),
-                           attempt=int(task["attempt"]) + 1)
+        self.ledger.update(
+            task["id"],
+            status="RUNNING",
+            branch=branch,
+            workdir=str(workdir),
+            attempt=int(task["attempt"]) + 1,
+        )
         task = self.ledger.get(task["id"])
         base_sha = run(["git", "-C", str(workdir), "rev-parse", "HEAD"], check=True).stdout.strip()
         comments = recent_human_comments(self.gh, int(task["issue_number"]), self.trusted)
@@ -842,52 +875,89 @@ class Orchestrator:
             session_id, usage, result = parse_codex_stream(text)
             log_path.write_text(text)
             self.ledger.close_run(
-                run_id, exit_code=124, session_id=session_id, usage=usage,
-                result=result, error="Codex timeout",
+                run_id,
+                exit_code=124,
+                session_id=session_id,
+                usage=usage,
+                result=result,
+                error="Codex timeout",
             )
             self.retry_or_block(task, "Codex timeout", session_id=session_id, rate_limited=False)
             return
         combined = cp.stdout + ("\n" + cp.stderr if cp.stderr else "")
         log_path.write_text(combined)
         session_id, usage, result = parse_codex_stream(cp.stdout)
-        limited, retry_at = rate_limit_info(combined, int(self.cfg["default_rate_limit_retry_seconds"]))
+        limited, retry_at = rate_limit_info(
+            combined, int(self.cfg["default_rate_limit_retry_seconds"])
+        )
         self.ledger.close_run(
-            run_id, exit_code=cp.returncode, session_id=session_id, usage=usage,
-            result=result, error=None if cp.returncode == 0 else combined[-1500:],
+            run_id,
+            exit_code=cp.returncode,
+            session_id=session_id,
+            usage=usage,
+            result=result,
+            error=None if cp.returncode == 0 else combined[-1500:],
         )
         if cp.returncode != 0:
             if limited:
-                self.ledger.update(task["id"], status="WAITING_RATE_LIMIT", retry_at=retry_at,
-                                   session_id=session_id, last_error="Codex rate/usage limit")
+                self.ledger.update(
+                    task["id"],
+                    status="WAITING_RATE_LIMIT",
+                    retry_at=retry_at,
+                    session_id=session_id,
+                    last_error="Codex rate/usage limit",
+                )
                 return
             self.retry_or_block(task, f"Codex failed rc={cp.returncode}", session_id=session_id)
             return
         try:
             files, _ = validate_changes(self.cfg, workdir, base_sha)
             self.commit_and_push(workdir, task, branch)
-            new_sha = run(["git", "-C", str(workdir), "rev-parse", "HEAD"], check=True).stdout.strip()
+            new_sha = run(
+                ["git", "-C", str(workdir), "rev-parse", "HEAD"], check=True
+            ).stdout.strip()
             if task["task_type"] == "BUILD":
                 pr = self.create_pr(issue, task, branch, new_sha, files)
                 pr_number = int(pr["number"])
             else:
                 pr_number = int(task["pr_number"])
-            self.ledger.update(task["id"], status="DONE", target_sha=new_sha, pr_number=pr_number,
-                               session_id=session_id, retry_at=None, last_error=None)
+            self.ledger.update(
+                task["id"],
+                status="DONE",
+                target_sha=new_sha,
+                pr_number=pr_number,
+                session_id=session_id,
+                retry_at=None,
+                last_error=None,
+            )
             self.enqueue_review(task, pr_number, new_sha)
         except Exception as exc:
             self.block(self.ledger.get(task["id"]), str(exc))
 
-    def invoke_codex(self, task: sqlite3.Row, workdir: Path, prompt: str) -> subprocess.CompletedProcess[str]:
+    def invoke_codex(
+        self, task: sqlite3.Row, workdir: Path, prompt: str
+    ) -> subprocess.CompletedProcess[str]:
         command: list[str]
         if task["session_id"]:
             command = [
-                "/usr/local/bin/codex", "exec", "resume", str(task["session_id"]),
-                "--json", "--sandbox", "workspace-write", "-",
+                "/usr/local/bin/codex",
+                "exec",
+                "resume",
+                str(task["session_id"]),
+                "--json",
+                "--sandbox",
+                "workspace-write",
+                "-",
             ]
         else:
             command = [
-                "/usr/local/bin/codex", "exec", "--json", "--sandbox", "workspace-write",
-                "--skip-git-repo-check", "-",
+                "/usr/local/bin/codex",
+                "exec",
+                "--json",
+                "--sandbox",
+                "workspace-write",
+                "--skip-git-repo-check",
+                "-",
             ]
         unit = f"hl-ai-codex-{task['id'][:10]}-{int(time.time())}"
         full = model_sandbox_command(
@@ -906,12 +976,13 @@ class Orchestrator:
         repair = ""
         if task["task_type"] == "REPAIR":
             repair = (
-                "\nThis is a repair pass. Fix ONLY the review blockers below and necessary adjacent tests. "
+                "\nThis is a repair pass. Fix ONLY the review blockers below "
+                "and necessary adjacent tests. "
                 "Do not re-audit the repository.\nBLOCKERS:\n"
                 + "\n".join(f"- {x}" for x in blockers)
             )
         return f"""You are the CODEX_CHATGPT engineering builder for the Hyperliquid project.
-One scoped task only: GitHub Issue #{issue['number']}: {issue.get('title','')}
+One scoped task only: GitHub Issue #{issue["number"]}: {issue.get("title", "")}
 
 Hard boundaries:
 - Repository is exactly {REPO}.
@@ -932,7 +1003,7 @@ Context discipline:
 {repair}
 
 ISSUE BODY:
-{issue.get('body') or ''}
+{issue.get("body") or ""}
 
 LATEST TRUSTED NON-MACHINE COMMENTS:
 {comment_text}
@@ -943,15 +1014,33 @@ Finish by stating what changed, tests run, and any blocker. Keep changes scoped.
     def commit_and_push(self, workdir: Path, task: sqlite3.Row, branch: str) -> None:
         uid = int(run(["id", "-u", CODEX_USER], check=True).stdout.strip())
         gid = int(run(["id", "-g", CODEX_USER], check=True).stdout.strip())
-        prefix = ["setpriv", f"--reuid={uid}", f"--regid={gid}", "--init-groups", "git", "-C", str(workdir)]
+        prefix = [
+            "setpriv",
+            f"--reuid={uid}",
+            f"--regid={gid}",
+            "--init-groups",
+            "git",
+            "-C",
+            str(workdir),
+        ]
         run([*prefix, "add", "-A"], check=True)
-        message = f"Issue #{task['issue_number']}: autonomous {str(task['task_type']).lower()} via Codex"
+        message = (
+            f"Issue #{task['issue_number']}: autonomous {str(task['task_type']).lower()} via Codex"
+        )
         cp = run([*prefix, "commit", "-m", message], timeout=60)
         if cp.returncode != 0:
             raise RuntimeError(f"commit failed: {cp.stderr[-1000:] or cp.stdout[-1000:]}")
         cp = run(
-            ["git", "-c", f"safe.directory={workdir}", "-C", str(workdir),
-             "push", GIT_PUSH_REMOTE, f"HEAD:refs/heads/{branch}"],
+            [
+                "git",
+                "-c",
+                f"safe.directory={workdir}",
+                "-C",
+                str(workdir),
+                "push",
+                GIT_PUSH_REMOTE,
+                f"HEAD:refs/heads/{branch}",
+            ],
             timeout=120,
         )
         if cp.returncode != 0:
@@ -966,10 +1055,10 @@ Finish by stating what changed, tests run, and any blocker. Keep changes scoped.
         files: list[str],
     ) -> dict[str, Any]:
         body = f"""## Objective
-Autonomous implementation for Issue #{issue['number']}: {issue.get('title','')}
+Autonomous implementation for Issue #{issue["number"]}: {issue.get("title", "")}
 
 ## GitHub Issue
-Closes #{issue['number']}
+Closes #{issue["number"]}
 
 ## Lane / subsystem
 AI-team infrastructure / assigned Issue scope
@@ -983,10 +1072,11 @@ Reviewed commit SHA: pending independent review
 Issue acceptance criteria not yet implemented.
 
 ## After
-Codex produced a scoped implementation. Changed files: {', '.join(files[:20])}
+Codex produced a scoped implementation. Changed files: {", ".join(files[:20])}
 
 ## Profitability impact
-No profitability claim from this PR unless the Issue explicitly provides independently reviewed evidence.
+No profitability claim from this PR unless the Issue explicitly provides
+independently reviewed evidence.
 
 ## Tests / validation
 See Codex task evidence and CI.
@@ -1006,12 +1096,12 @@ LIVE-SENSITIVE: NO
 <!-- AI_TEAM_BUILDER_EVIDENCE
 BUILDER=CODEX_CHATGPT
 BUILT_SHA={sha}
-ASSIGNMENT_ID={task['id']}
-TASK_CLASS={task['task_class']}
+ASSIGNMENT_ID={task["id"]}
+TASK_CLASS={task["task_class"]}
 -->
 """
         return self.gh.create_pr(
-            title=f"AI team: #{issue['number']} {issue.get('title','')}"[:240],
+            title=f"AI team: #{issue['number']} {issue.get('title', '')}"[:240],
             head=branch,
             base="main",
             body=body,
@@ -1067,16 +1157,21 @@ TASK_CLASS={task['task_class']}
             issue = self.gh.issue(int(task["issue_number"]))
             _, reason = parse_task_class(str(issue.get("body") or ""))
             route_review(self.cfg, str(task["task_class"]), reason)
-        workdir = Path(task["workdir"]) if task["workdir"] else prepare_checkout(
-            user=CLAUDE_USER,
-            home=CLAUDE_HOME,
-            base_dir=CLAUDE_WORK,
-            task_id=str(task["id"]),
-            ref=target_sha,
-            branch=None,
+        workdir = (
+            Path(task["workdir"])
+            if task["workdir"]
+            else prepare_checkout(
+                user=CLAUDE_USER,
+                home=CLAUDE_HOME,
+                base_dir=CLAUDE_WORK,
+                task_id=str(task["id"]),
+                ref=target_sha,
+                branch=None,
+            )
         )
-        self.ledger.update(task["id"], status="RUNNING", workdir=str(workdir),
-                           attempt=int(task["attempt"]) + 1)
+        self.ledger.update(
+            task["id"], status="RUNNING", workdir=str(workdir), attempt=int(task["attempt"]) + 1
+        )
         task = self.ledger.get(task["id"])
         changed = self.gh.changed_files(int(task["pr_number"]))
         pr_comments = recent_human_comments(self.gh, int(task["pr_number"]), self.trusted)
@@ -1087,11 +1182,18 @@ TASK_CLASS={task['task_class']}
         run_id = self.ledger.open_run(task, log_path)
         if not CLAUDE_ENV_FILE.exists():
             self.ledger.close_run(
-                run_id, exit_code=78, session_id=None, usage={}, result=None,
+                run_id,
+                exit_code=78,
+                session_id=None,
+                usage={},
+                result=None,
                 error=f"Claude auth file missing: {CLAUDE_ENV_FILE}",
             )
-            self.ledger.update(task["id"], status="BLOCKED",
-                               last_error="CLAUDE_AUTH_REQUIRED: run owner setup-token helper")
+            self.ledger.update(
+                task["id"],
+                status="BLOCKED",
+                last_error="CLAUDE_AUTH_REQUIRED: run owner setup-token helper",
+            )
             return
         try:
             cp = self.invoke_claude(task, workdir, prompt)
@@ -1100,23 +1202,38 @@ TASK_CLASS={task['task_class']}
             session_id, usage, result = parse_claude_output(text)
             log_path.write_text(text)
             self.ledger.close_run(
-                run_id, exit_code=124, session_id=session_id, usage=usage,
-                result=result, error="Claude timeout",
+                run_id,
+                exit_code=124,
+                session_id=session_id,
+                usage=usage,
+                result=result,
+                error="Claude timeout",
             )
             self.retry_or_block(task, "Claude timeout", session_id=session_id)
             return
         combined = cp.stdout + ("\n" + cp.stderr if cp.stderr else "")
         log_path.write_text(combined)
         session_id, usage, result = parse_claude_output(cp.stdout)
-        limited, retry_at = rate_limit_info(combined, int(self.cfg["default_rate_limit_retry_seconds"]))
+        limited, retry_at = rate_limit_info(
+            combined, int(self.cfg["default_rate_limit_retry_seconds"])
+        )
         self.ledger.close_run(
-            run_id, exit_code=cp.returncode, session_id=session_id, usage=usage,
-            result=result, error=None if cp.returncode == 0 else combined[-1500:],
+            run_id,
+            exit_code=cp.returncode,
+            session_id=session_id,
+            usage=usage,
+            result=result,
+            error=None if cp.returncode == 0 else combined[-1500:],
         )
         if cp.returncode != 0:
             if limited:
-                self.ledger.update(task["id"], status="WAITING_RATE_LIMIT", retry_at=retry_at,
-                                   session_id=session_id, last_error="Claude rate/usage limit")
+                self.ledger.update(
+                    task["id"],
+                    status="WAITING_RATE_LIMIT",
+                    retry_at=retry_at,
+                    session_id=session_id,
+                    last_error="Claude rate/usage limit",
+                )
                 return
             self.retry_or_block(task, f"Claude failed rc={cp.returncode}", session_id=session_id)
             return
@@ -1145,12 +1262,23 @@ TASK_CLASS={task['task_class']}
             + result[:7000],
         )
         if verdict == "FAIL":
-            self.ledger.update(task["id"], status="DONE", blockers_json=json.dumps(blockers),
-                               session_id=session_id, last_error="review FAIL")
+            self.ledger.update(
+                task["id"],
+                status="DONE",
+                blockers_json=json.dumps(blockers),
+                session_id=session_id,
+                last_error="review FAIL",
+            )
             self.enqueue_repair(task, blockers)
         else:
-            self.ledger.update(task["id"], status="WAITING_CI", blockers_json="[]",
-                               session_id=session_id, retry_at=utcnow(), last_error=None)
+            self.ledger.update(
+                task["id"],
+                status="WAITING_CI",
+                blockers_json="[]",
+                session_id=session_id,
+                retry_at=utcnow(),
+                last_error=None,
+            )
 
     def invoke_claude(
         self, task: sqlite3.Row, workdir: Path, prompt: str
@@ -1158,20 +1286,38 @@ TASK_CLASS={task['task_class']}
         model = "opus" if task["model_class"] == "OPUS" else "sonnet"
         if task["session_id"]:
             command = [
-                "/usr/bin/claude", "-p", "--resume", str(task["session_id"]),
-                "--model", model, "--output-format", "json",
-                "--permission-mode", "dontAsk",
+                "/usr/bin/claude",
+                "-p",
+                "--resume",
+                str(task["session_id"]),
+                "--model",
+                model,
+                "--output-format",
+                "json",
+                "--permission-mode",
+                "dontAsk",
             ]
         else:
             command = [
-                "/usr/bin/claude", "-p", "--model", model, "--output-format", "json",
-                "--permission-mode", "dontAsk",
-                "--allowedTools", "Read,Glob,Grep,Bash",
+                "/usr/bin/claude",
+                "-p",
+                "--model",
+                model,
+                "--output-format",
+                "json",
+                "--permission-mode",
+                "dontAsk",
+                "--allowedTools",
+                "Read,Glob,Grep,Bash",
             ]
         unit = f"hl-ai-claude-{task['id'][:10]}-{int(time.time())}"
         full = model_sandbox_command(
-            unit=unit, user=CLAUDE_USER, home=CLAUDE_HOME, workdir=workdir,
-            command=command, env_file=CLAUDE_ENV_FILE,
+            unit=unit,
+            user=CLAUDE_USER,
+            home=CLAUDE_HOME,
+            workdir=workdir,
+            command=command,
+            env_file=CLAUDE_ENV_FILE,
         )
         return run(full, input_text=prompt, timeout=int(self.cfg["review_timeout_seconds"]))
 
@@ -1193,8 +1339,8 @@ TASK_CLASS={task['task_class']}
                 "necessary adjacent context. Do not restart a repository audit.\n"
             )
         return f"""You are CLAUDE, the independent adversarial reviewer for the Hyperliquid project.
-Review exactly PR #{task['pr_number']} at exact SHA {target}.
-Model routing for this assignment is fixed by the orchestrator: {task['model_class']}.
+Review exactly PR #{task["pr_number"]} at exact SHA {target}.
+Model routing for this assignment is fixed by the orchestrator: {task["model_class"]}.
 
 Hard boundaries:
 - REAL TRADING REMAINS DISABLED. Flag any attempt to enable it, add/use keys, place orders,
@@ -1210,19 +1356,19 @@ Context discipline:
 4. No recursive whole-repository audit.
 {delta}
 PR TITLE:
-{pr.get('title','')}
+{pr.get("title", "")}
 
 PR BODY:
-{pr.get('body') or ''}
+{pr.get("body") or ""}
 
 CHANGED FILES:
-{chr(10).join('- ' + x for x in changed)}
+{chr(10).join("- " + x for x in changed)}
 
 PREVIOUS BLOCKERS (if any):
-{chr(10).join('- ' + x for x in blockers) if blockers else '(none)'}
+{chr(10).join("- " + x for x in blockers) if blockers else "(none)"}
 
 LATEST TRUSTED PR COMMENTS:
-{chr(10).join(comments[-6:]) if comments else '(none)'}
+{chr(10).join(comments[-6:]) if comments else "(none)"}
 
 Run narrow relevant tests if useful. At the very end emit EXACTLY these machine-readable lines:
 REVIEWED_SHA={target}
@@ -1307,10 +1453,13 @@ The reviewed SHA must be exactly the target SHA.
             return
         state, detail = self.gh.check_state(target)
         if state == "PENDING":
-            retry = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=int(self.cfg["poll_seconds"]))
-            self.ledger.update(task["id"], status="WAITING_CI",
-                               retry_at=retry.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-                               last_error=f"CI pending: {detail}")
+            retry = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=int(self.cfg["poll_seconds"]))
+            self.ledger.update(
+                task["id"],
+                status="WAITING_CI",
+                retry_at=retry.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+                last_error=f"CI pending: {detail}",
+            )
             return
         if state == "FAIL":
             self.block(task, f"CI failed after review PASS: {detail}")
@@ -1325,8 +1474,12 @@ The reviewed SHA must be exactly the target SHA.
             self.block(task, "owner-sensitive/live path cannot auto-merge")
             return
         if str(task["task_class"]) not in self.cfg["auto_merge_task_classes"]:
-            self.ledger.update(task["id"], status="DONE", retry_at=None,
-                               last_error="PASS+CI green; task class requires non-automatic merge")
+            self.ledger.update(
+                task["id"],
+                status="DONE",
+                retry_at=None,
+                last_error="PASS+CI green; task class requires non-automatic merge",
+            )
             self.gh.comment(
                 int(task["pr_number"]),
                 "AI team gate: exact-SHA review PASS and CI green. "
@@ -1359,7 +1512,7 @@ The reviewed SHA must be exactly the target SHA.
         if attempts >= int(self.cfg["max_attempts"]):
             self.block(task, f"{error}; max attempts reached")
             return
-        retry = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=60 * max(1, attempts))
+        retry = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=60 * max(1, attempts))
         self.ledger.update(
             task["id"],
             status="WAITING_RATE_LIMIT" if rate_limited else "RETRY",
@@ -1376,7 +1529,7 @@ The reviewed SHA must be exactly the target SHA.
             self.gh.comment(
                 number,
                 f"<!-- AI_TEAM_BLOCKED_V1\nASSIGNMENT_ID={task['id']}\n"
-                f"ERROR={error[:1000].replace(chr(10),' ')}\n-->\n"
+                f"ERROR={error[:1000].replace(chr(10), ' ')}\n-->\n"
                 f"Autonomous task blocked: {error[:1200]}",
             )
         except Exception:
