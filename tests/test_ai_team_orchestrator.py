@@ -187,6 +187,16 @@ def test_orchestrator_control_plane_paths_are_not_auto_mergeable(path):
     assert any(path.startswith(prefix) for prefix in protected)
 
 
+def test_protected_control_plane_allowlist_excludes_live_and_deploy_paths():
+    allowed = orch.AUTO_APPLY_CONTROL_PLANE_PATHS
+    assert "scripts/ai_team_orchestrator.py" in allowed
+    assert "scripts/ai_team_runtime_ledger.py" in allowed
+    assert "config/ai_team_router.json" in allowed
+    assert "src/hlcopy/trading/permissions.py" not in allowed
+    assert "docs/ai-team/LIVE_TRADING_GATE.md" not in allowed
+    assert ".github/workflows/deploy-ai-team-orchestrator.yml" not in allowed
+
+
 def test_only_explicit_routine_class_is_auto_merge_eligible():
     auto_merge = orch.DEFAULT_CONFIG["auto_merge_task_classes"]
     assert orch.parse_task_class("TASK_CLASS=ROUTINE")[0] in auto_merge
