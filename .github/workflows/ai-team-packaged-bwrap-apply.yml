@@ -1,0 +1,51 @@
+name: ai-team-packaged-bwrap-apply
+
+on:
+  push:
+    branches: [codex/126-ai-orchestrator]
+    paths:
+      - .github/workflows/ai-team-packaged-bwrap-apply.yml
+
+permissions:
+  contents: read
+
+jobs:
+  apply:
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Use the matching packaged Codex Linux sandbox
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = 'aliezzat4321/hyperliquid-copy-engine'
+          echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
+          echo 'POLYMARKET_INSPECTION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('scripts/ai_team_orchestrator.py')
+          s=p.read_text()
+          old='    bwrap_path: Path = Path("/usr/bin/bwrap"),\n'
+          new='    bwrap_path: Path = Path("/usr/local/bin/bwrap"),\n'
+          assert s.count(old)==1, s.count(old)
+          p.write_text(s.replace(old,new,1))
+          PY
+          python3 -m py_compile scripts/ai_team_orchestrator.py
+          grep -q 'Path("/usr/local/bin/bwrap")' scripts/ai_team_orchestrator.py
+          bash -n scripts/install_codex_code_mode_host.sh
+          rm -f .github/workflows/ai-team-packaged-bwrap-apply.yml
+          git config user.name 'aliezzat4321'
+          git config user.email 'ali.ezzat4321@gmail.com'
+          git add scripts/ai_team_orchestrator.py .github/workflows/ai-team-packaged-bwrap-apply.yml
+          git commit -m 'Use Codex packaged Linux bwrap companion'
+          git remote set-url origin git@github.com:aliezzat4321/hyperliquid-copy-engine.git
+          git push origin HEAD:codex/126-ai-orchestrator
+          echo 'CODEX_PACKAGED_BWRAP_PREFLIGHT=COMMITTED'
+          echo 'POLYMARKET_TOUCHED=NO'
+          echo 'REAL_TRADING_TOUCHED=NO'
