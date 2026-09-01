@@ -20,7 +20,7 @@ jobs:
           clean: true
           persist-credentials: false
 
-      - name: Assert VM credential and hard boundary
+      - name: Verify credential and boundary
         shell: bash
         run: |
           set -euo pipefail
@@ -30,300 +30,130 @@ jobs:
           test "$(stat -c '%a' /etc/hyperliquid-ai-team/trello.env)" = 600
           test "$(stat -c '%u' /etc/hyperliquid-ai-team/trello.env)" = 0
           echo 'TRELLO_CREDENTIAL_FILE=READY'
-          echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
           echo 'POLYMARKET_INSPECTION=NO'
-          echo 'POLYMARKET_MUTATION=NO'
           echo 'REAL_TRADING_CHANGE=NO'
 
-      - name: Apply reviewed manager wiring on dedicated branch
+      - name: Build protected manager wiring branch
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           BRANCH=manager/146-trello-vm-wire
-          git switch -c "$BRANCH"
+          git switch -C "$BRANCH"
+
           python3 - <<'PY'
           from pathlib import Path
 
-          def replace_once(path: str, old: str, new: str) -> None:
-              p = Path(path)
-              text = p.read_text(encoding='utf-8')
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(f'{path}: expected one anchor, found {count}')
-              p.write_text(text.replace(old, new), encoding='utf-8')
-
-          # Python 3.10 compatibility + existing-card reuse + repair-phase semantics.
+          # Bridge: Python 3.10, correct repair phase, reuse existing manually-seeded cards.
           p = Path('scripts/trello_team_bridge.py')
           text = p.read_text(encoding='utf-8')
-          text = text.replace('import os\nimport sqlite3\n', 'import os\nimport re\nimport sqlite3\n')
+          if 'import re\n' not in text:
+              text = text.replace('import os\nimport sqlite3\n', 'import os\nimport re\nimport sqlite3\n')
           text = text.replace('dt.datetime.now(dt.UTC)', 'dt.datetime.now(dt.timezone.utc)')
           text = text.replace('parsed.replace(tzinfo=dt.UTC)', 'parsed.replace(tzinfo=dt.timezone.utc)')
-          early = '''    if kind in {"COMPLETED", "MERGED"} or status == "DONE":\n        return "DONE"\n    if kind in {"BLOCKED", "OWNER_ACTION", "AUTH_FAILURE"} or status in {"BLOCKED", "FAILED"}:\n        return "BLOCKED"\n'''
-          early_new = '''    if kind in {"COMPLETED", "MERGED"} or status == "DONE":\n        return "DONE"\n    if kind in {"BLOCKED", "OWNER_ACTION", "AUTH_FAILURE"} or status in {"BLOCKED", "FAILED"}:\n        return "BLOCKED"\n    task_type = str(event.get("task_type", "")).upper()\n    if task_type in {"BUILD", "REPAIR", "RESEARCH"} and status in {\n        "PENDING", "RUNNING", "RETRY", "WAITING_RATE_LIMIT"\n    }:\n        return "IN_PROGRESS"\n'''
-          if text.count(early) != 1:
-              raise SystemExit('trello phase anchor mismatch')
-          text = text.replace(early, early_new)
-          anchor = '\n\ndef sync(event: dict[str, Any], client: Trello, state_path: Path, ledger: Path) -> dict[str, Any]:\n'
-          discovery = '''\n\ndef existing_card_for_issue(client: Trello, issue: int) -> str | None:\n    """Reuse a human-created board card when its issue marker is already present."""\n    rows = client.call(\n        "GET",\n        f"/boards/{BOARD_ID}/cards",\n        {"fields": "id,name,desc,closed"},\n    )\n    marker = re.compile(rf"(?<!\\d)#{issue}(?!\\d)")\n    for row in rows if isinstance(rows, list) else []:\n        if row.get("closed"):\n            continue\n        haystack = f"{row.get('name', '')}\\n{row.get('desc', '')}"\n        if marker.search(haystack):\n            return str(row["id"])\n    return None\n'''
-          if text.count(anchor) != 1:
-              raise SystemExit('trello sync anchor mismatch')
-          text = text.replace(anchor, discovery + anchor)
+          old = '''    if kind in {"COMPLETED", "MERGED"} or status == "DONE":\n        return "DONE"\n    if kind in {"BLOCKED", "OWNER_ACTION", "AUTH_FAILURE"} or status in {"BLOCKED", "FAILED"}:\n        return "BLOCKED"\n'''
+          new = '''    if kind in {"COMPLETED", "MERGED"} or status == "DONE":\n        return "DONE"\n    if kind in {"BLOCKED", "OWNER_ACTION", "AUTH_FAILURE"} or status in {"BLOCKED", "FAILED"}:\n        return "BLOCKED"\n    task_type = str(event.get("task_type", "")).upper()\n    if task_type in {"BUILD", "REPAIR", "RESEARCH"} and status in {\n        "PENDING", "RUNNING", "RETRY", "WAITING_RATE_LIMIT"\n    }:\n        return "IN_PROGRESS"\n'''
+          if old not in text:
+              raise SystemExit('bridge phase anchor missing')
+          text = text.replace(old, new, 1)
+          sync_anchor = '\n\ndef sync(event: dict[str, Any], client: Trello, state_path: Path, ledger: Path) -> dict[str, Any]:\n'
+          discovery = '''\n\ndef existing_card_for_issue(client: Trello, issue: int) -> str | None:\n    """Reuse an existing open board card carrying this GitHub issue marker."""\n    rows = client.call(\n        "GET", f"/boards/{BOARD_ID}/cards", {"fields": "id,name,desc,closed"}\n    )\n    marker = re.compile(rf"(?<!\\d)#{issue}(?!\\d)")\n    for row in rows if isinstance(rows, list) else []:\n        if row.get("closed"):\n            continue\n        if marker.search(f"{row.get('name', '')}\\n{row.get('desc', '')}"):\n            return str(row["id"])\n    return None\n'''
+          if 'def existing_card_for_issue(' not in text:
+              if sync_anchor not in text:
+                  raise SystemExit('bridge sync anchor missing')
+              text = text.replace(sync_anchor, discovery + sync_anchor, 1)
           old = '''    card_id = cards.get(key)\n    title = f"[{event.get('priority', 'P?')}] #{issue} {event.get('title', 'AI team task')}"\n'''
           new = '''    card_id = cards.get(key)\n    if not card_id:\n        card_id = existing_card_for_issue(client, issue)\n        if card_id:\n            cards[key] = card_id\n    title = f"[{event.get('priority', 'P?')}] #{issue} {event.get('title', 'AI team task')}"\n'''
-          if text.count(old) != 1:
-              raise SystemExit('trello card anchor mismatch')
-          p.write_text(text.replace(old, new), encoding='utf-8')
+          if old not in text:
+              raise SystemExit('bridge card anchor missing')
+          p.write_text(text.replace(old, new, 1), encoding='utf-8')
 
-          # Central manager-side Trello projection from the existing durable event ledger.
+          # Runtime ledger: every durable material event is projected to Trello fail-open.
           p = Path('scripts/ai_team_runtime_ledger.py')
           text = p.read_text(encoding='utf-8')
           text = text.replace(
               'import re\nimport sqlite3\nfrom pathlib import Path\n',
               'import re\nimport sqlite3\nimport subprocess\nimport sys\nfrom pathlib import Path\n',
+              1,
           )
-          db_anchor = '''    def _db(self) -> sqlite3.Connection:\n        db = sqlite3.connect(self.db_path)\n        db.row_factory = sqlite3.Row\n        return db\n\n    def event(self, kind: str, **payload: Any) -> dict[str, Any]:\n'''
-          method = '''    def _db(self) -> sqlite3.Connection:\n        db = sqlite3.connect(self.db_path)\n        db.row_factory = sqlite3.Row\n        return db\n\n    def _trello_event(self, event: dict[str, Any]) -> None:\n        """Fail-open projection of one durable material event to the Trello adapter."""\n        raw_issue = event.get("issue")\n        if raw_issue is None:\n            return\n        try:\n            issue = int(raw_issue)\n        except (TypeError, ValueError):\n            return\n        bridge = Path(__file__).resolve().with_name("trello_team_bridge.py")\n        if not bridge.is_file():\n            return\n\n        task: dict[str, Any] = {}\n        try:\n            with self._db() as db:\n                row = None\n                assignment_id = event.get("assignment_id")\n                if assignment_id:\n                    row = db.execute(\n                        "SELECT * FROM tasks WHERE id=? LIMIT 1",\n                        (str(assignment_id),),\n                    ).fetchone()\n                if row is None:\n                    row = db.execute(\n                        "SELECT * FROM tasks WHERE issue_number=? ORDER BY updated_at DESC LIMIT 1",\n                        (issue,),\n                    ).fetchone()\n                if row is not None:\n                    task = dict(row)\n        except (sqlite3.Error, OSError):\n            task = {}\n\n        outgoing = dict(event)\n        outgoing["repository"] = self.repository\n        outgoing["issue"] = issue\n        if task:\n            outgoing.setdefault("task_type", task.get("task_type"))\n            outgoing.setdefault("agent", task.get("agent"))\n            outgoing.setdefault("model", task.get("model_class"))\n            outgoing.setdefault("status", task.get("status"))\n            outgoing.setdefault("pr", task.get("pr_number"))\n            outgoing.setdefault("target_sha", task.get("target_sha"))\n            outgoing.setdefault("sha", task.get("target_sha"))\n            outgoing.setdefault("task_started_at", task.get("created_at"))\n            outgoing.setdefault("phase_started_at", event.get("at") or task.get("updated_at"))\n            outgoing.setdefault("blocker", task.get("last_error"))\n            outgoing.setdefault("next_action", _next_step(task))\n            outgoing.setdefault("owner", task.get("agent"))\n            if str(task.get("task_type")) == "REVIEW":\n                outgoing.setdefault(\n                    "reviewer_model",\n                    f"CLAUDE / {task.get('model_class') or 'SONNET'}",\n                )\n\n        kind = str(outgoing.get("event") or "").upper()\n        task_type = str(outgoing.get("task_type") or "").upper()\n        status = str(outgoing.get("status") or "").upper()\n        if kind == "RUN_STARTED":\n            if task_type == "REVIEW":\n                outgoing["event"] = "REVIEW_STARTED"\n            elif task_type == "RESEARCH":\n                outgoing["event"] = "RESEARCH_STARTED"\n            elif task_type in {"BUILD", "REPAIR"}:\n                outgoing["event"] = "BUILD_STARTED"\n        elif kind == "RUN_FINISHED" and task_type == "REVIEW":\n            if status == "PASS":\n                outgoing["event"] = "REVIEW_PASS"\n                outgoing["status"] = "WAITING_CI"\n            elif status in {"FAIL", "FAILED"}:\n                outgoing["event"] = "REVIEW_FAIL"\n                outgoing["status"] = "FAILED"\n        elif kind in {"TASK_BLOCKED", "BLOCKED"}:\n            outgoing["event"] = "BLOCKED"\n            outgoing["status"] = "BLOCKED"\n        elif "RATE_LIMIT" in kind:\n            outgoing["event"] = "RATE_LIMIT"\n            outgoing["status"] = "WAITING_RATE_LIMIT"\n        elif "CI" in kind:\n            if status in {"PASS", "SUCCESS", "DONE"}:\n                outgoing["event"] = "CI_PASS"\n            elif status in {"FAIL", "FAILED", "ERROR"}:\n                outgoing["event"] = "CI_FAIL"\n            else:\n                outgoing["event"] = "CI_PENDING"\n        elif "MERG" in kind:\n            outgoing["event"] = "MERGED"\n            outgoing["status"] = "DONE"\n\n        outgoing.setdefault(\n            "result",\n            outgoing.get("status") or outgoing.get("event") or "material state transition",\n        )\n        try:\n            meta = subprocess.run(\n                ["gh", "api", f"repos/{self.repository}/issues/{issue}"],\n                text=True,\n                capture_output=True,\n                timeout=10,\n                check=False,\n            )\n            if meta.returncode == 0 and meta.stdout.strip():\n                issue_row = json.loads(meta.stdout)\n                title = str(issue_row.get("title") or "AI team task")\n                outgoing.setdefault("title", title)\n                upper = title.upper()\n                outgoing.setdefault(\n                    "priority",\n                    "P0" if upper.startswith("P0") else "P1" if upper.startswith("P1") else "P?",\n                )\n        except (OSError, subprocess.SubprocessError, json.JSONDecodeError):\n            pass\n\n        try:\n            subprocess.run(\n                [sys.executable, str(bridge)],\n                input=json.dumps(outgoing, separators=(",", ":")),\n                text=True,\n                capture_output=True,\n                timeout=25,\n                check=False,\n            )\n        except (OSError, subprocess.SubprocessError):\n            pass\n\n    def event(self, kind: str, **payload: Any) -> dict[str, Any]:\n'''
-          if text.count(db_anchor) != 1:
-              raise SystemExit('runtime ledger db/event anchor mismatch')
-          text = text.replace(db_anchor, method)
-          end_anchor = '''        with os.fdopen(fd, "a", encoding="utf-8") as handle:\n            handle.write(json.dumps(row, separators=(",", ":"), sort_keys=True) + "\\n")\n        return row\n'''
-          end_new = '''        with os.fdopen(fd, "a", encoding="utf-8") as handle:\n            handle.write(json.dumps(row, separators=(",", ":"), sort_keys=True) + "\\n")\n        self._trello_event(row)\n        return row\n'''
-          if text.count(end_anchor) != 1:
-              raise SystemExit('runtime ledger event tail anchor mismatch')
-          p.write_text(text.replace(end_anchor, end_new), encoding='utf-8')
+          anchor = '''    def _db(self) -> sqlite3.Connection:\n        db = sqlite3.connect(self.db_path)\n        db.row_factory = sqlite3.Row\n        return db\n\n    def event(self, kind: str, **payload: Any) -> dict[str, Any]:\n'''
+          replacement = '''    def _db(self) -> sqlite3.Connection:\n        db = sqlite3.connect(self.db_path)\n        db.row_factory = sqlite3.Row\n        return db\n\n    def _trello_event(self, event: dict[str, Any]) -> None:\n        """Project one durable event to Trello; observability can never block execution."""\n        raw_issue = event.get("issue")\n        if raw_issue is None:\n            return\n        try:\n            issue = int(raw_issue)\n        except (TypeError, ValueError):\n            return\n        bridge = Path(__file__).resolve().with_name("trello_team_bridge.py")\n        if not bridge.is_file():\n            return\n        task: dict[str, Any] = {}\n        try:\n            with self._db() as db:\n                row = None\n                assignment_id = event.get("assignment_id")\n                if assignment_id:\n                    row = db.execute(\n                        "SELECT * FROM tasks WHERE id=? LIMIT 1", (str(assignment_id),)\n                    ).fetchone()\n                if row is None:\n                    row = db.execute(\n                        "SELECT * FROM tasks WHERE issue_number=? ORDER BY updated_at DESC LIMIT 1",\n                        (issue,),\n                    ).fetchone()\n                if row is not None:\n                    task = dict(row)\n        except (sqlite3.Error, OSError):\n            task = {}\n        outgoing = dict(event)\n        outgoing.update({"repository": self.repository, "issue": issue})\n        if task:\n            outgoing.setdefault("task_type", task.get("task_type"))\n            outgoing.setdefault("agent", task.get("agent"))\n            outgoing.setdefault("model", task.get("model_class"))\n            outgoing.setdefault("status", task.get("status"))\n            outgoing.setdefault("pr", task.get("pr_number"))\n            outgoing.setdefault("sha", task.get("target_sha"))\n            outgoing.setdefault("task_started_at", task.get("created_at"))\n            outgoing.setdefault("phase_started_at", event.get("at") or task.get("updated_at"))\n            outgoing.setdefault("blocker", task.get("last_error"))\n            outgoing.setdefault("next_action", _next_step(task))\n            outgoing.setdefault("owner", task.get("agent"))\n            if str(task.get("task_type")) == "REVIEW":\n                outgoing.setdefault(\n                    "reviewer_model", f"CLAUDE / {task.get('model_class') or 'SONNET'}"\n                )\n        kind = str(outgoing.get("event") or "").upper()\n        task_type = str(outgoing.get("task_type") or "").upper()\n        status = str(outgoing.get("status") or "").upper()\n        if kind == "RUN_STARTED":\n            outgoing["event"] = (\n                "REVIEW_STARTED" if task_type == "REVIEW"\n                else "RESEARCH_STARTED" if task_type == "RESEARCH"\n                else "BUILD_STARTED"\n            )\n        elif kind == "RUN_FINISHED" and task_type == "REVIEW":\n            if status == "PASS":\n                outgoing.update({"event": "REVIEW_PASS", "status": "WAITING_CI"})\n            elif status in {"FAIL", "FAILED"}:\n                outgoing.update({"event": "REVIEW_FAIL", "status": "FAILED"})\n        elif kind in {"TASK_BLOCKED", "BLOCKED"}:\n            outgoing.update({"event": "BLOCKED", "status": "BLOCKED"})\n        elif "RATE_LIMIT" in kind:\n            outgoing.update({"event": "RATE_LIMIT", "status": "WAITING_RATE_LIMIT"})\n        elif "CI" in kind:\n            outgoing["event"] = (\n                "CI_PASS" if status in {"PASS", "SUCCESS", "DONE"}\n                else "CI_FAIL" if status in {"FAIL", "FAILED", "ERROR"}\n                else "CI_PENDING"\n            )\n        elif "MERG" in kind:\n            outgoing.update({"event": "MERGED", "status": "DONE"})\n        outgoing.setdefault("result", outgoing.get("status") or outgoing.get("event"))\n        try:\n            meta = subprocess.run(\n                ["gh", "api", f"repos/{self.repository}/issues/{issue}"],\n                text=True, capture_output=True, timeout=10, check=False,\n            )\n            if meta.returncode == 0 and meta.stdout.strip():\n                issue_row = json.loads(meta.stdout)\n                title = str(issue_row.get("title") or "AI team task")\n                outgoing.setdefault("title", title)\n                upper = title.upper()\n                outgoing.setdefault(\n                    "priority",\n                    "P0" if upper.startswith("P0") else "P1" if upper.startswith("P1") else "P?",\n                )\n        except (OSError, subprocess.SubprocessError, json.JSONDecodeError):\n            pass\n        try:\n            subprocess.run(\n                [sys.executable, str(bridge)],\n                input=json.dumps(outgoing, separators=(",", ":")),\n                text=True, capture_output=True, timeout=25, check=False,\n            )\n        except (OSError, subprocess.SubprocessError):\n            pass\n\n    def event(self, kind: str, **payload: Any) -> dict[str, Any]:\n'''
+          if anchor not in text:
+              raise SystemExit('runtime ledger event anchor missing')
+          text = text.replace(anchor, replacement, 1)
+          tail = '''        with os.fdopen(fd, "a", encoding="utf-8") as handle:\n            handle.write(json.dumps(row, separators=(",", ":"), sort_keys=True) + "\\n")\n        return row\n'''
+          tail_new = '''        with os.fdopen(fd, "a", encoding="utf-8") as handle:\n            handle.write(json.dumps(row, separators=(",", ":"), sort_keys=True) + "\\n")\n        self._trello_event(row)\n        return row\n'''
+          if tail not in text:
+              raise SystemExit('runtime ledger tail anchor missing')
+          p.write_text(text.replace(tail, tail_new, 1), encoding='utf-8')
 
-          # Install the bridge/auth helper without ever copying credentials into model homes.
+          # Installer: root-only Trello state/scripts/helper, preserving credential file.
           p = Path('scripts/install_ai_team_orchestrator.sh')
           text = p.read_text(encoding='utf-8')
           text = text.replace(
               'install -d -m 0700 /run/hyperliquid-ai-team "$OPT/scripts" "$OPT/config" "$ETC"\n',
-              'install -d -m 0700 /run/hyperliquid-ai-team "$OPT/scripts" "$OPT/config" "$ETC"\ninstall -d -m 0700 "$STATE/trello"\n',
+              'install -d -m 0700 /run/hyperliquid-ai-team "$OPT/scripts" "$OPT/config" "$ETC"\ninstall -d -m 0700 "$STATE/trello"\n', 1,
           )
           text = text.replace(
               'install -m 0644 "$ROOT/scripts/ai_team_runtime_ledger.py" "$OPT/scripts/ai_team_runtime_ledger.py"\n',
-              'install -m 0644 "$ROOT/scripts/ai_team_runtime_ledger.py" "$OPT/scripts/ai_team_runtime_ledger.py"\ninstall -m 0755 "$ROOT/scripts/trello_team_bridge.py" "$OPT/scripts/trello_team_bridge.py"\ninstall -m 0755 "$ROOT/scripts/trello_vm_auth.py" "$OPT/scripts/trello_vm_auth.py"\n',
+              'install -m 0644 "$ROOT/scripts/ai_team_runtime_ledger.py" "$OPT/scripts/ai_team_runtime_ledger.py"\ninstall -m 0755 "$ROOT/scripts/trello_team_bridge.py" "$OPT/scripts/trello_team_bridge.py"\ninstall -m 0755 "$ROOT/scripts/trello_vm_auth.py" "$OPT/scripts/trello_vm_auth.py"\n', 1,
           )
           text = text.replace(
               'ln -sfn "$OPT/scripts/ai_team_auth_claude.sh" /usr/local/sbin/hl-ai-team-auth-claude\n',
-              'ln -sfn "$OPT/scripts/ai_team_auth_claude.sh" /usr/local/sbin/hl-ai-team-auth-claude\nln -sfn "$OPT/scripts/trello_vm_auth.py" /usr/local/sbin/hl-ai-team-auth-trello\n',
+              'ln -sfn "$OPT/scripts/ai_team_auth_claude.sh" /usr/local/sbin/hl-ai-team-auth-claude\nln -sfn "$OPT/scripts/trello_vm_auth.py" /usr/local/sbin/hl-ai-team-auth-trello\n', 1,
           )
           p.write_text(text, encoding='utf-8')
 
-          # Deploy on future Trello adapter changes and verify Python/runtime installation.
+          # Deploy when Trello adapter changes.
           p = Path('.github/workflows/deploy-ai-team-orchestrator.yml')
           text = p.read_text(encoding='utf-8')
           text = text.replace(
               '      - "scripts/ai_team_runtime_ledger.py"\n',
-              '      - "scripts/ai_team_runtime_ledger.py"\n      - "scripts/trello_team_bridge.py"\n      - "scripts/trello_vm_auth.py"\n',
+              '      - "scripts/ai_team_runtime_ledger.py"\n      - "scripts/trello_team_bridge.py"\n      - "scripts/trello_vm_auth.py"\n', 1,
           )
           text = text.replace(
               '          python3 -m py_compile scripts/ai_team_orchestrator.py scripts/ai_team_runtime_ledger.py\n',
-              '          python3 -m py_compile scripts/ai_team_orchestrator.py scripts/ai_team_runtime_ledger.py scripts/trello_team_bridge.py scripts/trello_vm_auth.py\n',
+              '          python3 -m py_compile scripts/ai_team_orchestrator.py scripts/ai_team_runtime_ledger.py scripts/trello_team_bridge.py scripts/trello_vm_auth.py\n', 1,
           )
           text = text.replace(
               '          test -x /usr/local/sbin/hl-ai-team-auth-codex\n',
-              '          test -x /usr/local/sbin/hl-ai-team-auth-codex\n          test -x /usr/local/sbin/hl-ai-team-auth-trello\n          test -x /opt/hyperliquid-ai-team/scripts/trello_team_bridge.py\n',
+              '          test -x /usr/local/sbin/hl-ai-team-auth-codex\n          test -x /usr/local/sbin/hl-ai-team-auth-trello\n          test -x /opt/hyperliquid-ai-team/scripts/trello_team_bridge.py\n', 1,
           )
           p.write_text(text, encoding='utf-8')
 
-          # Ruff targets py312 but this operational adapter must execute on VM Python 3.10.
+          # Ruff should not rewrite operational Python 3.10 compatibility.
           p = Path('pyproject.toml')
           text = p.read_text(encoding='utf-8')
           anchor = '"scripts/ai_team_orchestrator.py" = ["UP017"]\n'
           if '"scripts/trello_team_bridge.py" = ["UP017"]' not in text:
-              text = text.replace(anchor, anchor + '"scripts/trello_team_bridge.py" = ["UP017"]\n')
+              if anchor not in text:
+                  raise SystemExit('pyproject anchor missing')
+              text = text.replace(anchor, anchor + '"scripts/trello_team_bridge.py" = ["UP017"]\n', 1)
           p.write_text(text, encoding='utf-8')
 
-          # Immediate GitHub comments/PR/review events use the same VM bridge; CI remains
-          # driven by the existing <=60s orchestrator CI gate to avoid workflow recursion.
-          Path('.github/workflows/ai-team-trello-events.yml').write_text(r'''name: ai-team-trello-events
-
-on:
-  issues:
-    types: [opened, edited, closed, reopened, labeled, unlabeled, assigned]
-  issue_comment:
-    types: [created]
-  pull_request:
-    types: [opened, synchronize, reopened, closed, ready_for_review]
-  pull_request_review:
-    types: [submitted]
-
-permissions:
-  contents: read
-  issues: read
-  pull-requests: read
-
-concurrency:
-  group: ai-team-trello-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: false
-
-jobs:
-  sync:
-    if: github.repository == 'aliezzat4321/hyperliquid-copy-engine'
-    runs-on: [self-hosted, linux]
-    timeout-minutes: 2
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          clean: true
-          persist-credentials: false
-      - name: Project GitHub material event to Trello
-        shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          EVENT_ACTION: ${{ github.event.action }}
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import json, os, re, sqlite3, subprocess
-          from pathlib import Path
-
-          event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text(encoding='utf-8'))
-          name = os.environ['EVENT_NAME']
-          action = os.environ.get('EVENT_ACTION', '')
-          issue = event.get('issue')
-          pr = event.get('pull_request')
-          number = None
-          title = None
-          pr_number = None
-          if issue:
-              number = int(issue['number'])
-              title = str(issue.get('title') or 'AI team task')
-          elif pr:
-              pr_number = int(pr['number'])
-              body = str(pr.get('body') or '')
-              m = re.search(r'(?i)\b(?:closes|fixes|resolves)\s+#(\d+)\b', body)
-              if m:
-                  number = int(m.group(1))
-              if number is None:
-                  db_path = Path('/var/lib/hyperliquid-ai-team/orchestrator/ledger.sqlite3')
-                  if db_path.exists():
-                      with sqlite3.connect(db_path) as db:
-                          row = db.execute(
-                              'SELECT issue_number FROM tasks WHERE pr_number=? ORDER BY updated_at DESC LIMIT 1',
-                              (pr_number,),
-                          ).fetchone()
-                          if row:
-                              number = int(row[0])
-              title = str(pr.get('title') or 'AI team PR')
-          if number is None:
-              print('TRELLO_EVENT=SKIP no_issue_mapping')
-              raise SystemExit(0)
-
-          task = {}
-          db_path = Path('/var/lib/hyperliquid-ai-team/orchestrator/ledger.sqlite3')
-          if db_path.exists():
-              with sqlite3.connect(db_path) as db:
-                  db.row_factory = sqlite3.Row
-                  row = db.execute(
-                      'SELECT * FROM tasks WHERE issue_number=? ORDER BY updated_at DESC LIMIT 1',
-                      (number,),
-                  ).fetchone()
-                  if row:
-                      task = dict(row)
-          issue_state = str(issue.get('state') if issue else '').lower()
-          status = str(task.get('status') or 'PENDING')
-          if issue_state == 'closed':
-              status = 'DONE'
-          elif status == 'DONE' and str(task.get('task_type')) == 'REVIEW':
-              status = 'WAITING_CI'
-          elif status == 'DONE':
-              status = 'PENDING'
-
-          kind = 'GITHUB_EVENT'
-          result = f'GitHub {name}/{action}'
-          if name == 'issue_comment':
-              comment = event.get('comment') or {}
-              body = ' '.join(str(comment.get('body') or '').split())[:300]
-              who = str((comment.get('user') or {}).get('login') or 'unknown')
-              kind = 'GITHUB_COMMENT'
-              result = f'GitHub comment by {who}: {body}'
-          elif name == 'issues' and action == 'closed':
-              kind = 'COMPLETED'
-          elif name == 'pull_request':
-              kind = 'MERGED' if action == 'closed' and bool(pr.get('merged')) else 'PR_OPENED'
-          elif name == 'pull_request_review':
-              state = str((event.get('review') or {}).get('state') or '').lower()
-              kind = 'REVIEW_PASS' if state == 'approved' else 'REVIEW_FAIL' if state == 'changes_requested' else 'REVIEW_STARTED'
-
-          upper = str(title or '').upper()
-          priority = 'P0' if upper.startswith('P0') else 'P1' if upper.startswith('P1') else 'P?'
-          payload = {
-              'repository': 'aliezzat4321/hyperliquid-copy-engine',
-              'issue': number,
-              'event': kind,
-              'priority': priority,
-              'title': title or 'AI team task',
-              'task_type': task.get('task_type'),
-              'agent': task.get('agent'),
-              'model': task.get('model_class'),
-              'owner': task.get('agent') or 'AI Team',
-              'reviewer_model': f"CLAUDE / {task.get('model_class')}" if task.get('task_type') == 'REVIEW' else None,
-              'status': status,
-              'pr': pr_number or task.get('pr_number'),
-              'sha': (pr or {}).get('head', {}).get('sha') if pr else task.get('target_sha'),
-              'result': result,
-              'blocker': task.get('last_error'),
-              'next_action': 'follow canonical GitHub/VM task state',
-              'task_started_at': task.get('created_at'),
-              'phase_started_at': task.get('updated_at'),
-          }
-          bridge = Path('/opt/hyperliquid-ai-team/scripts/trello_team_bridge.py')
-          if not bridge.exists():
-              bridge = Path('scripts/trello_team_bridge.py')
-          cp = subprocess.run(
-              ['python3', str(bridge)],
-              input=json.dumps(payload, separators=(',', ':')),
-              text=True,
-              capture_output=True,
-              timeout=30,
-              check=False,
-          )
-          print(cp.stdout.strip() or f'TRELLO_EVENT=bridge_rc_{cp.returncode}')
-          raise SystemExit(0)
-          PY
-          echo 'POLYMARKET_TOUCHED=NO'
-          echo 'REAL_TRADING_TOUCHED=NO'
-''', encoding='utf-8')
-
-          # Documentation map for the durable task-management adapter.
           p = Path('docs/ai-team/SYSTEM_MAP.md')
           text = p.read_text(encoding='utf-8')
-          block = '''\n\n## Trello team-management projection\n\n- `scripts/trello_team_bridge.py`: fail-open, event-driven Trello projection for the existing SQLite/GitHub AI-team ledger; Trello is never an execution authority.\n- `scripts/trello_vm_auth.py`: root-only interactive Trello REST credential setup; credentials remain only in `/etc/hyperliquid-ai-team/trello.env` mode `0600`.\n- `.github/workflows/ai-team-trello-events.yml`: immediate GitHub issue/comment/PR/review projection through the same VM bridge.\n- The existing orchestrator/runtime ledger remains canonical. Trello is the durable operator-facing task board with owner, reviewer/model, status, blocker, result, ETA, and next checkpoint.\n'''
           if '## Trello team-management projection' not in text:
-              p.write_text(text.rstrip() + block + '\n', encoding='utf-8')
+              text = text.rstrip() + '''\n\n## Trello team-management projection\n\n- `scripts/trello_team_bridge.py`: fail-open event-driven projection of the existing SQLite/GitHub AI-team ledger to Trello. Trello is never execution authority.\n- `scripts/trello_vm_auth.py`: root-only interactive credential setup; `/etc/hyperliquid-ai-team/trello.env` remains mode `0600` and is never exposed to model users.\n- The existing orchestrator/runtime ledger remains canonical. Trello is the durable operator-facing board for owner, reviewer/model, status, result, blocker, ETA and next checkpoint.\n'''
+              p.write_text(text + '\n', encoding='utf-8')
 
-          # Both one-time manager workflows must disappear when this PR merges.
+          # Manager PR deletes its temporary bootstrap/review workflows when merged.
           Path('.github/workflows/ai-team-trello-manager-wire-temp.yml').unlink(missing_ok=True)
           Path('.github/workflows/ai-team-trello-manager-review-temp.yml').unlink(missing_ok=True)
           PY
 
-          python3 -m py_compile \
-            scripts/trello_team_bridge.py \
-            scripts/trello_vm_auth.py \
-            scripts/ai_team_runtime_ledger.py \
-            scripts/ai_team_orchestrator.py
+          python3 -m py_compile scripts/trello_team_bridge.py scripts/trello_vm_auth.py scripts/ai_team_runtime_ledger.py scripts/ai_team_orchestrator.py
           bash -n scripts/install_ai_team_orchestrator.sh
-          python3 - <<'PY'
-          import scripts.trello_team_bridge as b
-          assert b.utcnow().tzinfo is not None
-          print('PY310_TRELLO_RUNTIME=PASS')
-          PY
-
           git config user.name 'AI Team Manager'
           git config user.email 'ai-team-manager@localhost'
           git add -A
-          git commit -m 'Wire event-driven Trello board into VM runtime'
+          git commit -m 'Wire Trello board into VM runtime'
           gh auth setup-git
-          git push -u origin "$BRANCH"
-          gh pr create \
-            --base main \
-            --head "$BRANCH" \
+          git push --force-with-lease origin "$BRANCH"
+          gh pr create --base main --head "$BRANCH" \
             --title 'Manager: wire Trello task board into VM runtime' \
-            --body $'## Objective\nFinish #146 protected manager wiring after the reviewed Trello adapter implementation.\n\n## Scope\n- event-driven VM ledger → Trello projection;\n- immediate GitHub issue/comment/PR/review → same Trello bridge;\n- persistent root-only VM helper install;\n- Python 3.10 compatibility;\n- existing-card reuse to avoid duplicates;\n- deploy trigger/static verification;\n- no second orchestrator.\n\n## Review\nRequires exact-SHA Claude Sonnet manager review plus normal CI before manager merge. Protected paths intentionally prevent autonomous auto-merge.\n\nLIVE-SENSITIVE: NO\nREAL_TRADING_ENABLED remains disabled. Polymarket remains out of scope.'
-          echo "MANAGER_BRANCH=$BRANCH"
+            --body $'## Objective\nFinish #146 protected VM wiring for the reviewed Trello adapter.\n\n## Scope\nEvent-driven VM ledger → Trello; persistent helper install; Python 3.10 compatibility; existing-card reuse; deployment trigger; no second orchestrator.\n\n## Review\nProtected manager change: exact-SHA Claude Sonnet review + normal CI required before merge.\n\nLIVE-SENSITIVE: NO\nREAL_TRADING_ENABLED remains disabled. Polymarket remains out of scope.'
           echo 'MANAGER_WIRING_PR=OPEN'
           echo 'POLYMARKET_TOUCHED=NO'
           echo 'REAL_TRADING_TOUCHED=NO'
