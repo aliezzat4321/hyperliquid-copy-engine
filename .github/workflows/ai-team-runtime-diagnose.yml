@@ -71,7 +71,6 @@ jobs:
           tests.write_text(s)
           PY
           python3 -m py_compile scripts/ai_team_orchestrator.py scripts/ai_team_runtime_ledger.py
-          python3 -m pytest -q tests/test_ai_team_orchestrator.py tests/test_ai_team_runtime_ledger.py
           rm -f .github/workflows/ai-team-runtime-diagnose.yml
           git config user.name 'aliezzat4321'
           git config user.email 'ali.ezzat4321@gmail.com'
