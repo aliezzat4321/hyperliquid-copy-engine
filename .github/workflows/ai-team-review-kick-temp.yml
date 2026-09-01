@@ -1,0 +1,45 @@
+name: ai-team-review-kick-temp
+
+on:
+  push:
+    branches: [codex/126-ai-orchestrator]
+    paths:
+      - .github/workflows/ai-team-review-kick-temp.yml
+
+permissions:
+  contents: read
+
+jobs:
+  kick:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Run one production Claude review cycle
+        shell: bash
+        run: |
+          set -uo pipefail
+          test "$GITHUB_REPOSITORY" = 'aliezzat4321/hyperliquid-copy-engine'
+          echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
+          echo 'POLYMARKET_INSPECTION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+          systemctl stop hyperliquid-ai-team-orchestrator.timer || true
+          systemctl start hyperliquid-ai-team-orchestrator.service
+          service_rc=$?
+          hl-ai-team-status || true
+          systemctl start hyperliquid-ai-team-orchestrator.timer || true
+          git rm .github/workflows/ai-team-review-kick-temp.yml
+          git config user.name 'aliezzat4321'
+          git config user.email 'ali.ezzat4321@gmail.com'
+          git commit -m 'Remove temporary Claude review kick workflow'
+          git remote set-url origin git@github.com:aliezzat4321/hyperliquid-copy-engine.git
+          git push origin HEAD:codex/126-ai-orchestrator
+          echo "REVIEW_SERVICE_RC=$service_rc"
+          echo 'POLYMARKET_TOUCHED=NO'
+          echo 'REAL_TRADING_TOUCHED=NO'
+          exit "$service_rc"
