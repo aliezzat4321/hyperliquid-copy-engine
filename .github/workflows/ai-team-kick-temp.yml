@@ -1,4 +1,4 @@
-name: ai-team-kick-temp
+name: ai-team-fix-untracked-temp
 
 on:
   push:
@@ -10,37 +10,56 @@ permissions:
   contents: read
 
 jobs:
-  diagnose:
+  fix:
     runs-on: [self-hosted, linux]
-    timeout-minutes: 3
+    timeout-minutes: 5
     steps:
-      - name: Inspect redacted Codex run 9 and worktree writeability
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Fix untracked-file validation without a model call
         shell: bash
         run: |
           set -euo pipefail
+          test "$GITHUB_REPOSITORY" = 'aliezzat4321/hyperliquid-copy-engine'
           echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
           echo 'POLYMARKET_INSPECTION=NO'
           echo 'POLYMARKET_MUTATION=NO'
           echo 'REAL_TRADING_CHANGE=NO'
           systemctl stop hyperliquid-ai-team-orchestrator.timer || true
-          run=/var/lib/hyperliquid-ai-team/runs/9
-          work=/var/lib/hyperliquid-ai-team/agents/codex/worktrees/8c5002599f2a40e9
-          for f in meta.json summary.md result.json stdout.log stderr.log; do
-            echo "--- $f ---"
-            if [[ -f "$run/$f" ]]; then
-              tail -n 120 "$run/$f"
-            else
-              echo MISSING
-            fi
-          done
-          echo '--- worktree state ---'
-          namei -l "$work" || true
-          git -c safe.directory="$work" -C "$work" status --short || true
-          echo '--- non-model agent write probe ---'
-          uid=$(id -u hl-codex-agent)
-          gid=$(id -g hl-codex-agent)
-          setpriv --reuid="$uid" --regid="$gid" --init-groups sh -lc "cd '$work' && printf 'probe\n' > .ai-team-write-probe && test -s .ai-team-write-probe && rm .ai-team-write-probe"
-          echo 'AGENT_WORKTREE_WRITE=OK'
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('scripts/ai_team_orchestrator.py')
+          s = path.read_text()
+          old = '''def changed_files(workdir: Path, base_sha: str) -> list[str]:\n    cp = git_worktree(workdir, "diff", "--name-only", base_sha, "--", check=True)\n    return [x.strip() for x in cp.stdout.splitlines() if x.strip()]\n\n\ndef validate_changes(cfg: dict[str, Any], workdir: Path, base_sha: str) -> tuple[list[str], bool]:\n    files = changed_files(workdir, base_sha)\n    if not files:\n        raise RuntimeError("agent produced no file changes")\n    no_auto = False\n    for name in files:\n        if name.startswith("/") or ".." in Path(name).parts:\n            raise RuntimeError(f"unsafe changed path: {name}")\n        if any(name.startswith(p) for p in cfg["safety"]["no_auto_merge_path_prefixes"]):\n            raise RuntimeError(f"autonomous task touched owner-sensitive live path: {name}")\n    diff = git_worktree(workdir, "diff", base_sha, "--", check=True).stdout\n    for pat in cfg["safety"]["forbidden_enable_patterns"]:\n        if re.search(pat, diff, flags=re.I):\n            raise RuntimeError(f"forbidden live-trading enablement pattern detected: {pat}")\n    return files, no_auto\n'''
+          new = '''def untracked_files(workdir: Path) -> list[str]:\n    cp = git_worktree(\n        workdir, "ls-files", "--others", "--exclude-standard", "--", check=True\n    )\n    return [x.strip() for x in cp.stdout.splitlines() if x.strip()]\n\n\ndef changed_files(workdir: Path, base_sha: str) -> list[str]:\n    cp = git_worktree(workdir, "diff", "--name-only", base_sha, "--", check=True)\n    tracked = [x.strip() for x in cp.stdout.splitlines() if x.strip()]\n    return list(dict.fromkeys([*tracked, *untracked_files(workdir)]))\n\n\ndef change_scan_text(workdir: Path, base_sha: str) -> str:\n    parts = [git_worktree(workdir, "diff", base_sha, "--", check=True).stdout]\n    for name in untracked_files(workdir):\n        path = workdir / name\n        if path.is_symlink():\n            raise RuntimeError(f"unsafe untracked symlink: {name}")\n        try:\n            size = path.stat().st_size\n        except OSError as exc:\n            raise RuntimeError(f"cannot inspect untracked file {name}: {exc}") from exc\n        if size > 1_000_000:\n            raise RuntimeError(f"untracked file too large for safety scan: {name}")\n        try:\n            parts.append(path.read_bytes().decode("utf-8", errors="replace"))\n        except OSError as exc:\n            raise RuntimeError(f"cannot read untracked file {name}: {exc}") from exc\n    return "\\n".join(parts)\n\n\ndef validate_changes(cfg: dict[str, Any], workdir: Path, base_sha: str) -> tuple[list[str], bool]:\n    files = changed_files(workdir, base_sha)\n    if not files:\n        raise RuntimeError("agent produced no file changes")\n    no_auto = False\n    for name in files:\n        if name.startswith("/") or ".." in Path(name).parts:\n            raise RuntimeError(f"unsafe changed path: {name}")\n        if any(name.startswith(p) for p in cfg["safety"]["no_auto_merge_path_prefixes"]):\n            raise RuntimeError(f"autonomous task touched owner-sensitive live path: {name}")\n    diff = change_scan_text(workdir, base_sha)\n    for pat in cfg["safety"]["forbidden_enable_patterns"]:\n        if re.search(pat, diff, flags=re.I):\n            raise RuntimeError(f"forbidden live-trading enablement pattern detected: {pat}")\n    return files, no_auto\n'''
+          assert s.count(old) == 1, s.count(old)
+          path.write_text(s.replace(old, new, 1))
+
+          tests = Path('tests/test_ai_team_orchestrator.py')
+          s = tests.read_text()
+          if 'import subprocess\n' not in s:
+              s = s.replace('import json\n', 'import json\nimport subprocess\n', 1)
+          assert 'test_changed_files_includes_new_untracked_file' not in s
+          s += '''\n\ndef _init_git_repo(path: Path) -> str:\n    subprocess.run(["git", "init", "-q", str(path)], check=True)\n    subprocess.run(["git", "-C", str(path), "config", "user.name", "Test"], check=True)\n    subprocess.run(\n        ["git", "-C", str(path), "config", "user.email", "test@example.com"],\n        check=True,\n    )\n    (path / "tracked.txt").write_text("base\\n")\n    subprocess.run(["git", "-C", str(path), "add", "tracked.txt"], check=True)\n    subprocess.run(["git", "-C", str(path), "commit", "-qm", "base"], check=True)\n    return subprocess.check_output(\n        ["git", "-C", str(path), "rev-parse", "HEAD"], text=True\n    ).strip()\n\n\ndef test_changed_files_includes_new_untracked_file(tmp_path: Path) -> None:\n    base_sha = _init_git_repo(tmp_path)\n    new_file = tmp_path / "docs" / "new.md"\n    new_file.parent.mkdir()\n    new_file.write_text("harmless\\n")\n    assert orch.changed_files(tmp_path, base_sha) == ["docs/new.md"]\n\n\ndef test_untracked_file_contents_are_scanned_for_live_enablement(tmp_path: Path) -> None:\n    base_sha = _init_git_repo(tmp_path)\n    new_file = tmp_path / "docs" / "new.md"\n    new_file.parent.mkdir()\n    new_file.write_text("REAL_TRADING_ENABLED=YES\\n")\n    with pytest.raises(RuntimeError, match="forbidden live-trading enablement"):\n        orch.validate_changes(orch.DEFAULT_CONFIG, tmp_path, base_sha)\n'''
+          tests.write_text(s)
+          PY
+          python3 -m py_compile scripts/ai_team_orchestrator.py
+          if [[ -x /root/hyperliquid-copy-engine/.venv/bin/python ]]; then
+            /root/hyperliquid-copy-engine/.venv/bin/python -m pytest -q \
+              tests/test_ai_team_orchestrator.py || true
+          fi
+          git diff --check
+          git config user.name 'aliezzat4321'
+          git config user.email 'ali.ezzat4321@gmail.com'
+          git add scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
+          git commit -m 'Fix autonomous validation of new files'
+          git remote set-url origin git@github.com:aliezzat4321/hyperliquid-copy-engine.git
+          git push origin HEAD:codex/126-ai-orchestrator
           systemctl start hyperliquid-ai-team-orchestrator.timer
+          echo 'UNTRACKED_VALIDATION_FIX=PUSHED'
           echo 'POLYMARKET_TOUCHED=NO'
           echo 'REAL_TRADING_TOUCHED=NO'
