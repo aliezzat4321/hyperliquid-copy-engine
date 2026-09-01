@@ -44,6 +44,11 @@ done
 install -d -m 0700 "$STATE/orchestrator"
 install -d -m 0700 /run/hyperliquid-ai-team "$OPT/scripts" "$OPT/config" "$ETC"
 
+# The standalone Codex CLI currently needs its matching Code Mode host installed
+# beside it. Pin and checksum the official OpenAI release asset; fail closed if
+# Codex is upgraded without a reviewed host mapping.
+bash "$ROOT/scripts/install_codex_code_mode_host.sh"
+
 # OpenAI documents copying auth.json as a supported headless fallback. Keep it local,
 # mode 0600, and do not copy any GitHub credential to the model user.
 CODEX_HOME="$STATE/agents/codex/home/.codex"
@@ -57,6 +62,7 @@ fi
 
 install -m 0755 "$ROOT/scripts/ai_team_orchestrator.py" "$OPT/scripts/ai_team_orchestrator.py"
 install -m 0755 "$ROOT/scripts/ai_team_auth_claude.sh" "$OPT/scripts/ai_team_auth_claude.sh"
+install -m 0755 "$ROOT/scripts/install_codex_code_mode_host.sh" "$OPT/scripts/install_codex_code_mode_host.sh"
 install -m 0644 "$ROOT/config/ai_team_router.json" "$OPT/config/ai_team_router.json"
 install -m 0644 "$ROOT/config/ai_team_router.json" "$ETC/router.json"
 install -m 0644 "$ROOT/deploy/systemd/hyperliquid-ai-team-orchestrator.service" /etc/systemd/system/hyperliquid-ai-team-orchestrator.service
