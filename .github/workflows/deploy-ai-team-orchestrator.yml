@@ -7,6 +7,7 @@ on:
       - codex/126-ai-orchestrator
     paths:
       - "scripts/ai_team_orchestrator.py"
+      - "scripts/ai_team_runtime_ledger.py"
       - "scripts/ai_team_auth_claude.sh"
       - "scripts/install_ai_team_orchestrator.sh"
       - "scripts/install_codex_code_mode_host.sh"

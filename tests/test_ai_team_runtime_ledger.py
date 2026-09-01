@@ -194,3 +194,15 @@ def test_handoff_is_chat_independent_and_under_four_kb(tmp_path: Path) -> None:
     assert '"issue":129' in body
     assert len(body.encode("utf-8")) < 4096
     assert (tmp_path / "state" / "handoff.md").read_text() == body
+
+
+def test_top_level_checkpoint_writes_preserve_state_root_traverse_mode(tmp_path: Path) -> None:
+    db_path = tmp_path / "ledger.sqlite3"
+    make_db(db_path)
+    state = tmp_path / "state"
+    files = runtime.RuntimeLedgerFiles(state, db_path, "owner/repo", 130)
+    assert state.stat().st_mode & 0o777 == 0o711
+    files.project_current()
+    assert state.stat().st_mode & 0o777 == 0o711
+    files.handoff(main_head="a" * 40, active_priorities=[])
+    assert state.stat().st_mode & 0o777 == 0o711

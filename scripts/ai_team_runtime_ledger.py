@@ -58,8 +58,10 @@ def bounded_redacted(text: str | None, limit: int = MAX_RAW_BYTES) -> str:
     return (raw[-keep:] + suffix).decode("utf-8", errors="replace")
 
 
-def _mkdir(path: Path, mode: int = 0o700) -> None:
+def _mkdir(path: Path, mode: int | None = None) -> None:
     path.mkdir(parents=True, exist_ok=True)
+    if mode is None:
+        return
     try:
         path.chmod(mode)
     except PermissionError:
@@ -161,9 +163,9 @@ class RuntimeLedgerFiles:
         self.runs_dir = root / "runs"
         self.checkpoints_dir = root / "checkpoints"
         _mkdir(root, 0o711)
-        _mkdir(self.events_dir)
-        _mkdir(self.runs_dir)
-        _mkdir(self.checkpoints_dir)
+        _mkdir(self.events_dir, 0o700)
+        _mkdir(self.runs_dir, 0o700)
+        _mkdir(self.checkpoints_dir, 0o700)
 
     def _db(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.db_path)
@@ -253,7 +255,7 @@ class RuntimeLedgerFiles:
         data = dict(task)
         started = utcnow()
         run_dir = self.runs_dir / str(run_id)
-        _mkdir(run_dir)
+        _mkdir(run_dir, 0o700)
         meta = {
             "run_id": run_id,
             "assignment_id": data.get("id"),
@@ -334,7 +336,7 @@ class RuntimeLedgerFiles:
     ) -> None:
         data = dict(task)
         run_dir = self.runs_dir / str(run_id)
-        _mkdir(run_dir)
+        _mkdir(run_dir, 0o700)
         ended = utcnow()
         meta_path = run_dir / "meta.json"
         try:

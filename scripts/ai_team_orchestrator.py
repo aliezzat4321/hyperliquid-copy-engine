@@ -588,17 +588,17 @@ def prepare_checkout(
     *, user: str, home: Path, base_dir: Path, task_id: str, ref: str, branch: str | None
 ) -> Path:
     workdir = base_dir / task_id
-    if workdir.exists():
-        return workdir
-    workdir.parent.mkdir(parents=True, exist_ok=True)
-    cp = run(
-        ["git", "clone", "--quiet", f"https://github.com/{REPO}.git", str(workdir)], timeout=180
-    )
-    if cp.returncode != 0:
-        raise RuntimeError(f"clone failed: {cp.stderr[-1200:]}")
-    run(["git", "-C", str(workdir), "checkout", "--quiet", ref], timeout=60, check=True)
-    if branch:
-        run(["git", "-C", str(workdir), "checkout", "-B", branch], timeout=60, check=True)
+    if not workdir.exists():
+        workdir.parent.mkdir(parents=True, exist_ok=True)
+        cp = run(
+            ["git", "clone", "--quiet", f"https://github.com/{REPO}.git", str(workdir)],
+            timeout=180,
+        )
+        if cp.returncode != 0:
+            raise RuntimeError(f"clone failed: {cp.stderr[-1200:]}")
+        run(["git", "-C", str(workdir), "checkout", "--quiet", ref], timeout=60, check=True)
+        if branch:
+            run(["git", "-C", str(workdir), "checkout", "-B", branch], timeout=60, check=True)
     uid = int(run(["id", "-u", user], check=True).stdout.strip())
     gid = int(run(["id", "-g", user], check=True).stdout.strip())
     os.chown(workdir, uid, gid)
@@ -989,17 +989,13 @@ class Orchestrator:
             pr = self.gh.pr(int(task["pr_number"]))
             branch = str(pr["head"]["ref"])
             base_ref = branch
-        workdir = (
-            Path(task["workdir"])
-            if task["workdir"]
-            else prepare_checkout(
-                user=CODEX_USER,
-                home=CODEX_HOME,
-                base_dir=CODEX_WORK,
-                task_id=str(task["id"]),
-                ref=base_ref,
-                branch=branch,
-            )
+        workdir = prepare_checkout(
+            user=CODEX_USER,
+            home=CODEX_HOME,
+            base_dir=CODEX_WORK,
+            task_id=str(task["id"]),
+            ref=base_ref,
+            branch=branch,
         )
         self.ledger.update(
             task["id"],
