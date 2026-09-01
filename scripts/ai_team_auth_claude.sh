@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # One-time owner interaction for Anthropic Pro/Max Claude Code use on the
-# dedicated reviewer identity.  Use Claude's normal subscription OAuth login
-# and let Claude manage/refresh its own Linux credential store.  We deliberately
-# do not rely on `claude setup-token`: that path has shown upstream 401 failures.
+# dedicated reviewer identity. Use Claude's normal subscription OAuth login and
+# let Claude manage/refresh its own Linux credential store. We deliberately do
+# not rely on `claude setup-token`: that path has shown upstream 401 failures.
 
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "Run this helper as root on the Hyperliquid VM." >&2
@@ -24,7 +24,8 @@ command -v claude >/dev/null 2>&1 || {
   exit 1
 }
 
-install -d -o hl-claude-agent -g hl-claude-agent -m 0700 "$CLAUDE_HOME" "$CLAUDE_CONFIG_DIR"
+install -d -o hl-claude-agent -g hl-claude-agent -m 0700 \
+  "$CLAUDE_HOME" "$CLAUDE_CONFIG_DIR" "$CLAUDE_HOME/.config" "$CLAUDE_HOME/.cache"
 install -d -m 0700 /etc/hyperliquid-ai-team
 
 # Remove any obsolete setup-token environment file so it cannot outrank the
@@ -32,11 +33,14 @@ install -d -m 0700 /etc/hyperliquid-ai-team
 rm -f "$READY_FILE"
 
 # Recover the small Claude state file if a previous interrupted login left only
-# a backup.  Otherwise start with an empty valid state file.
+# a backup. Otherwise start with an empty valid state file.
 if [[ ! -f "$CLAUDE_HOME/.claude.json" ]]; then
-  backup="$(find "$CLAUDE_CONFIG_DIR/backups" -maxdepth 1 -type f -name '.claude.json.backup.*' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n1 | cut -d' ' -f2- || true)"
+  backup="$(find "$CLAUDE_CONFIG_DIR/backups" -maxdepth 1 -type f \
+    -name '.claude.json.backup.*' -printf '%T@ %p\n' 2>/dev/null \
+    | sort -nr | head -n1 | cut -d' ' -f2- || true)"
   if [[ -n "$backup" ]]; then
-    install -o hl-claude-agent -g hl-claude-agent -m 0600 "$backup" "$CLAUDE_HOME/.claude.json"
+    install -o hl-claude-agent -g hl-claude-agent -m 0600 \
+      "$backup" "$CLAUDE_HOME/.claude.json"
   else
     printf '{}\n' > "$CLAUDE_HOME/.claude.json"
     chown hl-claude-agent:hl-claude-agent "$CLAUDE_HOME/.claude.json"
@@ -46,7 +50,36 @@ fi
 
 uid="$(id -u hl-claude-agent)"
 gid="$(id -g hl-claude-agent)"
+term_value="${TERM:-xterm-256color}"
 
+claude_as_agent() {
+  local -a command=("$@")
+  setpriv --reuid="$uid" --regid="$gid" --init-groups \
+    /usr/bin/env -i \
+      HOME="$CLAUDE_HOME" \
+      USER=hl-claude-agent \
+      LOGNAME=hl-claude-agent \
+      PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+      TERM="$term_value" \
+      XDG_CONFIG_HOME="$CLAUDE_HOME/.config" \
+      XDG_CACHE_HOME="$CLAUDE_HOME/.cache" \
+      CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR" \
+      /bin/sh -c 'cd "$HOME" && exec "$@"' sh "${command[@]}"
+}
+
+# Fail closed if privilege dropping/environment isolation is not actually in
+# effect. Never let Claude fall back to /root settings or credentials.
+identity_check="$(
+  setpriv --reuid="$uid" --regid="$gid" --init-groups \
+    /usr/bin/env -i HOME="$CLAUDE_HOME" USER=hl-claude-agent LOGNAME=hl-claude-agent \
+    /bin/sh -c 'printf "%s|%s|%s" "$(id -un)" "$HOME" "$LOGNAME"'
+)"
+if [[ "$identity_check" != "hl-claude-agent|$CLAUDE_HOME|hl-claude-agent" ]]; then
+  echo "Refusing Claude login: isolated identity check failed." >&2
+  exit 1
+fi
+
+echo "Claude login identity verified: hl-claude-agent (isolated home)."
 cat <<'EOF'
 Claude subscription login will open now under the isolated hl-claude-agent identity.
 Choose your Claude.ai Pro/Max account and complete the browser flow.
@@ -54,9 +87,7 @@ SSH is supported: if the browser shows a login code, paste that code back into t
 After Claude says Login successful, exit Claude (Ctrl+C is fine) so this helper can verify it.
 EOF
 
-env HOME="$CLAUDE_HOME" CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR" \
-  setpriv --reuid="$uid" --regid="$gid" --init-groups \
-  /usr/bin/claude || true
+claude_as_agent /usr/bin/claude || true
 
 cred="$CLAUDE_CONFIG_DIR/.credentials.json"
 if [[ ! -s "$cred" ]]; then
@@ -77,10 +108,15 @@ EOF
 chmod 0600 "$READY_FILE"
 
 echo "Testing Claude Sonnet non-interactively..."
-env HOME="$CLAUDE_HOME" CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR" \
-  setpriv --reuid="$uid" --regid="$gid" --init-groups \
-  /usr/bin/claude -p --model sonnet --output-format text \
-  'Reply exactly: CLAUDE_AUTH_OK'
+result="$(
+  claude_as_agent /usr/bin/claude -p --model sonnet --output-format text \
+    'Reply exactly: CLAUDE_AUTH_OK'
+)"
+printf '%s\n' "$result"
+if [[ "$result" != *"CLAUDE_AUTH_OK"* ]]; then
+  echo "Claude authentication verification failed." >&2
+  exit 1
+fi
 
 echo "Claude subscription authentication installed for hl-claude-agent."
 echo "Run: hl-ai-team-status"
