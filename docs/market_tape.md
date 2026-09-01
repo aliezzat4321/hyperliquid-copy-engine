@@ -123,3 +123,22 @@ Initial latency scenarios:
 ```
 
 The tape is evidence collection. It does not by itself imply copy trading is profitable.
+
+## Storage lifecycle and pressure policy
+
+`scripts/storage_retention_audit.py` is the fail-closed dependency classifier. It keeps
+the recent window and robust evidence at full fidelity, marks older useful evidence for
+compression/downsampling, and permits deletion only for old partitions absent from the
+complete profitability protection set. `scripts/storage_retention_apply.py` accepts only
+a fresh, exact-SHA reviewed manifest and targets the Issue #120 exit band below 80%
+(75% by default). Destructive production use additionally requires exact-SHA independent
+review; neither script resumes capture or changes trading permissions.
+
+`config/storage_policy.json` is the permanent owner/retention/budget registry for every
+material high-volume writer. `scripts/storage_controller.py` records per-dataset bytes,
+positive bytes/hour growth, aggregate time-to-full, budget breaches and hysteretic
+pressure decisions. It deliberately emits decisions rather than controlling services;
+the protected manager layer must stop every writer in `controlled_writers` when action is
+`STOP_ALL_MATERIAL_WRITERS`, and may resume them only after a later decision is `ALLOW`.
+Missing policy fields or invalid history fail closed. The manager-layer deployment wiring
+is intentionally outside this autonomous change.

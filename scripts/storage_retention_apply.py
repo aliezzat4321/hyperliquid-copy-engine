@@ -327,7 +327,7 @@ def main() -> None:
             "/root/hyperliquid-audit/storage-retention/storage_retention_apply.json"
         ),
     )
-    parser.add_argument("--target-used-pct", type=float, default=92.0)
+    parser.add_argument("--target-used-pct", type=float, default=75.0)
     parser.add_argument("--max-manifest-age-minutes", type=int, default=15)
     parser.add_argument("--expected-manifest-sha256", default="")
     parser.add_argument("--apply", action="store_true")
@@ -337,8 +337,8 @@ def main() -> None:
         raise SystemExit("market-root must be the exact Hyperliquid market-shadow directory")
     if args.mount.resolve(strict=True) != EXPECTED_MOUNT.resolve(strict=True):
         raise SystemExit("mount must be the exact Hyperliquid data volume")
-    if not (90.0 <= args.target_used_pct <= 92.0):
-        raise SystemExit("emergency target-used-pct must be between 90 and 92")
+    if not (70.0 <= args.target_used_pct < 80.0):
+        raise SystemExit("exit-gate target-used-pct must be at least 70 and below 80")
 
     actual_manifest_sha256 = _sha256(args.manifest)
     expected_sha = str(args.expected_manifest_sha256 or "").strip().lower()
