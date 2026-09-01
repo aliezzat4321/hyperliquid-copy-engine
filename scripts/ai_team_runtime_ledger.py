@@ -186,6 +186,9 @@ class RuntimeLedgerFiles:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         with os.fdopen(fd, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n")
+        # Stable trigger for event-driven Trello projection. This is local-only and
+        # intentionally contains no event payload or secret.
+        _atomic_text(self.events_dir / ".trello-event-trigger", row["at"] + "\n")
         return row
 
     def _task_view(self, task: dict[str, Any] | None) -> dict[str, Any] | None:

@@ -13,12 +13,24 @@ SPEC.loader.exec_module(bridge)
 
 
 class FakeTrello:
-    def __init__(self) -> None:
+    def __init__(self, existing: bool = False) -> None:
         self.calls: list[tuple[str, str, dict]] = []
         self.next_id = "card-146"
+        self.existing = existing
 
-    def call(self, method: str, path: str, data: dict | None = None) -> dict:
+    def call(self, method: str, path: str, data: dict | None = None):
         self.calls.append((method, path, data or {}))
+        if method == "GET" and path.endswith("/cards"):
+            if not self.existing:
+                return []
+            return [
+                {
+                    "id": self.next_id,
+                    "name": "P0 — VM→Trello (#146)",
+                    "desc": "GITHUB: https://github.com/x/y/issues/146",
+                    "closed": False,
+                }
+            ]
         return {"id": self.next_id}
 
 
@@ -74,6 +86,26 @@ def test_lifecycle_updates_one_mapped_card_and_material_notifications(tmp_path: 
     assert json.loads(state.read_text())["cards"][f"{bridge.REPOSITORY}#146"] == "card-146"
 
 
+def test_existing_manually_seeded_card_is_reused(tmp_path: Path) -> None:
+    client = FakeTrello(existing=True)
+    state = tmp_path / "bridge.json"
+    result = bridge.sync(
+        event("BUILD_STARTED", status="RUNNING"),
+        client,
+        state,
+        tmp_path / "missing.sqlite3",
+    )
+    assert result["card_id"] == "card-146"
+    assert not any(method == "POST" and path == "/cards" for method, path, _ in client.calls)
+    assert any(method == "PUT" and path == "/cards/card-146" for method, path, _ in client.calls)
+    assert json.loads(state.read_text())["cards"][f"{bridge.REPOSITORY}#146"] == "card-146"
+
+
+def test_active_repair_stays_in_progress_even_with_existing_pr() -> None:
+    payload = event("RUN_STARTED", task_type="REPAIR", status="RUNNING", pr=148)
+    assert bridge.phase(payload) == "IN_PROGRESS"
+
+
 def test_external_github_comment_and_ci_converge_on_same_card(tmp_path: Path) -> None:
     client = FakeTrello()
     state = tmp_path / "state.json"
@@ -87,9 +119,9 @@ def test_external_github_comment_and_ci_converge_on_same_card(tmp_path: Path) ->
     card_calls = [
         path
         for method, path, _ in client.calls
-        if method in {"POST", "PUT"} and "/actions/" not in path
+        if method in {"POST", "PUT"} and "/actions/" not in path and not path.endswith("/cards")
     ]
-    assert card_calls == ["/cards", "/cards/card-146"]
+    assert card_calls == ["/cards/card-146"]
     assert client.calls[-2][1] == "/cards/card-146"
     assert client.calls[-2][2]["idList"] == bridge.LISTS["REVIEW_CI"]
 
@@ -104,7 +136,7 @@ def test_card_has_required_fields_fallback_eta_and_over_eta(monkeypatch, tmp_pat
         tmp_path / "s",
         tmp_path / "l",
     )
-    desc = client.calls[0][2]["desc"]
+    desc = next(data["desc"] for method, path, data in client.calls if method == "POST" and path == "/cards")
     labels = (
         "Priority", "Issue", "PR / SHA", "Owner", "Reviewer / model", "Status",
         "Latest result", "Blocker", "Next action", "Elapsed time", "ETA band",
@@ -137,9 +169,7 @@ def test_runtime_history_replaces_fallback_after_five_samples(tmp_path: Path) ->
     db.commit()
     db.close()
     now = bridge.dt.datetime(2026, 9, 1, 10, 1, tzinfo=bridge.dt.timezone.utc)
-    band, _, _ = bridge.eta(
-        event("BUILD_STARTED"), tmp_path / "ledger.sqlite3", now
-    )
+    band, _, _ = bridge.eta(event("BUILD_STARTED"), tmp_path / "ledger.sqlite3", now)
     assert "runtime ledger n=5" in band
 
 
@@ -158,7 +188,5 @@ def test_sync_failure_record_contains_no_secret_or_payload_text(tmp_path: Path) 
 
 def test_observation_requires_explicit_estimate() -> None:
     payload = event("SIGNIFICANT_RESULT", agent="SYSTEM", task_type="OBSERVATION")
-    value, checkpoint, over = bridge.eta(
-        payload, Path("/missing"), bridge.utcnow()
-    )
+    value, checkpoint, over = bridge.eta(payload, Path("/missing"), bridge.utcnow())
     assert (value, checkpoint, over) == ("measured estimate required", "not estimated", False)

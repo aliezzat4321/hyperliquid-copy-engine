@@ -1,0 +1,154 @@
+name: ai-team-trello-events
+
+on:
+  issues:
+    types: [opened, edited, closed, reopened, labeled, unlabeled, assigned]
+  issue_comment:
+    types: [created]
+  pull_request:
+    types: [opened, synchronize, reopened, closed, ready_for_review]
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: trello-event-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'aliezzat4321/hyperliquid-copy-engine'
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+          persist-credentials: false
+
+      - name: Project material GitHub event through VM bridge
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import sqlite3
+          import subprocess
+          from pathlib import Path
+
+          repo = "aliezzat4321/hyperliquid-copy-engine"
+          event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
+          name = os.environ["EVENT_NAME"]
+          action = os.environ.get("EVENT_ACTION", "")
+          issue_obj = event.get("issue")
+          pr_obj = event.get("pull_request")
+          issue_number = int(issue_obj["number"]) if issue_obj else None
+          pr_number = int(pr_obj["number"]) if pr_obj else None
+
+          db_path = Path("/var/lib/hyperliquid-ai-team/orchestrator/ledger.sqlite3")
+          task = {}
+          if pr_obj and issue_number is None:
+              body = str(pr_obj.get("body") or "")
+              match = re.search(r"(?i)\b(?:closes|fixes|resolves)\s+#(\d+)\b", body)
+              if match:
+                  issue_number = int(match.group(1))
+          if db_path.exists():
+              try:
+                  with sqlite3.connect(db_path) as db:
+                      db.row_factory = sqlite3.Row
+                      row = None
+                      if issue_number is not None:
+                          row = db.execute(
+                              "SELECT * FROM tasks WHERE issue_number=? ORDER BY updated_at DESC LIMIT 1",
+                              (issue_number,),
+                          ).fetchone()
+                      elif pr_number is not None:
+                          row = db.execute(
+                              "SELECT * FROM tasks WHERE pr_number=? ORDER BY updated_at DESC LIMIT 1",
+                              (pr_number,),
+                          ).fetchone()
+                          if row is not None:
+                              issue_number = int(row["issue_number"])
+                      if row is not None:
+                          task = dict(row)
+              except sqlite3.Error:
+                  task = {}
+          if issue_number is None:
+              print("TRELLO_EVENT=SKIP no_issue_mapping")
+              raise SystemExit(0)
+
+          title = str((issue_obj or pr_obj or {}).get("title") or "AI team task")
+          priority = "P0" if title.upper().startswith("P0") else "P1" if title.upper().startswith("P1") else "P?"
+          status = str(task.get("status") or "PENDING").upper()
+          kind = "GITHUB_EVENT"
+          result = f"GitHub {name}/{action}"
+          if name == "issue_comment":
+              comment = event.get("comment") or {}
+              who = str((comment.get("user") or {}).get("login") or "unknown")
+              body = " ".join(str(comment.get("body") or "").split())[:300]
+              kind = "GITHUB_COMMENT"
+              result = f"GitHub comment by {who}: {body}"
+          elif name == "issues" and action == "closed":
+              kind, status = "COMPLETED", "DONE"
+          elif name == "pull_request":
+              if action == "closed" and bool(pr_obj.get("merged")):
+                  kind, status = "MERGED", "DONE"
+              else:
+                  kind = "PR_OPENED"
+          elif name == "pull_request_review":
+              review_state = str((event.get("review") or {}).get("state") or "").lower()
+              if review_state == "approved":
+                  kind, status = "REVIEW_PASS", "WAITING_CI"
+              elif review_state == "changes_requested":
+                  kind, status = "REVIEW_FAIL", "FAILED"
+              else:
+                  kind = "REVIEW_STARTED"
+
+          model = task.get("model_class")
+          payload = {
+              "repository": repo,
+              "issue": issue_number,
+              "event": kind,
+              "priority": priority,
+              "title": title,
+              "task_type": task.get("task_type"),
+              "agent": task.get("agent"),
+              "model": model,
+              "owner": task.get("agent") or "AI Team",
+              "reviewer_model": f"CLAUDE / {model}" if task.get("task_type") == "REVIEW" and model else None,
+              "status": status,
+              "pr": pr_number or task.get("pr_number"),
+              "sha": (pr_obj or {}).get("head", {}).get("sha") if pr_obj else task.get("target_sha"),
+              "result": result,
+              "blocker": task.get("last_error") or "none",
+              "next_action": "follow canonical GitHub/VM task state",
+              "task_started_at": task.get("created_at"),
+              "phase_started_at": task.get("updated_at"),
+          }
+          bridge = Path("/opt/hyperliquid-ai-team/scripts/trello_team_bridge.py")
+          if not bridge.exists():
+              bridge = Path("scripts/trello_team_bridge.py")
+          cp = subprocess.run(
+              ["python3", str(bridge)],
+              input=json.dumps(payload, separators=(",", ":")),
+              text=True,
+              capture_output=True,
+              timeout=30,
+              check=False,
+          )
+          output = (cp.stdout or "").strip()
+          print(output or f"TRELLO_EVENT=bridge_rc_{cp.returncode}")
+          # Observability is fail-open. Never fail canonical GitHub work for Trello.
+          raise SystemExit(0)
+          PY
+          echo 'POLYMARKET_TOUCHED=NO'
+          echo 'REAL_TRADING_TOUCHED=NO'

@@ -1,0 +1,19 @@
+[Unit]
+Description=Hyperliquid AI-team event-driven Trello relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/python3 /opt/hyperliquid-ai-team/scripts/trello_event_relay.py
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/hyperliquid-ai-team/trello
+
+# Trello is observability only. A temporary API failure must never affect the
+# canonical orchestrator; the retry timer invokes this oneshot again.

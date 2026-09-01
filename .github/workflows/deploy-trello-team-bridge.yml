@@ -1,0 +1,63 @@
+name: deploy-trello-team-bridge
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/trello_team_bridge.py"
+      - "scripts/trello_event_relay.py"
+      - "scripts/trello_vm_auth.py"
+      - "scripts/install_trello_team_bridge.sh"
+      - "deploy/systemd/hyperliquid-ai-team-trello-relay.service"
+      - "deploy/systemd/hyperliquid-ai-team-trello-relay.path"
+      - "deploy/systemd/hyperliquid-ai-team-trello-relay.timer"
+      - ".github/workflows/deploy-trello-team-bridge.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-trello-team-bridge
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+          persist-credentials: false
+
+      - name: Verify and install
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "aliezzat4321/hyperliquid-copy-engine"
+          test "$(id -u)" = 0
+          python3 -m py_compile scripts/trello_team_bridge.py scripts/trello_event_relay.py scripts/trello_vm_auth.py
+          bash -n scripts/install_trello_team_bridge.sh
+          bash scripts/install_trello_team_bridge.sh
+          test -x /usr/local/sbin/hl-ai-team-auth-trello
+          test -x /opt/hyperliquid-ai-team/scripts/trello_team_bridge.py
+          test -x /opt/hyperliquid-ai-team/scripts/trello_event_relay.py
+          systemctl is-active --quiet hyperliquid-ai-team-trello-relay.path
+          systemctl is-active --quiet hyperliquid-ai-team-trello-relay.timer
+          test -f /etc/hyperliquid-ai-team/trello.env
+          test "$(stat -c '%a' /etc/hyperliquid-ai-team/trello.env)" = 600
+          echo 'TRELLO_VM_RUNTIME=INSTALLED'
+
+      - name: Real Trello capability smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/trello-deploy-smoke.json <<'JSON'
+          {"repository":"aliezzat4321/hyperliquid-copy-engine","issue":146,"event":"SIGNIFICANT_RESULT","priority":"P0","title":"event-driven VM→Trello team board + ETA/notifications","task_type":"CI_MERGE","agent":"SYSTEM","model":"SYSTEM","owner":"AI Team Manager","reviewer_model":"Claude Sonnet","status":"DONE","result":"VM Trello bridge deployed and capability-checked","next_action":"resume storage P0 and lane health work","eta_minutes":1}
+          JSON
+          python3 /opt/hyperliquid-ai-team/scripts/trello_team_bridge.py --event-file /tmp/trello-deploy-smoke.json | tee /tmp/trello-deploy-smoke.out
+          grep -q '^TRELLO_SYNC=OK ' /tmp/trello-deploy-smoke.out
+          rm -f /tmp/trello-deploy-smoke.json /tmp/trello-deploy-smoke.out
+          echo 'TRELLO_VM_CAPABILITY=PASS'
+          echo 'POLYMARKET_TOUCHED=NO'
+          echo 'REAL_TRADING_TOUCHED=NO'

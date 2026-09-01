@@ -1,0 +1,11 @@
+[Unit]
+Description=Retry deferred Hyperliquid AI-team Trello projections
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=60s
+AccuracySec=5s
+Unit=hyperliquid-ai-team-trello-relay.service
+
+[Install]
+WantedBy=timers.target

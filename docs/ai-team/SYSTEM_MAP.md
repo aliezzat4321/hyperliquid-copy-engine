@@ -92,6 +92,17 @@ provenance rather than re-deriving values.
 | `prospective-champion-status.yml` | 15 min | Frozen target approvals |
 | `storage-governance.yml` | hourly | Postgres audit, disk guard install |
 
+## Trello team-management projection
+
+| Component | Path / runtime | Purpose |
+|---|---|---|
+| Trello adapter | `scripts/trello_team_bridge.py` | Fail-open issue→card projection with owner/reviewer/status/result/blocker/ETA; Trello is never execution authority |
+| Durable-event relay | `scripts/trello_event_relay.py` | Tails the existing runtime event ledger and projects new material events immediately |
+| VM credential helper | `scripts/trello_vm_auth.py` | Root-only setup for `/etc/hyperliquid-ai-team/trello.env` mode `0600`; credentials never enter model homes |
+| Event trigger | `hyperliquid-ai-team-trello-relay.path` | Immediate filesystem-triggered projection after durable runtime events |
+| Retry fallback | `hyperliquid-ai-team-trello-relay.timer` | 60-second bounded retry only; not the primary sync |
+| GitHub event projection | `ai-team-trello-events.yml` | Issue/comment/PR/review events update the same mapped card without chat or hourly polling |
+
 ## Canonical docs
 
 | Topic | Path |
@@ -107,3 +118,4 @@ provenance rather than re-deriving values.
 | Lane 3 net edge | `docs/INVO_NOTIFICATION_NET_EDGE.md` (arrives with PR #95) |
 | Market tape contract | `docs/market_tape.md` |
 | Trader forensics | `docs/trader_forensics.md` |
+| Trello team board | `docs/ai-team/TRELLO_TEAM_BOARD.md` |

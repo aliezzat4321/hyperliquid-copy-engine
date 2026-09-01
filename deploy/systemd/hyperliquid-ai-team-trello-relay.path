@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch Hyperliquid AI-team material events for Trello projection
+
+[Path]
+PathChanged=/var/lib/hyperliquid-ai-team/events/.trello-event-trigger
+Unit=hyperliquid-ai-team-trello-relay.service
+
+[Install]
+WantedBy=multi-user.target

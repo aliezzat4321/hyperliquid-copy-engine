@@ -861,7 +861,15 @@ def change_scan_text(workdir: Path, base_sha: str) -> str:
     return "\n".join(parts)
 
 
-def validate_changes(cfg: dict[str, Any], workdir: Path, base_sha: str) -> tuple[list[str], bool]:
+def validate_changes(
+    cfg: dict[str, Any],
+    workdir: Path,
+    base_sha: str,
+    *,
+    allow_owner_sensitive: bool = False,
+) -> tuple[list[str], bool]:
+    # MANAGER_PROTECTED_REPAIR_V1: manager branches may be repaired by Codex in the
+    # normal ledger loop, but owner-sensitive paths remain permanently non-auto-merge.
     files = changed_files(workdir, base_sha)
     if not files:
         raise RuntimeError("agent produced no file changes")
@@ -870,7 +878,9 @@ def validate_changes(cfg: dict[str, Any], workdir: Path, base_sha: str) -> tuple
         if name.startswith("/") or ".." in Path(name).parts:
             raise RuntimeError(f"unsafe changed path: {name}")
         if any(name.startswith(p) for p in cfg["safety"]["no_auto_merge_path_prefixes"]):
-            raise RuntimeError(f"autonomous task touched owner-sensitive live path: {name}")
+            if not allow_owner_sensitive:
+                raise RuntimeError(f"autonomous task touched owner-sensitive live path: {name}")
+            no_auto = True
     diff = change_scan_text(workdir, base_sha)
     for pat in cfg["safety"]["forbidden_enable_patterns"]:
         if re.search(pat, diff, flags=re.I):
@@ -1025,6 +1035,7 @@ class Orchestrator:
         except RuntimeError as exc:
             self.block(task, f"CODEX_RUNTIME_PREFLIGHT: {exc}")
             return
+        manager_protected = False
         if task["task_type"] == "BUILD":
             base_ref = "origin/main"
             branch = task["branch"] or f"codex/auto-{task['issue_number']}-{task['id'][:8]}"
@@ -1035,6 +1046,10 @@ class Orchestrator:
             pr = self.gh.pr(int(task["pr_number"]))
             branch = str(pr["head"]["ref"])
             base_ref = branch
+            manager_protected = (
+                branch.startswith("manager/")
+                and "AI_TEAM_MANAGER_PROTECTED=YES" in str(pr.get("body") or "")
+            )
         workdir = prepare_checkout(
             user=CODEX_USER,
             home=CODEX_HOME,
@@ -1168,7 +1183,12 @@ class Orchestrator:
             )
             return
         try:
-            files, _ = validate_changes(self.cfg, workdir, base_sha)
+            files, _ = validate_changes(
+                self.cfg,
+                workdir,
+                base_sha,
+                allow_owner_sensitive=manager_protected,
+            )
             self.commit_and_push(workdir, task, branch)
             new_sha = git_worktree(workdir, "rev-parse", "HEAD", check=True).stdout.strip()
             if task["task_type"] == "BUILD":

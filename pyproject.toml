@@ -66,6 +66,9 @@ select = ["E", "F", "I", "UP", "B"]
 # them can change production semantics. Keep these lint exemptions isolated here until
 # each script is safely rewritten under its own issue and runtime-equivalence tests.
 "scripts/ai_team_orchestrator.py" = ["UP017"]
+"scripts/trello_team_bridge.py" = ["UP017"]
+"scripts/trello_event_relay.py" = ["E501"]
+"tests/test_trello_team_bridge.py" = ["E501"]
 "scripts/edge_temporal_validation.py" = ["E501", "E701", "E702"]
 "scripts/prospective_champion_lane.py" = ["E401", "E501", "E701", "E702", "I001"]
 "scripts/postgres_storage_audit.py" = ["E501", "UP017", "UP022"]

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Event-driven, fail-open Trello projection for the AI-team VM ledger.
 
-This is an observability adapter, not an orchestrator.  It consumes one normalized
+This is an observability adapter, not an orchestrator. It consumes one normalized
 material event at a time and projects it onto the card mapped to a GitHub issue.
 """
 
@@ -11,6 +11,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -54,7 +55,7 @@ FALLBACKS = {
 
 
 def utcnow() -> dt.datetime:
-    return dt.datetime.now(dt.UTC)
+    return dt.datetime.now(dt.timezone.utc)
 
 
 def iso(value: dt.datetime) -> str:
@@ -66,7 +67,7 @@ def parse_time(value: Any) -> dt.datetime | None:
         return None
     try:
         parsed = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.UTC)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.timezone.utc)
     except ValueError:
         return None
 
@@ -91,20 +92,44 @@ def phase(event: dict[str, Any]) -> str:
     status = str(event.get("status", "")).upper()
     if kind in {"COMPLETED", "MERGED"} or status == "DONE":
         return "DONE"
-    if kind in {"BLOCKED", "OWNER_ACTION", "AUTH_FAILURE"} or status in {"BLOCKED", "FAILED"}:
+    if kind in {"BLOCKED", "OWNER_ACTION", "AUTH_FAILURE"} or status in {
+        "BLOCKED",
+        "FAILED",
+    }:
         return "BLOCKED"
+    task_type = str(event.get("task_type", "")).upper()
+    if task_type in {"BUILD", "REPAIR", "RESEARCH"} and status in {
+        "PENDING",
+        "RUNNING",
+        "RETRY",
+        "WAITING_RATE_LIMIT",
+    }:
+        return "IN_PROGRESS"
     review_events = {
-        "PR_OPENED", "REVIEW_STARTED", "REVIEW_PASS", "REVIEW_FAIL",
-        "CI_PENDING", "CI_PASS", "CI_FAIL",
+        "PR_OPENED",
+        "REVIEW_STARTED",
+        "REVIEW_PASS",
+        "REVIEW_FAIL",
+        "CI_PENDING",
+        "CI_PASS",
+        "CI_FAIL",
     }
     if kind in review_events or event.get("pr"):
         return "REVIEW_CI"
     active_events = {
-        "ASSIGNED", "TASK_ASSIGNED", "BUILD_STARTED", "RESEARCH_STARTED",
-        "RUN_STARTED", "RETRY", "RATE_LIMIT",
+        "ASSIGNED",
+        "TASK_ASSIGNED",
+        "BUILD_STARTED",
+        "RESEARCH_STARTED",
+        "RUN_STARTED",
+        "RETRY",
+        "RATE_LIMIT",
     }
     if kind in active_events or status in {
-        "PENDING", "RUNNING", "RETRY", "WAITING_RATE_LIMIT"
+        "PENDING",
+        "RUNNING",
+        "RETRY",
+        "WAITING_RATE_LIMIT",
     }:
         return "IN_PROGRESS"
     return "BACKLOG"
@@ -235,6 +260,19 @@ class Trello:
         raise RuntimeError("unreachable")
 
 
+def existing_card_for_issue(client: Trello, issue: int) -> str | None:
+    """Reuse a manually-created open card if it already carries this issue marker."""
+    rows = client.call("GET", f"/boards/{BOARD_ID}/cards", {"fields": "id,name,desc,closed"})
+    marker = re.compile(rf"(?<!\d)#{issue}(?!\d)")
+    for row in rows if isinstance(rows, list) else []:
+        if row.get("closed"):
+            continue
+        haystack = f"{row.get('name', '')}\n{row.get('desc', '')}"
+        if marker.search(haystack):
+            return str(row["id"])
+    return None
+
+
 def sync(event: dict[str, Any], client: Trello, state_path: Path, ledger: Path) -> dict[str, Any]:
     if event.get("repository", REPOSITORY) != REPOSITORY:
         raise ValueError("repository mismatch")
@@ -244,6 +282,10 @@ def sync(event: dict[str, Any], client: Trello, state_path: Path, ledger: Path) 
     cards = state.setdefault("cards", {})
     key = f"{REPOSITORY}#{issue}"
     card_id = cards.get(key)
+    if not card_id:
+        card_id = existing_card_for_issue(client, issue)
+        if card_id:
+            cards[key] = card_id
     title = f"[{event.get('priority', 'P?')}] #{issue} {event.get('title', 'AI team task')}"
     payload = {
         "name": title,

@@ -1,0 +1,137 @@
+name: ai-team-manager-protected-review
+
+on:
+  push:
+    branches:
+      - "manager/**"
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  validate-manager-push:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: hlcopy
+          POSTGRES_PASSWORD: hlcopy
+          POSTGRES_DB: hlcopy
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U hlcopy -d hlcopy"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://hlcopy:hlcopy@localhost:5432/hlcopy
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -U pip
+      - run: pip install -e '.[dev]'
+      - run: ruff check .
+      - run: pytest
+      - name: Protected-manager safety assertion
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          ! git grep -n -E 'REAL_TRADING_ENABLED[[:space:]]*=[[:space:]]*(YES|TRUE|1)' -- . \
+            ':(exclude)docs/**' ':(exclude)tests/**'
+          echo 'MANAGER_VALIDATION=PASS'
+          echo 'REAL_TRADING_CHANGE=NO'
+          echo 'POLYMARKET_SCOPE=DENIED'
+
+  enqueue-from-pr:
+    if: >-
+      github.event_name == 'pull_request_target' &&
+      startsWith(github.head_ref, 'manager/') &&
+      github.event.pull_request.user.login == github.repository_owner &&
+      contains(github.event.pull_request.body, 'AI_TEAM_MANAGER_PROTECTED=YES')
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          clean: true
+          persist-credentials: false
+      - name: Enqueue exact-SHA review in canonical VM ledger
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "aliezzat4321/hyperliquid-copy-engine"
+          test "$(id -u)" = 0
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
+          python3 -m py_compile \
+            scripts/ai_team_orchestrator.py \
+            scripts/ai_team_manager_review_enqueue.py
+          python3 scripts/ai_team_manager_review_enqueue.py \
+            --pr "${{ github.event.pull_request.number }}" \
+            --target-sha "${{ github.event.pull_request.head.sha }}"
+          systemctl start hyperliquid-ai-team-orchestrator.service
+          echo 'MANAGER_REVIEW_LEDGER_DISPATCH=PASS'
+          echo 'FAIL_TO_REPAIR_PATH=CLAUDE_REVIEW->CODEX_REPAIR->CLAUDE_REREVIEW'
+          echo 'OWNER_SENSITIVE_AUTO_MERGE=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+          echo 'POLYMARKET_SCOPE=DENIED'
+
+  enqueue-from-manager-push:
+    if: github.event_name == 'push'
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: true
+          persist-credentials: false
+      - name: Find protected PR and enqueue exact-SHA review
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "aliezzat4321/hyperliquid-copy-engine"
+          test "$(id -u)" = 0
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          PR_NUMBER="$(gh api \
+            "repos/$GITHUB_REPOSITORY/pulls?state=open&head=${GITHUB_REPOSITORY_OWNER}:${GITHUB_REF_NAME}" \
+            --jq '.[0].number // empty')"
+          if [[ -z "$PR_NUMBER" ]]; then
+            echo 'MANAGER_REVIEW=NO_OPEN_PR'
+            exit 0
+          fi
+          BODY="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.body // ""')"
+          if ! grep -q '^AI_TEAM_MANAGER_PROTECTED=YES$' <<<"$BODY"; then
+            echo 'MANAGER_REVIEW=UNMARKED_PR'
+            exit 0
+          fi
+          python3 -m py_compile \
+            scripts/ai_team_orchestrator.py \
+            scripts/ai_team_manager_review_enqueue.py
+          python3 scripts/ai_team_manager_review_enqueue.py \
+            --pr "$PR_NUMBER" \
+            --target-sha "$GITHUB_SHA"
+          systemctl start hyperliquid-ai-team-orchestrator.service
+          echo 'MANAGER_REVIEW_LEDGER_DISPATCH=PASS'
+          echo 'FAIL_TO_REPAIR_PATH=CLAUDE_REVIEW->CODEX_REPAIR->CLAUDE_REREVIEW'
+          echo 'OWNER_SENSITIVE_AUTO_MERGE=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+          echo 'POLYMARKET_SCOPE=DENIED'
