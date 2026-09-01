@@ -10,11 +10,11 @@ permissions:
   contents: read
 
 jobs:
-  kick:
+  diagnose:
     runs-on: [self-hosted, linux]
-    timeout-minutes: 8
+    timeout-minutes: 3
     steps:
-      - name: Run one production orchestrator cycle
+      - name: Inspect redacted Codex run 9 and worktree writeability
         shell: bash
         run: |
           set -euo pipefail
@@ -22,8 +22,25 @@ jobs:
           echo 'POLYMARKET_INSPECTION=NO'
           echo 'POLYMARKET_MUTATION=NO'
           echo 'REAL_TRADING_CHANGE=NO'
-          systemctl start hyperliquid-ai-team-orchestrator.service
-          hl-ai-team-status
+          systemctl stop hyperliquid-ai-team-orchestrator.timer || true
+          run=/var/lib/hyperliquid-ai-team/runs/9
+          work=/var/lib/hyperliquid-ai-team/agents/codex/worktrees/8c5002599f2a40e9
+          for f in meta.json summary.md result.json stdout.log stderr.log; do
+            echo "--- $f ---"
+            if [[ -f "$run/$f" ]]; then
+              tail -n 120 "$run/$f"
+            else
+              echo MISSING
+            fi
+          done
+          echo '--- worktree state ---'
+          namei -l "$work" || true
+          git -c safe.directory="$work" -C "$work" status --short || true
+          echo '--- non-model agent write probe ---'
+          uid=$(id -u hl-codex-agent)
+          gid=$(id -g hl-codex-agent)
+          setpriv --reuid="$uid" --regid="$gid" --init-groups sh -lc "cd '$work' && printf 'probe\n' > .ai-team-write-probe && test -s .ai-team-write-probe && rm .ai-team-write-probe"
+          echo 'AGENT_WORKTREE_WRITE=OK'
           systemctl start hyperliquid-ai-team-orchestrator.timer
           echo 'POLYMARKET_TOUCHED=NO'
           echo 'REAL_TRADING_TOUCHED=NO'
