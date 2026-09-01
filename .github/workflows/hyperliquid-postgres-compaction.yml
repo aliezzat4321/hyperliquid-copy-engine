@@ -26,8 +26,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: hyperliquid-postgres-compaction-${{ github.event_name }}
-  cancel-in-progress: ${{ github.event_name == 'push' }}
+  group: hyperliquid-postgres-compaction
+  cancel-in-progress: true
 
 env:
   REVIEW_ROOT: /root/hyperliquid-audit/postgres-compaction/reviewed
