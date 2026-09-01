@@ -13,16 +13,21 @@ jobs:
   diagnose:
     runs-on: [self-hosted, linux]
     steps:
-      - name: Run one Hyperliquid AI-team cycle and inspect only its namespace
+      - name: Run one Hyperliquid AI-team cycle with direct traceback
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
           echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
           echo 'POLYMARKET_INSPECTION=NO'
           echo 'POLYMARKET_MUTATION=NO'
           echo 'REAL_TRADING_CHANGE=NO'
-          systemctl start hyperliquid-ai-team-orchestrator.service || true
-          echo '--- status ---'
+          echo '--- direct orchestrator cycle ---'
+          /usr/bin/python3 /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py --once 2>&1
+          direct_rc=$?
+          echo "DIRECT_ORCHESTRATOR_RC=$direct_rc"
+          echo '--- systemd status ---'
+          systemctl status hyperliquid-ai-team-orchestrator.service --no-pager -l || true
+          echo '--- status checkpoint ---'
           hl-ai-team-status || true
           echo '--- latest ledger tasks/runs ---'
           python3 - <<'PY'
@@ -37,6 +42,7 @@ jobs:
               print(dict(r))
           PY
           echo '--- recent AI-team service journal ---'
-          journalctl -u hyperliquid-ai-team-orchestrator.service --since '30 minutes ago' -n 80 --no-pager -o cat || true
+          journalctl -u hyperliquid-ai-team-orchestrator.service --since '30 minutes ago' -n 120 --no-pager -o short-precise || true
           echo 'POLYMARKET_TOUCHED=NO'
           echo 'REAL_TRADING_TOUCHED=NO'
+          exit 0
