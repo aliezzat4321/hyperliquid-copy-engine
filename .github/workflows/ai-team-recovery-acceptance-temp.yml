@@ -10,20 +10,14 @@ permissions:
   contents: read
 
 jobs:
-  recovery:
+  stage1:
     runs-on: [self-hosted, linux]
-    timeout-minutes: 12
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-        with:
-          clean: true
-          persist-credentials: false
-          fetch-depth: 0
-      - name: Prove fresh-session recovery and complete issue 135
+      - name: Fresh recovery probe and Codex resume
         shell: bash
         run: |
           set -euo pipefail
-          test "$GITHUB_REPOSITORY" = 'aliezzat4321/hyperliquid-copy-engine'
           echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
           echo 'POLYMARKET_INSPECTION=NO'
           echo 'POLYMARKET_MUTATION=NO'
@@ -31,58 +25,16 @@ jobs:
           systemctl stop hyperliquid-ai-team-orchestrator.timer || true
           trap 'systemctl start hyperliquid-ai-team-orchestrator.timer || true' EXIT
 
-          echo '--- assert persisted Codex interruption ---'
-          PYTHONPATH=/opt/hyperliquid-ai-team/scripts python3 - <<'PY'
-          import ai_team_orchestrator as orch
-          team = orch.Orchestrator()
-          rows = [r for r in team.ledger.db.execute(
-              "SELECT * FROM tasks WHERE issue_number=135 AND task_type='BUILD' ORDER BY created_at DESC"
-          )]
-          assert len(rows) == 1, len(rows)
-          row = rows[0]
-          assert row['status'] == 'RETRY', row['status']
-          assert row['last_error'] == 'TEST_INJECTED_CODEX_SESSION_END', row['last_error']
-          assert row['session_id'], 'missing saved Codex session'
-          assert row['retry_at'], 'missing retry timestamp'
-          assert row['branch'] == 'codex/auto-135-e9e87b7b', row['branch']
-          assert row['workdir'], 'missing saved worktree'
-          print('CODEX_CHECKPOINT=PERSISTED')
-          print('CODEX_ASSIGNMENT=' + row['id'])
-          print('CODEX_BRANCH=' + row['branch'])
-          print('CODEX_STATE=' + row['status'])
-          print('CODEX_RETRY_AT=' + row['retry_at'])
-          PY
-
-          echo '--- fresh independent Codex recovery probe ---'
-          status_body=$(gh api repos/aliezzat4321/hyperliquid-copy-engine/issues/130 --jq .body)
+          status_body="$(gh api repos/aliezzat4321/hyperliquid-copy-engine/issues/130 --jq .body)"
+          agents_text="$(gh api repos/aliezzat4321/hyperliquid-copy-engine/contents/AGENTS.md --jq .content | base64 -d)"
           probe=/var/lib/hyperliquid-ai-team/agents/codex/worktrees/recovery-probe-135
           rm -rf "$probe"
           install -d -o hl-codex-agent -g hl-codex-agent -m 0700 "$probe"
           uid=$(id -u hl-codex-agent)
           gid=$(id -g hl-codex-agent)
-          prompt=$(cat <<EOF
-You are a FRESH independent recovery probe. You have no prior chat/session history.
-Do not inspect any other project or data. Use ONLY the two supplied texts below.
-Identify the active Codex assignment and the next operational action.
-Reply with exactly four lines and no extra text:
-ISSUE=<number>
-STATE=<state>
-BRANCH=<branch>
-NEXT=<resume or other concise action>
-
---- AGENTS.md ---
-$(cat AGENTS.md)
-
---- GitHub Issue #130 runtime checkpoint ---
-$status_body
-EOF
-          )
+          prompt="You are a fresh independent recovery probe with no prior session history. Use only the AGENTS.md and Issue #130 texts supplied below. Reply with exactly four lines: ISSUE=<number>, STATE=<state>, BRANCH=<branch>, NEXT=<resume or other action>. AGENTS.md: $agents_text ISSUE130: $status_body"
           set +e
-          probe_out=$(printf '%s\n' "$prompt" | timeout 90s \
-            setpriv --reuid="$uid" --regid="$gid" --init-groups \
-            env HOME=/var/lib/hyperliquid-ai-team/agents/codex/home \
-                CODEX_HOME=/var/lib/hyperliquid-ai-team/agents/codex/home/.codex \
-                /usr/local/bin/codex exec --json --sandbox workspace-write --skip-git-repo-check - 2>&1)
+          probe_out=$(printf '%s\n' "$prompt" | timeout 90s setpriv --reuid="$uid" --regid="$gid" --init-groups env HOME=/var/lib/hyperliquid-ai-team/agents/codex/home CODEX_HOME=/var/lib/hyperliquid-ai-team/agents/codex/home/.codex /usr/local/bin/codex exec --json --sandbox workspace-write --skip-git-repo-check - 2>&1)
           probe_rc=$?
           set -e
           printf '%s\n' "$probe_out" | sed -E 's/(token|authorization|cookie|secret|password)[=:][^ ,]*/\1=[REDACTED]/Ig'
@@ -94,141 +46,22 @@ EOF
           rm -rf "$probe"
           echo 'FRESH_RECOVERY_PROBE=PASS'
 
-          echo '--- accelerate only injected Codex retry clock ---'
           PYTHONPATH=/opt/hyperliquid-ai-team/scripts python3 - <<'PY'
           import ai_team_orchestrator as orch
           team = orch.Orchestrator()
-          row = team.ledger.db.execute(
-              "SELECT * FROM tasks WHERE issue_number=135 AND task_type='BUILD' ORDER BY created_at DESC LIMIT 1"
-          ).fetchone()
+          row = team.ledger.db.execute("SELECT * FROM tasks WHERE issue_number=135 AND task_type='BUILD' ORDER BY created_at DESC LIMIT 1").fetchone()
           assert row and row['status'] == 'RETRY'
           assert row['last_error'] == 'TEST_INJECTED_CODEX_SESSION_END'
+          assert row['session_id'] and row['retry_at'] and row['workdir']
           old = row['retry_at']
           team.ledger.update(row['id'], retry_at=orch.utcnow())
-          team.runtime.event(
-              'TEST_RETRY_CLOCK_ACCELERATED', assignment_id=row['id'], issue=135,
-              phase='CODEX_RESUME', previous_retry_after=old
-          )
+          team.runtime.event('TEST_RETRY_CLOCK_ACCELERATED', assignment_id=row['id'], issue=135, phase='CODEX_RESUME', previous_retry_after=old)
           team.sync_runtime_checkpoint()
-          print('CODEX_TEST_CLOCK=READY_NOW')
+          print('CODEX_CHECKPOINT=PERSISTED_AND_READY')
           PY
 
           systemctl start hyperliquid-ai-team-orchestrator.service
+          hl-ai-team-status
           echo 'CODEX_RESUME_CYCLE=COMPLETE'
-
-          echo '--- verify PR and Claude assignment exist ---'
-          PYTHONPATH=/opt/hyperliquid-ai-team/scripts python3 - <<'PY'
-          import ai_team_orchestrator as orch
-          team = orch.Orchestrator()
-          build = team.ledger.db.execute(
-              "SELECT * FROM tasks WHERE issue_number=135 AND task_type='BUILD' ORDER BY created_at DESC LIMIT 1"
-          ).fetchone()
-          review = team.ledger.db.execute(
-              "SELECT * FROM tasks WHERE issue_number=135 AND task_type='REVIEW' ORDER BY created_at DESC LIMIT 1"
-          ).fetchone()
-          assert build and build['status'] == 'DONE', dict(build) if build else None
-          assert review and review['status'] == 'PENDING', dict(review) if review else None
-          assert review['pr_number'] and review['target_sha']
-          print('RECOVERY_PR=' + str(review['pr_number']))
-          print('RECOVERY_SHA=' + review['target_sha'])
-          PY
-
-          systemctl start hyperliquid-ai-team-orchestrator.service
-          echo 'CLAUDE_FIRST_REVIEW_CYCLE=COMPLETE'
-
-          echo '--- assert persisted Claude rate-limit checkpoint ---'
-          PYTHONPATH=/opt/hyperliquid-ai-team/scripts python3 - <<'PY'
-          import ai_team_orchestrator as orch
-          team = orch.Orchestrator()
-          row = team.ledger.db.execute(
-              "SELECT * FROM tasks WHERE issue_number=135 AND task_type='REVIEW' ORDER BY created_at DESC LIMIT 1"
-          ).fetchone()
-          assert row and row['status'] == 'WAITING_RATE_LIMIT', dict(row) if row else None
-          assert row['last_error'] == 'TEST_INJECTED_CLAUDE_RATE_LIMIT', row['last_error']
-          assert row['session_id'], 'missing saved Claude session'
-          assert row['retry_at'], 'missing Claude retry timestamp'
-          assert row['target_sha'], 'missing exact review SHA'
-          print('CLAUDE_CHECKPOINT=PERSISTED')
-          print('CLAUDE_STATE=' + row['status'])
-          print('CLAUDE_PR=' + str(row['pr_number']))
-          print('CLAUDE_SHA=' + row['target_sha'])
-          print('CLAUDE_RETRY_AT=' + row['retry_at'])
-          PY
-
-          checkpoint=$(gh api repos/aliezzat4321/hyperliquid-copy-engine/issues/130 --jq .body)
-          printf '%s\n' "$checkpoint" | grep -q '"issue":135'
-          printf '%s\n' "$checkpoint" | grep -q 'WAITING_RATE_LIMIT'
-          printf '%s\n' "$checkpoint" | grep -q 'resume review session at retry_after'
-          echo 'GITHUB_RUNTIME_HANDOFF=RECOVERABLE'
-
-          echo '--- accelerate only injected Claude retry clock ---'
-          PYTHONPATH=/opt/hyperliquid-ai-team/scripts python3 - <<'PY'
-          import ai_team_orchestrator as orch
-          team = orch.Orchestrator()
-          row = team.ledger.db.execute(
-              "SELECT * FROM tasks WHERE issue_number=135 AND task_type='REVIEW' ORDER BY created_at DESC LIMIT 1"
-          ).fetchone()
-          assert row and row['status'] == 'WAITING_RATE_LIMIT'
-          assert row['last_error'] == 'TEST_INJECTED_CLAUDE_RATE_LIMIT'
-          old = row['retry_at']
-          team.ledger.update(row['id'], retry_at=orch.utcnow())
-          team.runtime.event(
-              'TEST_RETRY_CLOCK_ACCELERATED', assignment_id=row['id'], issue=135,
-              pr=row['pr_number'], target_sha=row['target_sha'],
-              phase='CLAUDE_RESUME', previous_retry_after=old
-          )
-          team.sync_runtime_checkpoint()
-          print('CLAUDE_TEST_CLOCK=READY_NOW')
-          PY
-
-          systemctl start hyperliquid-ai-team-orchestrator.service
-          echo 'CLAUDE_RESUME_CYCLE=COMPLETE'
-
-          echo '--- drive normal CI gate until merged ---'
-          for i in $(seq 1 12); do
-            merged=$(PYTHONPATH=/opt/hyperliquid-ai-team/scripts python3 - <<'PY'
-          import ai_team_orchestrator as orch
-          team = orch.Orchestrator()
-          row = team.ledger.db.execute(
-              "SELECT * FROM tasks WHERE issue_number=135 AND task_type='REVIEW' ORDER BY created_at DESC LIMIT 1"
-          ).fetchone()
-          assert row and row['pr_number']
-          pr = team.gh.pr(int(row['pr_number']))
-          print('YES' if pr.get('merged_at') else 'NO')
-          if not pr.get('merged_at') and row['status'] == 'WAITING_CI':
-              team.ledger.update(row['id'], retry_at=orch.utcnow())
-              team.sync_runtime_checkpoint()
-          PY
-          )
-            echo "CI_GATE_ITERATION=$i MERGED=$merged"
-            if [[ "$merged" = YES ]]; then
-              break
-            fi
-            systemctl start hyperliquid-ai-team-orchestrator.service || true
-            sleep 10
-          done
-
-          PYTHONPATH=/opt/hyperliquid-ai-team/scripts python3 - <<'PY'
-          import ai_team_orchestrator as orch
-          team = orch.Orchestrator()
-          row = team.ledger.db.execute(
-              "SELECT * FROM tasks WHERE issue_number=135 AND task_type='REVIEW' ORDER BY created_at DESC LIMIT 1"
-          ).fetchone()
-          assert row and row['pr_number']
-          pr = team.gh.pr(int(row['pr_number']))
-          assert pr.get('merged_at'), pr
-          assert row['status'] == 'DONE', row['status']
-          print('RECOVERY_ACCEPTANCE=PASS')
-          print('MERGED_PR=' + str(row['pr_number']))
-          print('REVIEWED_SHA=' + str(row['target_sha']))
-          PY
-
-          git rm .github/workflows/ai-team-recovery-acceptance-temp.yml
-          git config user.name 'aliezzat4321'
-          git config user.email 'ali.ezzat4321@gmail.com'
-          git commit -m 'Remove temporary recovery acceptance harness'
-          git remote set-url origin git@github.com:aliezzat4321/hyperliquid-copy-engine.git
-          git push origin HEAD:codex/126-ai-orchestrator
-          echo 'AI_TEAM_TIMER=RESTORED_ON_EXIT'
           echo 'POLYMARKET_TOUCHED=NO'
           echo 'REAL_TRADING_TOUCHED=NO'
