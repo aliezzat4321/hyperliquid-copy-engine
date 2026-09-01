@@ -2,9 +2,7 @@ name: ai-team-trello-manager-wire-temp
 
 on:
   push:
-    branches: [main]
-    paths:
-      - ".github/workflows/ai-team-trello-manager-wire-temp.yml"
+    branches: [trigger/151-protected-bootstrap]
 
 permissions:
   contents: write
