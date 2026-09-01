@@ -1,4 +1,4 @@
-name: ai-team-runtime-diagnose
+name: ai-team-runtime-recovery-fix
 
 on:
   push:
@@ -10,32 +10,75 @@ permissions:
   contents: read
 
 jobs:
-  diagnose:
+  fix:
     runs-on: [self-hosted, linux]
     steps:
-      - name: Inspect isolated Codex runtime without another model call
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Fix checkpoint permissions and idempotent retry setup atomically
         shell: bash
         run: |
           set -euo pipefail
+          test "$GITHUB_REPOSITORY" = 'aliezzat4321/hyperliquid-copy-engine'
           echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
           echo 'POLYMARKET_INSPECTION=NO'
           echo 'POLYMARKET_MUTATION=NO'
           echo 'REAL_TRADING_CHANGE=NO'
-          systemctl stop hyperliquid-ai-team-orchestrator.timer
-          echo 'AI_TEAM_TIMER=PAUSED_FOR_DIAGNOSIS'
-          work=/var/lib/hyperliquid-ai-team/agents/codex/worktrees/f799b5cc7d574139
-          echo '--- path permissions ---'
-          namei -l "$work" || true
-          stat -c '%A %U:%G %n' /var/lib/hyperliquid-ai-team /var/lib/hyperliquid-ai-team/agents /var/lib/hyperliquid-ai-team/agents/codex /var/lib/hyperliquid-ai-team/agents/codex/worktrees "$work" || true
-          echo '--- agent access ---'
-          setpriv --reuid="$(id -u hl-codex-agent)" --regid="$(id -g hl-codex-agent)" --init-groups sh -lc "id; cd '$work' && pwd && git status --short" || true
-          echo '--- latest Codex attempt log ---'
-          latest=$(ls -1t /var/lib/hyperliquid-ai-team/agents/codex/logs/f799b5cc7d574139-attempt-*.jsonl 2>/dev/null | head -n1 || true)
-          if [[ -n "$latest" ]]; then
-            echo "LOG=$latest"
-            tail -n 80 "$latest" | sed -E 's/(token|authorization|cookie|secret|password)[=:][^ ,]*/\1=[REDACTED]/Ig'
-          fi
-          echo '--- status checkpoint ---'
-          hl-ai-team-status || true
+          python3 - <<'PY'
+          from pathlib import Path
+
+          ledger = Path('scripts/ai_team_runtime_ledger.py')
+          s = ledger.read_text()
+          old = '''def _mkdir(path: Path, mode: int = 0o700) -> None:\n    path.mkdir(parents=True, exist_ok=True)\n    try:\n        path.chmod(mode)\n    except PermissionError:\n        pass\n'''
+          new = '''def _mkdir(path: Path, mode: int | None = None) -> None:\n    path.mkdir(parents=True, exist_ok=True)\n    if mode is None:\n        return\n    try:\n        path.chmod(mode)\n    except PermissionError:\n        pass\n'''
+          assert s.count(old) == 1, s.count(old)
+          s = s.replace(old, new, 1)
+          old = '''        _mkdir(root, 0o711)\n        _mkdir(self.events_dir)\n        _mkdir(self.runs_dir)\n        _mkdir(self.checkpoints_dir)\n'''
+          new = '''        _mkdir(root, 0o711)\n        _mkdir(self.events_dir, 0o700)\n        _mkdir(self.runs_dir, 0o700)\n        _mkdir(self.checkpoints_dir, 0o700)\n'''
+          assert s.count(old) == 1, s.count(old)
+          s = s.replace(old, new, 1)
+          s = s.replace('        _mkdir(run_dir)\n', '        _mkdir(run_dir, 0o700)\n')
+          assert s.count('        _mkdir(run_dir, 0o700)\n') == 2
+          ledger.write_text(s)
+
+          orch = Path('scripts/ai_team_orchestrator.py')
+          s = orch.read_text()
+          old = '''    workdir = base_dir / task_id\n    if workdir.exists():\n        return workdir\n    workdir.parent.mkdir(parents=True, exist_ok=True)\n    cp = run(\n        ["git", "clone", "--quiet", f"https://github.com/{REPO}.git", str(workdir)], timeout=180\n    )\n    if cp.returncode != 0:\n        raise RuntimeError(f"clone failed: {cp.stderr[-1200:]}")\n    run(["git", "-C", str(workdir), "checkout", "--quiet", ref], timeout=60, check=True)\n    if branch:\n        run(["git", "-C", str(workdir), "checkout", "-B", branch], timeout=60, check=True)\n    uid = int(run(["id", "-u", user], check=True).stdout.strip())\n'''
+          new = '''    workdir = base_dir / task_id\n    if not workdir.exists():\n        workdir.parent.mkdir(parents=True, exist_ok=True)\n        cp = run(\n            ["git", "clone", "--quiet", f"https://github.com/{REPO}.git", str(workdir)],\n            timeout=180,\n        )\n        if cp.returncode != 0:\n            raise RuntimeError(f"clone failed: {cp.stderr[-1200:]}")\n        run(["git", "-C", str(workdir), "checkout", "--quiet", ref], timeout=60, check=True)\n        if branch:\n            run(["git", "-C", str(workdir), "checkout", "-B", branch], timeout=60, check=True)\n    uid = int(run(["id", "-u", user], check=True).stdout.strip())\n'''
+          assert s.count(old) == 1, s.count(old)
+          s = s.replace(old, new, 1)
+          old = '''        workdir = (\n            Path(task["workdir"])\n            if task["workdir"]\n            else prepare_checkout(\n                user=CODEX_USER,\n                home=CODEX_HOME,\n                base_dir=CODEX_WORK,\n                task_id=str(task["id"]),\n                ref=base_ref,\n                branch=branch,\n            )\n        )\n'''
+          new = '''        workdir = prepare_checkout(\n            user=CODEX_USER,\n            home=CODEX_HOME,\n            base_dir=CODEX_WORK,\n            task_id=str(task["id"]),\n            ref=base_ref,\n            branch=branch,\n        )\n'''
+          assert s.count(old) == 1, s.count(old)
+          s = s.replace(old, new, 1)
+          orch.write_text(s)
+
+          deploy = Path('.github/workflows/deploy-ai-team-orchestrator.yml')
+          s = deploy.read_text()
+          needle = '      - "scripts/ai_team_orchestrator.py"\n'
+          addition = needle + '      - "scripts/ai_team_runtime_ledger.py"\n'
+          assert s.count(needle) == 1
+          assert 'scripts/ai_team_runtime_ledger.py' not in s
+          deploy.write_text(s.replace(needle, addition, 1))
+
+          tests = Path('tests/test_ai_team_runtime_ledger.py')
+          s = tests.read_text()
+          assert 'test_top_level_checkpoint_writes_preserve_state_root_traverse_mode' not in s
+          s += '''\n\ndef test_top_level_checkpoint_writes_preserve_state_root_traverse_mode(tmp_path: Path) -> None:\n    db_path = tmp_path / "ledger.sqlite3"\n    make_db(db_path)\n    state = tmp_path / "state"\n    files = runtime.RuntimeLedgerFiles(state, db_path, "owner/repo", 130)\n    assert state.stat().st_mode & 0o777 == 0o711\n    files.project_current()\n    assert state.stat().st_mode & 0o777 == 0o711\n    files.handoff(main_head="a" * 40, active_priorities=[])\n    assert state.stat().st_mode & 0o777 == 0o711\n'''
+          tests.write_text(s)
+          PY
+          python3 -m py_compile scripts/ai_team_orchestrator.py scripts/ai_team_runtime_ledger.py
+          python3 -m pytest -q tests/test_ai_team_orchestrator.py tests/test_ai_team_runtime_ledger.py
+          rm -f .github/workflows/ai-team-runtime-diagnose.yml
+          git config user.name 'aliezzat4321'
+          git config user.email 'ali.ezzat4321@gmail.com'
+          git add scripts/ai_team_orchestrator.py scripts/ai_team_runtime_ledger.py tests/test_ai_team_runtime_ledger.py .github/workflows/deploy-ai-team-orchestrator.yml .github/workflows/ai-team-runtime-diagnose.yml
+          git commit -m 'Fix durable checkpoint permissions and retry recovery'
+          git remote set-url origin git@github.com:aliezzat4321/hyperliquid-copy-engine.git
+          git push origin HEAD:codex/126-ai-orchestrator
+          echo 'DURABLE_PERMISSION_FIX=COMMITTED'
           echo 'POLYMARKET_TOUCHED=NO'
           echo 'REAL_TRADING_TOUCHED=NO'
