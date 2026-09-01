@@ -141,7 +141,9 @@ def test_partial_leaderboard_snapshot_rolls_back_and_retries() -> None:
                 )
                 assert await cursor.fetchone() == (0,)
             finally:
-                await conn.execute(f"DROP TRIGGER IF EXISTS {trigger_name} ON leaderboard_snapshots")
+                await conn.execute(
+                    f"DROP TRIGGER IF EXISTS {trigger_name} ON leaderboard_snapshots"
+                )
                 await conn.execute(f"DROP FUNCTION IF EXISTS {function_name}()")
 
             await db.upsert_leaderboard(
