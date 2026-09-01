@@ -206,4 +206,7 @@ def test_codex_runtime_preflight_requires_companion_host(tmp_path):
     host = tmp_path / "codex-code-mode-host"
     host.write_text("#!/bin/sh\n")
     host.chmod(0o755)
-    assert orch.codex_runtime_preflight(codex) == host
+    bwrap = tmp_path / "bwrap"
+    bwrap.write_text("#!/bin/sh\n")
+    bwrap.chmod(0o755)
+    assert orch.codex_runtime_preflight(codex, bwrap) == host

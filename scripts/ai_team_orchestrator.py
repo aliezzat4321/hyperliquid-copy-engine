@@ -679,6 +679,7 @@ def model_sandbox_command(
 
 def codex_runtime_preflight(
     codex_path: Path = Path("/usr/local/bin/codex"),
+    bwrap_path: Path = Path("/usr/bin/bwrap"),
 ) -> Path:
     """Refuse a model call if Codex or its Linux sandbox dependencies are missing."""
     if not codex_path.is_file() or not os.access(codex_path, os.X_OK):
@@ -689,9 +690,10 @@ def codex_runtime_preflight(
             "Codex Code Mode host missing or not executable; refusing model call: "
             f"{host}"
         )
-    bwrap = Path("/usr/bin/bwrap")
-    if not bwrap.is_file() or not os.access(bwrap, os.X_OK):
-        raise RuntimeError("Codex Linux workspace sandbox dependency missing: /usr/bin/bwrap")
+    if not bwrap_path.is_file() or not os.access(bwrap_path, os.X_OK):
+        raise RuntimeError(
+            f"Codex Linux workspace sandbox dependency missing: {bwrap_path}"
+        )
     return host
 
 
