@@ -2,9 +2,9 @@
 
 Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
-**Snapshot:** 2026-08-31T12:32:51Z  
-**Updated by:** CLAUDE  
-**Observed main head:** `316918cd5df171b8f27b13495c64cf0fafa7a06e`  
+**Snapshot:** 2026-09-01T16:28:03Z  
+**Updated by:** CODEX_CHATGPT  
+**Observed main head:** `926d94d839b5d299139b337406ea2dff54e5da05`  
 **Mission:** Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.
 
 ## Live trading
@@ -13,6 +13,7 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 ## Active priorities
 | Priority | Issue | Objective | Builder | Reviewer | Status | Profit-critical |
 |---|---:|---|---|---|---|---|
+| P0 | #141 | Three-lane profitability tournament and executable-edge scoreboard | CODEX_CHATGPT | CLAUDE | IN_PROGRESS | yes |
 | P0 | #90 | Restore market-data capture and storage headroom | CODEX_CHATGPT | CLAUDE | OPEN | yes |
 | P0 | #91 | Build Lane 3 notification-edge v2 profitability gate | CLAUDE | CODEX_CHATGPT | OPEN | yes |
 | P0 | #92 | Validate and land builder-first Invo wallet resolver | CODEX_CHATGPT | CLAUDE | OPEN | yes |

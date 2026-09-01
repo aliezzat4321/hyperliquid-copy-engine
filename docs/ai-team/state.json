@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
-  "snapshot_at": "2026-08-31T12:32:51Z",
-  "updated_by": "CLAUDE",
-  "head_observed": "316918cd5df171b8f27b13495c64cf0fafa7a06e",
+  "snapshot_at": "2026-09-01T16:28:03Z",
+  "updated_by": "CODEX_CHATGPT",
+  "head_observed": "926d94d839b5d299139b337406ea2dff54e5da05",
   "mission": "Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.",
   "live_trading": {
     "authorized": false,
@@ -10,6 +10,15 @@
     "authorization": null
   },
   "priorities": [
+    {
+      "priority": "P0",
+      "issue": 141,
+      "title": "Three-lane profitability tournament and executable-edge scoreboard",
+      "owner": "CODEX_CHATGPT",
+      "reviewer": "CLAUDE",
+      "status": "IN_PROGRESS",
+      "profitability_critical": true
+    },
     {
       "priority": "P0",
       "issue": 90,

@@ -1,0 +1,214 @@
+{
+  "schema_version": 1,
+  "scoreboard_version": "three-lane-scoreboard-v1",
+  "as_of": "2026-08-31T12:32:51Z",
+  "issue": 141,
+  "policy_version": "quant-promotion-policy-v1",
+  "live_trading_enabled": false,
+  "ranking_basis": "Decision priority for producing accepted executable net-edge evidence, not a claim that any lane is profitable. Missing required evidence fails closed.",
+  "lanes": [
+    {
+      "rank": 1,
+      "lane": "lane_3",
+      "name": "Direct third-party notification copy",
+      "evidence_level": "EXPLORATORY_SHADOW",
+      "promotion_verdict": "FAIL_INSUFFICIENT_EXECUTABLE_NET_EVIDENCE",
+      "gross_theoretical_edge": {
+        "pnl_usd": 37.771087,
+        "return_pct": null,
+        "average_pnl_per_closed_trade_usd": 0.7708385102040816,
+        "median_return_per_closed_trade_bps": 27.4256,
+        "basis": "Mid-to-mid gross shadow closes; excludes costs and six unresolved positions. Average PnL is derived as 37.771087 / 49."
+      },
+      "net_executable_edge": {
+        "pnl_usd": null,
+        "return_pct": null,
+        "average_pnl_per_copied_trade_usd": null,
+        "status": "UNKNOWN",
+        "reason": "No accepted fee, spread, impact, funding, and unresolved-position-adjusted result."
+      },
+      "sample": {
+        "eligible_signals": null,
+        "shadow_opens": 55,
+        "closed_trades": 49,
+        "unresolved_positions": 6,
+        "distinct_days": null
+      },
+      "outcomes": {
+        "win_rate_pct": null,
+        "payoff_ratio": null,
+        "max_drawdown_usd": null,
+        "downside_concentration": null
+      },
+      "execution": {
+        "fees": "UNMEASURED",
+        "slippage_spread_impact": "UNMEASURED; policy reference cost is an assumed 15 bps round trip, not an observation",
+        "funding": "UNMEASURED",
+        "observed_median_signal_latency_ms": 11032,
+        "assumed_order_latency_ms": null,
+        "signal_to_shadow_open_rate_pct": 57.291666666666664,
+        "copyability_basis": "55 opens / (55 opens + 41 signals rejected by the 25 second freshness gate); diagnostic only because total eligible signals and other rejection classes are unavailable"
+      },
+      "stability": {
+        "recency": "Observed 2026-08-31T09:11:47Z",
+        "degradation": "UNKNOWN",
+        "out_of_sample_status": "Prospective-like shadow collection, but accepted net attribution is absent and closes are survivorship-biased",
+        "statistical_confidence": "NONE; no clustered interval and no accepted complete-ledger analysis"
+      },
+      "capacity": "UNKNOWN; no decision-time book depth or measured impact",
+      "engineering_distance": "NEAR: run the existing net-edge attribution work on the complete ledger, mark unresolved positions, and capture decision-time book spread/depth",
+      "smallest_next_measurement": "Complete-ledger, trader/day-clustered net attribution with measured decision-time book costs and explicit marking of the six unresolved positions.",
+      "sources": [
+        {"source_type": "WORKFLOW_RUN", "source_ref": "33376459723", "observed_at": "2026-08-31T09:11:47Z"},
+        {"source_type": "EXPERIMENT", "source_ref": "EXP-001", "observed_at": "2026-08-31T11:56:01Z"}
+      ]
+    },
+    {
+      "rank": 2,
+      "lane": "lane_1",
+      "name": "Hyperliquid leaderboard selective wallet by asset copy",
+      "evidence_level": "FROZEN_PROSPECTIVE_INCOMPLETE",
+      "promotion_verdict": "FAIL_MISSING_PUBLISHED_PROSPECTIVE_ECONOMICS",
+      "gross_theoretical_edge": {
+        "pnl_usd": null,
+        "return_pct": null,
+        "average_pnl_per_closed_trade_usd": null,
+        "median_return_per_closed_trade_bps": null,
+        "basis": "The funnel reports candidate counts but no current aggregate economics suitable for this scoreboard."
+      },
+      "net_executable_edge": {
+        "pnl_usd": null,
+        "return_pct": null,
+        "average_pnl_per_copied_trade_usd": null,
+        "status": "UNKNOWN",
+        "reason": "Two targets are labelled approved, but the trusted observation does not publish per-target trades, costs, PnL, drawdown, or uncertainty."
+      },
+      "sample": {
+        "eligible_signals": null,
+        "shadow_opens": null,
+        "closed_trades": null,
+        "unresolved_positions": null,
+        "distinct_days": null,
+        "screened_cohorts": 1551,
+        "positive_screens": 284,
+        "robust_candidates": 186,
+        "frozen_targets": 4,
+        "frozen_targets_approved": 2,
+        "frozen_targets_with_zero_events": 1
+      },
+      "outcomes": {
+        "win_rate_pct": null,
+        "payoff_ratio": null,
+        "max_drawdown_usd": null,
+        "downside_concentration": null
+      },
+      "execution": {
+        "fees": "NOT_PUBLISHED_IN_TRUSTED_OBSERVATION",
+        "slippage_spread_impact": "NOT_PUBLISHED_IN_TRUSTED_OBSERVATION",
+        "funding": "NOT_PUBLISHED_IN_TRUSTED_OBSERVATION",
+        "observed_median_signal_latency_ms": null,
+        "assumed_order_latency_ms": null,
+        "signal_to_shadow_open_rate_pct": null,
+        "copyability_basis": "UNKNOWN"
+      },
+      "stability": {
+        "recency": "Observed 2026-08-31T11:40:40Z",
+        "degradation": "UNKNOWN",
+        "out_of_sample_status": "Four frozen targets exist, but broad-screen selection is disconnected from the frozen queue and one target has zero events",
+        "statistical_confidence": "NONE PUBLISHED; broad screening requires multiple-testing control"
+      },
+      "capacity": "Target notionals are configured, but executable capacity and concentration are not published in trusted evidence",
+      "engineering_distance": "NEAR_TO_MEDIUM: publish target-level prospective economics and automate causal handoff from the selective cohort funnel",
+      "smallest_next_measurement": "For each frozen wallet by coin cohort, publish closed and unresolved counts, distinct days, gross and net PnL in USD, costs, worst-latency execution survival, drawdown, and clustered confidence.",
+      "sources": [
+        {"source_type": "WORKFLOW_RUN", "source_ref": "33369211976", "observed_at": "2026-08-31T07:37:45Z"},
+        {"source_type": "WORKFLOW_RUN", "source_ref": "33388075503", "observed_at": "2026-08-31T11:40:40Z"}
+      ]
+    },
+    {
+      "rank": 3,
+      "lane": "lane_2",
+      "name": "Third-party wallet resolver then Hyperliquid copy",
+      "evidence_level": "IDENTITY_FUNNEL_ONLY",
+      "promotion_verdict": "FAIL_ZERO_VERIFIED_IDENTITIES",
+      "gross_theoretical_edge": {
+        "pnl_usd": null,
+        "return_pct": null,
+        "average_pnl_per_closed_trade_usd": null,
+        "median_return_per_closed_trade_bps": null,
+        "basis": "No verified identity has entered an execution-aware comparison."
+      },
+      "net_executable_edge": {
+        "pnl_usd": null,
+        "return_pct": null,
+        "average_pnl_per_copied_trade_usd": null,
+        "status": "NOT_OBSERVED",
+        "reason": "Zero published verified identities."
+      },
+      "sample": {
+        "eligible_signals": null,
+        "shadow_opens": null,
+        "closed_trades": 0,
+        "unresolved_positions": null,
+        "distinct_days": null,
+        "candidate_portfolios": 324,
+        "resolution_ready_portfolios": 174,
+        "verified_identities": 0,
+        "third_party_prospective_events": 610
+      },
+      "outcomes": {
+        "win_rate_pct": null,
+        "payoff_ratio": null,
+        "max_drawdown_usd": null,
+        "downside_concentration": null
+      },
+      "execution": {
+        "fees": "NOT_OBSERVED",
+        "slippage_spread_impact": "NOT_OBSERVED",
+        "funding": "NOT_OBSERVED",
+        "observed_median_signal_latency_ms": null,
+        "assumed_order_latency_ms": null,
+        "signal_to_shadow_open_rate_pct": null,
+        "copyability_basis": "Fill copyability is unobserved. Identity publication yield is 0 published identities / 174 resolution-ready portfolios."
+      },
+      "stability": {
+        "recency": "Observed 2026-08-31T11:40:40Z",
+        "degradation": "NOT_APPLICABLE_WITH_ZERO_IDENTITIES",
+        "out_of_sample_status": "No matched-trader prospective execution sample",
+        "statistical_confidence": "NONE"
+      },
+      "capacity": "UNKNOWN until identities are verified and Hyperliquid fills can be paired",
+      "engineering_distance": "MEDIUM: validate the builder-first resolver and produce at least one identity before matched Lane 2 versus Lane 3 measurement",
+      "smallest_next_measurement": "Publish the first verified identity with resolution latency, then pair that trader's Hyperliquid events to the same notification signals and compare completeness, latency, fills, and net PnL.",
+      "sources": [
+        {"source_type": "WORKFLOW_RUN", "source_ref": "33388075503", "observed_at": "2026-08-31T11:40:40Z"}
+      ]
+    }
+  ],
+  "priority_candidates": [
+    {
+      "priority": 1,
+      "candidate": "Lane 3 complete-ledger direct notification shadow cohort",
+      "why": "Only lane with observed shadow closes and positive gross dollars; closest to a falsifiable executable-net verdict.",
+      "status": "RESEARCH_PRIORITY_NOT_PROMOTED"
+    },
+    {
+      "priority": 2,
+      "candidate": "Lane 1 frozen wallet by coin cohorts",
+      "why": "Selectivity is already represented by frozen wallet by coin targets, but the trusted report must publish complete prospective economics before any target can be ranked.",
+      "status": "RESEARCH_PRIORITY_NOT_PROMOTED"
+    },
+    {
+      "priority": 3,
+      "candidate": "Matched-trader Lane 2 versus Lane 3 pair",
+      "why": "This is the causal comparison the issue requires, but it cannot begin until the resolver publishes a verified identity.",
+      "status": "BLOCKED_ON_VERIFIED_IDENTITY"
+    }
+  ],
+  "promotion_demotion": {
+    "promotion": "Apply quant-promotion-policy-v1 without modification: at least 30 closed prospective trades across at least 5 distinct days; the two-sided 90% lower confidence bound on net economics must exceed cost; maximum single-trade profit concentration 0.50; maximum unresolved share 0.35. Additionally require measured decision-time execution costs, explicit funding, drawdown, capacity, latency and execution survival, frozen entry-time rules, and correction for broad screening before any future live consideration.",
+    "demotion": "Demote to research when any policy floor fails, net confidence falls to or below cost, unresolved share or concentration breaches its cap, data integrity or execution parity fails, the candidate materially degrades across a new prospective window, or the rule changes and therefore requires a new frozen window.",
+    "live_boundary": "A promotion verdict does not authorize capital. REAL_TRADING_ENABLED remains false and LIVE_TRADING_GATE still requires explicit, scoped user authorization."
+  },
+  "decision": "Focus measurement effort on Lane 3 first, Lane 1 target-level prospective publication second, and Lane 2 resolver yield third. No lane is eligible for live consideration."
+}
