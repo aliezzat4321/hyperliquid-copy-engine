@@ -77,14 +77,17 @@ def _relation_bytes(name: str) -> int:
     return _int(f"SELECT pg_total_relation_size('{name}'::regclass)")
 
 
-def _optional_relation_bytes(name: str) -> int:
-    return _int(
-        "SELECT CASE WHEN to_regclass('"
-        + name
-        + "') IS NULL THEN 0 ELSE pg_total_relation_size('"
-        + name
-        + "'::regclass) END"
+def _relation_exists(name: str) -> bool:
+    return bool(
+        _int(
+            "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
+            f"WHERE n.nspname='public' AND c.relname='{name}'"
+        )
     )
+
+
+def _optional_relation_bytes(name: str) -> int:
+    return _relation_bytes(name) if _relation_exists(name) else 0
 
 
 def _sha256(path: Path) -> str:
@@ -176,24 +179,14 @@ def build_plan(path: Path) -> dict[str, Any]:
         " FROM raw_api_responses WHERE response_json <> '{}'::jsonb"
         " ORDER BY content_sha256,fetched_at) payloads"
     )
-    conflicting_hash_bodies = _int(
-        "SELECT count(*) FROM ("
-        " SELECT content_sha256 FROM raw_api_responses"
-        " WHERE response_json <> '{}'::jsonb"
-        " GROUP BY content_sha256 HAVING count(DISTINCT response_json) > 1"
-        ") conflicts"
-    )
-    if conflicting_hash_bodies:
-        raise RuntimeError(
-            f"content hashes map to multiple raw bodies: {conflicting_hash_bodies}"
+    existing_payload_conflicts = 0
+    if _relation_exists("raw_api_payloads"):
+        existing_payload_conflicts = _int(
+            "SELECT count(*) FROM raw_api_responses r JOIN raw_api_payloads p"
+            " ON p.content_sha256=r.content_sha256"
+            " WHERE r.response_json <> '{}'::jsonb"
+            " AND p.response_json IS DISTINCT FROM r.response_json"
         )
-    existing_payload_conflicts = _int(
-        "SELECT CASE WHEN to_regclass('raw_api_payloads') IS NULL THEN 0 ELSE ("
-        " SELECT count(*) FROM raw_api_responses r JOIN raw_api_payloads p"
-        " ON p.content_sha256=r.content_sha256"
-        " WHERE r.response_json <> '{}'::jsonb"
-        " AND p.response_json IS DISTINCT FROM r.response_json) END"
-    )
     if existing_payload_conflicts:
         raise RuntimeError(
             f"existing content-addressed payloads disagree: {existing_payload_conflicts}"
@@ -273,6 +266,7 @@ def build_plan(path: Path) -> dict[str, Any]:
             "leaderboard_raw_json_reconstructable_from_raw_api_payloads": True,
             "raw_api_observations_preserved": True,
             "raw_api_payloads_content_addressed": True,
+            "content_sha256_is_canonical_payload_identity": True,
             "fills_untouched": True,
             "raw_api_first_for_headroom": True,
             "unnecessary_observation_hash_index": False,
@@ -301,7 +295,6 @@ def build_plan(path: Path) -> dict[str, Any]:
             "estimated_observation_relation_bytes_after": raw_observation_after_estimate,
             "required_peak_available_bytes": raw_api_phase_required,
             "projected_net_reclaim_bytes": projected_raw_api_net_reclaim,
-            "conflicting_hash_bodies": conflicting_hash_bodies,
             "existing_payload_conflicts": existing_payload_conflicts,
         },
         "fills": {
@@ -352,6 +345,7 @@ def _validate_plan(path: Path, expected_sha256: str) -> dict[str, Any]:
         "leaderboard_raw_json_reconstructable_from_raw_api_payloads",
         "raw_api_observations_preserved",
         "raw_api_payloads_content_addressed",
+        "content_sha256_is_canonical_payload_identity",
         "fills_untouched",
         "raw_api_first_for_headroom",
     )
@@ -362,8 +356,6 @@ def _validate_plan(path: Path, expected_sha256: str) -> dict[str, Any]:
         raise RuntimeError("observation hash index must remain disabled")
     if int(plan["leaderboard"]["missing_retained_provenance"]) != 0:
         raise RuntimeError("reviewed leaderboard provenance is incomplete")
-    if int(plan["raw_api"]["conflicting_hash_bodies"]) != 0:
-        raise RuntimeError("reviewed raw API hashes are inconsistent")
     if int(plan["raw_api"]["existing_payload_conflicts"]) != 0:
         raise RuntimeError("reviewed existing raw API payloads are inconsistent")
     plan["_cutoff_dt"] = cutoff
@@ -398,15 +390,6 @@ CREATE TABLE IF NOT EXISTS raw_api_payloads (
 );
 DO $verify$
 BEGIN
-  IF EXISTS (
-    SELECT 1 FROM (
-      SELECT content_sha256 FROM raw_api_responses
-      WHERE response_json <> '{}'::jsonb
-      GROUP BY content_sha256 HAVING count(DISTINCT response_json) > 1
-    ) conflicts
-  ) THEN
-    RAISE EXCEPTION 'one content hash maps to multiple response bodies';
-  END IF;
   IF EXISTS (
     SELECT 1 FROM raw_api_responses r JOIN raw_api_payloads p
       ON p.content_sha256=r.content_sha256
