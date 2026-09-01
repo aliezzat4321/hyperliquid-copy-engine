@@ -13,7 +13,7 @@ jobs:
   diagnose:
     runs-on: [self-hosted, linux]
     steps:
-      - name: Inspect Hyperliquid AI-team runtime only
+      - name: Run one Hyperliquid AI-team cycle and inspect only its namespace
         shell: bash
         run: |
           set -euo pipefail
@@ -21,10 +21,9 @@ jobs:
           echo 'POLYMARKET_INSPECTION=NO'
           echo 'POLYMARKET_MUTATION=NO'
           echo 'REAL_TRADING_CHANGE=NO'
+          systemctl start hyperliquid-ai-team-orchestrator.service || true
           echo '--- status ---'
           hl-ai-team-status || true
-          echo '--- orchestrator method map ---'
-          grep -nE '^(def|    def) ' /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py | tail -n 120 || true
           echo '--- latest ledger tasks/runs ---'
           python3 - <<'PY'
           import sqlite3
@@ -37,7 +36,7 @@ jobs:
           for r in db.execute('select id,task_id,agent,model_class,started_at,ended_at,exit_code,session_id,input_tokens,output_tokens,cached_input_tokens,log_path,error from runs order by id desc limit 8'):
               print(dict(r))
           PY
-          echo '--- recent service journal ---'
-          journalctl -u hyperliquid-ai-team-orchestrator.service --since '6 hours ago' -n 80 --no-pager -o cat || true
+          echo '--- recent AI-team service journal ---'
+          journalctl -u hyperliquid-ai-team-orchestrator.service --since '30 minutes ago' -n 80 --no-pager -o cat || true
           echo 'POLYMARKET_TOUCHED=NO'
           echo 'REAL_TRADING_TOUCHED=NO'
