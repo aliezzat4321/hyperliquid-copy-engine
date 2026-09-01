@@ -65,9 +65,10 @@ def test_missing_required_economics_fails_validation() -> None:
 )
 def test_missing_rendered_top_level_field_fails_validation(field: str) -> None:
     data = copy.deepcopy(_data())
+    now = _fixture_now(data)
     del data[field]
     with pytest.raises(ValueError, match="missing fields"):
-        renderer.validate(data, now=_fixture_now(data))
+        renderer.validate(data, now=now)
 
 
 @pytest.mark.parametrize("field", ["name", "evidence_level"])
