@@ -4,6 +4,8 @@ set -euo pipefail
 # Codex 0.151.0 enables the out-of-process Code Mode host by default. The
 # standalone CLI installer on this VM did not install that companion binary,
 # so install the matching official OpenAI release asset beside `codex`.
+# Codex workspace-write on Linux also requires bubblewrap for the filesystem
+# sandbox. Provision it explicitly and fail before any model call if missing.
 # Fail closed on a version mismatch rather than silently pairing incompatible
 # binaries and wasting a model run.
 
@@ -14,6 +16,14 @@ fi
 
 CODEX_BIN="${CODEX_BIN:-/usr/local/bin/codex}"
 [[ -x "$CODEX_BIN" ]] || { echo "Codex CLI missing: $CODEX_BIN" >&2; exit 1; }
+
+if ! command -v bwrap >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+  apt-get install -y --no-install-recommends bubblewrap
+fi
+[[ -x "$(command -v bwrap)" ]] || { echo "CODEX_SANDBOX=BLOCKED bubblewrap missing" >&2; exit 1; }
+echo "CODEX_SANDBOX_BWRAP=READY path=$(command -v bwrap)"
 
 raw_version="$($CODEX_BIN --version)"
 version="$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' <<<"$raw_version" | head -n1)"
