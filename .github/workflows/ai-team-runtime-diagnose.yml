@@ -23,6 +23,8 @@ jobs:
           echo 'REAL_TRADING_CHANGE=NO'
           echo '--- status ---'
           hl-ai-team-status || true
+          echo '--- orchestrator method map ---'
+          grep -nE '^(def|    def) ' /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py | tail -n 120 || true
           echo '--- latest ledger tasks/runs ---'
           python3 - <<'PY'
           import sqlite3
@@ -36,14 +38,6 @@ jobs:
               print(dict(r))
           PY
           echo '--- recent service journal ---'
-          journalctl -u hyperliquid-ai-team-orchestrator.service --since '6 hours ago' -n 120 --no-pager -o cat || true
-          echo '--- latest Codex log (redacted) ---'
-          latest="$(find /var/lib/hyperliquid-ai-team/agents/codex/logs -maxdepth 1 -type f -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2- || true)"
-          if [[ -n "$latest" ]]; then
-            echo "log=$(basename "$latest")"
-            tail -n 160 "$latest" | sed -E 's/(sk-ant-[A-Za-z0-9_-]+|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|Bearer [A-Za-z0-9._-]+)/[REDACTED]/g'
-          else
-            echo 'NO_CODEX_LOG'
-          fi
+          journalctl -u hyperliquid-ai-team-orchestrator.service --since '6 hours ago' -n 80 --no-pager -o cat || true
           echo 'POLYMARKET_TOUCHED=NO'
           echo 'REAL_TRADING_TOUCHED=NO'
