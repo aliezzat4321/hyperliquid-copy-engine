@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -210,3 +211,35 @@ def test_codex_runtime_preflight_requires_companion_host(tmp_path):
     bwrap.write_text("#!/bin/sh\n")
     bwrap.chmod(0o755)
     assert orch.codex_runtime_preflight(codex, bwrap) == host
+
+
+def _init_git_repo(path: Path) -> str:
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.name", "Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(path), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    (path / "tracked.txt").write_text("base\n")
+    subprocess.run(["git", "-C", str(path), "add", "tracked.txt"], check=True)
+    subprocess.run(["git", "-C", str(path), "commit", "-qm", "base"], check=True)
+    return subprocess.check_output(
+        ["git", "-C", str(path), "rev-parse", "HEAD"], text=True
+    ).strip()
+
+
+def test_changed_files_includes_new_untracked_file(tmp_path: Path) -> None:
+    base_sha = _init_git_repo(tmp_path)
+    new_file = tmp_path / "docs" / "new.md"
+    new_file.parent.mkdir()
+    new_file.write_text("harmless\n")
+    assert orch.changed_files(tmp_path, base_sha) == ["docs/new.md"]
+
+
+def test_untracked_file_contents_are_scanned_for_live_enablement(tmp_path: Path) -> None:
+    base_sha = _init_git_repo(tmp_path)
+    new_file = tmp_path / "docs" / "new.md"
+    new_file.parent.mkdir()
+    new_file.write_text("REAL_TRADING_ENABLED=YES\n")
+    with pytest.raises(RuntimeError, match="forbidden live-trading enablement"):
+        orch.validate_changes(orch.DEFAULT_CONFIG, tmp_path, base_sha)

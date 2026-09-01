@@ -810,9 +810,36 @@ def extract_review(result: str, target_sha: str) -> tuple[str, list[str], str]:
     return verdict, blockers, summary
 
 
+def untracked_files(workdir: Path) -> list[str]:
+    cp = git_worktree(
+        workdir, "ls-files", "--others", "--exclude-standard", "--", check=True
+    )
+    return [x.strip() for x in cp.stdout.splitlines() if x.strip()]
+
+
 def changed_files(workdir: Path, base_sha: str) -> list[str]:
     cp = git_worktree(workdir, "diff", "--name-only", base_sha, "--", check=True)
-    return [x.strip() for x in cp.stdout.splitlines() if x.strip()]
+    tracked = [x.strip() for x in cp.stdout.splitlines() if x.strip()]
+    return list(dict.fromkeys([*tracked, *untracked_files(workdir)]))
+
+
+def change_scan_text(workdir: Path, base_sha: str) -> str:
+    parts = [git_worktree(workdir, "diff", base_sha, "--", check=True).stdout]
+    for name in untracked_files(workdir):
+        path = workdir / name
+        if path.is_symlink():
+            raise RuntimeError(f"unsafe untracked symlink: {name}")
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            raise RuntimeError(f"cannot inspect untracked file {name}: {exc}") from exc
+        if size > 1_000_000:
+            raise RuntimeError(f"untracked file too large for safety scan: {name}")
+        try:
+            parts.append(path.read_bytes().decode("utf-8", errors="replace"))
+        except OSError as exc:
+            raise RuntimeError(f"cannot read untracked file {name}: {exc}") from exc
+    return "\n".join(parts)
 
 
 def validate_changes(cfg: dict[str, Any], workdir: Path, base_sha: str) -> tuple[list[str], bool]:
@@ -825,7 +852,7 @@ def validate_changes(cfg: dict[str, Any], workdir: Path, base_sha: str) -> tuple
             raise RuntimeError(f"unsafe changed path: {name}")
         if any(name.startswith(p) for p in cfg["safety"]["no_auto_merge_path_prefixes"]):
             raise RuntimeError(f"autonomous task touched owner-sensitive live path: {name}")
-    diff = git_worktree(workdir, "diff", base_sha, "--", check=True).stdout
+    diff = change_scan_text(workdir, base_sha)
     for pat in cfg["safety"]["forbidden_enable_patterns"]:
         if re.search(pat, diff, flags=re.I):
             raise RuntimeError(f"forbidden live-trading enablement pattern detected: {pat}")
