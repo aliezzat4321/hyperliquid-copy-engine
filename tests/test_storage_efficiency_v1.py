@@ -14,10 +14,21 @@ class _FakeCursor:
         return self.row
 
 
+class _FakeTransaction:
+    async def __aenter__(self) -> _FakeTransaction:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        return None
+
+
 class _FakeConn:
     def __init__(self, latest_snapshot: object = None) -> None:
         self.calls: list[tuple[str, object]] = []
         self.latest_snapshot = latest_snapshot
+
+    def transaction(self) -> _FakeTransaction:
+        return _FakeTransaction()
 
     async def execute(self, query: str, params: object = None) -> _FakeCursor:
         self.calls.append((query, params))
