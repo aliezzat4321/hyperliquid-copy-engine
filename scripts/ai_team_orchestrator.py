@@ -1894,10 +1894,17 @@ The reviewed SHA must be exactly the target SHA.
                 )
             ]
             if not all(name in AUTO_APPLY_CONTROL_PLANE_PATHS for name in protected_files):
-                self.block(task, "protected change contains path outside AI control-plane allowlist")
+                self.block(
+                    task,
+                    "protected change contains path outside AI control-plane allowlist",
+                )
                 return
             if not acceptance_flag(str(issue.get("body") or ""), "AI_TEAM_PROTECTED_CHANGE"):
-                self.block(task, "protected AI-control-plane change lacks AI_TEAM_PROTECTED_CHANGE=YES")
+                self.block(
+                    task,
+                    "protected AI-control-plane change lacks "
+                    "AI_TEAM_PROTECTED_CHANGE=YES",
+                )
                 return
             self.gh.comment(
                 int(task["pr_number"]),
