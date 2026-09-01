@@ -164,7 +164,7 @@ def run(
 def git_worktree(
     workdir: Path, *args: str, check: bool = False
 ) -> subprocess.CompletedProcess[str]:
-    """Run root-side Git only with this generated worktree explicitly trusted."""
+    """Run manager-side read-only Git without refreshing the agent-owned index."""
     return run(
         [
             "git",
@@ -175,6 +175,7 @@ def git_worktree(
             *args,
         ],
         check=check,
+        env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
     )
 
 
@@ -584,6 +585,19 @@ def recent_human_comments(gh: GitHub, number: int, trusted: set[str], limit: int
     return rows[-limit:]
 
 
+def normalize_worktree_ownership(workdir: Path, user: str) -> tuple[int, int]:
+    """Return a generated worktree fully to its dedicated non-root agent identity."""
+    uid = int(run(["id", "-u", user], check=True).stdout.strip())
+    gid = int(run(["id", "-g", user], check=True).stdout.strip())
+    os.chown(workdir, uid, gid)
+    for root, dirs, files in os.walk(workdir):
+        for name in dirs:
+            os.chown(Path(root) / name, uid, gid)
+        for name in files:
+            os.chown(Path(root) / name, uid, gid)
+    return uid, gid
+
+
 def prepare_checkout(
     *, user: str, home: Path, base_dir: Path, task_id: str, ref: str, branch: str | None
 ) -> Path:
@@ -599,14 +613,7 @@ def prepare_checkout(
         run(["git", "-C", str(workdir), "checkout", "--quiet", ref], timeout=60, check=True)
         if branch:
             run(["git", "-C", str(workdir), "checkout", "-B", branch], timeout=60, check=True)
-    uid = int(run(["id", "-u", user], check=True).stdout.strip())
-    gid = int(run(["id", "-g", user], check=True).stdout.strip())
-    os.chown(workdir, uid, gid)
-    for root, dirs, files in os.walk(workdir):
-        for name in dirs:
-            os.chown(Path(root) / name, uid, gid)
-        for name in files:
-            os.chown(Path(root) / name, uid, gid)
+    uid, gid = normalize_worktree_ownership(workdir, user)
     run(
         [
             "setpriv",
@@ -1270,8 +1277,7 @@ Finish by stating what changed, tests run, and any blocker. Keep changes scoped.
 """
 
     def commit_and_push(self, workdir: Path, task: sqlite3.Row, branch: str) -> None:
-        uid = int(run(["id", "-u", CODEX_USER], check=True).stdout.strip())
-        gid = int(run(["id", "-g", CODEX_USER], check=True).stdout.strip())
+        uid, gid = normalize_worktree_ownership(workdir, CODEX_USER)
         prefix = [
             "setpriv",
             f"--reuid={uid}",

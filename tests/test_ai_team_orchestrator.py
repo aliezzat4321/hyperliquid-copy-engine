@@ -188,6 +188,7 @@ def test_root_git_trust_is_scoped_to_exact_worktree(tmp_path, monkeypatch):
     def fake_run(cmd, **kwargs):
         captured["cmd"] = cmd
         captured["check"] = kwargs.get("check")
+        captured["env"] = kwargs.get("env")
         return None
 
     monkeypatch.setattr(orch, "run", fake_run)
@@ -195,6 +196,7 @@ def test_root_git_trust_is_scoped_to_exact_worktree(tmp_path, monkeypatch):
     assert captured["cmd"][:3] == ["git", "-c", f"safe.directory={tmp_path}"]
     assert captured["cmd"][3:] == ["-C", str(tmp_path), "rev-parse", "HEAD"]
     assert captured["check"] is True
+    assert captured["env"]["GIT_OPTIONAL_LOCKS"] == "0"
 
 
 def test_codex_runtime_preflight_requires_companion_host(tmp_path):
@@ -243,3 +245,24 @@ def test_untracked_file_contents_are_scanned_for_live_enablement(tmp_path: Path)
     new_file.write_text("REAL_TRADING_ENABLED=YES\n")
     with pytest.raises(RuntimeError, match="forbidden live-trading enablement"):
         orch.validate_changes(orch.DEFAULT_CONFIG, tmp_path, base_sha)
+
+
+def test_commit_and_push_restores_agent_ownership_before_staging(
+    tmp_path: Path, monkeypatch
+) -> None:
+    normalized = []
+
+    def fake_normalize(workdir, user):
+        normalized.append((workdir, user))
+        return 111, 222
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(orch, "normalize_worktree_ownership", fake_normalize)
+    monkeypatch.setattr(orch, "run", fake_run)
+    team = object.__new__(orch.Orchestrator)
+    team.commit_and_push(
+        tmp_path, {"issue_number": 1, "task_type": "BUILD"}, "codex/test"
+    )
+    assert normalized == [(tmp_path, orch.CODEX_USER)]
