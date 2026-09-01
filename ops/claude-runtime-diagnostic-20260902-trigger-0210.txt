@@ -1,0 +1,1 @@
+Trigger isolated Claude availability re-check after reported session reset. Hyperliquid AI runtime only. No Polymarket. No real trading change.
