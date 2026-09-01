@@ -133,6 +133,9 @@ eligible for deletion only when the complete screening evidence deterministicall
 that no positive or robust coin dependency exists. `storage_retention_audit.py` creates
 the review artifact and `storage_retention_apply.py` accepts only a fresh, exact-SHA
 reviewed manifest. PostgreSQL and fills are never filesystem-delete candidates.
+The emergency manifest may contain at most 12 GiB of deterministically eligible
+partitions. This permits the 75% healthy target to be reachable from the declared
+44 GiB dataset-budget envelope while retaining a hard, independently reviewed cap.
 
 The permanent policy is `config/storage_governance_v1.json`. It assigns each material
 dataset an owner, retention class, byte budget, growth budget and its material writer

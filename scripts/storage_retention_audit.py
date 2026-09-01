@@ -12,6 +12,7 @@ from pathlib import Path
 DATE_RE = re.compile(r"^date=(\d{4}-\d{2}-\d{2})$")
 COIN_RE = re.compile(r"^coin=(.+)$")
 GIB = 1024**3
+MAX_DELETE_CANDIDATE_GIB = 12.0
 
 
 def _du_bytes(path: Path) -> int:
@@ -116,13 +117,19 @@ def main() -> None:
         default=Path("/root/hyperliquid-audit/storage-retention"),
     )
     parser.add_argument("--recent-days", type=int, default=3)
-    parser.add_argument("--max-delete-candidate-gib", type=float, default=6.0)
+    parser.add_argument(
+        "--max-delete-candidate-gib",
+        type=float,
+        default=MAX_DELETE_CANDIDATE_GIB,
+    )
     args = parser.parse_args()
 
     if args.recent_days < 3:
         raise SystemExit("SAFETY_FAIL at least 3 recent UTC days must remain full fidelity")
-    if not (0 < args.max_delete_candidate_gib <= 6.0):
-        raise SystemExit("SAFETY_FAIL emergency delete-candidate budget must be >0 and <=6 GiB")
+    if not (0 < args.max_delete_candidate_gib <= MAX_DELETE_CANDIDATE_GIB):
+        raise SystemExit(
+            "SAFETY_FAIL emergency delete-candidate budget must be >0 and <=12 GiB"
+        )
 
     root = args.hyperliquid_root
     market = root / "market-shadow"

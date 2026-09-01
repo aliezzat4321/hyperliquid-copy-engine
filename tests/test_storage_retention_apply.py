@@ -29,7 +29,7 @@ def _manifest(
         "generated_at": "2026-08-31T13:55:00+00:00",
         "real_trading": False,
         "recent_days_kept_full_fidelity": 3,
-        "deletion_budget_bytes": 6 * 1024**3,
+        "deletion_budget_bytes": 12 * 1024**3,
         "source_evidence": {"complete": True},
         "normalization": {
             "robust_alias_safety_passed": True,
@@ -244,4 +244,19 @@ def test_rejects_delete_pool_over_reviewed_budget(tmp_path: Path) -> None:
     manifest = _manifest(candidate)
     manifest["deletion_budget_bytes"] = 1000
     with pytest.raises(ValueError, match="exceeds reviewed budget"):
+        _validate(manifest, market, tmp_path)
+
+
+def test_accepts_twelve_gib_reviewed_budget(tmp_path: Path) -> None:
+    market, candidate = _layout(tmp_path)
+    manifest = _manifest(candidate)
+    manifest["deletion_budget_bytes"] = 12 * 1024**3
+    assert len(_validate(manifest, market, tmp_path)) == 1
+
+
+def test_rejects_reviewed_budget_above_twelve_gib(tmp_path: Path) -> None:
+    market, candidate = _layout(tmp_path)
+    manifest = _manifest(candidate)
+    manifest["deletion_budget_bytes"] = 12 * 1024**3 + 1
+    with pytest.raises(ValueError, match="must be >0 and <=12 GiB"):
         _validate(manifest, market, tmp_path)
