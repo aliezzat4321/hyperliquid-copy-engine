@@ -123,3 +123,20 @@ Initial latency scenarios:
 ```
 
 The tape is evidence collection. It does not by itself imply copy trading is profitable.
+
+## Storage lifecycle
+
+Storage lifecycle decisions are manifest-driven and fail closed. The most recent three
+UTC days and every robust candidate coin remain full fidelity. Older tape with positive
+screening evidence is classified for compression/downsampling, while an old partition is
+eligible for deletion only when the complete screening evidence deterministically proves
+that no positive or robust coin dependency exists. `storage_retention_audit.py` creates
+the review artifact and `storage_retention_apply.py` accepts only a fresh, exact-SHA
+reviewed manifest. PostgreSQL and fills are never filesystem-delete candidates.
+
+The permanent policy is `config/storage_governance_v1.json`. It assigns each material
+dataset an owner, retention class, byte budget, growth budget and its material writer
+units. `storage_controller.py` records bytes/hour and time-to-full, pauses all governed
+writers on absolute, forecast or aggregate-growth pressure, and uses a separate resume
+threshold for hysteresis. Deployment wiring is intentionally not changed here; the
+manager must install the controller only after exact-SHA independent review.
