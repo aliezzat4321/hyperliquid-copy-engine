@@ -1,4 +1,4 @@
-name: ai-team-recovery-acceptance-temp
+name: ai-team-acceptance-finalizer-temp
 
 on:
   push:
@@ -10,37 +10,166 @@ permissions:
   contents: read
 
 jobs:
-  stage1b:
+  finalize:
     runs-on: [self-hosted, linux]
-    timeout-minutes: 5
+    timeout-minutes: 25
     steps:
-      - name: Record probe evidence and resume Codex checkpoint
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Patch resume CLI and finish acceptance drills
         shell: bash
         run: |
           set -euo pipefail
+          test "$GITHUB_REPOSITORY" = 'aliezzat4321/hyperliquid-copy-engine'
           echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
           echo 'POLYMARKET_INSPECTION=NO'
           echo 'POLYMARKET_MUTATION=NO'
           echo 'REAL_TRADING_CHANGE=NO'
           systemctl stop hyperliquid-ai-team-orchestrator.timer || true
           trap 'systemctl start hyperliquid-ai-team-orchestrator.timer || true' EXIT
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('scripts/ai_team_orchestrator.py')
+          s = path.read_text()
+          old = '''            command = [\n                "/usr/local/bin/codex",\n                "exec",\n                "resume",\n                str(task["session_id"]),\n                "--json",\n                "--sandbox",\n                "workspace-write",\n                "-",\n            ]\n'''
+          new = '''            command = [\n                "/usr/local/bin/codex",\n                "exec",\n                "--json",\n                "--sandbox",\n                "workspace-write",\n                "resume",\n                str(task["session_id"]),\n                "-",\n            ]\n'''
+          assert s.count(old) == 1, s.count(old)
+          path.write_text(s.replace(old, new, 1))
+
+          tests = Path('tests/test_ai_team_orchestrator.py')
+          t = tests.read_text()
+          name = 'test_codex_resume_places_exec_options_before_resume_subcommand'
+          if name not in t:
+              t += '''\n\ndef test_codex_resume_places_exec_options_before_resume_subcommand(\n    tmp_path: Path, monkeypatch\n) -> None:\n    seen = {}\n    team = object.__new__(orch.Orchestrator)\n    team.cfg = {"build_timeout_seconds": 30}\n\n    def fake_sandbox(*, unit, user, home, workdir, command):\n        seen["command"] = command\n        return command\n\n    def fake_run(cmd, **kwargs):\n        return subprocess.CompletedProcess(cmd, 0, "", "")\n\n    monkeypatch.setattr(orch, "model_sandbox_command", fake_sandbox)\n    monkeypatch.setattr(orch, "run", fake_run)\n    team.invoke_codex(\n        {"session_id": "session-123"}, tmp_path, "continue", "unit-test"\n    )\n    assert seen["command"] == [\n        "/usr/local/bin/codex",\n        "exec",\n        "--json",\n        "--sandbox",\n        "workspace-write",\n        "resume",\n        "session-123",\n        "-",\n    ]\n'''
+              tests.write_text(t)
+          PY
+
+          /usr/local/bin/codex exec --json --sandbox workspace-write resume --help >/tmp/codex-resume-help.txt
+          grep -q 'Usage:' /tmp/codex-resume-help.txt
+          python3 -m py_compile scripts/ai_team_orchestrator.py
+          /root/hyperliquid-copy-engine/.venv/bin/python -m pytest -q tests/test_ai_team_orchestrator.py
+          git diff --check
+
+          git config user.name 'aliezzat4321'
+          git config user.email 'ali.ezzat4321@gmail.com'
+          git add scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
+          git commit -m 'Fix Codex session resume command ordering'
+          git remote set-url origin git@github.com:aliezzat4321/hyperliquid-copy-engine.git
+          git push origin HEAD:codex/126-ai-orchestrator
+          echo 'CODEX_RESUME_FIX=PUSHED'
+
+          bash scripts/install_ai_team_orchestrator.sh
+          grep -A14 'if task\["session_id"\]' /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py | grep -q 'workspace-write'
+          echo 'CODEX_RESUME_FIX=DEPLOYED'
+
           PYTHONPATH=/opt/hyperliquid-ai-team/scripts python3 - <<'PY'
           import ai_team_orchestrator as orch
           team = orch.Orchestrator()
           row = team.ledger.db.execute("SELECT * FROM tasks WHERE issue_number=135 AND task_type='BUILD' ORDER BY created_at DESC LIMIT 1").fetchone()
-          assert row and row['status'] == 'RETRY'
-          assert row['last_error'] == 'TEST_INJECTED_CODEX_SESSION_END'
-          assert row['session_id'] and row['retry_at'] and row['workdir']
-          old = row['retry_at']
-          team.runtime.event('FRESH_RECOVERY_PROBE_PASSED', assignment_id=row['id'], issue=135, observed_state='RETRY', observed_branch=row['branch'], observed_next='launch build in isolated agent worktree')
+          assert row and row['status'] == 'RETRY', dict(row) if row else None
+          assert row['session_id'] and row['workdir']
           team.ledger.update(row['id'], retry_at=orch.utcnow())
-          team.runtime.event('TEST_RETRY_CLOCK_ACCELERATED', assignment_id=row['id'], issue=135, phase='CODEX_RESUME', previous_retry_after=old)
+          team.runtime.event('TEST_RETRY_CLOCK_ACCELERATED', assignment_id=row['id'], issue=135, phase='CODEX_RESUME_FINAL')
           team.sync_runtime_checkpoint()
-          print('FRESH_RECOVERY_PROBE=PASS')
-          print('CODEX_CHECKPOINT=PERSISTED_AND_READY')
+          print('ISSUE135_CODEX_RESUME=READY')
           PY
           systemctl start hyperliquid-ai-team-orchestrator.service
+
+          PYTHONPATH=/opt/hyperliquid-ai-team/scripts python3 - <<'PY'
+          import ai_team_orchestrator as orch
+          team = orch.Orchestrator()
+          build = team.ledger.db.execute("SELECT * FROM tasks WHERE issue_number=135 AND task_type='BUILD' ORDER BY created_at DESC LIMIT 1").fetchone()
+          assert build and build['status'] == 'DONE', dict(build) if build else None
+          review = team.ledger.db.execute("SELECT * FROM tasks WHERE issue_number=135 AND task_type='REVIEW' ORDER BY created_at DESC LIMIT 1").fetchone()
+          assert review and review['status'] == 'PENDING', dict(review) if review else None
+          print('ISSUE135_CODEX_RESUME=PASS')
+          print('ISSUE135_PR=' + str(review['pr_number']))
+          print('ISSUE135_SHA=' + str(review['target_sha']))
+          PY
+
+          systemctl start hyperliquid-ai-team-orchestrator.service
+          PYTHONPATH=/opt/hyperliquid-ai-team/scripts python3 - <<'PY'
+          import ai_team_orchestrator as orch
+          team = orch.Orchestrator()
+          review = team.ledger.db.execute("SELECT * FROM tasks WHERE issue_number=135 AND task_type='REVIEW' ORDER BY created_at DESC LIMIT 1").fetchone()
+          assert review and review['status'] == 'WAITING_RATE_LIMIT', dict(review) if review else None
+          assert review['last_error'] == 'TEST_INJECTED_CLAUDE_RATE_LIMIT'
+          assert review['session_id'] and review['retry_at'] and review['target_sha'] and review['pr_number']
+          old = review['retry_at']
+          team.runtime.event('ISSUE135_CLAUDE_RATE_LIMIT_CHECKPOINT_PROVED', assignment_id=review['id'], issue=135, pr=review['pr_number'], target_sha=review['target_sha'], session_id=review['session_id'], retry_after=old)
+          team.ledger.update(review['id'], retry_at=orch.utcnow())
+          team.sync_runtime_checkpoint()
+          print('ISSUE135_CLAUDE_RATE_LIMIT_CHECKPOINT=PASS')
+          PY
+
+          systemctl start hyperliquid-ai-team-orchestrator.service
+          PYTHONPATH=/opt/hyperliquid-ai-team/scripts python3 - <<'PY'
+          import ai_team_orchestrator as orch
+          team = orch.Orchestrator()
+          review = team.ledger.db.execute("SELECT * FROM tasks WHERE issue_number=135 AND task_type='REVIEW' ORDER BY created_at DESC LIMIT 1").fetchone()
+          assert review and review['status'] == 'WAITING_CI', dict(review) if review else None
+          print('ISSUE135_CLAUDE_RESUME=PASS')
+          PY
+
+          for i in $(seq 1 8); do
+            PYTHONPATH=/opt/hyperliquid-ai-team/scripts python3 - <<'PY'
+          import ai_team_orchestrator as orch
+          team = orch.Orchestrator()
+          row = team.ledger.db.execute("SELECT * FROM tasks WHERE issue_number=135 AND task_type='REVIEW' ORDER BY created_at DESC LIMIT 1").fetchone()
+          if row and row['status'] == 'WAITING_CI':
+              team.ledger.update(row['id'], retry_at=orch.utcnow())
+          PY
+            systemctl start hyperliquid-ai-team-orchestrator.service || true
+            state=$(gh api repos/aliezzat4321/hyperliquid-copy-engine/issues/135 --jq .state)
+            if [[ "$state" = closed ]]; then break; fi
+            sleep 8
+          done
+          test "$(gh api repos/aliezzat4321/hyperliquid-copy-engine/issues/135 --jq .state)" = closed
+          echo 'ISSUE135=COMPLETE'
+
+          PYTHONPATH=/opt/hyperliquid-ai-team/scripts python3 - <<'PY'
+          import ai_team_orchestrator as orch
+          team = orch.Orchestrator()
+          issue = team.gh.issue(136)
+          if issue.get('state') != 'closed':
+              team.gh.add_labels(136, [team.cfg['labels']['ready']])
+          print('ISSUE136=QUEUED')
+          PY
+
+          for phase in $(seq 1 12); do
+            PYTHONPATH=/opt/hyperliquid-ai-team/scripts python3 - <<'PY'
+          import ai_team_orchestrator as orch
+          team = orch.Orchestrator()
+          for row in team.ledger.db.execute("SELECT * FROM tasks WHERE issue_number=136 AND status IN ('RETRY','WAITING_RATE_LIMIT','WAITING_CI')"):
+              team.ledger.update(row['id'], retry_at=orch.utcnow())
+          PY
+            systemctl start hyperliquid-ai-team-orchestrator.service || true
+            state=$(gh api repos/aliezzat4321/hyperliquid-copy-engine/issues/136 --jq .state)
+            [[ "$state" = closed ]] && break
+            sleep 6
+          done
+          test "$(gh api repos/aliezzat4321/hyperliquid-copy-engine/issues/136 --jq .state)" = closed
+
+          PYTHONPATH=/opt/hyperliquid-ai-team/scripts python3 - <<'PY'
+          import ai_team_orchestrator as orch
+          team = orch.Orchestrator()
+          rows = list(team.ledger.db.execute("SELECT task_type,status,target_sha,previous_sha,blockers_json FROM tasks WHERE issue_number=136 ORDER BY created_at"))
+          assert any(r['task_type'] == 'REVIEW' and r['status'] == 'DONE' and r['blockers_json'] not in (None, '[]') for r in rows), [dict(r) for r in rows]
+          assert any(r['task_type'] == 'REPAIR' and r['status'] == 'DONE' for r in rows), [dict(r) for r in rows]
+          assert any(r['task_type'] == 'REVIEW' and r['status'] == 'DONE' and r['previous_sha'] for r in rows), [dict(r) for r in rows]
+          print('ISSUE136_FAIL_REPAIR_PASS=COMPLETE')
+          PY
+
           hl-ai-team-status
-          echo 'CODEX_RESUME_CYCLE=COMPLETE'
+          git rm .github/workflows/ai-team-recovery-acceptance-temp.yml
+          git add -A
+          git commit -m 'Remove temporary AI-team acceptance finalizer'
+          git push origin HEAD:codex/126-ai-orchestrator
+          echo 'TEMP_ACCEPTANCE_WORKFLOW=REMOVED'
           echo 'POLYMARKET_TOUCHED=NO'
           echo 'REAL_TRADING_TOUCHED=NO'
