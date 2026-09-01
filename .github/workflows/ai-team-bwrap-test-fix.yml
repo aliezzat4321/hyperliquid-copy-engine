@@ -1,0 +1,52 @@
+name: ai-team-bwrap-test-fix
+
+on:
+  push:
+    branches: [codex/126-ai-orchestrator]
+    paths:
+      - .github/workflows/ai-team-bwrap-test-fix.yml
+
+permissions:
+  contents: read
+
+jobs:
+  fix:
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Make bubblewrap preflight injectable for unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('scripts/ai_team_orchestrator.py')
+          s=p.read_text()
+          old='''def codex_runtime_preflight(\n    codex_path: Path = Path("/usr/local/bin/codex"),\n) -> Path:\n'''
+          new='''def codex_runtime_preflight(\n    codex_path: Path = Path("/usr/local/bin/codex"),\n    bwrap_path: Path = Path("/usr/bin/bwrap"),\n) -> Path:\n'''
+          assert s.count(old)==1, s.count(old)
+          s=s.replace(old,new,1)
+          old='''    bwrap = Path("/usr/bin/bwrap")\n    if not bwrap.is_file() or not os.access(bwrap, os.X_OK):\n        raise RuntimeError("Codex Linux workspace sandbox dependency missing: /usr/bin/bwrap")\n'''
+          new='''    if not bwrap_path.is_file() or not os.access(bwrap_path, os.X_OK):\n        raise RuntimeError(\n            f"Codex Linux workspace sandbox dependency missing: {bwrap_path}"\n        )\n'''
+          assert s.count(old)==1, s.count(old)
+          p.write_text(s.replace(old,new,1))
+
+          p=Path('tests/test_ai_team_orchestrator.py')
+          s=p.read_text()
+          old='''    host = tmp_path / "codex-code-mode-host"\n    host.write_text("#!/bin/sh\\n")\n    host.chmod(0o755)\n    assert orch.codex_runtime_preflight(codex) == host\n'''
+          new='''    host = tmp_path / "codex-code-mode-host"\n    host.write_text("#!/bin/sh\\n")\n    host.chmod(0o755)\n    bwrap = tmp_path / "bwrap"\n    bwrap.write_text("#!/bin/sh\\n")\n    bwrap.chmod(0o755)\n    assert orch.codex_runtime_preflight(codex, bwrap) == host\n'''
+          assert s.count(old)==1, s.count(old)
+          p.write_text(s.replace(old,new,1))
+          PY
+          python3 -m py_compile scripts/ai_team_orchestrator.py
+          rm -f .github/workflows/ai-team-bwrap-test-fix.yml
+          git config user.name 'aliezzat4321'
+          git config user.email 'ali.ezzat4321@gmail.com'
+          git add scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py .github/workflows/ai-team-bwrap-test-fix.yml
+          git commit -m 'Test Codex bubblewrap preflight explicitly'
+          git remote set-url origin git@github.com:aliezzat4321/hyperliquid-copy-engine.git
+          git push origin HEAD:codex/126-ai-orchestrator
