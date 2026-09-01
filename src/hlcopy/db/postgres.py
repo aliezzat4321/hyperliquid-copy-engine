@@ -138,61 +138,76 @@ class Database:
         progress: Callable[[int, int], None] | None = None,
         progress_every: int = 2_500,
     ) -> None:
-        """Refresh wallets every run but persist history only at a bounded cadence."""
+        """Refresh wallets and persist each selected leaderboard snapshot atomically."""
         conn = self._require()
         snapshot_at = _dt(snapshot_at_ms)
-        cursor = await conn.execute("SELECT max(snapshot_at) FROM leaderboard_snapshots")
-        latest_row = await cursor.fetchone()
-        latest_snapshot = latest_row[0] if latest_row else None
         minimum_gap = timedelta(minutes=max(1, snapshot_min_interval_minutes))
-        persist_snapshot = latest_snapshot is None or snapshot_at - latest_snapshot >= minimum_gap
 
-        period_ranks: dict[str, dict[str, int]] = {}
-        if persist_snapshot:
-            periods = {period for candidate in candidates for period in candidate.windows}
-            for period in periods:
-                ordered = sorted(candidates, key=lambda c: c.window(period).pnl, reverse=True)
-                period_ranks[period] = {c.address: i for i, c in enumerate(ordered, start=1)}
-
-        total = len(candidates)
-        for index, candidate in enumerate(candidates, start=1):
-            await conn.execute(
-                """
-                INSERT INTO wallets(
-                  address, first_seen, last_seen, source, display_name, metadata_json
-                )
-                VALUES (%s, %s, %s, 'official_leaderboard', %s, %s)
-                ON CONFLICT(address) DO UPDATE SET
-                  last_seen = GREATEST(wallets.last_seen, EXCLUDED.last_seen),
-                  display_name = COALESCE(EXCLUDED.display_name, wallets.display_name)
-                """,
-                (candidate.address, snapshot_at, snapshot_at, candidate.display_name, Jsonb({})),
+        # The connection runs in autocommit mode for ordinary ingestion. Leaderboard
+        # snapshots are different: a partial cross-sectional snapshot can bias later
+        # research and, if committed, can incorrectly advance the cadence watermark.
+        # One explicit transaction makes the wallet refresh + selected snapshot an
+        # all-or-nothing unit; a mid-snapshot failure therefore leaves no new watermark.
+        async with conn.transaction():
+            cursor = await conn.execute("SELECT max(snapshot_at) FROM leaderboard_snapshots")
+            latest_row = await cursor.fetchone()
+            latest_snapshot = latest_row[0] if latest_row else None
+            persist_snapshot = (
+                latest_snapshot is None or snapshot_at - latest_snapshot >= minimum_gap
             )
+
+            period_ranks: dict[str, dict[str, int]] = {}
             if persist_snapshot:
-                for period, stats in candidate.windows.items():
-                    await conn.execute(
-                        """
-                        INSERT INTO leaderboard_snapshots
-                          (snapshot_at, address, ranking_period, rank, pnl, roi, volume,
-                           account_value, raw_json)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'{}'::jsonb)
-                        ON CONFLICT DO NOTHING
-                        """,
-                        (
-                            snapshot_at,
-                            candidate.address,
-                            period,
-                            period_ranks.get(period, {}).get(candidate.address),
-                            stats.pnl,
-                            stats.roi,
-                            stats.volume,
-                            candidate.account_value,
-                        ),
+                periods = {period for candidate in candidates for period in candidate.windows}
+                for period in periods:
+                    ordered = sorted(candidates, key=lambda c: c.window(period).pnl, reverse=True)
+                    period_ranks[period] = {c.address: i for i, c in enumerate(ordered, start=1)}
+
+            total = len(candidates)
+            for index, candidate in enumerate(candidates, start=1):
+                await conn.execute(
+                    """
+                    INSERT INTO wallets(
+                      address, first_seen, last_seen, source, display_name, metadata_json
                     )
-            if progress is not None and (
-                index == total or index % max(1, progress_every) == 0
-            ):
-                progress(index, total)
+                    VALUES (%s, %s, %s, 'official_leaderboard', %s, %s)
+                    ON CONFLICT(address) DO UPDATE SET
+                      last_seen = GREATEST(wallets.last_seen, EXCLUDED.last_seen),
+                      display_name = COALESCE(EXCLUDED.display_name, wallets.display_name)
+                    """,
+                    (
+                        candidate.address,
+                        snapshot_at,
+                        snapshot_at,
+                        candidate.display_name,
+                        Jsonb({}),
+                    ),
+                )
+                if persist_snapshot:
+                    for period, stats in candidate.windows.items():
+                        await conn.execute(
+                            """
+                            INSERT INTO leaderboard_snapshots
+                              (snapshot_at, address, ranking_period, rank, pnl, roi, volume,
+                               account_value, raw_json)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'{}'::jsonb)
+                            ON CONFLICT DO NOTHING
+                            """,
+                            (
+                                snapshot_at,
+                                candidate.address,
+                                period,
+                                period_ranks.get(period, {}).get(candidate.address),
+                                stats.pnl,
+                                stats.roi,
+                                stats.volume,
+                                candidate.account_value,
+                            ),
+                        )
+                if progress is not None and (
+                    index == total or index % max(1, progress_every) == 0
+                ):
+                    progress(index, total)
 
     async def upsert_fills(self, fills: list[Fill]) -> None:
         conn = self._require()
