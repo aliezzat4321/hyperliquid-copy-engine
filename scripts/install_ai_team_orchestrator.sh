@@ -25,7 +25,7 @@ echo 'REAL_TRADING_CHANGE=NO'
 
 # Parent directories permit traversal only; per-agent roots remain private and owned by
 # their service identity. This lets an agent reach its own HOME without exposing the
-# sibling agent's contents or the root-only orchestrator ledger.
+# sibling agent's contents or the root-only orchestrator ledger/checkpoints.
 install -d -m 0711 "$STATE"
 install -d -m 0711 "$STATE/agents"
 for spec in 'hl-codex-agent:codex' 'hl-claude-agent:claude'; do
@@ -41,12 +41,12 @@ for spec in 'hl-codex-agent:codex' 'hl-claude-agent:claude'; do
   install -d -o "$user" -g "$user" -m 0750 "$agent_root/worktrees"
   install -d -o "$user" -g "$user" -m 0750 "$agent_root/logs"
 done
-install -d -m 0700 "$STATE/orchestrator"
+install -d -m 0700 "$STATE/orchestrator" "$STATE/events" "$STATE/runs" "$STATE/checkpoints"
 install -d -m 0700 /run/hyperliquid-ai-team "$OPT/scripts" "$OPT/config" "$ETC"
 
-# The standalone Codex CLI currently needs its matching Code Mode host installed
-# beside it. Pin and checksum the official OpenAI release asset; fail closed if
-# Codex is upgraded without a reviewed host mapping.
+# The standalone Codex CLI needs its matching Code Mode host plus the Linux
+# workspace sandbox dependency. The helper pins the host checksum and installs
+# Ubuntu's bubblewrap package when absent.
 bash "$ROOT/scripts/install_codex_code_mode_host.sh"
 
 # OpenAI documents copying auth.json as a supported headless fallback. Keep it local,
@@ -61,6 +61,7 @@ else
 fi
 
 install -m 0755 "$ROOT/scripts/ai_team_orchestrator.py" "$OPT/scripts/ai_team_orchestrator.py"
+install -m 0644 "$ROOT/scripts/ai_team_runtime_ledger.py" "$OPT/scripts/ai_team_runtime_ledger.py"
 install -m 0755 "$ROOT/scripts/ai_team_auth_claude.sh" "$OPT/scripts/ai_team_auth_claude.sh"
 install -m 0755 "$ROOT/scripts/install_codex_code_mode_host.sh" "$OPT/scripts/install_codex_code_mode_host.sh"
 install -m 0644 "$ROOT/config/ai_team_router.json" "$OPT/config/ai_team_router.json"
@@ -73,6 +74,7 @@ cat > /usr/local/bin/hl-ai-team-status <<'EOF'
 exec /usr/bin/python3 /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py --status "$@"
 EOF
 chmod 0755 /usr/local/bin/hl-ai-team-status
+ln -sfn /usr/local/bin/hl-ai-team-status /usr/local/bin/hyperliquid-ai-status
 ln -sfn "$OPT/scripts/ai_team_auth_claude.sh" /usr/local/sbin/hl-ai-team-auth-claude
 
 /usr/bin/python3 "$OPT/scripts/ai_team_orchestrator.py" --init-db
@@ -99,6 +101,8 @@ systemctl daemon-reload
 systemctl enable --now hyperliquid-ai-team-orchestrator.timer >/dev/null
 
 echo 'AI_TEAM_INSTALL=OK'
+echo 'RUNTIME_LEDGER_ROOT=/var/lib/hyperliquid-ai-team'
+echo 'RUNTIME_STATUS_ISSUE=130'
 echo 'TIMER_ENABLED_AND_ACTIVE=YES'
 echo 'MODEL_IDLE_BEHAVIOR=NO_MODEL_CALLS_WITHOUT_DUE_TASK'
 echo 'POLYMARKET_TOUCHED=NO'
