@@ -1,0 +1,58 @@
+name: temp-pr152-lint-repair
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.event.head_commit.message == 'Bootstrap one-time lint repair for PR 152'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: manager/151-protected-self-change
+          fetch-depth: 0
+      - name: Repair exact lint failures only
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "2e6f4deab533b70ba5f659b73e465a5c665e3c04"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('scripts/ai_team_orchestrator.py')
+          text = path.read_text()
+          replacements = {
+              '                self.block(task, "protected change contains path outside AI control-plane allowlist")\n': (
+                  '                self.block(\n'
+                  '                    task,\n'
+                  '                    "protected change contains path outside AI control-plane allowlist",\n'
+                  '                )\n'
+              ),
+              '                self.block(task, "protected AI-control-plane change lacks AI_TEAM_PROTECTED_CHANGE=YES")\n': (
+                  '                self.block(\n'
+                  '                    task,\n'
+                  '                    "protected AI-control-plane change lacks "\n'
+                  '                    "AI_TEAM_PROTECTED_CHANGE=YES",\n'
+                  '                )\n'
+              ),
+          }
+          for old, new in replacements.items():
+              if text.count(old) != 1:
+                  raise SystemExit(f'exact repair target count != 1: {old.strip()}')
+              text = text.replace(old, new)
+          path.write_text(text)
+          PY
+          test "$(git diff --name-only)" = "scripts/ai_team_orchestrator.py"
+          python3 -m py_compile scripts/ai_team_orchestrator.py
+          git diff --check
+          git config user.name "Hyperliquid AI Team Manager"
+          git config user.email "actions@users.noreply.github.com"
+          git add scripts/ai_team_orchestrator.py
+          git commit -m "Fix protected bootstrap lint"
+          git push origin HEAD:manager/151-protected-self-change
