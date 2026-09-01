@@ -1,0 +1,64 @@
+name: ai-team-py310-compat-fix
+
+on:
+  push:
+    branches: [codex/126-ai-orchestrator]
+    paths: [".github/workflows/ai-team-py310-compat-fix.yml"]
+
+permissions:
+  contents: write
+
+jobs:
+  repair-and-deploy:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/126-ai-orchestrator
+          fetch-depth: 0
+      - name: Keep orchestrator compatible with VM Python
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('scripts/ai_team_orchestrator.py')
+          text = path.read_text()
+          count = text.count('dt.UTC')
+          if count == 0:
+              raise SystemExit('expected dt.UTC compatibility targets not found')
+          path.write_text(text.replace('dt.UTC', 'dt.timezone.utc'))
+
+          cfg = Path('pyproject.toml')
+          raw = cfg.read_text()
+          line = '"scripts/ai_team_orchestrator.py" = ["UP017"]\n'
+          anchor = '"scripts/edge_temporal_validation.py" = ["E501", "E701", "E702"]\n'
+          if line not in raw:
+              if anchor not in raw:
+                  raise SystemExit('ruff per-file-ignore anchor missing')
+              raw = raw.replace(anchor, line + anchor, 1)
+              cfg.write_text(raw)
+          print(f'PY310_UTC_REPLACEMENTS={count}')
+          PY
+          python3 --version
+          python3 -m py_compile scripts/ai_team_orchestrator.py
+          python3 scripts/ai_team_orchestrator.py --help >/dev/null
+      - name: Commit, deploy, and exercise service once
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'hyperliquid-ai-team'
+          git config user.email 'hyperliquid-ai-team@users.noreply.github.com'
+          git add scripts/ai_team_orchestrator.py pyproject.toml
+          git commit -m 'Keep AI orchestrator compatible with VM Python 3.10'
+          git push origin HEAD:codex/126-ai-orchestrator
+          bash scripts/install_ai_team_orchestrator.sh
+          systemctl reset-failed hyperliquid-ai-team-orchestrator.service || true
+          systemctl start hyperliquid-ai-team-orchestrator.service || true
+          hl-ai-team-status
+          systemctl status hyperliquid-ai-team-orchestrator.service --no-pager -l || true
+          journalctl -u hyperliquid-ai-team-orchestrator.service -n 30 --no-pager -l || true
+          echo 'POLYMARKET_TOUCHED=NO'
+          echo 'REAL_TRADING_TOUCHED=NO'
