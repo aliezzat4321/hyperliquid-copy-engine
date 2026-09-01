@@ -9,6 +9,7 @@ on:
       - "scripts/ai_team_orchestrator.py"
       - "scripts/ai_team_auth_claude.sh"
       - "scripts/install_ai_team_orchestrator.sh"
+      - "scripts/install_codex_code_mode_host.sh"
       - "config/ai_team_router.json"
       - "deploy/systemd/hyperliquid-ai-team-orchestrator.service"
       - "deploy/systemd/hyperliquid-ai-team-orchestrator.timer"
@@ -50,6 +51,7 @@ jobs:
           python3 -m json.tool config/ai_team_router.json >/dev/null
           bash -n scripts/ai_team_auth_claude.sh
           bash -n scripts/install_ai_team_orchestrator.sh
+          bash -n scripts/install_codex_code_mode_host.sh
           systemd-analyze verify \
             deploy/systemd/hyperliquid-ai-team-orchestrator.service \
             deploy/systemd/hyperliquid-ai-team-orchestrator.timer
@@ -59,6 +61,7 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/install_ai_team_orchestrator.sh
+          test -x /usr/local/bin/codex-code-mode-host
           systemctl start hyperliquid-ai-team-orchestrator.service
           systemctl is-enabled hyperliquid-ai-team-orchestrator.timer
           hl-ai-team-status
