@@ -19,7 +19,7 @@ jobs:
       (github.event.pull_request.head.ref == 'manager/151-protected-self-change' &&
        github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, linux]
-    timeout-minutes: 15
+    timeout-minutes: 12
     steps:
       - name: Resolve target PR
         id: target
@@ -100,7 +100,10 @@ jobs:
           chown -R hl-claude-agent:hl-claude-agent "$REVIEW_DIR"
 
           run_claude() {
-            setpriv --reuid="$UID_C" --regid="$GID_C" --init-groups \
+            duration="$1"
+            shift
+            timeout --foreground "$duration" \
+              setpriv --reuid="$UID_C" --regid="$GID_C" --init-groups \
               env -i HOME="$CLAUDE_HOME" CLAUDE_CONFIG_DIR="$CLAUDE_HOME/.claude" \
               XDG_CONFIG_HOME="$CLAUDE_HOME/.config" XDG_CACHE_HOME="$CLAUDE_HOME/.cache" \
               PATH=/usr/local/bin:/usr/bin:/bin \
@@ -108,7 +111,7 @@ jobs:
           }
 
           set +e
-          ready="$(cd "$REVIEW_DIR" && run_claude -p 'Reply exactly: CLAUDE_READY_OK' --model sonnet --output-format text --permission-mode dontAsk 2>/tmp/claude-bootstrap-ready.err)"
+          ready="$(cd "$REVIEW_DIR" && run_claude 45s -p 'Reply exactly: CLAUDE_READY_OK' --model sonnet --output-format text --permission-mode dontAsk 2>/tmp/claude-bootstrap-ready.err)"
           rc=$?
           set -e
           if [[ $rc -ne 0 || "$ready" != *CLAUDE_READY_OK* ]]; then
@@ -136,10 +139,15 @@ jobs:
           EOF
 
           set +e
-          review_json="$(cd "$REVIEW_DIR" && run_claude -p "$(cat /tmp/claude-bootstrap-review.txt)" --model sonnet --output-format json --permission-mode dontAsk 2>/tmp/claude-bootstrap-review.err)"
+          review_json="$(cd "$REVIEW_DIR" && run_claude 7m -p "$(cat /tmp/claude-bootstrap-review.txt)" --model sonnet --output-format json --permission-mode dontAsk 2>/tmp/claude-bootstrap-review.err)"
           rc=$?
           set -e
           if [[ $rc -ne 0 ]]; then
+            if [[ $rc -eq 124 ]]; then
+              echo 'CLAUDE_BOOTSTRAP_REVIEW=TIMED_OUT_WILL_RETRY'
+              rm -rf "$REVIEW_DIR" /tmp/claude-bootstrap-review.txt /tmp/claude-bootstrap-review.err
+              exit 0
+            fi
             echo "Claude exact-SHA review command failed rc=$rc" >&2
             tail -c 1000 /tmp/claude-bootstrap-review.err >&2 || true
             exit $rc
