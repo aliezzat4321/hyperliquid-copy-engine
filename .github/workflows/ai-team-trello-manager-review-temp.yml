@@ -1,7 +1,7 @@
 name: ai-team-trello-manager-review-temp
 
 on:
-  pull_request:
+  pull_request_target:
     branches: [main]
     types: [opened, synchronize, reopened]
 
@@ -12,13 +12,16 @@ permissions:
 
 jobs:
   review:
-    if: github.head_ref == 'manager/146-trello-vm-wire'
+    if: >-
+      github.event.pull_request.head.ref == 'manager/146-trello-vm-wire' &&
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, linux]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
           clean: true
           persist-credentials: false
 
@@ -40,9 +43,11 @@ jobs:
           set -euo pipefail
           python3 -m py_compile \
             scripts/trello_team_bridge.py \
+            scripts/trello_event_relay.py \
             scripts/trello_vm_auth.py \
             scripts/ai_team_runtime_ledger.py \
             scripts/ai_team_orchestrator.py
+          bash -n scripts/install_trello_team_bridge.sh
           python3 - <<'PY'
           import scripts.trello_team_bridge as b
           now = b.utcnow()
@@ -52,6 +57,7 @@ jobs:
           if [[ -x /root/hyperliquid-copy-engine/.venv/bin/python ]]; then
             /root/hyperliquid-copy-engine/.venv/bin/python -m pytest -q \
               tests/test_trello_team_bridge.py \
+              tests/test_trello_event_relay.py \
               tests/test_trello_vm_auth.py \
               tests/test_ai_team_orchestrator.py
           fi
@@ -64,7 +70,7 @@ jobs:
           test "$(stat -c '%a' /etc/hyperliquid-ai-team/trello.env)" = 600
           test "$(stat -c '%u' /etc/hyperliquid-ai-team/trello.env)" = 0
           cat >/tmp/trello-manager-smoke.json <<'JSON'
-          {"repository":"aliezzat4321/hyperliquid-copy-engine","issue":146,"event":"SIGNIFICANT_RESULT","priority":"P0","title":"event-driven VM→Trello team board + ETA/notifications","task_type":"CI_MERGE","agent":"SYSTEM","model":"SYSTEM","owner":"AI Team Manager","reviewer_model":"Claude Sonnet","status":"DONE","result":"VM credential + Trello bridge acceptance smoke passed","next_action":"finish protected manager wiring and deploy","eta_minutes":1}
+          {"repository":"aliezzat4321/hyperliquid-copy-engine","issue":146,"event":"SIGNIFICANT_RESULT","priority":"P0","title":"event-driven VM→Trello team board + ETA/notifications","task_type":"CI_MERGE","agent":"SYSTEM","model":"SYSTEM","owner":"AI Team Manager","reviewer_model":"Claude Sonnet","status":"DONE","result":"VM credential + Trello bridge exact-SHA acceptance smoke passed","next_action":"merge reviewed manager wiring and deploy","eta_minutes":1}
           JSON
           python3 scripts/trello_team_bridge.py --event-file /tmp/trello-manager-smoke.json | tee /tmp/trello-manager-smoke.out
           grep -q '^TRELLO_SYNC=OK ' /tmp/trello-manager-smoke.out
@@ -93,18 +99,18 @@ jobs:
           Repository: aliezzat4321/hyperliquid-copy-engine
           PR: #$PR_NUMBER
 
-          Read AGENTS.md and the relevant ai-team governance docs. Review the exact diff origin/main...HEAD and callers. Do not modify any file.
+          Read AGENTS.md and relevant ai-team governance docs. Review exact diff origin/main...HEAD and callers. Do not modify files.
 
           Acceptance focus:
-          - Trello is observability/task-management only and can never block engineering/trading research.
-          - No secret may enter GitHub, model homes, prompts, logs, or Trello cards.
-          - Existing SQLite/GitHub orchestrator remains canonical; no second orchestration framework.
-          - Material internal state transitions update Trello immediately from the VM.
-          - GitHub issue comments/PR/reviews converge through the same bridge without hourly polling.
-          - Existing Trello cards are reused rather than duplicated.
-          - ETA semantics are conservative and Python 3.10 compatible on the VM.
+          - Trello is observability/task management only and cannot block canonical engineering/research.
+          - Existing SQLite/GitHub orchestrator remains canonical; no second orchestration framework/ledger.
+          - Runtime material events project immediately via the existing durable event stream; retry fallback is secondary only.
+          - GitHub issue comments/PR/reviews update the same card without chat/hourly polling.
+          - Existing manually seeded cards are reused, not duplicated.
+          - ETA semantics are conservative and VM Python 3.10 compatible.
+          - Credentials stay root-only and out of GitHub/model homes/prompts/logs/cards.
           - No real trading enablement, keys, orders, capital/risk authorization, or Polymarket scope change.
-          - Installer/deploy wiring is bounded and does not expose Trello credentials to Codex or Claude.
+          - systemd/deploy wiring is bounded and fail-open toward Trello.
 
           Output at the end EXACTLY:
           REVIEWED_SHA=$TARGET_SHA
