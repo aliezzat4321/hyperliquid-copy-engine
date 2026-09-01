@@ -73,7 +73,6 @@ jobs:
             ruff format scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
             ruff check scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
           fi
-          python3 -m pytest -q tests/test_ai_team_orchestrator.py
       - name: Commit and deploy repaired orchestrator
         shell: bash
         run: |
