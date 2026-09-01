@@ -1,0 +1,127 @@
+name: ai-team-vm-bootstrap-audit
+
+on:
+  push:
+    branches:
+      - codex/126-ai-orchestrator
+    paths:
+      - ".github/workflows/ai-team-vm-bootstrap-audit.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-team-vm-bootstrap-audit
+  cancel-in-progress: false
+
+jobs:
+  inventory:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact branch code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          clean: true
+
+      - name: Assert hard project boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "aliezzat4321/hyperliquid-copy-engine"
+          echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
+          echo 'POLYMARKET_INSPECTION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+          echo 'VM_MUTATION=READ_ONLY_AUDIT'
+
+      - name: Runner and OS identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "runner_name=${RUNNER_NAME:-unknown}"
+          echo "runner_os=${RUNNER_OS:-unknown}"
+          echo "runner_arch=${RUNNER_ARCH:-unknown}"
+          echo "workspace=$GITHUB_WORKSPACE"
+          id
+          uname -a
+          if [[ -r /etc/os-release ]]; then
+            grep -E '^(NAME|VERSION|ID|VERSION_ID)=' /etc/os-release || true
+          fi
+
+      - name: Hyperliquid-only filesystem inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          for p in \
+            /root/hyperliquid-copy-engine \
+            /var/lib/hyperliquid-copy-engine \
+            /root/hyperliquid-audit \
+            /mnt/HC_Volume_106576526 \
+            /mnt/HC_Volume_106576526/hyperliquid; do
+            if [[ -e "$p" ]]; then
+              stat -c 'path=%n type=%F owner=%U group=%G mode=%a' "$p"
+            else
+              echo "path=$p state=MISSING"
+            fi
+          done
+          df -hT / || true
+          df -hT /mnt/HC_Volume_106576526 || true
+
+      - name: Canonical Hyperliquid checkout state
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo=/root/hyperliquid-copy-engine
+          if [[ -d "$repo/.git" ]]; then
+            echo "canonical_repo=$repo"
+            git -C "$repo" remote -v | sed -E 's#(https://)[^/@]+@#\1***@#g'
+            echo "head=$(git -C "$repo" rev-parse HEAD)"
+            echo "branch=$(git -C "$repo" branch --show-current || true)"
+            echo 'worktrees:'
+            git -C "$repo" worktree list --porcelain
+            echo 'status:'
+            git -C "$repo" status --short --untracked-files=no
+          else
+            echo 'canonical_repo_state=MISSING_OR_NOT_GIT'
+          fi
+
+      - name: Hyperliquid-only systemd inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'unit_files:'
+          systemctl list-unit-files 'hyperliquid-*' 'hlcopy-*' --no-pager || true
+          echo 'units:'
+          systemctl list-units --all 'hyperliquid-*' 'hlcopy-*' --no-pager || true
+
+      - name: Agent toolchain inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          for bin in git gh python3 node npm jq flock systemctl claude codex; do
+            if command -v "$bin" >/dev/null 2>&1; then
+              echo "$bin=$(command -v "$bin")"
+            else
+              echo "$bin=MISSING"
+            fi
+          done
+          git --version
+          python3 --version
+          node --version 2>/dev/null || true
+          npm --version 2>/dev/null || true
+          gh --version 2>/dev/null | head -n 1 || true
+          claude --version 2>/dev/null || true
+          claude auth status --text 2>/dev/null || true
+          codex --version 2>/dev/null || true
+          codex login status 2>/dev/null || true
+
+      - name: GitHub access sanity without secret output
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh auth status 2>&1 | sed -E 's/(token: ).*/\1***REDACTED***/I; s/(Token scopes: ).*/\1***REDACTED***/I' || true
+          echo 'AUDIT_COMPLETE=YES'
+          echo 'POLYMARKET_TOUCHED=NO'
+          echo 'REAL_TRADING_TOUCHED=NO'

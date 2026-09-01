@@ -1,0 +1,100 @@
+name: ai-team-agent-runtime-smoke
+
+on:
+  push:
+    branches: [codex/126-ai-orchestrator]
+    paths: [".github/workflows/ai-team-agent-runtime-smoke.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 10
+    steps:
+      - name: Assert boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "aliezzat4321/hyperliquid-copy-engine"
+          echo 'POLYMARKET_INSPECTION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+
+      - name: Verify isolated auth and resume CLI surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          c_uid="$(id -u hl-codex-agent)"
+          c_gid="$(id -g hl-codex-agent)"
+          c_home=/var/lib/hyperliquid-ai-team/agents/codex/home
+          env -i HOME="$c_home" CODEX_HOME="$c_home/.codex" PATH=/usr/local/bin:/usr/bin:/bin \
+            setpriv --reuid="$c_uid" --regid="$c_gid" --init-groups \
+            /usr/local/bin/codex login status
+          /usr/local/bin/codex exec resume --help | head -n 40
+
+          a_uid="$(id -u hl-claude-agent)"
+          a_gid="$(id -g hl-claude-agent)"
+          a_home=/var/lib/hyperliquid-ai-team/agents/claude/home
+          test -s "$a_home/.claude/.credentials.json"
+          env -i HOME="$a_home" CLAUDE_CONFIG_DIR="$a_home/.claude" PATH=/usr/local/bin:/usr/bin:/bin \
+            setpriv --reuid="$a_uid" --regid="$a_gid" --init-groups \
+            /usr/bin/claude -p --model sonnet --output-format text \
+            'Reply exactly: CLAUDE_AUTH_SMOKE_OK'
+          echo 'CLAUDE_AGENT_AUTH=READY'
+
+      - name: Prove Codex non-interactive execution in sandbox
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke=/var/lib/hyperliquid-ai-team/agents/codex/worktrees/runtime-smoke
+          c_home=/var/lib/hyperliquid-ai-team/agents/codex/home
+          install -d -o hl-codex-agent -g hl-codex-agent -m 0750 "$smoke"
+          output="$(systemd-run --pipe --wait --collect --quiet \
+            --unit="hl-ai-codex-runtime-smoke-$GITHUB_RUN_ID" \
+            --uid=hl-codex-agent --gid=hl-codex-agent \
+            --working-directory="$smoke" \
+            --property=NoNewPrivileges=yes \
+            --property=PrivateTmp=yes \
+            --property=ProtectHome=yes \
+            --property=ProtectSystem=strict \
+            --property=RestrictSUIDSGID=yes \
+            --property=InaccessiblePaths=/mnt \
+            --property="ReadWritePaths=$smoke $c_home" \
+            --setenv="HOME=$c_home" --setenv="CODEX_HOME=$c_home/.codex" \
+            /usr/local/bin/codex exec --json --sandbox read-only --skip-git-repo-check \
+            'Return exactly CODEX_NONINTERACTIVE_OK and do not call tools.' 2>&1)"
+          printf '%s\n' "$output" | tail -n 20
+          grep -q 'CODEX_NONINTERACTIVE_OK' <<<"$output"
+          rm -rf "$smoke"
+          echo 'CODEX_NONINTERACTIVE=PASS'
+
+      - name: Prove Claude non-interactive execution in sandbox
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke=/var/lib/hyperliquid-ai-team/agents/claude/worktrees/runtime-smoke
+          a_home=/var/lib/hyperliquid-ai-team/agents/claude/home
+          install -d -o hl-claude-agent -g hl-claude-agent -m 0750 "$smoke"
+          output="$(systemd-run --pipe --wait --collect --quiet \
+            --unit="hl-ai-claude-runtime-smoke-$GITHUB_RUN_ID" \
+            --uid=hl-claude-agent --gid=hl-claude-agent \
+            --working-directory="$smoke" \
+            --property=NoNewPrivileges=yes \
+            --property=PrivateTmp=yes \
+            --property=ProtectHome=yes \
+            --property=ProtectSystem=strict \
+            --property=RestrictSUIDSGID=yes \
+            --property=InaccessiblePaths=/mnt \
+            --property="ReadWritePaths=$smoke $a_home" \
+            --setenv="HOME=$a_home" --setenv="CLAUDE_CONFIG_DIR=$a_home/.claude" \
+            /usr/bin/claude -p --model sonnet --output-format text \
+            --permission-mode dontAsk \
+            'Reply exactly: CLAUDE_NONINTERACTIVE_OK' 2>&1)"
+          printf '%s\n' "$output" | tail -n 20
+          grep -q 'CLAUDE_NONINTERACTIVE_OK' <<<"$output"
+          rm -rf "$smoke"
+          echo 'CLAUDE_NONINTERACTIVE=PASS'
+          echo 'POLYMARKET_TOUCHED=NO'
+          echo 'REAL_TRADING_TOUCHED=NO'

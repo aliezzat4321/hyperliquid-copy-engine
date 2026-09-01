@@ -1,0 +1,32 @@
+name: ai-team-status-probe
+
+on:
+  push:
+    branches: [codex/126-ai-orchestrator]
+    paths: [".github/workflows/ai-team-status-probe.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  status:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 5
+    steps:
+      - name: Read Hyperliquid AI-team status only
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'TARGET_PROJECT=HYPERLIQUID_AI_TEAM_ONLY'
+          echo 'POLYMARKET_INSPECTION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+          hl-ai-team-status
+          echo '=== DRY RUN CODEX LOG ==='
+          find /var/lib/hyperliquid-ai-team/agents/codex/logs -maxdepth 1 -type f \
+            -name '5e939708d6ac4568-*' -print -exec tail -n 120 {} \; || true
+          echo '=== AI TEAM SERVICE JOURNAL ==='
+          journalctl -u hyperliquid-ai-team-orchestrator.service -n 60 --no-pager -l || true
+          echo 'PROBE_REVISION=3'
+          echo 'POLYMARKET_TOUCHED=NO'
+          echo 'REAL_TRADING_TOUCHED=NO'
