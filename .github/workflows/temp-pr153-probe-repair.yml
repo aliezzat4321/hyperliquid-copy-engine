@@ -102,7 +102,7 @@ jobs:
                   detail=detail[:800],
               )
 
-'''
+          '''
           p.write_text(text[:start] + replacement + text[end:])
 
           tests = Path('tests/test_ai_team_orchestrator.py')
