@@ -32,8 +32,9 @@ The protected `.github/workflows/hyperliquid-emergency-storage-reclaim.yml` stil
 Before running it, the manager must change both apply invocations to
 `--target-used-pct 79` and set `--max-delete-candidate-gib` to the smallest reviewed value
 whose byte equivalent covers the audited deletion-candidate pool and the bytes required
-to reach 79%. The resulting workflow commit and manifest require exact-SHA independent
-Claude Opus review. The autonomous builder cannot edit this protected path.
+to reach 79%, without exceeding the scripts' 24 GiB hard ceiling. The resulting workflow
+commit and manifest require exact-SHA independent Claude Opus review. The autonomous
+builder cannot edit this protected path.
 
 ## Closure evidence
 
