@@ -2,140 +2,516 @@ name: ai-team-trello-manager-wire-temp
 
 on:
   push:
-    branches: [trigger/pr153-final-review]
+    branches: [trigger/pr153-handoff-hardening]
 
 permissions:
-  actions: write
-  contents: read
-  issues: write
-  pull-requests: write
+  contents: write
 
 jobs:
-  cancel-stale:
+  fix:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
-    steps:
-      - name: Cancel obsolete exact-SHA review
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          gh api --method POST repos/${GITHUB_REPOSITORY}/actions/runs/33582806380/cancel || true
-          echo 'STALE_REVIEW_CANCEL_REQUESTED=33582806380'
-
-  review:
-    needs: cancel-stale
-    runs-on: [self-hosted, linux]
-    timeout-minutes: 12
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: c9fb51a2fef992d549c5ffb1b75c089d70e3a9a1
+          ref: codex/auto-151-5cc33cdb
           fetch-depth: 0
-          clean: true
           persist-credentials: false
 
-      - name: Verify exact target and boundaries
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$GITHUB_REPOSITORY" = "aliezzat4321/hyperliquid-copy-engine"
-          test "$(id -u)" = 0
-          test "$(git rev-parse HEAD)" = "c9fb51a2fef992d549c5ffb1b75c089d70e3a9a1"
-          python3 -m py_compile scripts/ai_team_orchestrator.py scripts/ai_team_runtime_ledger.py
-          ! git diff origin/main...HEAD -- scripts/ai_team_orchestrator.py | grep -E '^\+.*(REAL_TRADING_ENABLED|LIVE_TRADING_ENABLED)\s*=\s*(YES|TRUE|1)'
-          echo 'POLYMARKET_TOUCHED=NO'
-          echo 'REAL_TRADING_TOUCHED=NO'
-
-      - name: Bounded Claude exact-SHA continuity audit
+      - name: Harden handoffs, rate-limit accounting, and stale worker state
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          TARGET_SHA=c9fb51a2fef992d549c5ffb1b75c089d70e3a9a1
-          PR_NUMBER=153
-          CLAUDE_HOME=/var/lib/hyperliquid-ai-team/agents/claude/home
-          UID_C="$(id -u hl-claude-agent)"
-          GID_C="$(id -g hl-claude-agent)"
-          REVIEW_DIR="/var/lib/hyperliquid-ai-team/agents/claude/worktrees/pr153-final-${GITHUB_RUN_ID}"
-          rm -rf "$REVIEW_DIR"
-          mkdir -p "$REVIEW_DIR"
-          cp -a "$GITHUB_WORKSPACE/." "$REVIEW_DIR/"
-          chown -R hl-claude-agent:hl-claude-agent "$REVIEW_DIR"
+          test "$GITHUB_REPOSITORY" = "aliezzat4321/hyperliquid-copy-engine"
+          test "$(git branch --show-current)" = "codex/auto-151-5cc33cdb"
+          python3 - <<'PY'
+          from pathlib import Path
 
-          run_claude() {
-            duration="$1"
-            shift
-            timeout --foreground "$duration" \
-              setpriv --reuid="$UID_C" --regid="$GID_C" --init-groups \
-              env -i HOME="$CLAUDE_HOME" CLAUDE_CONFIG_DIR="$CLAUDE_HOME/.claude" \
-              XDG_CONFIG_HOME="$CLAUDE_HOME/.config" XDG_CACHE_HOME="$CLAUDE_HOME/.cache" \
-              PATH=/usr/local/bin:/usr/bin:/bin \
-              /usr/bin/claude "$@"
-          }
+          p = Path('scripts/ai_team_orchestrator.py')
+          text = p.read_text(encoding='utf-8')
 
-          set +e
-          ready="$(cd "$REVIEW_DIR" && run_claude 30s -p 'Reply exactly: CLAUDE_READY_OK' --model sonnet --output-format text --permission-mode dontAsk 2>/tmp/pr153-final-ready.err)"
-          rc=$?
-          set -e
-          if [[ $rc -ne 0 || "$ready" != *CLAUDE_READY_OK* ]]; then
-            echo 'CLAUDE_PR153_FINAL_REVIEW=WAITING_RATE_LIMIT_OR_UNAVAILABLE'
-            tail -c 600 /tmp/pr153-final-ready.err 2>/dev/null || true
-            rm -rf "$REVIEW_DIR" /tmp/pr153-final-ready.err
-            exit 0
-          fi
+          # Restart recovery must clear the persisted unit after returning it for reaping.
+          old = '''            UPDATE tasks
+               SET status='RETRY',
+                   retry_at=?,
+                   last_error=COALESCE(last_error,'orchestrator restarted during task'),
+                   updated_at=?
+             WHERE status='RUNNING'
+'''
+          new = '''            UPDATE tasks
+               SET status='RETRY',
+                   retry_at=?,
+                   systemd_unit=NULL,
+                   last_error=COALESCE(last_error,'orchestrator restarted during task'),
+                   updated_at=?
+             WHERE status='RUNNING'
+'''
+          if old not in text:
+              raise SystemExit('recover_interrupted block not found')
+          text = text.replace(old, new, 1)
 
-          cat >/tmp/pr153-final-review.txt <<EOF
-          You are CLAUDE, independent adversarial exact-SHA reviewer for Hyperliquid PR #153.
-          Review EXACT SHA $TARGET_SHA. Do not modify files. Read AGENTS.md, the PR diff origin/main...HEAD, and only necessary adjacent callers.
+          # Add idempotent child/handoff queries after Ledger.update().
+          anchor = '''    def due(self) -> sqlite3.Row | None:
+'''
+          methods = '''    def child(
+        self, parent_id: str, task_type: str, target_sha: str | None = None
+    ) -> sqlite3.Row | None:
+        sql = "SELECT * FROM tasks WHERE parent_id=? AND task_type=?"
+        params: list[Any] = [parent_id, task_type]
+        if target_sha is not None:
+            sql += " AND target_sha=?"
+            params.append(target_sha)
+        sql += " ORDER BY created_at LIMIT 1"
+        return self.db.execute(sql, params).fetchone()
 
-          Audit the COMPLETE automation continuity state machine, not just the original Claude limit bug. Recoverable outcomes must remain autonomous:
-          1. Claude/provider usage/rate limit -> WAITING_RATE_LIMIT, no attempt burn, short repo-free probe, worker released, same task/session resumes.
-          2. interrupted/stale worker -> reap + requeue.
-          3. review FAIL -> Codex REPAIR on same PR.
-          4. CI FAIL -> Codex REPAIR on same PR, never terminal BLOCKED.
-          5. PR head movement -> replacement exact-SHA review.
-          6. transient merge/API rejection -> retry merge stage without another model call.
-          7. recoverable Codex postprocess/finalize/push/API failures -> bounded retry, not immediate BLOCKED.
-          8. terminal BLOCKED only for safety/auth/corrupt identity-state or exhausted bounded circuit breaker.
-          9. no duplicate/infinite repair loops, stale-SHA merge, lost checkpoint, worker monopolization, or weakening of live/trading/deploy/capital/credential/Polymarket boundaries.
+    def handoff_candidates(self) -> list[sqlite3.Row]:
+        return self.db.execute(
+            """
+            SELECT * FROM tasks
+             WHERE (
+                    status='DONE'
+                AND task_type IN ('BUILD','REPAIR')
+                AND pr_number IS NOT NULL
+                AND target_sha IS NOT NULL
+             ) OR (
+                    status='DONE'
+                AND task_type='REVIEW'
+                AND last_error IN ('review FAIL','CI failure queued for autonomous repair')
+             ) OR (
+                    status='STALE'
+                AND task_type='REVIEW'
+                AND (
+                       last_error LIKE 'PR moved to %'
+                    OR last_error='PR changed during review'
+                )
+             )
+             ORDER BY updated_at
+             LIMIT 50
+            """
+        ).fetchall()
 
-          CI, ai-team-contract and live-sensitive-guard must be green for this exact SHA before merge; independently verify code logic and regression tests.
+'''
+          if methods not in text:
+              if anchor not in text:
+                  raise SystemExit('Ledger.due anchor not found')
+              text = text.replace(anchor, methods + anchor, 1)
 
-          End EXACTLY with:
-          REVIEWED_SHA=$TARGET_SHA
-          VERDICT=PASS
-          BLOCKERS_JSON=[]
-          or VERDICT=FAIL with concrete JSON blockers.
-          EOF
+          # Reconcile parent->child handoffs before selecting the next due task.
+          cycle_anchor = '''    def cycle(self) -> None:
+'''
+          reconcile = '''    def reconcile_handoffs(self) -> None:
+        """Recover a child task if a restart/API failure interrupted a handoff."""
+        for row in self.ledger.handoff_candidates():
+            try:
+                if row["task_type"] in {"BUILD", "REPAIR"}:
+                    if not self.ledger.child(str(row["id"]), "REVIEW"):
+                        self.enqueue_review(
+                            row, int(row["pr_number"]), str(row["target_sha"])
+                        )
+                        self.runtime.event(
+                            "HANDOFF_RECOVERED",
+                            assignment_id=row["id"],
+                            issue=row["issue_number"],
+                            pr=row["pr_number"],
+                            child_type="REVIEW",
+                        )
+                elif row["status"] == "DONE":
+                    if not self.ledger.child(str(row["id"]), "REPAIR"):
+                        blockers = json.loads(row["blockers_json"] or "[]")
+                        self.enqueue_repair(row, blockers)
+                        self.runtime.event(
+                            "HANDOFF_RECOVERED",
+                            assignment_id=row["id"],
+                            issue=row["issue_number"],
+                            pr=row["pr_number"],
+                            child_type="REPAIR",
+                        )
+                elif row["status"] == "STALE" and row["pr_number"]:
+                    pr = self.gh.pr(int(row["pr_number"]))
+                    if str(pr.get("state") or "open").lower() != "open":
+                        continue
+                    current_sha = str(pr["head"]["sha"])
+                    if current_sha == str(row["target_sha"]):
+                        continue
+                    if not self.ledger.child(str(row["id"]), "REVIEW", current_sha):
+                        self.enqueue_replacement_review(row, current_sha)
+                        self.runtime.event(
+                            "HANDOFF_RECOVERED",
+                            assignment_id=row["id"],
+                            issue=row["issue_number"],
+                            pr=row["pr_number"],
+                            child_type="REVIEW",
+                            target_sha=current_sha,
+                        )
+            except Exception as exc:
+                self.runtime.event(
+                    "HANDOFF_RECOVERY_RETRY",
+                    assignment_id=row["id"],
+                    issue=row["issue_number"],
+                    pr=row["pr_number"],
+                    error=str(exc),
+                )
 
-          set +e
-          review_json="$(cd "$REVIEW_DIR" && run_claude 7m -p "$(cat /tmp/pr153-final-review.txt)" --model sonnet --output-format json --permission-mode dontAsk 2>/tmp/pr153-final-review.err)"
-          rc=$?
-          set -e
-          if [[ $rc -ne 0 ]]; then
-            if [[ $rc -eq 124 ]]; then
-              echo 'CLAUDE_PR153_FINAL_REVIEW=TIMED_OUT_WILL_RETRY'
-              exit 0
-            fi
-            tail -c 1000 /tmp/pr153-final-review.err >&2 || true
-            exit $rc
-          fi
-          printf '%s' "$review_json" >/tmp/pr153-final-review.json
-          python3 - "$TARGET_SHA" /tmp/pr153-final-review.json >/tmp/pr153-final-result.txt <<'PY'
-          import json, re, sys
-          sha = sys.argv[1]
-          row = json.load(open(sys.argv[2], encoding='utf-8'))
-          result = str(row.get('result') or '')
-          print(result)
-          sm = re.search(r'(?mi)^\s*REVIEWED_SHA\s*=\s*([0-9a-f]{40})\s*$', result)
-          vm = re.search(r'(?mi)^\s*VERDICT\s*=\s*(PASS|FAIL)\s*$', result)
-          if not sm or sm.group(1) != sha:
-              raise SystemExit('stale/missing reviewed SHA')
-          if not vm or vm.group(1) != 'PASS':
-              raise SystemExit('Claude exact-SHA continuity audit did not PASS')
+'''
+          if reconcile not in text:
+              if cycle_anchor not in text:
+                  raise SystemExit('cycle anchor not found')
+              text = text.replace(cycle_anchor, reconcile + cycle_anchor, 1)
+
+          old = '''        self.sync_runtime_checkpoint()
+        task = self.ledger.due()
+'''
+          new = '''        self.reconcile_handoffs()
+        self.sync_runtime_checkpoint()
+        task = self.ledger.due()
+'''
+          if old not in text:
+              raise SystemExit('cycle handoff insertion point not found')
+          text = text.replace(old, new, 1)
+
+          # Persist the Codex systemd unit before starting the model so restart recovery can reap it.
+          old = '''        unit = f"hl-ai-codex-{task['id'][:10]}-{int(time.time())}"
+        self.runtime.run_started(run_id, task, prompt=prompt, systemd_unit=unit)
+'''
+          new = '''        unit = f"hl-ai-codex-{task['id'][:10]}-{int(time.time())}"
+        self.ledger.update(task["id"], systemd_unit=unit)
+        self.runtime.run_started(run_id, task, prompt=prompt, systemd_unit=unit)
+'''
+          if old not in text:
+              raise SystemExit('Codex unit persistence point not found')
+          text = text.replace(old, new, 1)
+
+          # Codex limits must not burn an attempt and must release the worker/unit.
+          old = '''                self.ledger.update(
+                    task["id"],
+                    status="WAITING_RATE_LIMIT",
+                    retry_at=retry_at,
+                    session_id=session_id,
+                    last_error="Codex rate/usage limit",
+                )
+'''
+          new = '''                limit_text = bounded_limit_text(combined)
+                self.ledger.update(
+                    task["id"],
+                    status="WAITING_RATE_LIMIT",
+                    retry_at=retry_at,
+                    session_id=session_id,
+                    attempt=max(0, int(task["attempt"]) - 1),
+                    limit_text=limit_text,
+                    systemd_unit=None,
+                    last_error="Codex rate/usage limit",
+                )
+                self.runtime.event(
+                    "CODEX_WAITING_RATE_LIMIT",
+                    assignment_id=task["id"],
+                    issue=task["issue_number"],
+                    pr=task["pr_number"],
+                    session_id=session_id,
+                    retry_after=retry_at,
+                    limit_text=limit_text,
+                )
+'''
+          if old not in text:
+              raise SystemExit('Codex rate-limit block not found')
+          text = text.replace(old, new, 1)
+
+          # Clear persisted worker ownership on non-running Codex transitions.
+          text = text.replace(
+              '''                last_error="TEST_INJECTED_CODEX_SESSION_END",
+            )
+''',
+              '''                last_error="TEST_INJECTED_CODEX_SESSION_END",
+                systemd_unit=None,
+            )
+''',
+              1,
+          )
+          text = text.replace(
+              '''                retry_at=None,
+                last_error=None,
+            )
+            self.enqueue_review(task, pr_number, new_sha)
+''',
+              '''                retry_at=None,
+                last_error=None,
+                systemd_unit=None,
+            )
+            self.enqueue_review(task, pr_number, new_sha)
+''',
+              1,
+          )
+
+          # Clear Claude unit on post-call transitions too.
+          text = text.replace(
+              '''            self.ledger.update(task["id"], status="STALE", last_error="PR changed during review")
+''',
+              '''            self.ledger.update(
+                task["id"], status="STALE", last_error="PR changed during review",
+                systemd_unit=None,
+            )
+''',
+              1,
+          )
+          text = text.replace(
+              '''                session_id=session_id,
+                last_error="review FAIL",
+            )
+''',
+              '''                session_id=session_id,
+                last_error="review FAIL",
+                systemd_unit=None,
+            )
+''',
+              1,
+          )
+          text = text.replace(
+              '''                retry_at=utcnow(),
+                last_error=None,
+            )
+''',
+              '''                retry_at=utcnow(),
+                last_error=None,
+                systemd_unit=None,
+            )
+''',
+              1,
+          )
+
+          # Terminal block always releases any stale unit marker.
+          old = '''        self.ledger.update(task["id"], status="BLOCKED", retry_at=None, last_error=error[:1500])
+'''
+          new = '''        self.ledger.update(
+            task["id"], status="BLOCKED", retry_at=None,
+            last_error=error[:1500], systemd_unit=None,
+        )
+'''
+          if old not in text:
+              raise SystemExit('block() update not found')
+          text = text.replace(old, new, 1)
+
+          # Make child task creation idempotent and make GitHub mirror failures non-fatal.
+          old = '''    def enqueue_review(self, parent: sqlite3.Row, pr_number: int, sha: str) -> None:
+        issue = self.gh.issue(int(parent["issue_number"]))
+'''
+          new = '''    def enqueue_review(self, parent: sqlite3.Row, pr_number: int, sha: str) -> None:
+        if self.ledger.child(str(parent["id"]), "REVIEW"):
+            return
+        issue = self.gh.issue(int(parent["issue_number"]))
+'''
+          if old not in text:
+              raise SystemExit('enqueue_review signature not found')
+          text = text.replace(old, new, 1)
+
+          old = '''        self.gh.comment(
+            pr_number,
+            assignment_marker(
+                task_id=task_id,
+                agent="CLAUDE",
+                task_type="REVIEW",
+                model_class=model,
+                task_class=str(parent["task_class"]),
+                issue_number=int(parent["issue_number"]),
+                pr_number=pr_number,
+                target_sha=sha,
+                parent_id=str(parent["id"]),
+                previous_sha=parent["previous_sha"],
+                escalation_reason=escalation_reason,
+            ),
+        )
+        self.gh.add_labels(pr_number, [self.cfg["labels"]["waiting_review"]])
+'''
+          new = '''        try:
+            self.gh.comment(
+                pr_number,
+                assignment_marker(
+                    task_id=task_id,
+                    agent="CLAUDE",
+                    task_type="REVIEW",
+                    model_class=model,
+                    task_class=str(parent["task_class"]),
+                    issue_number=int(parent["issue_number"]),
+                    pr_number=pr_number,
+                    target_sha=sha,
+                    parent_id=str(parent["id"]),
+                    previous_sha=parent["previous_sha"],
+                    escalation_reason=escalation_reason,
+                ),
+            )
+            self.gh.add_labels(pr_number, [self.cfg["labels"]["waiting_review"]])
+        except Exception as exc:
+            self.runtime.event(
+                "HANDOFF_MIRROR_FAILED", assignment_id=task_id,
+                issue=parent["issue_number"], pr=pr_number,
+                child_type="REVIEW", error=str(exc),
+            )
+'''
+          if old not in text:
+              raise SystemExit('enqueue_review mirror block not found')
+          text = text.replace(old, new, 1)
+
+          old = '''    def enqueue_repair(self, review: sqlite3.Row, blockers: list[str]) -> None:
+        task_id = self.ledger.create_task(
+'''
+          new = '''    def enqueue_repair(self, review: sqlite3.Row, blockers: list[str]) -> None:
+        if self.ledger.child(str(review["id"]), "REPAIR"):
+            return
+        task_id = self.ledger.create_task(
+'''
+          if old not in text:
+              raise SystemExit('enqueue_repair signature not found')
+          text = text.replace(old, new, 1)
+
+          old = '''        self.gh.comment(
+            int(review["pr_number"]),
+            assignment_marker(
+                task_id=task_id,
+                agent="CODEX_CHATGPT",
+                task_type="REPAIR",
+                model_class="CODEX_DEFAULT",
+                task_class=str(review["task_class"]),
+                issue_number=int(review["issue_number"]),
+                pr_number=int(review["pr_number"]),
+                target_sha=str(review["target_sha"]),
+                parent_id=str(review["id"]),
+                previous_sha=str(review["target_sha"]),
+            ),
+        )
+'''
+          new = '''        try:
+            self.gh.comment(
+                int(review["pr_number"]),
+                assignment_marker(
+                    task_id=task_id,
+                    agent="CODEX_CHATGPT",
+                    task_type="REPAIR",
+                    model_class="CODEX_DEFAULT",
+                    task_class=str(review["task_class"]),
+                    issue_number=int(review["issue_number"]),
+                    pr_number=int(review["pr_number"]),
+                    target_sha=str(review["target_sha"]),
+                    parent_id=str(review["id"]),
+                    previous_sha=str(review["target_sha"]),
+                ),
+            )
+        except Exception as exc:
+            self.runtime.event(
+                "HANDOFF_MIRROR_FAILED", assignment_id=task_id,
+                issue=review["issue_number"], pr=review["pr_number"],
+                child_type="REPAIR", error=str(exc),
+            )
+'''
+          if old not in text:
+              raise SystemExit('enqueue_repair mirror block not found')
+          text = text.replace(old, new, 1)
+
+          old = '''    def enqueue_replacement_review(self, old: sqlite3.Row, current_sha: str) -> None:
+        task_id = self.ledger.create_task(
+'''
+          new = '''    def enqueue_replacement_review(self, old: sqlite3.Row, current_sha: str) -> None:
+        if self.ledger.child(str(old["id"]), "REVIEW", current_sha):
+            return
+        task_id = self.ledger.create_task(
+'''
+          if old not in text:
+              raise SystemExit('enqueue_replacement_review signature not found')
+          text = text.replace(old, new, 1)
+
+          old = '''        self.gh.comment(
+            int(old["pr_number"]),
+            assignment_marker(
+                task_id=task_id,
+                agent="CLAUDE",
+                task_type="REVIEW",
+                model_class=str(old["model_class"]),
+                task_class=str(old["task_class"]),
+                issue_number=int(old["issue_number"]),
+                pr_number=int(old["pr_number"]),
+                target_sha=current_sha,
+                parent_id=str(old["id"]),
+                previous_sha=str(old["target_sha"]),
+            ),
+        )
+'''
+          new = '''        try:
+            self.gh.comment(
+                int(old["pr_number"]),
+                assignment_marker(
+                    task_id=task_id,
+                    agent="CLAUDE",
+                    task_type="REVIEW",
+                    model_class=str(old["model_class"]),
+                    task_class=str(old["task_class"]),
+                    issue_number=int(old["issue_number"]),
+                    pr_number=int(old["pr_number"]),
+                    target_sha=current_sha,
+                    parent_id=str(old["id"]),
+                    previous_sha=str(old["target_sha"]),
+                ),
+            )
+        except Exception as exc:
+            self.runtime.event(
+                "HANDOFF_MIRROR_FAILED", assignment_id=task_id,
+                issue=old["issue_number"], pr=old["pr_number"],
+                child_type="REVIEW", target_sha=current_sha, error=str(exc),
+            )
+'''
+          if old not in text:
+              raise SystemExit('replacement review mirror block not found')
+          text = text.replace(old, new, 1)
+
+          p.write_text(text, encoding='utf-8')
+
+          tests = Path('tests/test_ai_team_orchestrator.py')
+          test_text = tests.read_text(encoding='utf-8')
+          if 'def test_handoffs_are_idempotent_and_recoverable()' not in test_text:
+              test_text += '''
+
+
+def test_handoffs_are_idempotent_and_recoverable():
+    source = MODULE_PATH.read_text()
+    assert "def reconcile_handoffs" in source
+    assert "def handoff_candidates" in source
+    assert "def child(" in source
+    assert "HANDOFF_RECOVERED" in source
+    assert "HANDOFF_RECOVERY_RETRY" in source
+    assert "HANDOFF_MIRROR_FAILED" in source
+    assert 'self.ledger.child(str(parent["id"]), "REVIEW")' in source
+    assert 'self.ledger.child(str(review["id"]), "REPAIR")' in source
+    assert 'self.ledger.child(str(old["id"]), "REVIEW", current_sha)' in source
+
+
+def test_codex_limit_and_worker_state_do_not_consume_or_leak():
+    source = MODULE_PATH.read_text()
+    codex = source[source.index("    def handle_codex("):source.index("    def invoke_codex(")]
+    assert "CODEX_WAITING_RATE_LIMIT" in codex
+    assert 'attempt=max(0, int(task["attempt"]) - 1)' in codex
+    assert 'self.ledger.update(task["id"], systemd_unit=unit)' in codex
+    assert "limit_text=limit_text" in codex
+    assert "systemd_unit=None" in codex
+
+
+def test_terminal_block_releases_worker_marker():
+    source = MODULE_PATH.read_text()
+    block = source[source.index("    def block("):source.index("    def sync_ready(")]
+    assert 'status="BLOCKED"' in block
+    assert "systemd_unit=None" in block
+'''
+              tests.write_text(test_text, encoding='utf-8')
           PY
-          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file /tmp/pr153-final-result.txt
-          echo 'CLAUDE_PR153_FINAL_EXACT_SHA_REVIEW=PASS'
-          rm -rf "$REVIEW_DIR" /tmp/pr153-final-ready.err /tmp/pr153-final-review.txt /tmp/pr153-final-review.err /tmp/pr153-final-review.json /tmp/pr153-final-result.txt
+
+          python3 -m pip install 'ruff<1,>=0.9' 'pytest<9,>=8.3' >/dev/null
+          ruff check --fix scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
+          ruff check scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
+          pytest -q tests/test_ai_team_orchestrator.py
+          git diff --check
+          git config user.name 'AI Team Control'
+          git config user.email 'ai-team-control@localhost'
+          git add scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
+          git commit -m 'Harden autonomous handoffs and worker recovery'
+          gh auth setup-git
+          git push origin HEAD:codex/auto-151-5cc33cdb
+          echo 'AUTONOMATION_HANDOFF_HARDENING_PUSHED=YES'
+          echo 'REAL_TRADING_TOUCHED=NO'
+          echo 'POLYMARKET_TOUCHED=NO'
