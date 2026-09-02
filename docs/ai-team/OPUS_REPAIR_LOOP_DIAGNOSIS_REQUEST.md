@@ -15,6 +15,10 @@ Task classification: `UNRESOLVED_DISAGREEMENT`.
 The response must be authored by Claude Opus. Treat prior Codex and Sonnet conclusions
 as evidence to test, not conclusions to inherit.
 
+The transport PR body must use the non-closing reference `Refs #172`; it must not use
+`Closes #172` or another closing keyword. Issue #172 remains open until the complete
+Claude Opus diagnosis described below lands.
+
 ## Evidence to inspect
 
 Keep inspection limited to the following relevant evidence:
@@ -83,6 +87,14 @@ Return one architecture, not a menu of alternatives. The written diagnosis must 
   still reaches the next valid state automatically.
 - A fail-closed safety argument and a single recommendation for #170.
 
+Claude Opus must record the complete written diagnosis in the durable in-repository
+artifact `docs/ai-team/OPUS_REPAIR_LOOP_DIAGNOSIS.md`; a review transcript or the
+exact-SHA review output (`VERDICT`/`BLOCKERS_JSON`) is not the diagnosis artifact and is
+not sufficient for completion. When that diagnosis is accepted, the accepted
+architecture must also be appended to `docs/ai-team/DECISIONS.md` in the same diagnosis
+change. Those diagnosis-stage documentation updates are requirements for the Opus
+handoff, not changes authorized for this request-only transport PR.
+
 ## Boundaries
 
 This task produces diagnosis only. Do not implement the architecture, modify runtime or
@@ -94,5 +106,7 @@ live-trading authorization. Protected-path controls and independent exact-SHA re
 remain mandatory.
 
 The diagnosis is complete only when Claude Opus has answered every required question in
-one concrete design. This request document itself is only the transport artifact for
-that review and must not be treated as the diagnosis.
+one concrete design, stored it in `docs/ai-team/OPUS_REPAIR_LOOP_DIAGNOSIS.md`, and
+appended the accepted architecture to `docs/ai-team/DECISIONS.md`. This request document
+itself is only the transport artifact for that review and must not be treated as the
+diagnosis.
