@@ -256,6 +256,44 @@ def test_probe_wait_and_success_preserve_attempt_and_session(tmp_path, monkeypat
     assert ready["session_id"] == "same-session"
 
 
+def test_non_limit_probe_failure_consumes_budget_and_leaves_wait_state(tmp_path, monkeypatch):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    task_id = ledger.create_task(
+        issue_number=2, pr_number=12, task_type="REVIEW", agent="CLAUDE",
+        model_class="SONNET", task_class="ROUTINE", status="WAITING_RATE_LIMIT",
+        retry_at=orch.utcnow(), session_id="same-session", attempt=0,
+        target_sha="a" * 40,
+    )
+    team = object.__new__(orch.Orchestrator)
+    team.ledger = ledger
+    team.cfg = {
+        **orch.DEFAULT_CONFIG,
+        "max_attempts": 3,
+        "claude_readiness_probe_seconds": 300,
+        "claude_readiness_probe_timeout_seconds": 20,
+        "claude_readiness_probe_output_bytes": 4096,
+    }
+
+    class Events:
+        def event(self, *args, **kwargs):
+            return None
+
+    team.runtime = Events()
+    monkeypatch.setattr(orch, "model_sandbox_command", lambda **kw: kw["command"])
+    monkeypatch.setattr(
+        orch, "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            [], 1, "", "authentication configuration failed"
+        ),
+    )
+    team.handle_claude_probe(ledger.get(task_id))
+    row = ledger.get(task_id)
+    assert row["status"] == "RETRY"
+    assert row["attempt"] == 1
+    assert row["session_id"] == "same-session"
+    assert "ordinary failure" in row["last_error"]
+    assert row["limit_text"] is None
+
 def test_watchdog_requeues_same_review_checkpoint(tmp_path):
     ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
     task_id = ledger.create_task(

@@ -1214,16 +1214,39 @@ class Orchestrator:
             )
             self.runtime.event("CLAUDE_READINESS_PROBE_READY", assignment_id=task["id"])
             return
-        retry_at = parsed_retry or retry_at_after(int(self.cfg["claude_readiness_probe_seconds"]))
-        limit_text = bounded_limit_text(combined)
+        detail = bounded_limit_text(combined) or f"probe rc={cp.returncode}"
+        if limited:
+            retry_at = parsed_retry or retry_at_after(
+                int(self.cfg["claude_readiness_probe_seconds"])
+            )
+            self.ledger.update(
+                task["id"], status="WAITING_RATE_LIMIT", retry_at=retry_at,
+                last_error="Claude provider still unavailable", limit_text=detail,
+                systemd_unit=None,
+            )
+            self.runtime.event(
+                "CLAUDE_READINESS_PROBE_WAITING", assignment_id=task["id"],
+                retry_after=retry_at, limit_text=detail, detected_limit=True,
+            )
+            return
+
+        next_attempt = int(task["attempt"]) + 1
         self.ledger.update(
-            task["id"], status="WAITING_RATE_LIMIT", retry_at=retry_at,
-            last_error="Claude provider still unavailable", limit_text=limit_text,
-            systemd_unit=None,
+            task["id"], attempt=next_attempt, limit_text=None, systemd_unit=None
         )
+        current = self.ledger.get(task["id"])
+        error = (
+            f"Claude readiness probe ordinary failure rc={cp.returncode}: "
+            f"{detail[:800]}"
+        )
+        self.retry_or_block(current, error, session_id=task["session_id"])
+        updated = self.ledger.get(task["id"])
         self.runtime.event(
-            "CLAUDE_READINESS_PROBE_WAITING", assignment_id=task["id"],
-            retry_after=retry_at, limit_text=limit_text, detected_limit=limited,
+            "CLAUDE_READINESS_PROBE_FAILURE",
+            assignment_id=task["id"], issue=task["issue_number"],
+            pr=task["pr_number"], attempt=next_attempt,
+            status=updated["status"], retry_after=updated["retry_at"],
+            detail=detail[:800],
         )
 
     def handle_codex(self, task: sqlite3.Row) -> None:
