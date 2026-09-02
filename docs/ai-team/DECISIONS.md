@@ -49,6 +49,12 @@ Accepted, superseding parts of the 2026-08-31 operating-model entry above:
 - Provider unavailability does not relax the merge gate. AI-control-plane changes still
   require trusted Issue authorization, the exact protected-file allowlist, green CI and
   an independent Claude PASS for the exact target SHA before merge.
+- Recoverable automation outcomes must stay inside an autonomous loop: review failure
+  queues Codex repair, CI failure queues Codex repair on the same PR, PR movement queues
+  an exact-SHA replacement review, merge/API rejection retries the merge stage, provider
+  limits wait without consuming failure budget, and interrupted workers are reaped and
+  requeued. Terminal `BLOCKED` is reserved for safety, authorization, corrupted task
+  identity/state, or an exhausted bounded failure circuit breaker.
 - No pre-review `ASYNC_MERGE` path is permitted. Consequently a later asynchronous FAIL
   cannot leave an unreviewed control-plane change active on `main` while awaiting a
   forward repair.
