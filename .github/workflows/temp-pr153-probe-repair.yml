@@ -2,13 +2,14 @@ name: temp-pr153-probe-repair
 
 on:
   push:
-    branches: [trigger/pr153-probe-repair]
+    branches: [main]
 
 permissions:
   contents: write
 
 jobs:
   repair:
+    if: github.event.head_commit.message == 'Run PR153 probe repair'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
