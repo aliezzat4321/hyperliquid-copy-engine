@@ -57,7 +57,7 @@ FALLBACKS = {
 
 
 def utcnow() -> dt.datetime:
-    return dt.datetime.now(dt.UTC)
+    return dt.datetime.now(dt.timezone.utc)  # noqa: UP017 - VM supports Python 3.10
 
 
 def iso(value: dt.datetime) -> str:
@@ -69,7 +69,11 @@ def parse_time(value: Any) -> dt.datetime | None:
         return None
     try:
         parsed = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.UTC)
+        return (
+            parsed
+            if parsed.tzinfo
+            else parsed.replace(tzinfo=dt.timezone.utc)  # noqa: UP017 - Python 3.10
+        )
     except ValueError:
         return None
 
@@ -301,14 +305,25 @@ def reconcile(
 ) -> dict[str, int]:
     """Drain a bounded durable outbox; retain failures for a later convergence pass."""
     processed = deferred = 0
+    failed_issues: set[int] = set()
     for path in sorted(outbox.glob("*.json"))[: max(0, limit)]:
+        event: Any = None
         try:
             event = json.loads(path.read_text(encoding="utf-8"))
+            issue = int(event["issue"])
+            if issue in failed_issues:
+                deferred += 1
+                continue
             sync(event, client, state_path, ledger)
             path.unlink()
             processed += 1
         except Exception:
             deferred += 1
+            if isinstance(event, dict) and event.get("issue") is not None:
+                try:
+                    failed_issues.add(int(event["issue"]))
+                except (TypeError, ValueError):
+                    pass
             continue
     return {"processed": processed, "deferred": deferred}
 

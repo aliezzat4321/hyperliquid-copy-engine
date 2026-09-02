@@ -215,6 +215,39 @@ def test_reconcile_continues_after_one_failed_event(tmp_path: Path) -> None:
     assert not (outbox / "002.json").exists()
 
 
+def test_reconcile_defers_later_events_for_issue_after_partial_failure(tmp_path: Path) -> None:
+    outbox = tmp_path / "outbox"
+    outbox.mkdir()
+    first = outbox / "001.json"
+    later_same_issue = outbox / "002.json"
+    unrelated = outbox / "003.json"
+    first.write_text(json.dumps(event("COMPLETED", result="done")))
+    later_same_issue.write_text(json.dumps(event("ASSIGNED", status="RUNNING")))
+    unrelated.write_text(json.dumps(event("ASSIGNED", issue=145, status="RUNNING")))
+
+    class CommentOutage(FakeTrello):
+        def call(self, method: str, path: str, data: dict | None = None) -> dict:
+            result = super().call(method, path, data)
+            if path.endswith("/actions/comments"):
+                raise OSError("comment endpoint offline")
+            return result
+
+    client = CommentOutage()
+    result = bridge.reconcile(outbox, client, tmp_path / "state", tmp_path / "ledger")
+
+    assert result == {"processed": 1, "deferred": 2}
+    assert first.exists()
+    assert later_same_issue.exists()
+    assert not unrelated.exists()
+    issue_146_card_writes = [
+        (method, path, data)
+        for method, path, data in client.calls
+        if path in {"/cards", "/cards/card-146"}
+        and "#146 " in str(data.get("name", ""))
+    ]
+    assert len(issue_146_card_writes) == 1
+
+
 def test_outage_retains_event_and_later_reconciliation_converges(tmp_path: Path) -> None:
     outbox = tmp_path / "outbox"
     outbox.mkdir()
