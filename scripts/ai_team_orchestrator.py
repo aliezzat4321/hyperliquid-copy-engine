@@ -240,6 +240,17 @@ class GitHub:
     def pending_issues(self, label: str) -> list[dict[str, Any]]:
         return self.ready_issues(label)
 
+    def finalizer_issues(self, done_label: str) -> list[dict[str, Any]]:
+        label = urllib.parse.quote(done_label, safe="")
+        rows = self.api(
+            "GET", f"repos/{self.repo}/issues?state=all&labels={label}"
+            "&sort=updated&direction=desc&per_page=100",
+        ) or []
+        return [
+            row for row in rows
+            if "pull_request" not in row and finalizes_parent(str(row.get("body") or ""))
+        ]
+
     def add_labels(self, number: int, labels: list[str]) -> None:
         if labels:
             self.api("POST", f"repos/{self.repo}/issues/{number}/labels", {"labels": labels})
@@ -505,6 +516,39 @@ class Ledger:
             tuple(ACTIVE_STATUSES),
         ).fetchone()
         return bool(row)
+
+    def has_queue_claim_conflict(self) -> bool:
+        """Allow unrelated Codex work while Claude is waiting on a future limit reset."""
+        placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
+        row = self.db.execute(
+            f"SELECT 1 FROM tasks WHERE status IN ({placeholders}) "
+            "AND NOT (agent='CLAUDE' AND status='WAITING_RATE_LIMIT' "
+            "AND retry_at IS NOT NULL AND retry_at > ?) LIMIT 1",
+            (*ACTIVE_STATUSES, utcnow()),
+        ).fetchone()
+        return bool(row)
+
+    def successful_issue(self, issue_number: int) -> bool:
+        """Require the latest terminal assignment to be cleanly successful."""
+        row = self.db.execute(
+            "SELECT status,last_error FROM tasks WHERE issue_number=? "
+            "AND status IN ('DONE','FAILED','BLOCKED','STALE') "
+            "ORDER BY updated_at DESC, created_at DESC LIMIT 1",
+            (issue_number,),
+        ).fetchone()
+        return bool(row and row["status"] == "DONE" and not row["last_error"])
+
+    def meta_get(self, key: str) -> str | None:
+        row = self.db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return str(row["value"]) if row else None
+
+    def meta_set(self, key: str, value: str) -> None:
+        self.db.execute(
+            "INSERT INTO meta(key,value) VALUES(?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+        self.db.commit()
 
     def open_run(self, task: sqlite3.Row, log_path: Path) -> int:
         cur = self.db.execute(
@@ -828,6 +872,17 @@ def queue_metadata(body: str) -> tuple[int, tuple[int, ...]] | None:
                 return None
             values.append(int(value.strip().lstrip("#")))
     return int(priority.group(1)), tuple(values)
+
+
+def finalizes_parent(body: str) -> int | None:
+    """Parse only the explicit trusted-child protocol marker."""
+    matches = re.findall(
+        r"(?mi)^\s*AI_TEAM_FINALIZES_PARENT\s*=\s*#?(\d+)\s*$", body or ""
+    )
+    if len(matches) != 1:
+        return None
+    parent = int(matches[0])
+    return parent if parent > 0 else None
 
 
 def retry_at_after(seconds: int) -> str:
@@ -1160,11 +1215,12 @@ class Orchestrator:
 
     def promote_queued_issue(self) -> bool:
         """Promote exactly one explicit, dependency-satisfied pending issue."""
-        if self.ledger.has_active_work():
+        if self.ledger.has_queue_claim_conflict():
             return False
         labels = self.cfg["labels"]
         blocked_labels = {labels["blocked"], labels["done"]}
         eligible: list[tuple[int, int, dict[str, Any]]] = []
+        dependency_blockers: dict[int, list[int]] = {}
         for issue in self.gh.pending_issues(labels["queued"]):
             number = int(issue["number"])
             names = {str(x.get("name")) for x in issue.get("labels", [])}
@@ -1176,28 +1232,95 @@ class Orchestrator:
             ):
                 continue
             priority, dependencies = metadata
-            satisfied = True
+            unresolved: list[int] = []
             for dependency in dependencies:
                 try:
                     dep = self.gh.issue(dependency)
                 except Exception:
-                    satisfied = False
-                    break
+                    unresolved.append(dependency)
+                    continue
                 dep_labels = {str(x.get("name")) for x in dep.get("labels", [])}
                 if (
                     str(dep.get("state") or "open").lower() != "closed"
                     and labels["done"] not in dep_labels
                 ):
-                    satisfied = False
-                    break
-            if satisfied:
+                    unresolved.append(dependency)
+            if not unresolved:
                 eligible.append((priority, number, issue))
+            else:
+                dependency_blockers[number] = unresolved
         if not eligible:
+            if dependency_blockers:
+                fingerprint = json.dumps(dependency_blockers, sort_keys=True)
+                if self.ledger.meta_get("queue_dependency_blockers") != fingerprint:
+                    self.ledger.meta_set("queue_dependency_blockers", fingerprint)
+                    self.runtime.event(
+                        "QUEUE_DEPENDENCY_BLOCKED", blockers=dependency_blockers,
+                        status="IDLE_DEPENDENCY_BLOCKED",
+                    )
+                    self.sync_runtime_checkpoint()
             return False
+        self.ledger.meta_set("queue_dependency_blockers", "")
         _, number, _issue = min(eligible, key=lambda row: (row[0], row[1]))
         self.gh.add_labels(number, [labels["ready"]])
         self.runtime.event("QUEUE_PROMOTED", issue=number)
         return self.claim_ready_issue()
+
+    def reconcile_parent_finalizers(self) -> bool:
+        """Finalize parents only for trusted, canonically successful children."""
+        changed = False
+        try:
+            children = self.gh.finalizer_issues(self.cfg["labels"]["done"])
+        except Exception as exc:
+            self.runtime.event("PARENT_FINALIZE_RETRY", error=str(exc))
+            return False
+        for child in children:
+            try:
+                changed = self._reconcile_parent_finalizer(child) or changed
+            except Exception as exc:
+                self.runtime.event(
+                    "PARENT_FINALIZE_RETRY", child_issue=child.get("number"),
+                    error=str(exc),
+                )
+        if changed:
+            self.sync_runtime_checkpoint()
+            self.kick_trello_reconciliation()
+        return changed
+
+    def _reconcile_parent_finalizer(self, child: dict[str, Any]) -> bool:
+        labels = self.cfg["labels"]
+        child_number = int(child["number"])
+        parent_number = finalizes_parent(str(child.get("body") or ""))
+        child_labels = {str(x.get("name")) for x in child.get("labels", [])}
+        if (
+            parent_number is None
+            or parent_number == child_number
+            or str(child.get("author_association") or "") not in self.trusted
+            or str(child.get("state") or "open").lower() != "closed"
+            or labels["done"] not in child_labels
+            or not self.ledger.successful_issue(child_number)
+        ):
+            return False
+        key = f"parent_finalized:{child_number}:{parent_number}"
+        if self.ledger.meta_get(key):
+            return False
+        parent = self.gh.issue(parent_number)
+        parent_labels = {str(x.get("name")) for x in parent.get("labels", [])}
+        self.gh.add_labels(parent_number, [labels["done"]])
+        for stale in (
+            labels["blocked"], labels["pending"], labels["ready"], labels["queued"]
+        ):
+            if stale in parent_labels:
+                self.gh.remove_label(parent_number, stale)
+        if str(parent.get("state") or "open").lower() != "closed":
+            self.gh.close_issue(parent_number)
+        self.runtime.event(
+            "PARENT_FINALIZED", issue=parent_number, child_issue=child_number,
+            status="DONE", result="trusted child completed",
+            next_action="Done / Proven",
+        )
+        self.ledger.meta_set(key, utcnow())
+        return True
 
     def reconcile_handoffs(self) -> None:
         """Recover a child task if a restart/API failure interrupted a handoff."""
@@ -1261,12 +1384,16 @@ class Orchestrator:
                 target_sha=stale["target_sha"], session_id=stale["session_id"],
             )
         self.reconcile_handoffs()
+        if self.ledger.due() is not None:
+            self.reconcile_parent_finalizers()
         self.sync_runtime_checkpoint()
         self.kick_trello_reconciliation()
         task = self.ledger.due()
         if task is None:
             if not self.claim_ready_issue():
-                self.promote_queued_issue()
+                self.reconcile_parent_finalizers()
+                if not self.claim_ready_issue():
+                    self.promote_queued_issue()
             task = self.ledger.due()
         if task is None:
             return
@@ -2386,6 +2513,7 @@ The reviewed SHA must be exactly the target SHA.
         self.gh.remove_label(int(task["pr_number"]), self.cfg["labels"]["waiting_review"])
         self.gh.add_labels(int(task["issue_number"]), [self.cfg["labels"]["done"]])
         self.gh.remove_label(int(task["issue_number"]), self.cfg["labels"]["pending"])
+        self.gh.close_issue(int(task["issue_number"]))
         self.gh.comment(
             int(task["issue_number"]),
             f"AI_TEAM_AUTONOMOUS_MERGE=YES\nPR={task['pr_number']}\nTARGET_SHA={target}\n"
