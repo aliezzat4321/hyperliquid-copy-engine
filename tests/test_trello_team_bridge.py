@@ -321,7 +321,7 @@ def terminal_ledger(path: Path) -> None:
         )
 
 
-def test_terminal_ledger_repairs_pre_event_card_once_without_duplicate(tmp_path: Path) -> None:
+def test_terminal_ledger_repairs_cold_state_card_once_without_duplicate(tmp_path: Path) -> None:
     ledger = tmp_path / "ledger.sqlite3"
     terminal_ledger(ledger)
 
@@ -332,13 +332,6 @@ def test_terminal_ledger_repairs_pre_event_card_once_without_duplicate(tmp_path:
 
     client = Existing()
     state = tmp_path / "state.json"
-    state.write_text(json.dumps({
-        "version": 1,
-        "cards": {},
-        "terminal_projections": {
-            f"{bridge.REPOSITORY}#157": {"pr": 158, "target_sha": "c" * 40}
-        },
-    }))
     assert bridge.reconcile(tmp_path / "missing-outbox", client, state, ledger) == {
         "processed": 0, "deferred": 0, "repaired": 1,
     }
@@ -347,6 +340,10 @@ def test_terminal_ledger_repairs_pre_event_card_once_without_duplicate(tmp_path:
     assert "Status: DONE" in update[2]["desc"]
     assert "Next action: Done / Proven" in update[2]["desc"]
     assert not any(method == "POST" and path == "/cards" for method, path, _ in client.calls)
+    saved = json.loads(state.read_text())
+    assert saved["terminal_projections"][f"{bridge.REPOSITORY}#157"] == {
+        "pr": 158, "target_sha": "c" * 40,
+    }
     assert bridge.reconcile(tmp_path / "missing-outbox", client, state, ledger) == {
         "processed": 0, "deferred": 0, "repaired": 1,
     }

@@ -352,8 +352,6 @@ def reconcile_ledger(
     """Repair bounded projections without treating worker DONE as issue DONE."""
     if limit <= 0 or not ledger.exists():
         return 0
-    state = load_state(state_path)
-    projected = state.get("terminal_projections", {})
     try:
         with sqlite3.connect(ledger) as db:
             db.row_factory = sqlite3.Row
@@ -373,18 +371,19 @@ def reconcile_ledger(
         return 0
     repaired = 0
     for row in rows:
-        key = f"{REPOSITORY}#{int(row['issue_number'])}"
-        marker = projected.get(key, {}) if isinstance(projected, dict) else {}
         task_type = str(row["task_type"]).upper()
         status = str(row["status"]).upper()
+        # REVIEW/DONE is written only after the orchestrator's canonical merge,
+        # close, and ai-team:done transition.  The ledger is durable canonical
+        # state; bridge.json is only a projection cache and may be absent after
+        # a crash, failed event write, or deploy.  Requiring that cache to
+        # corroborate the row makes the documented ledger fallback circular.
         terminal = (
             task_type == "REVIEW"
             and status == "DONE"
             and not row["last_error"]
             and row["pr_number"] is not None
             and row["target_sha"] is not None
-            and marker.get("pr") == int(row["pr_number"])
-            and marker.get("target_sha") == str(row["target_sha"])
         )
         if terminal:
             kind, result, next_action = "COMPLETED", "merged and proven", "Done / Proven"
