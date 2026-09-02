@@ -20,6 +20,7 @@ Update this file only when a component moves, is added, or is retired.
 | Wallet registry | `src/hlcopy/shadow/registry.py` | `research → validation → approved`; enforces the 10-user-per-IP cap |
 | Trading permission boundary | `src/hlcopy/trading/permissions.py` | `REAL_TRADING_ENABLED`; **live-sensitive** |
 | Config | `src/hlcopy/config.py` | `HLCOPY_*` settings |
+| Storage pressure controller | `scripts/storage_controller.py`, `config/storage_policy.json` | Read-only fail-closed budgets, forecast and writer decisions |
 | Database | `src/hlcopy/db/postgres.py`, `db/schema.sql` | Append-only raw + derived tables |
 | CLI | `src/hlcopy/cli.py` | `hlcopy` entry point |
 
@@ -106,4 +107,5 @@ provenance rather than re-deriving values.
 | Resolver design | `docs/WALLET_IDENTIFIER.md`, `docs/RESOLVER_SCANNING.md` |
 | Lane 3 net edge | `docs/INVO_NOTIFICATION_NET_EDGE.md` (arrives with PR #95) |
 | Market tape contract | `docs/market_tape.md` |
+| Storage exit gate | `docs/ai-team/STORAGE_EXIT_GATE.md` |
 | Trader forensics | `docs/trader_forensics.md` |
