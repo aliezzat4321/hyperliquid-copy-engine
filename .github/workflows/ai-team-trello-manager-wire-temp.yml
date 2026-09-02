@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   review:
-    if: github.event_name == 'schedule' || github.event.head_commit.message == 'Run PR153 final exact review'
+    if: github.event_name == 'schedule' || github.event.head_commit.message == 'Fix PR153 exact review head gate'
     runs-on: [self-hosted, linux]
     timeout-minutes: 10
     steps:
@@ -24,7 +24,7 @@ jobs:
         run: |
           set -euo pipefail
           TARGET_SHA=3cdf49c8792fdfd4dc9d281e593ecd051b86c330
-          CURRENT_SHA="$(gh pr view 153 --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)"
+          CURRENT_SHA="$(gh api "repos/$GITHUB_REPOSITORY/pulls/153" --jq .head.sha)"
           if [[ "$CURRENT_SHA" != "$TARGET_SHA" ]]; then
             echo 'run_review=no' >> "$GITHUB_OUTPUT"
             echo "STALE_TARGET current=$CURRENT_SHA expected=$TARGET_SHA"
