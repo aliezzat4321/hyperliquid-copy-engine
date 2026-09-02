@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,8 +15,37 @@ MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 validate_manifest = MODULE.validate_manifest
+validate_target_used_pct = MODULE.validate_target_used_pct
 
 NOW = datetime(2026, 8, 31, 14, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("target", [70.0, 75.0, 79.999, 92.0])
+def test_accepts_storage_closure_target(target: float) -> None:
+    assert validate_target_used_pct(target) == target
+
+
+@pytest.mark.parametrize("target", [69.999, 92.001, float("inf"), float("nan")])
+def test_rejects_target_outside_storage_closure_band(target: float) -> None:
+    with pytest.raises(ValueError, match="between 70 and 92 inclusive"):
+        validate_target_used_pct(target)
+
+
+def test_workflow_target_literals_are_accepted_by_apply_validator() -> None:
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "hyperliquid-emergency-storage-reclaim.yml"
+    )
+    targets = re.findall(
+        r"--target-used-pct\s+([0-9]+(?:\.[0-9]+)?)",
+        workflow.read_text(encoding="utf-8"),
+    )
+    assert targets, "workflow must declare at least one explicit --target-used-pct"
+    for target in targets:
+        value = float(target)
+        assert validate_target_used_pct(value) == value
 
 
 def _manifest(
@@ -29,7 +59,7 @@ def _manifest(
         "generated_at": "2026-08-31T13:55:00+00:00",
         "real_trading": False,
         "recent_days_kept_full_fidelity": 3,
-        "deletion_budget_bytes": 6 * 1024**3,
+        "deletion_budget_bytes": 12 * 1024**3,
         "source_evidence": {"complete": True},
         "normalization": {
             "robust_alias_safety_passed": True,
@@ -244,4 +274,19 @@ def test_rejects_delete_pool_over_reviewed_budget(tmp_path: Path) -> None:
     manifest = _manifest(candidate)
     manifest["deletion_budget_bytes"] = 1000
     with pytest.raises(ValueError, match="exceeds reviewed budget"):
+        _validate(manifest, market, tmp_path)
+
+
+def test_accepts_twelve_gib_reviewed_budget(tmp_path: Path) -> None:
+    market, candidate = _layout(tmp_path)
+    manifest = _manifest(candidate)
+    manifest["deletion_budget_bytes"] = 12 * 1024**3
+    assert len(_validate(manifest, market, tmp_path)) == 1
+
+
+def test_rejects_reviewed_budget_above_twelve_gib(tmp_path: Path) -> None:
+    market, candidate = _layout(tmp_path)
+    manifest = _manifest(candidate)
+    manifest["deletion_budget_bytes"] = 12 * 1024**3 + 1
+    with pytest.raises(ValueError, match="must be >0 and <=12 GiB"):
         _validate(manifest, market, tmp_path)

@@ -15,6 +15,9 @@ UTC_TZ = timezone(timedelta(0))
 EXPECTED_MARKET_ROOT = Path("/mnt/HC_Volume_106576526/hyperliquid/market-shadow")
 EXPECTED_MOUNT = Path("/mnt/HC_Volume_106576526")
 GIB = 1024**3
+MAX_DELETE_CANDIDATE_BYTES = 12 * GIB
+MIN_TARGET_USED_PCT = 70.0
+MAX_TARGET_USED_PCT = 92.0
 
 
 @dataclass(frozen=True)
@@ -164,8 +167,8 @@ def validate_manifest(
         raise ValueError("market_shadow.partitions must be a list")
 
     delete_budget_bytes = int(manifest.get("deletion_budget_bytes") or 0)
-    if not (0 < delete_budget_bytes <= 6 * GIB):
-        raise ValueError("manifest deletion budget must be >0 and <=6 GiB")
+    if not (0 < delete_budget_bytes <= MAX_DELETE_CANDIDATE_BYTES):
+        raise ValueError("manifest deletion budget must be >0 and <=12 GiB")
 
     resolved_market = market_root.resolve(strict=True)
     candidates: list[Candidate] = []
@@ -309,6 +312,16 @@ def apply_candidates(
     }
 
 
+def validate_target_used_pct(value: float) -> float:
+    """Validate the bounded target shared by dry-run and emergency apply callers."""
+    if not (MIN_TARGET_USED_PCT <= value <= MAX_TARGET_USED_PCT):
+        raise ValueError(
+            "target-used-pct must be between "
+            f"{MIN_TARGET_USED_PCT:g} and {MAX_TARGET_USED_PCT:g} inclusive"
+        )
+    return value
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -327,7 +340,7 @@ def main() -> None:
             "/root/hyperliquid-audit/storage-retention/storage_retention_apply.json"
         ),
     )
-    parser.add_argument("--target-used-pct", type=float, default=92.0)
+    parser.add_argument("--target-used-pct", type=float, default=75.0)
     parser.add_argument("--max-manifest-age-minutes", type=int, default=15)
     parser.add_argument("--expected-manifest-sha256", default="")
     parser.add_argument("--apply", action="store_true")
@@ -337,8 +350,10 @@ def main() -> None:
         raise SystemExit("market-root must be the exact Hyperliquid market-shadow directory")
     if args.mount.resolve(strict=True) != EXPECTED_MOUNT.resolve(strict=True):
         raise SystemExit("mount must be the exact Hyperliquid data volume")
-    if not (90.0 <= args.target_used_pct <= 92.0):
-        raise SystemExit("emergency target-used-pct must be between 90 and 92")
+    try:
+        validate_target_used_pct(args.target_used_pct)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
     actual_manifest_sha256 = _sha256(args.manifest)
     expected_sha = str(args.expected_manifest_sha256 or "").strip().lower()

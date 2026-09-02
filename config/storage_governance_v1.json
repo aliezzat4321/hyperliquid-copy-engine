@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "mount": "/mnt/HC_Volume_106576526",
+  "policy": {
+    "healthy_used_pct": 75.0,
+    "warn_used_pct": 80.0,
+    "stop_used_pct": 85.0,
+    "resume_used_pct": 78.0,
+    "minimum_time_to_full_hours": 48.0,
+    "forecast_window_hours": 24.0
+  },
+  "datasets": [
+    {
+      "name": "postgresql",
+      "owner": "database",
+      "retention_class": "durable_compacted",
+      "byte_budget": 16106127360,
+      "growth_budget_bytes_per_hour": 268435456,
+      "writers": ["hyperliquid-universe-scout.timer"]
+    },
+    {
+      "name": "market-shadow",
+      "owner": "market_capture",
+      "retention_class": "recent_full_older_downsampled",
+      "byte_budget": 21474836480,
+      "growth_budget_bytes_per_hour": 536870912,
+      "writers": ["hyperliquid-market-capture.timer", "hyperliquid-market-capture.service"]
+    },
+    {
+      "name": "shadow",
+      "owner": "shadow_research",
+      "retention_class": "durable_evidence",
+      "byte_budget": 4294967296,
+      "growth_budget_bytes_per_hour": 268435456,
+      "writers": [
+        "hyperliquid-wide-trade-watch-live.service",
+        "hyperliquid-wide-fill-enrichment-live.service",
+        "hyperliquid-third-party-wide-watch.service",
+        "hyperliquid-third-party-wide-enrichment.service"
+      ]
+    },
+    {
+      "name": "profitability",
+      "owner": "profitability_research",
+      "retention_class": "durable_results",
+      "byte_budget": 4294967296,
+      "growth_budget_bytes_per_hour": 268435456,
+      "writers": ["hyperliquid-profitability.timer", "hyperliquid-third-party-profitability.timer"]
+    }
+  ]
+}

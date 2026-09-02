@@ -21,6 +21,7 @@ Update this file only when a component moves, is added, or is retired.
 | Trading permission boundary | `src/hlcopy/trading/permissions.py` | `REAL_TRADING_ENABLED`; **live-sensitive** |
 | Config | `src/hlcopy/config.py` | `HLCOPY_*` settings |
 | Database | `src/hlcopy/db/postgres.py`, `db/schema.sql` | Append-only raw + derived tables |
+| Storage controller | `scripts/storage_controller.py`, `config/storage_governance_v1.json` | Dataset ownership/budgets, all-writer pressure control, growth forecast and hysteresis; deployment pending manager review |
 | CLI | `src/hlcopy/cli.py` | `hlcopy` entry point |
 
 ## Lane 1 — Hyperliquid native discovery
