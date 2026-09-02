@@ -68,6 +68,7 @@ fi
 
 install -m 0755 "$ROOT/scripts/ai_team_orchestrator.py" "$OPT/scripts/ai_team_orchestrator.py"
 install -m 0644 "$ROOT/scripts/ai_team_runtime_ledger.py" "$OPT/scripts/ai_team_runtime_ledger.py"
+install -o root -g root -m 0755 "$ROOT/scripts/trello_team_bridge.py" "$OPT/scripts/trello_team_bridge.py"
 install -m 0755 "$ROOT/scripts/ai_team_auth_codex.sh" "$OPT/scripts/ai_team_auth_codex.sh"
 install -m 0755 "$ROOT/scripts/ai_team_auth_claude.sh" "$OPT/scripts/ai_team_auth_claude.sh"
 install -m 0755 "$ROOT/scripts/install_codex_code_mode_host.sh" "$OPT/scripts/install_codex_code_mode_host.sh"
@@ -90,6 +91,7 @@ ln -sfn "$OPT/scripts/ai_team_auth_claude.sh" /usr/local/sbin/hl-ai-team-auth-cl
 # GitHub labels are durable coordination primitives. Create only our namespaced labels.
 declare -A colors=(
   ["ai-team:ready"]="0E8A16"
+  ["ai-team:queued"]="C5DEF5"
   ["ai-team:pending"]="FBCA04"
   ["ai-team:running"]="1D76DB"
   ["ai-team:waiting-review"]="5319E7"
