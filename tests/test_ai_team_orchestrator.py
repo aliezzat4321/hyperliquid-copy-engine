@@ -646,6 +646,93 @@ def test_queue_metadata_is_explicit_and_strict():
     ) is None
 
 
+def test_parent_finalizer_metadata_is_explicit_and_unambiguous():
+    assert orch.finalizes_parent("P0 title mentions parent #154") is None
+    assert orch.finalizes_parent("AI_TEAM_FINALIZES_PARENT=#154") == 154
+    assert orch.finalizes_parent("AI_TEAM_FINALIZES_PARENT=0") is None
+    assert orch.finalizes_parent(
+        "AI_TEAM_FINALIZES_PARENT=154\nAI_TEAM_FINALIZES_PARENT=155"
+    ) is None
+
+
+def test_parent_finalization_requires_canonical_child_success_and_is_idempotent(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    task_id = ledger.create_task(
+        issue_number=161, task_type="BUILD", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", task_class="ROUTINE", status="DONE",
+    )
+    labels = orch.DEFAULT_CONFIG["labels"]
+    child = {
+        "number": 161, "body": "AI_TEAM_FINALIZES_PARENT=154",
+        "author_association": "OWNER", "state": "closed",
+        "labels": [{"name": labels["done"]}],
+    }
+    parent = {
+        "number": 154, "state": "open",
+        "labels": [{"name": labels["blocked"]}, {"name": labels["queued"]}],
+    }
+
+    class GH:
+        def __init__(self):
+            self.closed = []
+        def finalizer_issues(self, done_label):
+            return [child]
+        def issue(self, number):
+            return parent
+        def add_labels(self, number, values):
+            parent["labels"].extend({"name": value} for value in values)
+        def remove_label(self, number, label):
+            parent["labels"] = [x for x in parent["labels"] if x["name"] != label]
+        def close_issue(self, number):
+            self.closed.append(number)
+            parent["state"] = "closed"
+
+    class Runtime:
+        def __init__(self):
+            self.events = []
+        def event(self, kind, **payload):
+            self.events.append((kind, payload))
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.gh = orch.DEFAULT_CONFIG, ledger, GH()
+    team.runtime, team.trusted = Runtime(), {"OWNER"}
+    team.sync_runtime_checkpoint = lambda: None
+    team.kick_trello_reconciliation = lambda: None
+    assert team.reconcile_parent_finalizers() is True
+    assert team.reconcile_parent_finalizers() is False
+    assert team.gh.closed == [154]
+    assert [kind for kind, _ in team.runtime.events] == ["PARENT_FINALIZED"]
+    assert {x["name"] for x in parent["labels"]} == {labels["done"]}
+
+    ledger.update(task_id, status="BLOCKED", last_error="unresolved failure")
+    ledger.meta_set("parent_finalized:161:154", "")
+    parent["state"] = "open"
+    assert team.reconcile_parent_finalizers() is False
+
+
+def test_untrusted_or_noncanonical_child_cannot_finalize_parent(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    ledger.create_task(
+        issue_number=161, task_type="BUILD", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", task_class="ROUTINE", status="DONE",
+    )
+    labels = orch.DEFAULT_CONFIG["labels"]
+    child = {
+        "number": 161, "body": "AI_TEAM_FINALIZES_PARENT=154",
+        "author_association": "NONE", "state": "closed",
+        "labels": [{"name": labels["done"]}],
+    }
+
+    class GH:
+        def finalizer_issues(self, done_label):
+            return [child]
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.gh = orch.DEFAULT_CONFIG, ledger, GH()
+    team.trusted = {"OWNER"}
+    assert team.reconcile_parent_finalizers() is False
+
+
 def test_queue_promotes_smallest_satisfied_priority_and_claims_once(tmp_path):
     ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
     labels = orch.DEFAULT_CONFIG["labels"]
@@ -705,6 +792,39 @@ def test_queue_promotes_smallest_satisfied_priority_and_claims_once(tmp_path):
     assert ledger.active_for_issue(120)
     assert team.promote_queued_issue() is False
     assert team.gh.comments == [120]
+
+
+def test_dependency_blocked_queue_emits_exact_deduplicated_blockers(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    labels = orch.DEFAULT_CONFIG["labels"]
+    issue = {
+        "number": 120,
+        "body": "AI_TEAM_AUTO_QUEUE=YES\nAI_TEAM_QUEUE_PRIORITY=10\nAI_TEAM_DEPENDS_ON=154,155",
+        "author_association": "OWNER", "labels": [{"name": labels["queued"]}],
+    }
+
+    class GH:
+        def pending_issues(self, label):
+            return [issue]
+        def issue(self, number):
+            return {"number": number, "state": "open", "labels": []}
+
+    class Runtime:
+        def __init__(self):
+            self.events = []
+        def event(self, kind, **payload):
+            self.events.append((kind, payload))
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.gh = orch.DEFAULT_CONFIG, ledger, GH()
+    team.runtime, team.trusted = Runtime(), {"OWNER"}
+    team.sync_runtime_checkpoint = lambda: None
+    assert team.promote_queued_issue() is False
+    assert team.promote_queued_issue() is False
+    assert team.runtime.events == [(
+        "QUEUE_DEPENDENCY_BLOCKED",
+        {"blockers": {120: [154, 155]}, "status": "IDLE_DEPENDENCY_BLOCKED"},
+    )]
 
 
 @pytest.mark.parametrize("terminal_status", ["BLOCKED", "STALE", "DONE"])
@@ -783,6 +903,17 @@ def test_active_task_prevents_duplicate_queue_claim(tmp_path):
     team.ledger = ledger
     team.gh = None
     assert team.promote_queued_issue() is False
+
+
+def test_future_claude_rate_limit_releases_unrelated_codex_queue(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    ledger.create_task(
+        issue_number=119, task_type="REVIEW", agent="CLAUDE",
+        model_class="SONNET", task_class="ROUTINE", status="WAITING_RATE_LIMIT",
+        retry_at="2099-01-01T00:00:00Z",
+    )
+    assert ledger.has_active_work() is True
+    assert ledger.has_queue_claim_conflict() is False
 
 
 def test_newly_blocked_task_clears_queue_state_and_is_not_reclaimed(tmp_path):
