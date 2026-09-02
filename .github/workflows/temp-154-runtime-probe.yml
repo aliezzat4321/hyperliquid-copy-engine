@@ -1,0 +1,39 @@
+name: temp-154-runtime-probe
+
+on:
+  push:
+    branches: [trigger/154-runtime-probe]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 5
+    steps:
+      - name: Probe Hyperliquid AI-team runtime only
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'TARGET_PROJECT=HYPERLIQUID_AI_TEAM_ONLY'
+          echo 'POLYMARKET_INSPECTION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+          echo '=== INSTALLED BRIDGE ==='
+          test -f /opt/hyperliquid-ai-team/scripts/trello_team_bridge.py && stat -c '%U %G %a %n' /opt/hyperliquid-ai-team/scripts/trello_team_bridge.py || true
+          echo '=== TRELLO ENV METADATA ONLY ==='
+          test -f /etc/hyperliquid-ai-team/trello.env && stat -c '%U %G %a %n' /etc/hyperliquid-ai-team/trello.env || true
+          echo '=== TIMER ==='
+          systemctl is-enabled hyperliquid-ai-team-orchestrator.timer || true
+          systemctl is-active hyperliquid-ai-team-orchestrator.timer || true
+          systemctl status hyperliquid-ai-team-orchestrator.timer --no-pager -l || true
+          systemctl list-timers hyperliquid-ai-team-orchestrator.timer --no-pager || true
+          echo '=== SERVICE ==='
+          systemctl status hyperliquid-ai-team-orchestrator.service --no-pager -l || true
+          echo '=== STATUS ==='
+          hl-ai-team-status || true
+          echo '=== JOURNAL ==='
+          journalctl -u hyperliquid-ai-team-orchestrator.service -n 100 --no-pager -l || true
+          echo 'POLYMARKET_TOUCHED=NO'
+          echo 'REAL_TRADING_TOUCHED=NO'
