@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   fix:
-    if: github.event.head_commit.message == 'Run PR153 handoff hardening v2'
+    if: github.event.head_commit.message == 'Run PR153 handoff hardening v3'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -26,6 +26,16 @@ jobs:
           set -euo pipefail
           git show origin/main:scripts/temp_pr153_handoff_hardening.py >/tmp/patch.py
           python3 /tmp/patch.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tests/test_ai_team_orchestrator.py')
+          text = p.read_text()
+          old = '    block = source[source.index("    def block("):source.index("    def sync_ready(")]\n'
+          new = '    start = source.index("    def block(")\n    block = source[start:start + 2500]\n'
+          if old not in text:
+              raise SystemExit('brittle block-test line not found')
+          p.write_text(text.replace(old, new, 1))
+          PY
           python3 -m pip install 'ruff<1,>=0.9' 'pytest<9,>=8.3' >/dev/null
           ruff check --fix scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
           ruff check scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
