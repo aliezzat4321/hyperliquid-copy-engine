@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 import importlib.util
 import json
 import subprocess
@@ -97,6 +98,81 @@ def test_non_rate_failure_does_not_invent_retry_timestamp():
     assert retry_at is None
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "rate limit",
+        "usage limit",
+        "quota exceeded",
+        "too many requests",
+        "limit reached",
+        "you've hit your limit",
+        "weighted-token exhaustion: usage denied",
+        "HTTP 429",
+        "status code 429",
+    ],
+)
+def test_claude_unavailability_detection_fixtures(message):
+    limited, retry_at = orch.rate_limit_info(message, 300)
+    assert limited is True
+    assert orch.parse_utc(retry_at) is not None
+
+
+@pytest.mark.parametrize("message", ["resets at 3am", "resets 3 AM", "resets in 47 minutes"])
+def test_rate_limit_reset_time_fixtures(message):
+    limited, retry_at = orch.rate_limit_info(f"usage limit; {message}", 300)
+    assert limited is True
+    assert orch.parse_utc(retry_at) > dt.datetime.now(dt.UTC)
+
+
+def test_rate_limit_iso_reset_fixture():
+    limited, retry_at = orch.rate_limit_info(
+        "quota exceeded; resets at 2099-02-03T04:05:06Z", 300
+    )
+    assert limited is True
+    assert retry_at == "2099-02-03T04:05:06Z"
+
+
+def test_unknown_rc_one_text_remains_ordinary_failure():
+    assert orch.rate_limit_info("process exited rc=1: assertion failed", 300) == (False, None)
+
+
+def test_review_enqueue_never_creates_pre_review_merge_gate(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    parent_id = ledger.create_task(
+        issue_number=151, task_type="BUILD", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", task_class="ROUTINE", status="DONE",
+    )
+
+    class GitHubStub:
+        def issue(self, number):
+            return {"body": "AI_TEAM_PROTECTED_CHANGE=YES\nAI_TEAM_ROUTINE_ASYNC_REVIEW=YES"}
+
+        def comment(self, *args):
+            return None
+
+        def add_labels(self, *args):
+            return None
+
+    class RuntimeStub:
+        def event(self, *args, **kwargs):
+            return None
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg = orch.DEFAULT_CONFIG
+    team.ledger = ledger
+    team.gh = GitHubStub()
+    team.runtime = RuntimeStub()
+    team.enqueue_review(ledger.get(parent_id), 152, "a" * 40)
+    rows = ledger.db.execute("SELECT * FROM tasks WHERE parent_id=?", (parent_id,)).fetchall()
+    audit = next(row for row in rows if row["task_type"] == "REVIEW")
+    assert audit["status"] == "PENDING"
+    assert audit["target_sha"] == "a" * 40
+    assert ledger.db.execute(
+        "SELECT * FROM tasks WHERE task_type='ASYNC_MERGE'"
+    ).fetchone() is None
+
+
 def test_ledger_recovers_orchestrator_restart_mid_task(tmp_path):
     ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
     task_id = ledger.create_task(
@@ -128,6 +204,110 @@ def test_ledger_keeps_rate_limited_task_and_resume_session(tmp_path):
     row = ledger.get(task_id)
     assert row["session_id"] == "session-keep-me"
     assert ledger.due() is None
+
+
+def test_scheduler_skips_not_due_claude_wait_for_codex(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    ledger.create_task(
+        issue_number=2, task_type="REVIEW", agent="CLAUDE", model_class="SONNET",
+        task_class="ROUTINE", status="WAITING_RATE_LIMIT",
+        retry_at="2999-01-01T00:00:00Z", session_id="same-session",
+    )
+    codex_id = ledger.create_task(
+        issue_number=3, task_type="BUILD", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", task_class="ROUTINE",
+    )
+    assert ledger.due()["id"] == codex_id
+
+
+def test_probe_wait_and_success_preserve_attempt_and_session(tmp_path, monkeypatch):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    task_id = ledger.create_task(
+        issue_number=2, pr_number=12, task_type="REVIEW", agent="CLAUDE",
+        model_class="SONNET", task_class="ROUTINE", status="WAITING_RATE_LIMIT",
+        retry_at=orch.utcnow(), session_id="same-session", attempt=2, target_sha="a" * 40,
+    )
+    team = object.__new__(orch.Orchestrator)
+    team.ledger = ledger
+    team.cfg = {**orch.DEFAULT_CONFIG, "claude_readiness_probe_seconds": 300,
+                "claude_readiness_probe_timeout_seconds": 20,
+                "claude_readiness_probe_output_bytes": 4096}
+
+    class Events:
+        def event(self, *args, **kwargs):
+            return None
+
+    team.runtime = Events()
+    monkeypatch.setattr(orch, "model_sandbox_command", lambda **kw: kw["command"])
+    replies = iter([
+        subprocess.CompletedProcess([], 1, "", "usage limit; resets in 47 minutes"),
+        subprocess.CompletedProcess([], 0, '{"result":"CLAUDE_READY_OK"}', ""),
+    ])
+    monkeypatch.setattr(orch, "run", lambda *args, **kwargs: next(replies))
+    team.handle_claude_probe(ledger.get(task_id))
+    waiting = ledger.get(task_id)
+    assert waiting["status"] == "WAITING_RATE_LIMIT"
+    assert waiting["attempt"] == 2
+    assert waiting["session_id"] == "same-session"
+    team.handle_claude_probe(waiting)
+    ready = ledger.get(task_id)
+    assert ready["status"] == "PENDING"
+    assert ready["attempt"] == 2
+    assert ready["session_id"] == "same-session"
+
+
+def test_non_limit_probe_failure_consumes_budget_and_leaves_wait_state(tmp_path, monkeypatch):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    task_id = ledger.create_task(
+        issue_number=2, pr_number=12, task_type="REVIEW", agent="CLAUDE",
+        model_class="SONNET", task_class="ROUTINE", status="WAITING_RATE_LIMIT",
+        retry_at=orch.utcnow(), session_id="same-session", attempt=0,
+        target_sha="a" * 40,
+    )
+    team = object.__new__(orch.Orchestrator)
+    team.ledger = ledger
+    team.cfg = {
+        **orch.DEFAULT_CONFIG,
+        "max_attempts": 3,
+        "claude_readiness_probe_seconds": 300,
+        "claude_readiness_probe_timeout_seconds": 20,
+        "claude_readiness_probe_output_bytes": 4096,
+    }
+
+    class Events:
+        def event(self, *args, **kwargs):
+            return None
+
+    team.runtime = Events()
+    monkeypatch.setattr(orch, "model_sandbox_command", lambda **kw: kw["command"])
+    monkeypatch.setattr(
+        orch, "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            [], 1, "", "authentication configuration failed"
+        ),
+    )
+    team.handle_claude_probe(ledger.get(task_id))
+    row = ledger.get(task_id)
+    assert row["status"] == "RETRY"
+    assert row["attempt"] == 1
+    assert row["session_id"] == "same-session"
+    assert "ordinary failure" in row["last_error"]
+    assert row["limit_text"] is None
+
+def test_watchdog_requeues_same_review_checkpoint(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    task_id = ledger.create_task(
+        issue_number=4, pr_number=14, task_type="REVIEW", agent="CLAUDE",
+        model_class="SONNET", task_class="ROUTINE", status="RUNNING",
+        target_sha="b" * 40, session_id="checkpoint-session", attempt=1,
+        systemd_unit="hl-ai-claude-deadbeef-1",
+    )
+    stale = ledger.recover_interrupted()
+    assert stale[0]["id"] == task_id
+    row = ledger.get(task_id)
+    assert row["status"] == "RETRY"
+    assert row["target_sha"] == "b" * 40
+    assert row["session_id"] == "checkpoint-session"
 
 
 def test_only_one_active_task_per_issue_is_detected(tmp_path):
@@ -333,3 +513,64 @@ def test_codex_resume_places_exec_options_before_resume_subcommand(
         "session-123",
         "-",
     ]
+
+
+
+def test_recoverable_automation_paths_do_not_terminally_block():
+    source = MODULE_PATH.read_text()
+    handle_ci = source[source.index("    def handle_ci("):source.index("    def retry_or_block(")]
+    assert "CI_REPAIR_ENQUEUED" in handle_ci
+    assert "self.enqueue_repair(task, blockers)" in handle_ci
+    assert "CI failed after review PASS" not in handle_ci
+    assert "MERGE_RETRY_SCHEDULED" in handle_ci
+    assert "merge rejected; automatic retry scheduled" in handle_ci
+
+
+def test_continuity_loops_cover_review_pr_move_limits_and_restart():
+    source = MODULE_PATH.read_text()
+    assert "self.enqueue_repair(task, blockers)" in source
+    assert "self.enqueue_replacement_review(task, current_sha)" in source
+    assert "WAITING_RATE_LIMIT" in source
+    assert "STALE_RUN_REQUEUED" in source
+
+
+
+def test_codex_postprocess_retries_recoverable_failures():
+    source = MODULE_PATH.read_text()
+    assert "CODEX_POSTPROCESS_RETRY_SCHEDULED" in source
+    assert "Codex postprocess/finalize failed" in source
+    assert "fail_closed_markers" in source
+    assert "owner-sensitive live path" in source
+    assert "forbidden live-trading enablement" in source
+
+
+
+def test_handoffs_are_idempotent_and_recoverable():
+    source = MODULE_PATH.read_text()
+    assert "def reconcile_handoffs" in source
+    assert "def handoff_candidates" in source
+    assert "def child(" in source
+    assert "HANDOFF_RECOVERED" in source
+    assert "HANDOFF_RECOVERY_RETRY" in source
+    assert "HANDOFF_MIRROR_FAILED" in source
+    assert 'self.ledger.child(str(parent["id"]), "REVIEW")' in source
+    assert 'self.ledger.child(str(review["id"]), "REPAIR")' in source
+    assert 'self.ledger.child(str(old["id"]), "REVIEW", current_sha)' in source
+
+
+def test_codex_limit_and_worker_state_do_not_consume_or_leak():
+    source = MODULE_PATH.read_text()
+    codex = source[source.index("    def handle_codex("):source.index("    def invoke_codex(")]
+    assert "CODEX_WAITING_RATE_LIMIT" in codex
+    assert 'attempt=max(0, int(task["attempt"]) - 1)' in codex
+    assert 'self.ledger.update(task["id"], systemd_unit=unit)' in codex
+    assert "limit_text=limit_text" in codex
+    assert "systemd_unit=None" in codex
+
+
+def test_terminal_block_releases_worker_marker():
+    source = MODULE_PATH.read_text()
+    start = source.index("    def block(")
+    block = source[start:start + 2500]
+    assert 'status="BLOCKED"' in block
+    assert "systemd_unit=None" in block

@@ -40,3 +40,28 @@ Accepted, superseding parts of the 2026-08-31 operating-model entry above:
   locate code and check prior results without re-auditing the repository.
 - Review independence is *recorded*, not proved: both agents share one GitHub identity.
   `REVIEW_PROVENANCE.md` documents the limitation and what CI can and cannot check.
+
+## 2026-09-02 — Claude availability is asynchronous; protected merges are not
+
+- Claude rate, usage-cap and provider unavailability is persisted as
+  `WAITING_RATE_LIMIT`; bounded repo-free readiness probes and the VM scheduler resume
+  the same review checkpoint without occupying a GitHub runner or blocking other work.
+- Provider unavailability does not relax the merge gate. AI-control-plane changes still
+  require trusted Issue authorization, the exact protected-file allowlist, green CI and
+  an independent Claude PASS for the exact target SHA before merge.
+- Recoverable automation outcomes must stay inside an autonomous loop: review failure
+  queues Codex repair, CI failure queues Codex repair on the same PR, PR movement queues
+  an exact-SHA replacement review, merge/API rejection retries the merge stage, provider
+  limits wait without consuming failure budget, interrupted workers are reaped and
+  requeued, and recoverable manager-side finalize/push/API failures retry within the
+  bounded circuit breaker instead of immediately becoming owner blockers. Parent-to-child
+  BUILD→REVIEW, REVIEW→REPAIR and stale-SHA→replacement-review handoffs are idempotent and
+  reconciled on later orchestrator cycles, so a restart or GitHub mirror/API failure cannot
+  strand otherwise recoverable work. Terminal `BLOCKED` is reserved for safety,
+  authorization, corrupted task identity/state, or an exhausted bounded failure circuit
+  breaker.
+- No pre-review `ASYNC_MERGE` path is permitted. Consequently a later asynchronous FAIL
+  cannot leave an unreviewed control-plane change active on `main` while awaiting a
+  forward repair.
+- This decision does not change live-trading permissions. `REAL_TRADING_ENABLED` remains
+  disabled, and trading, live, deployment, capital and credential paths remain excluded.

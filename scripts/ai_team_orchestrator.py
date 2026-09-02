@@ -93,6 +93,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "max_attempts": 3,
     "poll_seconds": 60,
     "default_rate_limit_retry_seconds": 3600,
+    "claude_readiness_probe_seconds": 300,
+    "claude_readiness_probe_timeout_seconds": 20,
+    "claude_readiness_probe_output_bytes": 4096,
     "review_timeout_seconds": 1200,
     "build_timeout_seconds": 1800,
     "trusted_author_associations": ["OWNER", "MEMBER", "COLLABORATOR"],
@@ -135,7 +138,9 @@ def parse_utc(value: str | None) -> dt.datetime | None:
     if not value:
         return None
     try:
-        return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        normalized = value[:-1] + "+00:00" if value.lower().endswith("z") else value
+        parsed = dt.datetime.fromisoformat(normalized)
+        return parsed.replace(tzinfo=dt.timezone.utc) if parsed.tzinfo is None else parsed
     except ValueError:
         return None
 
@@ -316,6 +321,8 @@ class Ledger:
               session_id TEXT,
               attempt INTEGER NOT NULL DEFAULT 0,
               retry_at TEXT,
+              limit_text TEXT,
+              systemd_unit TEXT,
               last_error TEXT,
               parent_id TEXT,
               created_at TEXT NOT NULL,
@@ -344,15 +351,21 @@ class Ledger:
             );
             """
         )
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(tasks)")}
+        for name in ("limit_text", "systemd_unit"):
+            if name not in columns:
+                self.db.execute(f"ALTER TABLE tasks ADD COLUMN {name} TEXT")
         self.db.commit()
 
-    def recover_interrupted(self) -> None:
+    def recover_interrupted(self) -> list[dict[str, Any]]:
         now = utcnow()
+        rows = [dict(row) for row in self.db.execute("SELECT * FROM tasks WHERE status='RUNNING'")]
         self.db.execute(
             """
             UPDATE tasks
                SET status='RETRY',
                    retry_at=?,
+                   systemd_unit=NULL,
                    last_error=COALESCE(last_error,'orchestrator restarted during task'),
                    updated_at=?
              WHERE status='RUNNING'
@@ -360,6 +373,7 @@ class Ledger:
             (now, now),
         )
         self.db.commit()
+        return rows
 
     def create_task(self, **kw: Any) -> str:
         task_id = kw.get("id") or uuid.uuid4().hex[:16]
@@ -381,6 +395,8 @@ class Ledger:
             "session_id": kw.get("session_id"),
             "attempt": int(kw.get("attempt", 0)),
             "retry_at": kw.get("retry_at"),
+            "limit_text": kw.get("limit_text"),
+            "systemd_unit": kw.get("systemd_unit"),
             "last_error": kw.get("last_error"),
             "parent_id": kw.get("parent_id"),
             "created_at": now,
@@ -411,6 +427,43 @@ class Ledger:
             [*kw.values(), task_id],
         )
         self.db.commit()
+
+    def child(
+        self, parent_id: str, task_type: str, target_sha: str | None = None
+    ) -> sqlite3.Row | None:
+        sql = "SELECT * FROM tasks WHERE parent_id=? AND task_type=?"
+        params: list[Any] = [parent_id, task_type]
+        if target_sha is not None:
+            sql += " AND target_sha=?"
+            params.append(target_sha)
+        sql += " ORDER BY created_at LIMIT 1"
+        return self.db.execute(sql, params).fetchone()
+
+    def handoff_candidates(self) -> list[sqlite3.Row]:
+        return self.db.execute(
+            """
+            SELECT * FROM tasks
+             WHERE (
+                    status='DONE'
+                AND task_type IN ('BUILD','REPAIR')
+                AND pr_number IS NOT NULL
+                AND target_sha IS NOT NULL
+             ) OR (
+                    status='DONE'
+                AND task_type='REVIEW'
+                AND last_error IN ('review FAIL','CI failure queued for autonomous repair')
+             ) OR (
+                    status='STALE'
+                AND task_type='REVIEW'
+                AND (
+                       last_error LIKE 'PR moved to %'
+                    OR last_error='PR changed during review'
+                )
+             )
+             ORDER BY updated_at
+             LIMIT 50
+            """
+        ).fetchall()
 
     def due(self) -> sqlite3.Row | None:
         now = utcnow()
@@ -802,18 +855,46 @@ def parse_claude_output(text: str) -> tuple[str | None, dict[str, int], str]:
 
 def rate_limit_info(text: str, default_seconds: int) -> tuple[bool, str | None]:
     low = text.lower()
-    phrases = ("rate limit", "usage limit", "quota exceeded", "too many requests", "limit reached")
-    if not any(p in low for p in phrases):
+    phrases = (
+        "rate limit", "usage limit", "quota exceeded", "too many requests",
+        "limit reached", "you've hit your limit", "you’ve hit your limit",
+        "weighted token", "weighted-token", "usage denied", "capacity unavailable",
+        "provider unavailable", "status 429", "http 429", "status code 429",
+    )
+    if not any(p in low for p in phrases) and not re.search(r"\b429\b", low):
         return False, None
     now = dt.datetime.now(dt.timezone.utc)
-    m = re.search(r"(?:try again|reset(?:s)?)(?: in)?\s+(\d+)\s*(minute|hour|second)s?", low)
+    m = re.search(
+        r"(?:try again|reset(?:s)?)(?:\s+in)?\s+(\d+(?:\.\d+)?)\s*"
+        r"(second|minute|hour|day)s?", low,
+    )
     if m:
-        n = int(m.group(1))
-        mult = {"second": 1, "minute": 60, "hour": 3600}[m.group(2)]
+        n = float(m.group(1))
+        mult = {"second": 1, "minute": 60, "hour": 3600, "day": 86400}[m.group(2)]
         when = now + dt.timedelta(seconds=n * mult + 30)
     else:
-        when = now + dt.timedelta(seconds=default_seconds)
+        iso = re.search(
+            r"(?:reset(?:s)?(?: at)?|retry(?:[_ -]?after)?(?: at)?)\s*[:=]?\s*"
+            r"(\d{4}-\d\d-\d\d[t ]\d\d:\d\d(?::\d\d)?(?:z|[+-]\d\d:?\d\d)?)",
+            low,
+        )
+        clock = re.search(r"reset(?:s)?(?:\s+at)?\s+(\d{1,2})(?::(\d\d))?\s*(am|pm)\b", low)
+        parsed = parse_utc(iso.group(1).replace(" ", "T")) if iso else None
+        if parsed:
+            when = parsed.astimezone(dt.timezone.utc)
+        elif clock:
+            hour = int(clock.group(1)) % 12 + (12 if clock.group(3) == "pm" else 0)
+            when = now.replace(hour=hour, minute=int(clock.group(2) or 0), second=0, microsecond=0)
+            if when <= now:
+                when += dt.timedelta(days=1)
+        else:
+            when = now + dt.timedelta(seconds=default_seconds)
     return True, when.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def bounded_limit_text(text: str) -> str:
+    """Persist enough provider context to diagnose a wait, without secrets/noise."""
+    return re.sub(r"\s+", " ", bounded_redacted(text, 1200)).strip()[-1200:]
 
 
 def extract_review(result: str, target_sha: str) -> tuple[str, list[str], str]:
@@ -1009,8 +1090,68 @@ class Orchestrator:
             return True
         return False
 
+    def reconcile_handoffs(self) -> None:
+        """Recover a child task if a restart/API failure interrupted a handoff."""
+        for row in self.ledger.handoff_candidates():
+            try:
+                if row["task_type"] in {"BUILD", "REPAIR"}:
+                    if not self.ledger.child(str(row["id"]), "REVIEW"):
+                        self.enqueue_review(
+                            row, int(row["pr_number"]), str(row["target_sha"])
+                        )
+                        self.runtime.event(
+                            "HANDOFF_RECOVERED",
+                            assignment_id=row["id"],
+                            issue=row["issue_number"],
+                            pr=row["pr_number"],
+                            child_type="REVIEW",
+                        )
+                elif row["status"] == "DONE":
+                    if not self.ledger.child(str(row["id"]), "REPAIR"):
+                        blockers = json.loads(row["blockers_json"] or "[]")
+                        self.enqueue_repair(row, blockers)
+                        self.runtime.event(
+                            "HANDOFF_RECOVERED",
+                            assignment_id=row["id"],
+                            issue=row["issue_number"],
+                            pr=row["pr_number"],
+                            child_type="REPAIR",
+                        )
+                elif row["status"] == "STALE" and row["pr_number"]:
+                    pr = self.gh.pr(int(row["pr_number"]))
+                    if str(pr.get("state") or "open").lower() != "open":
+                        continue
+                    current_sha = str(pr["head"]["sha"])
+                    if current_sha == str(row["target_sha"]):
+                        continue
+                    if not self.ledger.child(str(row["id"]), "REVIEW", current_sha):
+                        self.enqueue_replacement_review(row, current_sha)
+                        self.runtime.event(
+                            "HANDOFF_RECOVERED",
+                            assignment_id=row["id"],
+                            issue=row["issue_number"],
+                            pr=row["pr_number"],
+                            child_type="REVIEW",
+                            target_sha=current_sha,
+                        )
+            except Exception as exc:
+                self.runtime.event(
+                    "HANDOFF_RECOVERY_RETRY",
+                    assignment_id=row["id"],
+                    issue=row["issue_number"],
+                    pr=row["pr_number"],
+                    error=str(exc),
+                )
+
     def cycle(self) -> None:
-        self.ledger.recover_interrupted()
+        for stale in self.ledger.recover_interrupted():
+            self.reap_stale_child(stale)
+            self.runtime.event(
+                "STALE_RUN_REQUEUED", assignment_id=stale["id"],
+                issue=stale["issue_number"], pr=stale["pr_number"],
+                target_sha=stale["target_sha"], session_id=stale["session_id"],
+            )
+        self.reconcile_handoffs()
         self.sync_runtime_checkpoint()
         task = self.ledger.due()
         if task is None:
@@ -1021,6 +1162,8 @@ class Orchestrator:
         try:
             if task["status"] == "WAITING_CI":
                 self.handle_ci(task)
+            elif task["status"] == "WAITING_RATE_LIMIT" and task["agent"] == "CLAUDE":
+                self.handle_claude_probe(task)
             elif task["task_type"] in {"BUILD", "REPAIR"}:
                 self.handle_codex(task)
             elif task["task_type"] == "REVIEW":
@@ -1029,6 +1172,82 @@ class Orchestrator:
                 self.block(task, f"unsupported task type {task['task_type']}")
         finally:
             self.sync_runtime_checkpoint()
+
+    def reap_stale_child(self, task: dict[str, Any] | sqlite3.Row) -> None:
+        unit = task["systemd_unit"]
+        if not unit or not re.fullmatch(
+            r"hl-ai-(?:claude|codex)(?:-probe)?-[A-Za-z0-9-]+", str(unit)
+        ):
+            return
+        run(["systemctl", "stop", str(unit)], timeout=15)
+
+    def handle_claude_probe(self, task: sqlite3.Row) -> None:
+        """Make a bounded, repo-free availability check; never spend an attempt."""
+        unit = f"hl-ai-claude-probe-{task['id'][:10]}-{int(time.time())}"
+        command = [
+            "/usr/bin/claude", "-p", "--model",
+            "opus" if task["model_class"] == "OPUS" else "sonnet",
+            "--output-format", "json", "--permission-mode", "dontAsk", "--max-turns", "1",
+        ]
+        full = model_sandbox_command(
+            unit=unit, user=CLAUDE_USER, home=CLAUDE_HOME,
+            workdir=STATE_ROOT / "orchestrator", command=command,
+        )
+        timeout = int(self.cfg["claude_readiness_probe_timeout_seconds"])
+        try:
+            cp = run(full, input_text="Reply with exactly CLAUDE_READY_OK", timeout=timeout)
+            combined = (cp.stdout + "\n" + cp.stderr)[
+                -int(self.cfg["claude_readiness_probe_output_bytes"]):
+            ]
+        except subprocess.TimeoutExpired as exc:
+            self.reap_stale_child({"systemd_unit": unit})
+            combined = str(exc)
+            cp = subprocess.CompletedProcess(full, 124, "", combined)
+        limited, parsed_retry = rate_limit_info(
+            combined, int(self.cfg["claude_readiness_probe_seconds"])
+        )
+        ready = cp.returncode == 0 and "CLAUDE_READY_OK" in combined
+        if ready:
+            self.ledger.update(
+                task["id"], status="PENDING", retry_at=utcnow(), last_error=None,
+                limit_text=None, systemd_unit=None,
+            )
+            self.runtime.event("CLAUDE_READINESS_PROBE_READY", assignment_id=task["id"])
+            return
+        detail = bounded_limit_text(combined) or f"probe rc={cp.returncode}"
+        if limited:
+            retry_at = parsed_retry or retry_at_after(
+                int(self.cfg["claude_readiness_probe_seconds"])
+            )
+            self.ledger.update(
+                task["id"], status="WAITING_RATE_LIMIT", retry_at=retry_at,
+                last_error="Claude provider still unavailable", limit_text=detail,
+                systemd_unit=None,
+            )
+            self.runtime.event(
+                "CLAUDE_READINESS_PROBE_WAITING", assignment_id=task["id"],
+                retry_after=retry_at, limit_text=detail, detected_limit=True,
+            )
+            return
+
+        next_attempt = int(task["attempt"]) + 1
+        self.ledger.update(
+            task["id"], attempt=next_attempt, limit_text=None, systemd_unit=None
+        )
+        current = self.ledger.get(task["id"])
+        error = (
+            f"Claude readiness probe ordinary failure rc={cp.returncode}: "
+            f"{detail[:800]}"
+        )
+        self.retry_or_block(current, error, session_id=task["session_id"])
+        updated = self.ledger.get(task["id"])
+        self.runtime.event(
+            "CLAUDE_READINESS_PROBE_FAILURE",
+            assignment_id=task["id"], issue=task["issue_number"],
+            pr=task["pr_number"], attempt=next_attempt,
+            status=updated["status"], retry_after=updated["retry_at"],
+            detail=detail[:800],
+        )
 
     def handle_codex(self, task: sqlite3.Row) -> None:
         issue = self.gh.issue(int(task["issue_number"]))
@@ -1044,12 +1263,15 @@ class Orchestrator:
             base_ref = "origin/main"
             branch = task["branch"] or f"codex/auto-{task['issue_number']}-{task['id'][:8]}"
         else:
-            if not task["pr_number"]:
-                self.block(task, "repair missing PR")
-                return
-            pr = self.gh.pr(int(task["pr_number"]))
-            branch = str(pr["head"]["ref"])
-            base_ref = branch
+            if task["pr_number"]:
+                pr = self.gh.pr(int(task["pr_number"]))
+                branch = str(pr["head"]["ref"])
+                base_ref = branch
+            else:
+                # A failed audit after async merge repairs/rolls back from current main
+                # in a fresh PR; the already-merged PR cannot be reused.
+                base_ref = "origin/main"
+                branch = task["branch"] or f"codex/repair-{task['issue_number']}-{task['id'][:8]}"
         workdir = prepare_checkout(
             user=CODEX_USER,
             home=CODEX_HOME,
@@ -1074,6 +1296,7 @@ class Orchestrator:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         run_id = self.ledger.open_run(task, log_path)
         unit = f"hl-ai-codex-{task['id'][:10]}-{int(time.time())}"
+        self.ledger.update(task["id"], systemd_unit=unit)
         self.runtime.run_started(run_id, task, prompt=prompt, systemd_unit=unit)
         self.sync_runtime_checkpoint()
         try:
@@ -1119,12 +1342,25 @@ class Orchestrator:
         )
         if cp.returncode != 0:
             if limited:
+                limit_text = bounded_limit_text(combined)
                 self.ledger.update(
                     task["id"],
                     status="WAITING_RATE_LIMIT",
                     retry_at=retry_at,
                     session_id=session_id,
+                    attempt=max(0, int(task["attempt"]) - 1),
+                    limit_text=limit_text,
+                    systemd_unit=None,
                     last_error="Codex rate/usage limit",
+                )
+                self.runtime.event(
+                    "CODEX_WAITING_RATE_LIMIT",
+                    assignment_id=task["id"],
+                    issue=task["issue_number"],
+                    pr=task["pr_number"],
+                    session_id=session_id,
+                    retry_after=retry_at,
+                    limit_text=limit_text,
                 )
                 self.finish_runtime_run(
                     run_id,
@@ -1161,6 +1397,7 @@ class Orchestrator:
                 retry_at=retry_at,
                 session_id=session_id,
                 last_error="TEST_INJECTED_CODEX_SESSION_END",
+                systemd_unit=None,
             )
             self.runtime.event(
                 "TEST_CODEX_SESSION_INTERRUPTED",
@@ -1186,7 +1423,7 @@ class Orchestrator:
             files, _ = validate_changes(self.cfg, workdir, base_sha)
             self.commit_and_push(workdir, task, branch)
             new_sha = git_worktree(workdir, "rev-parse", "HEAD", check=True).stdout.strip()
-            if task["task_type"] == "BUILD":
+            if task["task_type"] == "BUILD" or not task["pr_number"]:
                 pr = self.create_pr(issue, task, branch, new_sha, files)
                 pr_number = int(pr["number"])
             else:
@@ -1199,6 +1436,7 @@ class Orchestrator:
                 session_id=session_id,
                 retry_at=None,
                 last_error=None,
+                systemd_unit=None,
             )
             self.enqueue_review(task, pr_number, new_sha)
             self.finish_runtime_run(
@@ -1213,7 +1451,34 @@ class Orchestrator:
                 status="DONE",
             )
         except Exception as exc:
-            self.block(self.ledger.get(task["id"]), str(exc))
+            error = str(exc)
+            current = self.ledger.get(task["id"])
+            fail_closed_markers = (
+                "unsafe changed path",
+                "owner-sensitive live path",
+                "forbidden live-trading enablement",
+                "unsafe untracked symlink",
+                "untracked file too large for safety scan",
+            )
+            if any(marker in error for marker in fail_closed_markers):
+                self.block(current, error)
+            else:
+                self.retry_or_block(
+                    current,
+                    f"Codex postprocess/finalize failed: {error}",
+                    session_id=session_id,
+                )
+                updated = self.ledger.get(task["id"])
+                if updated["status"] != "BLOCKED":
+                    self.runtime.event(
+                        "CODEX_POSTPROCESS_RETRY_SCHEDULED",
+                        assignment_id=task["id"],
+                        issue=task["issue_number"],
+                        pr=task["pr_number"],
+                        retry_after=updated["retry_at"],
+                        error=error,
+                    )
+            updated = self.ledger.get(task["id"])
             self.finish_runtime_run(
                 run_id,
                 str(task["id"]),
@@ -1223,8 +1488,8 @@ class Orchestrator:
                 session_id=session_id,
                 usage=usage,
                 result=result,
-                error=str(exc),
-                status="BLOCKED",
+                error=error,
+                status=str(updated["status"]),
             )
 
     def invoke_codex(
@@ -1399,6 +1664,8 @@ TASK_CLASS={task["task_class"]}
         )
 
     def enqueue_review(self, parent: sqlite3.Row, pr_number: int, sha: str) -> None:
+        if self.ledger.child(str(parent["id"]), "REVIEW"):
+            return
         issue = self.gh.issue(int(parent["issue_number"]))
         _, escalation_reason = parse_task_class(str(issue.get("body") or ""))
         model = route_review(self.cfg, str(parent["task_class"]), escalation_reason)
@@ -1414,29 +1681,44 @@ TASK_CLASS={task["task_class"]}
             blockers=json.loads(parent["blockers_json"] or "[]"),
             parent_id=str(parent["id"]),
         )
-        self.gh.comment(
-            pr_number,
-            assignment_marker(
-                task_id=task_id,
-                agent="CLAUDE",
-                task_type="REVIEW",
-                model_class=model,
-                task_class=str(parent["task_class"]),
-                issue_number=int(parent["issue_number"]),
-                pr_number=pr_number,
-                target_sha=sha,
-                parent_id=str(parent["id"]),
-                previous_sha=parent["previous_sha"],
-                escalation_reason=escalation_reason,
-            ),
-        )
-        self.gh.add_labels(pr_number, [self.cfg["labels"]["waiting_review"]])
+        try:
+            self.gh.comment(
+                pr_number,
+                assignment_marker(
+                    task_id=task_id,
+                    agent="CLAUDE",
+                    task_type="REVIEW",
+                    model_class=model,
+                    task_class=str(parent["task_class"]),
+                    issue_number=int(parent["issue_number"]),
+                    pr_number=pr_number,
+                    target_sha=sha,
+                    parent_id=str(parent["id"]),
+                    previous_sha=parent["previous_sha"],
+                    escalation_reason=escalation_reason,
+                ),
+            )
+            self.gh.add_labels(pr_number, [self.cfg["labels"]["waiting_review"]])
+        except Exception as exc:
+            self.runtime.event(
+                "HANDOFF_MIRROR_FAILED", assignment_id=task_id,
+                issue=parent["issue_number"], pr=pr_number,
+                child_type="REVIEW", error=str(exc),
+            )
 
     def handle_review(self, task: sqlite3.Row) -> None:
         if not task["pr_number"] or not task["target_sha"]:
             self.block(task, "review missing PR/SHA")
             return
         pr = self.gh.pr(int(task["pr_number"]))
+        if str(pr.get("state") or "open").lower() != "open" and not pr.get("merged_at"):
+            self.ledger.update(task["id"], status="STALE", retry_at=None,
+                               last_error="PR is no longer open", systemd_unit=None)
+            self.runtime.event(
+                "OBSOLETE_REVIEW_DROPPED", assignment_id=task["id"], pr=task["pr_number"],
+                target_sha=task["target_sha"],
+            )
+            return
         current_sha = str(pr["head"]["sha"])
         target_sha = str(task["target_sha"])
         if current_sha != target_sha:
@@ -1490,11 +1772,13 @@ not run on re-review because previous_sha is then populated.
         log_path.parent.mkdir(parents=True, exist_ok=True)
         run_id = self.ledger.open_run(task, log_path)
         unit = f"hl-ai-claude-{task['id'][:10]}-{int(time.time())}"
+        self.ledger.update(task["id"], systemd_unit=unit)
         self.runtime.run_started(run_id, task, prompt=prompt, systemd_unit=unit)
         self.sync_runtime_checkpoint()
         try:
             cp = self.invoke_claude(task, workdir, prompt, unit)
         except subprocess.TimeoutExpired as exc:
+            self.reap_stale_child({"systemd_unit": unit})
             text = (exc.stdout or "") + "\n" + (exc.stderr or "")
             session_id, usage, result = parse_claude_output(text)
             log_path.write_text(bounded_redacted(text))
@@ -1522,8 +1806,9 @@ not run on re-review because previous_sha is then populated.
         combined = cp.stdout + ("\n" + cp.stderr if cp.stderr else "")
         log_path.write_text(bounded_redacted(combined))
         session_id, usage, result = parse_claude_output(cp.stdout)
+        resume_session = session_id or task["session_id"]
         limited, retry_at = rate_limit_info(
-            combined, int(self.cfg["default_rate_limit_retry_seconds"])
+            combined, int(self.cfg["claude_readiness_probe_seconds"])
         )
         self.ledger.close_run(
             run_id,
@@ -1533,27 +1818,26 @@ not run on re-review because previous_sha is then populated.
             result=result,
             error=None if cp.returncode == 0 else combined[-1500:],
         )
+        if limited:
+            self.ledger.update(
+                task["id"], status="WAITING_RATE_LIMIT", retry_at=retry_at,
+                session_id=resume_session, attempt=max(0, int(task["attempt"]) - 1),
+                limit_text=bounded_limit_text(combined), systemd_unit=None,
+                last_error="Claude rate/usage limit",
+            )
+            self.runtime.event(
+                "CLAUDE_WAITING_RATE_LIMIT", assignment_id=task["id"],
+                issue=task["issue_number"], pr=task["pr_number"], target_sha=target_sha,
+                session_id=resume_session, retry_after=retry_at,
+                limit_text=bounded_limit_text(combined),
+            )
+            self.finish_runtime_run(
+                run_id, str(task["id"]), stdout=cp.stdout, stderr=cp.stderr,
+                exit_code=cp.returncode, session_id=resume_session, usage=usage,
+                result=result, error="Claude rate/usage limit",
+            )
+            return
         if cp.returncode != 0:
-            if limited:
-                self.ledger.update(
-                    task["id"],
-                    status="WAITING_RATE_LIMIT",
-                    retry_at=retry_at,
-                    session_id=session_id,
-                    last_error="Claude rate/usage limit",
-                )
-                self.finish_runtime_run(
-                    run_id,
-                    str(task["id"]),
-                    stdout=cp.stdout,
-                    stderr=cp.stderr,
-                    exit_code=cp.returncode,
-                    session_id=session_id,
-                    usage=usage,
-                    result=result,
-                    error="Claude rate/usage limit",
-                )
-                return
             self.retry_or_block(task, f"Claude failed rc={cp.returncode}", session_id=session_id)
             self.finish_runtime_run(
                 run_id,
@@ -1575,7 +1859,9 @@ not run on re-review because previous_sha is then populated.
                 task["id"],
                 status="WAITING_RATE_LIMIT",
                 retry_at=retry_at,
-                session_id=session_id,
+                session_id=resume_session,
+                attempt=max(0, int(task["attempt"]) - 1),
+                systemd_unit=None,
                 last_error="TEST_INJECTED_CLAUDE_RATE_LIMIT",
             )
             self.runtime.event(
@@ -1618,7 +1904,10 @@ not run on re-review because previous_sha is then populated.
             return
         after = self.gh.pr(int(task["pr_number"]))
         if str(after["head"]["sha"]) != target_sha:
-            self.ledger.update(task["id"], status="STALE", last_error="PR changed during review")
+            self.ledger.update(
+                task["id"], status="STALE", last_error="PR changed during review",
+                systemd_unit=None,
+            )
             self.enqueue_replacement_review(task, str(after["head"]["sha"]))
             self.finish_runtime_run(
                 run_id,
@@ -1654,6 +1943,7 @@ not run on re-review because previous_sha is then populated.
                 blockers_json=json.dumps(blockers),
                 session_id=session_id,
                 last_error="review FAIL",
+                systemd_unit=None,
             )
             self.enqueue_repair(task, blockers)
             self.finish_runtime_run(
@@ -1676,6 +1966,7 @@ not run on re-review because previous_sha is then populated.
                 session_id=session_id,
                 retry_at=utcnow(),
                 last_error=None,
+                systemd_unit=None,
             )
             self.finish_runtime_run(
                 run_id,
@@ -1792,6 +2083,8 @@ The reviewed SHA must be exactly the target SHA.
 """
 
     def enqueue_repair(self, review: sqlite3.Row, blockers: list[str]) -> None:
+        if self.ledger.child(str(review["id"]), "REPAIR"):
+            return
         task_id = self.ledger.create_task(
             issue_number=int(review["issue_number"]),
             pr_number=int(review["pr_number"]),
@@ -1804,23 +2097,32 @@ The reviewed SHA must be exactly the target SHA.
             blockers=blockers,
             parent_id=str(review["id"]),
         )
-        self.gh.comment(
-            int(review["pr_number"]),
-            assignment_marker(
-                task_id=task_id,
-                agent="CODEX_CHATGPT",
-                task_type="REPAIR",
-                model_class="CODEX_DEFAULT",
-                task_class=str(review["task_class"]),
-                issue_number=int(review["issue_number"]),
-                pr_number=int(review["pr_number"]),
-                target_sha=str(review["target_sha"]),
-                parent_id=str(review["id"]),
-                previous_sha=str(review["target_sha"]),
-            ),
-        )
+        try:
+            self.gh.comment(
+                int(review["pr_number"]),
+                assignment_marker(
+                    task_id=task_id,
+                    agent="CODEX_CHATGPT",
+                    task_type="REPAIR",
+                    model_class="CODEX_DEFAULT",
+                    task_class=str(review["task_class"]),
+                    issue_number=int(review["issue_number"]),
+                    pr_number=int(review["pr_number"]),
+                    target_sha=str(review["target_sha"]),
+                    parent_id=str(review["id"]),
+                    previous_sha=str(review["target_sha"]),
+                ),
+            )
+        except Exception as exc:
+            self.runtime.event(
+                "HANDOFF_MIRROR_FAILED", assignment_id=task_id,
+                issue=review["issue_number"], pr=review["pr_number"],
+                child_type="REPAIR", error=str(exc),
+            )
 
     def enqueue_replacement_review(self, old: sqlite3.Row, current_sha: str) -> None:
+        if self.ledger.child(str(old["id"]), "REVIEW", current_sha):
+            return
         task_id = self.ledger.create_task(
             issue_number=int(old["issue_number"]),
             pr_number=int(old["pr_number"]),
@@ -1833,21 +2135,28 @@ The reviewed SHA must be exactly the target SHA.
             blockers=json.loads(old["blockers_json"] or "[]"),
             parent_id=str(old["id"]),
         )
-        self.gh.comment(
-            int(old["pr_number"]),
-            assignment_marker(
-                task_id=task_id,
-                agent="CLAUDE",
-                task_type="REVIEW",
-                model_class=str(old["model_class"]),
-                task_class=str(old["task_class"]),
-                issue_number=int(old["issue_number"]),
-                pr_number=int(old["pr_number"]),
-                target_sha=current_sha,
-                parent_id=str(old["id"]),
-                previous_sha=str(old["target_sha"]),
-            ),
-        )
+        try:
+            self.gh.comment(
+                int(old["pr_number"]),
+                assignment_marker(
+                    task_id=task_id,
+                    agent="CLAUDE",
+                    task_type="REVIEW",
+                    model_class=str(old["model_class"]),
+                    task_class=str(old["task_class"]),
+                    issue_number=int(old["issue_number"]),
+                    pr_number=int(old["pr_number"]),
+                    target_sha=current_sha,
+                    parent_id=str(old["id"]),
+                    previous_sha=str(old["target_sha"]),
+                ),
+            )
+        except Exception as exc:
+            self.runtime.event(
+                "HANDOFF_MIRROR_FAILED", assignment_id=task_id,
+                issue=old["issue_number"], pr=old["pr_number"],
+                child_type="REVIEW", target_sha=current_sha, error=str(exc),
+            )
 
     def handle_ci(self, task: sqlite3.Row) -> None:
         if not task["pr_number"] or not task["target_sha"]:
@@ -1872,16 +2181,33 @@ The reviewed SHA must be exactly the target SHA.
             )
             return
         if state == "FAIL":
-            self.block(task, f"CI failed after review PASS: {detail}")
+            # CI failures are repairable code/test defects, not owner blockers.
+            blockers = [f"CI failed at {target}: {detail}"]
+            self.ledger.update(
+                task["id"],
+                status="DONE",
+                blockers_json=json.dumps(blockers),
+                retry_at=None,
+                last_error="CI failure queued for autonomous repair",
+            )
+            self.runtime.event(
+                "CI_REPAIR_ENQUEUED",
+                assignment_id=task["id"],
+                issue=task["issue_number"],
+                pr=task["pr_number"],
+                target_sha=target,
+                detail=detail,
+            )
+            self.enqueue_repair(task, blockers)
             return
         files = self.gh.changed_files(int(task["pr_number"]))
+        issue = self.gh.issue(int(task["issue_number"]))
         sensitive = any(
             name.startswith(prefix)
             for name in files
             for prefix in self.cfg["safety"]["no_auto_merge_path_prefixes"]
         )
         if sensitive:
-            issue = self.gh.issue(int(task["issue_number"]))
             if str(issue.get("author_association") or "") not in self.trusted:
                 self.block(task, "protected AI-control-plane change lost trusted issue author")
                 return
@@ -1910,7 +2236,7 @@ The reviewed SHA must be exactly the target SHA.
                 int(task["pr_number"]),
                 "AI_TEAM_PROTECTED_GATE=PASS\n"
                 "Trusted Issue authorization + independent exact-SHA Claude PASS + CI green; "
-                "all protected files are inside the narrow AI control-plane allowlist.",
+                + "all protected files are inside the narrow AI control-plane allowlist.",
             )
         if str(task["task_class"]) not in self.cfg["auto_merge_task_classes"]:
             self.ledger.update(
@@ -1927,7 +2253,22 @@ The reviewed SHA must be exactly the target SHA.
             return
         merged = self.gh.merge(int(task["pr_number"]), target)
         if not merged or not merged.get("merged"):
-            self.block(task, f"merge rejected: {merged}")
+            # Merge/API rejection can be transient; retry this stage only.
+            retry_at = retry_at_after(max(60, int(self.cfg["poll_seconds"])))
+            self.ledger.update(
+                task["id"],
+                status="WAITING_CI",
+                retry_at=retry_at,
+                last_error=f"merge rejected; automatic retry scheduled: {merged}",
+            )
+            self.runtime.event(
+                "MERGE_RETRY_SCHEDULED",
+                assignment_id=task["id"],
+                issue=task["issue_number"],
+                pr=task["pr_number"],
+                target_sha=target,
+                retry_after=retry_at,
+            )
             return
         self.ledger.update(task["id"], status="DONE", retry_at=None, last_error=None)
         self.gh.remove_label(int(task["pr_number"]), self.cfg["labels"]["waiting_review"])
@@ -1935,8 +2276,8 @@ The reviewed SHA must be exactly the target SHA.
         self.gh.remove_label(int(task["issue_number"]), self.cfg["labels"]["pending"])
         self.gh.comment(
             int(task["issue_number"]),
-            f"AI_TEAM_AUTONOMOUS_MERGE=YES\nPR={task['pr_number']}\nREVIEWED_SHA={target}\n"
-            f"CI=PASS\nMERGED_AT={utcnow()}",
+            f"AI_TEAM_AUTONOMOUS_MERGE=YES\nPR={task['pr_number']}\nTARGET_SHA={target}\n"
+            f"CI=PASS\nASYNC_CLAUDE_AUDIT=NO\nMERGED_AT={utcnow()}",
         )
 
     def retry_or_block(
@@ -1957,11 +2298,15 @@ The reviewed SHA must be exactly the target SHA.
             status="WAITING_RATE_LIMIT" if rate_limited else "RETRY",
             retry_at=retry.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
             session_id=session_id or task["session_id"],
+            systemd_unit=None,
             last_error=error,
         )
 
     def block(self, task: sqlite3.Row, error: str) -> None:
-        self.ledger.update(task["id"], status="BLOCKED", retry_at=None, last_error=error[:1500])
+        self.ledger.update(
+            task["id"], status="BLOCKED", retry_at=None,
+            last_error=error[:1500], systemd_unit=None,
+        )
         number = int(task["pr_number"] or task["issue_number"])
         try:
             self.gh.add_labels(number, [self.cfg["labels"]["blocked"]])
