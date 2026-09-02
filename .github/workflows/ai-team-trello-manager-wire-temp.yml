@@ -2,7 +2,7 @@ name: ai-team-trello-manager-wire-temp
 
 on:
   push:
-    branches: [trigger/151-protected-lint-fix]
+    branches: [trigger/pr153-continuity-repair2]
 
 permissions:
   contents: write
@@ -10,67 +10,137 @@ permissions:
 jobs:
   fix:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: manager/151-protected-self-change
+          ref: codex/auto-151-5cc33cdb
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Fix only known bootstrap lint and push
+      - name: Repair automation continuity and lint
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           test "$GITHUB_REPOSITORY" = "aliezzat4321/hyperliquid-copy-engine"
-          test "$(git branch --show-current)" = "manager/151-protected-self-change"
+          test "$(git branch --show-current)" = "codex/auto-151-5cc33cdb"
           python3 - <<'PY'
           from pathlib import Path
+
           p = Path('scripts/ai_team_orchestrator.py')
           text = p.read_text(encoding='utf-8')
-          text = text.replace(
-              '                if any(name.startswith(prefix) for prefix in self.cfg["safety"]["no_auto_merge_path_prefixes"])\n',
-              '                if any(\n'
-              '                    name.startswith(prefix)\n'
-              '                    for prefix in self.cfg["safety"]["no_auto_merge_path_prefixes"]\n'
-              '                )\n',
+
+          old = (
+              '        if state == "FAIL":\n'
+              '            self.block(task, f"CI failed after review PASS: {detail}")\n'
+              '            return\n'
           )
-          text = text.replace(
-              '            if not all(name in AUTO_APPLY_CONTROL_PLANE_PATHS for name in protected_files):\n'
-              '                self.block(task, "protected change contains path outside AI control-plane allowlist")\n',
-              '            if not all(\n'
-              '                name in AUTO_APPLY_CONTROL_PLANE_PATHS for name in protected_files\n'
-              '            ):\n'
-              '                self.block(\n'
-              '                    task, "protected change contains path outside AI control-plane allowlist"\n'
-              '                )\n',
+          new = (
+              '        if state == "FAIL":\n'
+              '            # CI failures are repairable code/test defects, not owner blockers.\n'
+              '            blockers = [f"CI failed at {target}: {detail}"]\n'
+              '            self.ledger.update(\n'
+              '                task["id"],\n'
+              '                status="DONE",\n'
+              '                blockers_json=json.dumps(blockers),\n'
+              '                retry_at=None,\n'
+              '                last_error="CI failure queued for autonomous repair",\n'
+              '            )\n'
+              '            self.runtime.event(\n'
+              '                "CI_REPAIR_ENQUEUED",\n'
+              '                assignment_id=task["id"],\n'
+              '                issue=task["issue_number"],\n'
+              '                pr=task["pr_number"],\n'
+              '                target_sha=target,\n'
+              '                detail=detail,\n'
+              '            )\n'
+              '            self.enqueue_repair(task, blockers)\n'
+              '            return\n'
           )
-          text = text.replace(
-              '            if not acceptance_flag(str(issue.get("body") or ""), "AI_TEAM_PROTECTED_CHANGE"):\n'
-              '                self.block(task, "protected AI-control-plane change lacks AI_TEAM_PROTECTED_CHANGE=YES")\n',
-              '            if not acceptance_flag(\n'
-              '                str(issue.get("body") or ""), "AI_TEAM_PROTECTED_CHANGE"\n'
-              '            ):\n'
-              '                self.block(\n'
-              '                    task,\n'
-              '                    "protected AI-control-plane change lacks "\n'
-              '                    "AI_TEAM_PROTECTED_CHANGE=YES",\n'
-              '                )\n',
+          if old not in text:
+              raise SystemExit('expected CI failure dead-end not found')
+          text = text.replace(old, new, 1)
+
+          old = (
+              '        if not merged or not merged.get("merged"):\n'
+              '            self.block(task, f"merge rejected: {merged}")\n'
+              '            return\n'
           )
+          new = (
+              '        if not merged or not merged.get("merged"):\n'
+              '            # Merge/API rejection can be transient; retry this stage only.\n'
+              '            retry_at = retry_at_after(max(60, int(self.cfg["poll_seconds"])))\n'
+              '            self.ledger.update(\n'
+              '                task["id"],\n'
+              '                status="WAITING_CI",\n'
+              '                retry_at=retry_at,\n'
+              '                last_error=f"merge rejected; automatic retry scheduled: {merged}",\n'
+              '            )\n'
+              '            self.runtime.event(\n'
+              '                "MERGE_RETRY_SCHEDULED",\n'
+              '                assignment_id=task["id"],\n'
+              '                issue=task["issue_number"],\n'
+              '                pr=task["pr_number"],\n'
+              '                target_sha=target,\n'
+              '                retry_after=retry_at,\n'
+              '            )\n'
+              '            return\n'
+          )
+          if old not in text:
+              raise SystemExit('expected merge rejection dead-end not found')
+          text = text.replace(old, new, 1)
+
+          long_line = (
+              '        if not unit or not re.fullmatch(r"hl-ai-(?:claude|codex)(?:-probe)?-'
+              '[A-Za-z0-9-]+", str(unit)):\n'
+          )
+          if long_line in text:
+              text = text.replace(
+                  long_line,
+                  '        if not unit or not re.fullmatch(\n'
+                  '            r"hl-ai-(?:claude|codex)(?:-probe)?-[A-Za-z0-9-]+", str(unit)\n'
+                  '        ):\n',
+                  1,
+              )
           p.write_text(text, encoding='utf-8')
+
+          tests = Path('tests/test_ai_team_orchestrator.py')
+          test_text = tests.read_text(encoding='utf-8')
+          if 'def test_recoverable_automation_paths_do_not_terminally_block()' not in test_text:
+              test_text += (
+                  '\n\n\n'
+                  'def test_recoverable_automation_paths_do_not_terminally_block():\n'
+                  '    source = MODULE_PATH.read_text()\n'
+                  '    handle_ci = source[source.index("    def handle_ci("):'
+                  'source.index("    def retry_or_block(")]\n'
+                  '    assert "CI_REPAIR_ENQUEUED" in handle_ci\n'
+                  '    assert "self.enqueue_repair(task, blockers)" in handle_ci\n'
+                  '    assert "CI failed after review PASS" not in handle_ci\n'
+                  '    assert "MERGE_RETRY_SCHEDULED" in handle_ci\n'
+                  '    assert "merge rejected; automatic retry scheduled" in handle_ci\n'
+                  '\n\n'
+                  'def test_continuity_loops_cover_review_pr_move_limits_and_restart():\n'
+                  '    source = MODULE_PATH.read_text()\n'
+                  '    assert "self.enqueue_repair(task, blockers)" in source\n'
+                  '    assert "self.enqueue_replacement_review(task, current_sha)" in source\n'
+                  '    assert "WAITING_RATE_LIMIT" in source\n'
+                  '    assert "STALE_RUN_REQUEUED" in source\n'
+              )
+              tests.write_text(test_text, encoding='utf-8')
           PY
-          python3 -m pip install 'ruff<1,>=0.9' >/dev/null
+          python3 -m pip install 'ruff<1,>=0.9' 'pytest<9,>=8.3' >/dev/null
+          ruff check --fix scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
           ruff check scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
-          python3 -m py_compile scripts/ai_team_orchestrator.py
+          pytest -q tests/test_ai_team_orchestrator.py
           git config user.name 'AI Team Control'
           git config user.email 'ai-team-control@localhost'
-          git add scripts/ai_team_orchestrator.py
+          git add scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
           git diff --cached --check
-          git commit -m 'Fix protected control-plane bootstrap lint'
+          git commit -m 'Fix autonomous CI repair and merge retry loops'
           gh auth setup-git
-          git push origin HEAD:manager/151-protected-self-change
-          echo 'BOOTSTRAP_LINT_FIX_PUSHED=YES'
+          git push origin HEAD:codex/auto-151-5cc33cdb
+          echo 'PR153_CONTINUITY_REPAIR_PUSHED=YES'
           echo 'REAL_TRADING_TOUCHED=NO'
           echo 'POLYMARKET_TOUCHED=NO'
