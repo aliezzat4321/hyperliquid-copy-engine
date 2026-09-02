@@ -9,7 +9,7 @@ import argparse
 import json
 import shutil
 import subprocess
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 
@@ -133,7 +133,7 @@ def decide(
     return {
         "schema_version": 1,
         "mode": "READ_ONLY_DECISION",
-        "observed_at": now.astimezone(timezone.utc).isoformat(),
+        "observed_at": now.astimezone(UTC).isoformat(),
         "mount": str(mount),
         "used_bytes": usage.used,
         "available_bytes": usage.free,
@@ -167,7 +167,7 @@ def main() -> None:
         policy,
         _load(args.previous) if args.previous else None,
         mount=mount,
-        now=datetime.now(timezone.utc),
+        now=datetime.now(UTC),
         allow_baseline_without_previous=args.allow_baseline_without_previous,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
