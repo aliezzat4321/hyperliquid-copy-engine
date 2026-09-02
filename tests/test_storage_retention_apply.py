@@ -247,6 +247,14 @@ def test_rejects_delete_pool_over_reviewed_budget(tmp_path: Path) -> None:
         _validate(manifest, market, tmp_path)
 
 
+def test_accepts_reviewed_budget_larger_than_six_gib(tmp_path: Path) -> None:
+    market, candidate = _layout(tmp_path)
+    manifest = _manifest(candidate)
+    manifest["deletion_budget_bytes"] = 12 * 1024**3
+    rows = _validate(manifest, market, tmp_path)
+    assert len(rows) == 1
+
+
 def test_apply_refuses_unreachable_target_before_deletion(tmp_path, monkeypatch):
     market, candidate_path = _layout(tmp_path)
     candidate = MODULE.Candidate(

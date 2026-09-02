@@ -16,13 +16,24 @@ independent Claude Opus review is required before either apply step.
    review of the resulting manifest, then apply only that manifest with
    `scripts/storage_retention_apply.py`. Its target defaults to 79% and must remain below
    80%. Before deletion it verifies the reviewed pool can reach the target.
-4. Run `scripts/storage_controller.py` for a baseline. The manager-owned hourly job must
+4. Run `scripts/storage_controller.py --allow-baseline-without-previous` exactly once for
+   a baseline. The manager-owned hourly job must
    pass the preceding successful observation and stop every name in `controlled_writers`
    on `STOP_ALL_MATERIAL_WRITERS`. Resume only after a later `ALLOW`. Deployment and
    service changes are owner-sensitive and deliberately excluded from this checkout.
    The manager must retire the incumbent guard's independent capture-resume path.
 5. Restart capture/research/profitability loops through manager controls and collect
    successive controller observations across at least the configured 24-hour window.
+
+## Required manager-owned workflow correction
+
+The protected `.github/workflows/hyperliquid-emergency-storage-reclaim.yml` still passes
+`--target-used-pct 92` to both retention apply invocations and passes a 6 GiB audit cap.
+Before running it, the manager must change both apply invocations to
+`--target-used-pct 79` and set `--max-delete-candidate-gib` to the smallest reviewed value
+whose byte equivalent covers the audited deletion-candidate pool and the bytes required
+to reach 79%. The resulting workflow commit and manifest require exact-SHA independent
+Claude Opus review. The autonomous builder cannot edit this protected path.
 
 ## Closure evidence
 

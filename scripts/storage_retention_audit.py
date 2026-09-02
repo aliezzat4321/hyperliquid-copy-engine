@@ -121,8 +121,8 @@ def main() -> None:
 
     if args.recent_days < 3:
         raise SystemExit("SAFETY_FAIL at least 3 recent UTC days must remain full fidelity")
-    if not (0 < args.max_delete_candidate_gib <= 6.0):
-        raise SystemExit("SAFETY_FAIL emergency delete-candidate budget must be >0 and <=6 GiB")
+    if args.max_delete_candidate_gib <= 0:
+        raise SystemExit("SAFETY_FAIL emergency delete-candidate budget must be positive")
 
     root = args.hyperliquid_root
     market = root / "market-shadow"

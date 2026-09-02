@@ -69,7 +69,10 @@ def test_policy_fails_closed_for_ungoverned_fields(tmp_path):
     broken = policy()
     del broken["datasets"][0]["owner"]
     with pytest.raises(ValueError, match="missing owner"):
-        MODULE.decide(broken, None, mount=tmp_path, now=datetime.now(UTC))
+        MODULE.decide(
+            broken, None, mount=tmp_path, now=datetime.now(UTC),
+            allow_baseline_without_previous=True,
+        )
 
 
 def test_stale_previous_observation_fails_closed(tmp_path, monkeypatch):
@@ -87,7 +90,10 @@ def test_stale_previous_observation_fails_closed(tmp_path, monkeypatch):
 
 def test_missing_governed_dataset_fails_closed(tmp_path):
     with pytest.raises(FileNotFoundError, match="governed dataset path does not exist"):
-        MODULE.decide(policy(), None, mount=tmp_path, now=datetime.now(UTC))
+        MODULE.decide(
+            policy(), None, mount=tmp_path, now=datetime.now(UTC),
+            allow_baseline_without_previous=True,
+        )
 
 
 def test_previous_missing_governed_dataset_fails_closed(tmp_path, monkeypatch):
@@ -100,3 +106,22 @@ def test_previous_missing_governed_dataset_fails_closed(tmp_path, monkeypatch):
     }
     with pytest.raises(ValueError, match="previous observation missing governed dataset"):
         MODULE.decide(policy(), previous, mount=tmp_path, now=now)
+
+
+def test_missing_previous_requires_explicit_baseline_flag(tmp_path):
+    with pytest.raises(ValueError, match="previous observation is required"):
+        MODULE.decide(policy(), None, mount=tmp_path, now=datetime.now(UTC))
+
+
+def test_explicit_baseline_is_allowed(tmp_path, monkeypatch):
+    monkeypatch.setattr(MODULE, "_du", lambda _: 10)
+    monkeypatch.setattr(
+        MODULE.shutil, "disk_usage",
+        lambda _: MODULE.shutil._ntuple_diskusage(10_000, 8000, 2000),
+    )
+    result = MODULE.decide(
+        policy(), None, mount=tmp_path, now=datetime.now(UTC),
+        allow_baseline_without_previous=True,
+    )
+    assert result["action"] == "WARN"
+    assert result["aggregate_bytes_per_hour"] is None

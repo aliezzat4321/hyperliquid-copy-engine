@@ -14,7 +14,6 @@ from pathlib import Path
 UTC_TZ = timezone(timedelta(0))
 EXPECTED_MARKET_ROOT = Path("/mnt/HC_Volume_106576526/hyperliquid/market-shadow")
 EXPECTED_MOUNT = Path("/mnt/HC_Volume_106576526")
-GIB = 1024**3
 
 
 @dataclass(frozen=True)
@@ -164,8 +163,8 @@ def validate_manifest(
         raise ValueError("market_shadow.partitions must be a list")
 
     delete_budget_bytes = int(manifest.get("deletion_budget_bytes") or 0)
-    if not (0 < delete_budget_bytes <= 6 * GIB):
-        raise ValueError("manifest deletion budget must be >0 and <=6 GiB")
+    if delete_budget_bytes <= 0:
+        raise ValueError("manifest deletion budget must be positive")
 
     resolved_market = market_root.resolve(strict=True)
     candidates: list[Candidate] = []

@@ -26,7 +26,14 @@ def _load(path: Path) -> dict:
     return value
 
 
-def decide(policy: dict, previous: dict | None, *, mount: Path, now: datetime) -> dict:
+def decide(
+    policy: dict,
+    previous: dict | None,
+    *,
+    mount: Path,
+    now: datetime,
+    allow_baseline_without_previous: bool = False,
+) -> dict:
     required = {
         "schema_version", "warn_used_pct", "stop_used_pct", "resume_used_pct",
         "minimum_forecast_hours", "history_window_hours", "datasets",
@@ -45,6 +52,11 @@ def decide(policy: dict, previous: dict | None, *, mount: Path, now: datetime) -
     maximum_age_hours = float(policy["history_window_hours"])
     if maximum_age_hours <= 0:
         raise ValueError("history_window_hours must be positive")
+    if previous is None and not allow_baseline_without_previous:
+        raise ValueError(
+            "previous observation is required; pass the explicit baseline flag only "
+            "when creating the first observation"
+        )
 
     previous_rows = {row["name"]: row for row in (previous or {}).get("datasets", [])}
     previous_at = None
@@ -141,6 +153,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--policy", type=Path, default=Path("config/storage_policy.json"))
     parser.add_argument("--previous", type=Path)
+    parser.add_argument(
+        "--allow-baseline-without-previous",
+        action="store_true",
+        help="explicitly create the first observation without hysteresis history",
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--mount", type=Path)
     args = parser.parse_args()
@@ -151,6 +168,7 @@ def main() -> None:
         _load(args.previous) if args.previous else None,
         mount=mount,
         now=datetime.now(timezone.utc),
+        allow_baseline_without_previous=args.allow_baseline_without_previous,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.output.with_suffix(args.output.suffix + ".tmp")
