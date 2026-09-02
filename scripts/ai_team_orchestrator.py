@@ -1320,7 +1320,34 @@ class Orchestrator:
                 status="DONE",
             )
         except Exception as exc:
-            self.block(self.ledger.get(task["id"]), str(exc))
+            error = str(exc)
+            current = self.ledger.get(task["id"])
+            fail_closed_markers = (
+                "unsafe changed path",
+                "owner-sensitive live path",
+                "forbidden live-trading enablement",
+                "unsafe untracked symlink",
+                "untracked file too large for safety scan",
+            )
+            if any(marker in error for marker in fail_closed_markers):
+                self.block(current, error)
+            else:
+                self.retry_or_block(
+                    current,
+                    f"Codex postprocess/finalize failed: {error}",
+                    session_id=session_id,
+                )
+                updated = self.ledger.get(task["id"])
+                if updated["status"] != "BLOCKED":
+                    self.runtime.event(
+                        "CODEX_POSTPROCESS_RETRY_SCHEDULED",
+                        assignment_id=task["id"],
+                        issue=task["issue_number"],
+                        pr=task["pr_number"],
+                        retry_after=updated["retry_at"],
+                        error=error,
+                    )
+            updated = self.ledger.get(task["id"])
             self.finish_runtime_run(
                 run_id,
                 str(task["id"]),
@@ -1330,8 +1357,8 @@ class Orchestrator:
                 session_id=session_id,
                 usage=usage,
                 result=result,
-                error=str(exc),
-                status="BLOCKED",
+                error=error,
+                status=str(updated["status"]),
             )
 
     def invoke_codex(

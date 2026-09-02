@@ -494,3 +494,13 @@ def test_continuity_loops_cover_review_pr_move_limits_and_restart():
     assert "self.enqueue_replacement_review(task, current_sha)" in source
     assert "WAITING_RATE_LIMIT" in source
     assert "STALE_RUN_REQUEUED" in source
+
+
+
+def test_codex_postprocess_retries_recoverable_failures():
+    source = MODULE_PATH.read_text()
+    assert "CODEX_POSTPROCESS_RETRY_SCHEDULED" in source
+    assert "Codex postprocess/finalize failed" in source
+    assert "fail_closed_markers" in source
+    assert "owner-sensitive live path" in source
+    assert "forbidden live-trading enablement" in source
