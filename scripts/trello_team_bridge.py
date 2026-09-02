@@ -96,9 +96,11 @@ def load_state(path: Path) -> dict[str, Any]:
 def phase(event: dict[str, Any]) -> str:
     kind = str(event.get("event", "")).upper()
     status = str(event.get("status", "")).upper()
-    if kind in {"COMPLETED", "MERGED"} or status == "DONE":
+    # Worker/task completion is not issue completion.  Only events emitted after
+    # the canonical GitHub close + ai-team:done transition may project terminal.
+    if kind in {"COMPLETED", "ISSUE_COMPLETED", "PARENT_FINALIZED"}:
         return "DONE"
-    if kind in {"BLOCKED", "OWNER_ACTION", "AUTH_FAILURE"} or status in {"BLOCKED", "FAILED"}:
+    if kind in {"BLOCKED", "OWNER_ACTION", "AUTH_FAILURE"} or status == "BLOCKED":
         return "BLOCKED"
     review_events = {
         "PR_OPENED", "REVIEW_STARTED", "REVIEW_PASS", "REVIEW_FAIL",
@@ -108,7 +110,8 @@ def phase(event: dict[str, Any]) -> str:
         return "REVIEW_CI"
     active_events = {
         "ASSIGNED", "TASK_ASSIGNED", "BUILD_STARTED", "RESEARCH_STARTED",
-        "RUN_STARTED", "RETRY", "RATE_LIMIT",
+        "RUN_STARTED", "RUN_FINISHED", "BUILD_FINISHED", "REPAIR_FINISHED",
+        "RETRY", "RATE_LIMIT", "CI_REPAIR_ENQUEUED", "HANDOFF_RECOVERED",
     }
     if kind in active_events or status in {
         "PENDING", "RUNNING", "RETRY", "WAITING_RATE_LIMIT"
@@ -242,19 +245,36 @@ class Trello:
         raise RuntimeError("unreachable")
 
     def exact_issue_card(self, issue: int) -> str | None:
-        """Reuse the board's existing exact-issue card when local state was lost."""
+        """Return the canonical exact-issue card and remember synthetic duplicates."""
         rows = self.call(
             "GET", f"/boards/{BOARD_ID}/cards", {"fields": "id,name,desc", "filter": "open"}
         ) or []
-        title_marker = re.compile(rf"(?:^|\s)#{issue}(?:\s|$)")
+        title_marker = re.compile(rf"(?<!\d)#{issue}(?!\d)")
         issue_field = re.compile(rf"(?m)^Issue:\s*#{issue}(?:\s|$)")
-        matches = sorted(
-            str(row["id"])
-            for row in rows
+        url_marker = f"https://github.com/{REPOSITORY}/issues/{issue}"
+        matches = [
+            row for row in rows
             if title_marker.search(str(row.get("name", "")))
             or issue_field.search(str(row.get("desc", "")))
+            or url_marker in str(row.get("desc", ""))
+        ]
+        synthetic = re.compile(rf"^\[P\?\]\s+#{issue}\s+AI team task$")
+        canonical = sorted(
+            matches,
+            key=lambda row: (
+                bool(synthetic.fullmatch(str(row.get("name", "")).strip())),
+                str(row["id"]),
+            ),
         )
-        return matches[0] if matches else None
+        self._synthetic_duplicates = getattr(self, "_synthetic_duplicates", {})
+        self._card_names = getattr(self, "_card_names", {})
+        self._card_names.update({str(row["id"]): str(row.get("name", "")) for row in matches})
+        self._synthetic_duplicates[issue] = {
+            str(row["id"])
+            for row in matches
+            if synthetic.fullmatch(str(row.get("name", "")).strip())
+        }
+        return str(canonical[0]["id"]) if canonical else None
 
 
 def sync(event: dict[str, Any], client: Trello, state_path: Path, ledger: Path) -> dict[str, Any]:
@@ -265,23 +285,36 @@ def sync(event: dict[str, Any], client: Trello, state_path: Path, ledger: Path) 
     state = load_state(state_path)
     cards = state.setdefault("cards", {})
     key = f"{REPOSITORY}#{issue}"
-    card_id = cards.get(key)
+    mapped_card_id = cards.get(key)
     title = f"[{event.get('priority', 'P?')}] #{issue} {event.get('title', 'AI team task')}"
     payload = {
         "name": title,
         "desc": description(event, now, ledger),
         "idList": LISTS[phase(event)],
     }
-    if not card_id:
-        card_id = client.exact_issue_card(issue)
-        if card_id:
-            cards[key] = card_id
+    # Always re-discover.  This repairs stale local mappings after restart/deploy
+    # and prefers a pre-existing project card over a bridge-created placeholder.
+    discovered_card_id = client.exact_issue_card(issue)
+    card_id = discovered_card_id or mapped_card_id
+    if card_id:
+        cards[key] = card_id
+        # Preserve the established project title when discovery selected it.
+        # Runtime events often lack a title and must not rename it to a synthetic
+        # placeholder during reconciliation.
+        discovered_name = getattr(client, "_card_names", {}).get(card_id)
+        if discovered_name and not event.get("title"):
+            payload.pop("name")
     if card_id:
         client.call("PUT", f"/cards/{card_id}", payload)
     else:
         card = client.call("POST", "/cards", payload)
         card_id = str(card["id"])
         cards[key] = card_id
+    # Archive only a positively identified synthetic duplicate, and only after
+    # the canonical card update above succeeded.
+    duplicates = getattr(client, "_synthetic_duplicates", {}).get(issue, set())
+    for duplicate_id in sorted(duplicates - {card_id}):
+        client.call("PUT", f"/cards/{duplicate_id}", {"closed": "true"})
     state.update({"version": 1, "last_success_at": iso(now), "last_error": None})
     if phase(event) == "DONE" and event.get("pr") and (
         event.get("target_sha") or event.get("sha")
@@ -293,7 +326,7 @@ def sync(event: dict[str, Any], client: Trello, state_path: Path, ledger: Path) 
         }
     atomic_json(state_path, state)
     kind = str(event.get("event", "")).upper()
-    if kind in NOTIFY:
+    if kind in NOTIFY and event.get("notify", True):
         summary = str(
             event.get("result")
             or event.get("blocker")
@@ -305,50 +338,77 @@ def sync(event: dict[str, Any], client: Trello, state_path: Path, ledger: Path) 
             f"/cards/{card_id}/actions/comments",
             {"text": f"@{OWNER} {kind}: {summary[:500]}"},
         )
-    return {"card_id": card_id, "issue": issue, "list": phase(event), "notified": kind in NOTIFY}
+    return {
+        "card_id": card_id,
+        "issue": issue,
+        "list": phase(event),
+        "notified": kind in NOTIFY and event.get("notify", True),
+    }
 
 
-def reconcile_terminal_ledger(
+def reconcile_ledger(
     client: Trello, state_path: Path, ledger: Path, limit: int
 ) -> int:
-    """Repair bounded pre-event successful merges from canonical ledger state."""
+    """Repair bounded projections without treating worker DONE as issue DONE."""
     if limit <= 0 or not ledger.exists():
         return 0
-    state = load_state(state_path)
-    projected = state.get("terminal_projections", {})
     try:
         with sqlite3.connect(ledger) as db:
             db.row_factory = sqlite3.Row
             rows = db.execute(
-                """SELECT id, issue_number, pr_number, target_sha, updated_at
-                     FROM tasks
-                    WHERE task_type='REVIEW' AND status='DONE'
-                      AND pr_number IS NOT NULL AND target_sha IS NOT NULL
-                      AND last_error IS NULL
-                    ORDER BY updated_at DESC LIMIT ?""",
+                """SELECT t.id, t.issue_number, t.pr_number, t.target_sha,
+                          t.task_type, t.agent, t.model_class, t.status,
+                          t.last_error, t.updated_at
+                     FROM tasks t
+                     JOIN (SELECT issue_number, MAX(updated_at) AS updated_at
+                             FROM tasks GROUP BY issue_number) latest
+                       ON latest.issue_number=t.issue_number
+                      AND latest.updated_at=t.updated_at
+                    ORDER BY t.updated_at DESC LIMIT ?""",
                 (limit,),
             ).fetchall()
     except (sqlite3.Error, OSError):
         return 0
     repaired = 0
     for row in rows:
-        key = f"{REPOSITORY}#{int(row['issue_number'])}"
-        marker = projected.get(key, {}) if isinstance(projected, dict) else {}
-        if (
-            marker.get("pr") == int(row["pr_number"])
-            and marker.get("target_sha") == str(row["target_sha"])
-        ):
-            continue
+        task_type = str(row["task_type"]).upper()
+        status = str(row["status"]).upper()
+        # REVIEW/DONE is written only after the orchestrator's canonical merge,
+        # close, and ai-team:done transition.  The ledger is durable canonical
+        # state; bridge.json is only a projection cache and may be absent after
+        # a crash, failed event write, or deploy.  Requiring that cache to
+        # corroborate the row makes the documented ledger fallback circular.
+        terminal = (
+            task_type == "REVIEW"
+            and status == "DONE"
+            and not row["last_error"]
+            and row["pr_number"] is not None
+            and row["target_sha"] is not None
+        )
+        if terminal:
+            kind, result, next_action = "COMPLETED", "merged and proven", "Done / Proven"
+        elif task_type == "REVIEW" or status == "WAITING_CI":
+            kind, result, next_action = "REVIEW_STARTED", status, "continue review / CI"
+        elif status in {"BLOCKED", "FAILED"}:
+            kind = "BLOCKED"
+            result = str(row["last_error"] or status)
+            next_action = "owner decision"
+        else:
+            kind, result, next_action = "RUN_STARTED", status, "continue build / repair"
         event = {
             "repository": REPOSITORY,
-            "event": "COMPLETED",
+            "event": kind,
             "assignment_id": str(row["id"]),
             "issue": int(row["issue_number"]),
-            "pr": int(row["pr_number"]),
-            "target_sha": str(row["target_sha"]),
-            "status": "DONE",
-            "result": "merged and proven (canonical ledger reconciliation)",
-            "next_action": "Done / Proven",
+            "pr": int(row["pr_number"]) if row["pr_number"] is not None else None,
+            "target_sha": str(row["target_sha"]) if row["target_sha"] else None,
+            "task_type": task_type,
+            "agent": row["agent"],
+            "model": row["model_class"],
+            "status": status,
+            "result": f"{result} (canonical ledger reconciliation)",
+            "next_action": next_action,
+            "notify": False,
             "phase_started_at": row["updated_at"],
         }
         try:
@@ -384,7 +444,7 @@ def reconcile(
                 except (TypeError, ValueError):
                     pass
             continue
-    repaired = reconcile_terminal_ledger(
+    repaired = reconcile_ledger(
         client, state_path, ledger, max(0, limit - processed - deferred)
     )
     result = {"processed": processed, "deferred": deferred}
