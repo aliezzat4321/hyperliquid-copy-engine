@@ -197,6 +197,44 @@ def test_exact_issue_card_ignores_pr_reference_and_archived_cards() -> None:
     assert calls[0][2]["filter"] == "open"
 
 
+def test_exact_issue_card_prefers_project_card_over_synthetic_duplicate() -> None:
+    client = bridge.Trello("key", "token")
+    client.call = lambda *_args, **_kwargs: [
+        {"id": "synthetic", "name": "[P?] #146 AI team task", "desc": ""},
+        {"id": "original", "name": "P0 — Trello continuity (#146)", "desc": ""},
+    ]
+    assert client.exact_issue_card(146) == "original"
+    assert client._synthetic_duplicates[146] == {"synthetic"}
+
+
+def test_stale_synthetic_mapping_migrates_then_archives_duplicate(tmp_path: Path) -> None:
+    class Existing(FakeTrello):
+        def exact_issue_card(self, issue: int) -> str | None:
+            self._synthetic_duplicates = {issue: {"synthetic"}}
+            return "original"
+
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({
+        "version": 1,
+        "cards": {f"{bridge.REPOSITORY}#146": "synthetic"},
+    }))
+    client = Existing()
+    bridge.sync(event("RUN_STARTED", status="RUNNING"), client, state, tmp_path / "ledger")
+    writes = [(path, data) for method, path, data in client.calls if method == "PUT"]
+    assert writes[0][0] == "/cards/original"
+    assert writes[1] == ("/cards/synthetic", {"closed": "true"})
+    assert json.loads(state.read_text())["cards"][f"{bridge.REPOSITORY}#146"] == "original"
+
+
+def test_worker_done_is_nonterminal_while_issue_remains_open() -> None:
+    assert bridge.phase(event("RUN_FINISHED", status="DONE", task_type="BUILD")) == "IN_PROGRESS"
+    assert bridge.phase(
+        event("RUN_FINISHED", status="FAILED", task_type="REPAIR")
+    ) == "IN_PROGRESS"
+    assert bridge.phase(event("REVIEW_PASS", status="DONE", task_type="REVIEW")) == "REVIEW_CI"
+    assert bridge.phase(event("COMPLETED", status="DONE")) == "DONE"
+
+
 def test_reconcile_continues_after_one_failed_event(tmp_path: Path) -> None:
     outbox = tmp_path / "outbox"
     outbox.mkdir()
@@ -273,11 +311,12 @@ def terminal_ledger(path: Path) -> None:
     with sqlite3.connect(path) as db:
         db.execute(
             "CREATE TABLE tasks(id TEXT, issue_number INTEGER, pr_number INTEGER, "
-            "target_sha TEXT, task_type TEXT, status TEXT, last_error TEXT, updated_at TEXT)"
+            "target_sha TEXT, task_type TEXT, agent TEXT, model_class TEXT, "
+            "status TEXT, last_error TEXT, updated_at TEXT)"
         )
         db.execute(
-            "INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?)",
-            ("review-157", 157, 158, "c" * 40, "REVIEW", "DONE", None,
+            "INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?,?)",
+            ("review-157", 157, 158, "c" * 40, "REVIEW", "CLAUDE", "SONNET", "DONE", None,
              "2026-09-01T12:00:00Z"),
         )
 
@@ -293,6 +332,13 @@ def test_terminal_ledger_repairs_pre_event_card_once_without_duplicate(tmp_path:
 
     client = Existing()
     state = tmp_path / "state.json"
+    state.write_text(json.dumps({
+        "version": 1,
+        "cards": {},
+        "terminal_projections": {
+            f"{bridge.REPOSITORY}#157": {"pr": 158, "target_sha": "c" * 40}
+        },
+    }))
     assert bridge.reconcile(tmp_path / "missing-outbox", client, state, ledger) == {
         "processed": 0, "deferred": 0, "repaired": 1,
     }
@@ -301,11 +347,10 @@ def test_terminal_ledger_repairs_pre_event_card_once_without_duplicate(tmp_path:
     assert "Status: DONE" in update[2]["desc"]
     assert "Next action: Done / Proven" in update[2]["desc"]
     assert not any(method == "POST" and path == "/cards" for method, path, _ in client.calls)
-    call_count = len(client.calls)
     assert bridge.reconcile(tmp_path / "missing-outbox", client, state, ledger) == {
-        "processed": 0, "deferred": 0,
+        "processed": 0, "deferred": 0, "repaired": 1,
     }
-    assert len(client.calls) == call_count
+    assert not any(path.endswith("/actions/comments") for _, path, _ in client.calls)
 
 
 def test_terminal_ledger_outage_later_converges(tmp_path: Path) -> None:
@@ -317,6 +362,13 @@ def test_terminal_ledger_outage_later_converges(tmp_path: Path) -> None:
             raise OSError("offline")
 
     state = tmp_path / "state.json"
+    state.write_text(json.dumps({
+        "version": 1,
+        "cards": {},
+        "terminal_projections": {
+            f"{bridge.REPOSITORY}#157": {"pr": 158, "target_sha": "c" * 40}
+        },
+    }))
     assert bridge.reconcile(tmp_path / "outbox", Outage(), state, ledger) == {
         "processed": 0, "deferred": 0,
     }
