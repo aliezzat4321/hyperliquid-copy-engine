@@ -2,13 +2,14 @@ name: ai-team-trello-manager-wire-temp
 
 on:
   push:
-    branches: [trigger/pr153-handoff-hardening]
+    branches: [main]
 
 permissions:
   contents: write
 
 jobs:
   fix:
+    if: github.event.head_commit.message == 'Run PR153 handoff hardening'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -32,7 +33,6 @@ jobs:
           p = Path('scripts/ai_team_orchestrator.py')
           text = p.read_text(encoding='utf-8')
 
-          # Restart recovery must clear the persisted unit after returning it for reaping.
           old = '''            UPDATE tasks
                SET status='RETRY',
                    retry_at=?,
@@ -52,7 +52,6 @@ jobs:
               raise SystemExit('recover_interrupted block not found')
           text = text.replace(old, new, 1)
 
-          # Add idempotent child/handoff queries after Ledger.update().
           anchor = '''    def due(self) -> sqlite3.Row | None:
 '''
           methods = '''    def child(
@@ -98,7 +97,6 @@ jobs:
                   raise SystemExit('Ledger.due anchor not found')
               text = text.replace(anchor, methods + anchor, 1)
 
-          # Reconcile parent->child handoffs before selecting the next due task.
           cycle_anchor = '''    def cycle(self) -> None:
 '''
           reconcile = '''    def reconcile_handoffs(self) -> None:
@@ -171,7 +169,6 @@ jobs:
               raise SystemExit('cycle handoff insertion point not found')
           text = text.replace(old, new, 1)
 
-          # Persist the Codex systemd unit before starting the model so restart recovery can reap it.
           old = '''        unit = f"hl-ai-codex-{task['id'][:10]}-{int(time.time())}"
         self.runtime.run_started(run_id, task, prompt=prompt, systemd_unit=unit)
 '''
@@ -183,7 +180,6 @@ jobs:
               raise SystemExit('Codex unit persistence point not found')
           text = text.replace(old, new, 1)
 
-          # Codex limits must not burn an attempt and must release the worker/unit.
           old = '''                self.ledger.update(
                     task["id"],
                     status="WAITING_RATE_LIMIT",
@@ -217,7 +213,6 @@ jobs:
               raise SystemExit('Codex rate-limit block not found')
           text = text.replace(old, new, 1)
 
-          # Clear persisted worker ownership on non-running Codex transitions.
           text = text.replace(
               '''                last_error="TEST_INJECTED_CODEX_SESSION_END",
             )
@@ -242,8 +237,6 @@ jobs:
 ''',
               1,
           )
-
-          # Clear Claude unit on post-call transitions too.
           text = text.replace(
               '''            self.ledger.update(task["id"], status="STALE", last_error="PR changed during review")
 ''',
@@ -279,7 +272,6 @@ jobs:
               1,
           )
 
-          # Terminal block always releases any stale unit marker.
           old = '''        self.ledger.update(task["id"], status="BLOCKED", retry_at=None, last_error=error[:1500])
 '''
           new = '''        self.ledger.update(
@@ -291,7 +283,6 @@ jobs:
               raise SystemExit('block() update not found')
           text = text.replace(old, new, 1)
 
-          # Make child task creation idempotent and make GitHub mirror failures non-fatal.
           old = '''    def enqueue_review(self, parent: sqlite3.Row, pr_number: int, sha: str) -> None:
         issue = self.gh.issue(int(parent["issue_number"]))
 '''
@@ -512,6 +503,6 @@ def test_terminal_block_releases_worker_marker():
           git commit -m 'Harden autonomous handoffs and worker recovery'
           gh auth setup-git
           git push origin HEAD:codex/auto-151-5cc33cdb
-          echo 'AUTONOMATION_HANDOFF_HARDENING_PUSHED=YES'
+          echo 'AUTOMATION_HANDOFF_HARDENING_PUSHED=YES'
           echo 'REAL_TRADING_TOUCHED=NO'
           echo 'POLYMARKET_TOUCHED=NO'
