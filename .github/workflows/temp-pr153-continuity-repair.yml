@@ -1,0 +1,81 @@
+name: temp-pr153-continuity-repair
+
+on:
+  push:
+    branches: [trigger/pr153-continuity-repair]
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/auto-151-5cc33cdb
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Patch automation continuity dead-ends
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('scripts/ai_team_orchestrator.py')
+          text = path.read_text()
+
+          old = '''        if state == "FAIL":\n            self.block(task, f"CI failed after review PASS: {detail}")\n            return\n'''
+          new = '''        if state == "FAIL":\n            # CI failures are normally repairable code/test defects, not owner blockers.\n            # Preserve the reviewed SHA as the repair baseline and hand the failure\n            # straight back to Codex on the same PR.\n            blockers = [f"CI failed at {target}: {detail}"]\n            self.ledger.update(\n                task["id"],\n                status="DONE",\n                blockers_json=json.dumps(blockers),\n                retry_at=None,\n                last_error="CI failure queued for autonomous repair",\n            )\n            self.runtime.event(\n                "CI_REPAIR_ENQUEUED",\n                assignment_id=task["id"],\n                issue=task["issue_number"],\n                pr=task["pr_number"],\n                target_sha=target,\n                detail=detail,\n            )\n            self.enqueue_repair(task, blockers)\n            return\n'''
+          if old not in text:
+              raise SystemExit('expected CI failure dead-end not found')
+          text = text.replace(old, new, 1)
+
+          old = '''        if not merged or not merged.get("merged"):\n            self.block(task, f"merge rejected: {merged}")\n            return\n'''
+          new = '''        if not merged or not merged.get("merged"):\n            # Merge/API rejection can be transient. Stay in the CI/merge stage and\n            # retry without burning another model review or requiring owner action.\n            retry_at = retry_at_after(max(60, int(self.cfg["poll_seconds"])))\n            self.ledger.update(\n                task["id"],\n                status="WAITING_CI",\n                retry_at=retry_at,\n                last_error=f"merge rejected; automatic retry scheduled: {merged}",\n            )\n            self.runtime.event(\n                "MERGE_RETRY_SCHEDULED",\n                assignment_id=task["id"],\n                issue=task["issue_number"],\n                pr=task["pr_number"],\n                target_sha=target,\n                retry_after=retry_at,\n            )\n            return\n'''
+          if old not in text:
+              raise SystemExit('expected merge rejection dead-end not found')
+          text = text.replace(old, new, 1)
+
+          # Keep the stale-child guard readable and lint-clean.
+          old = '        if not unit or not re.fullmatch(r"hl-ai-(?:claude|codex)(?:-probe)?-[A-Za-z0-9-]+", str(unit)):\n'
+          new = '''        if not unit or not re.fullmatch(\n            r"hl-ai-(?:claude|codex)(?:-probe)?-[A-Za-z0-9-]+", str(unit)\n        ):\n'''
+          if old in text:
+              text = text.replace(old, new, 1)
+
+          path.write_text(text)
+
+          tests = Path('tests/test_ai_team_orchestrator.py')
+          test_text = tests.read_text()
+          marker = 'def test_recoverable_automation_paths_do_not_terminally_block()'
+          if marker not in test_text:
+              test_text += '''\n\n
+def test_recoverable_automation_paths_do_not_terminally_block():\n    source = MODULE_PATH.read_text()\n    handle_ci = source[source.index("    def handle_ci("):source.index("    def retry_or_block(")]\n\n    assert 'CI_REPAIR_ENQUEUED' in handle_ci\n    assert 'self.enqueue_repair(task, blockers)' in handle_ci\n    assert 'CI failed after review PASS' not in handle_ci\n    assert 'MERGE_RETRY_SCHEDULED' in handle_ci\n    assert 'merge rejected; automatic retry scheduled' in handle_ci\n    assert 'self.block(task, f"merge rejected:' not in handle_ci\n\n\ndef test_continuity_loops_cover_review_and_pr_movement():\n    source = MODULE_PATH.read_text()\n    assert 'if verdict == "FAIL":' in source\n    assert 'self.enqueue_repair(task, blockers)' in source\n    assert 'self.enqueue_replacement_review(task, current_sha)' in source\n    assert 'status="WAITING_RATE_LIMIT"' in source\n    assert 'STALE_RUN_REQUEUED' in source\n'''
+              tests.write_text(test_text)
+          PY
+
+      - name: Lint and focused tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install 'ruff>=0.9,<1' 'pytest>=8.3,<9'
+          ruff check --fix scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
+          ruff check scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
+          pytest -q tests/test_ai_team_orchestrator.py
+
+      - name: Commit and push PR branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'aliezzat4321'
+          git config user.email 'ali.ezzat4321@gmail.com'
+          git add scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
+          if git diff --cached --quiet; then
+            echo 'NO_CHANGES=YES'
+            exit 0
+          fi
+          git commit -m 'Fix autonomous CI repair and merge retry loops'
+          git push origin HEAD:codex/auto-151-5cc33cdb
