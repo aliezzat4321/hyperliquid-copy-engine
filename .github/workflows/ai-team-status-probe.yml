@@ -22,11 +22,10 @@ jobs:
           echo 'POLYMARKET_MUTATION=NO'
           echo 'REAL_TRADING_CHANGE=NO'
           hl-ai-team-status
-          echo '=== DRY RUN CODEX LOG ==='
-          find /var/lib/hyperliquid-ai-team/agents/codex/logs -maxdepth 1 -type f \
-            -name '5e939708d6ac4568-*' -print -exec tail -n 120 {} \; || true
           echo '=== AI TEAM SERVICE JOURNAL ==='
-          journalctl -u hyperliquid-ai-team-orchestrator.service -n 60 --no-pager -l || true
-          echo 'PROBE_REVISION=3'
+          journalctl -u hyperliquid-ai-team-orchestrator.service -n 120 --no-pager -l || true
+          echo '=== INSTALLED CONTINUITY MARKERS ==='
+          grep -nE 'WAITING_RATE_LIMIT|CLAUDE_READINESS_PROBE|retry_or_block|recover_interrupted' /usr/local/lib/hyperliquid-ai-team/ai_team_orchestrator.py 2>/dev/null | tail -n 80 || true
+          echo 'PROBE_REVISION=4'
           echo 'POLYMARKET_TOUCHED=NO'
           echo 'REAL_TRADING_TOUCHED=NO'
