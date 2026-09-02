@@ -504,3 +504,35 @@ def test_codex_postprocess_retries_recoverable_failures():
     assert "fail_closed_markers" in source
     assert "owner-sensitive live path" in source
     assert "forbidden live-trading enablement" in source
+
+
+
+def test_handoffs_are_idempotent_and_recoverable():
+    source = MODULE_PATH.read_text()
+    assert "def reconcile_handoffs" in source
+    assert "def handoff_candidates" in source
+    assert "def child(" in source
+    assert "HANDOFF_RECOVERED" in source
+    assert "HANDOFF_RECOVERY_RETRY" in source
+    assert "HANDOFF_MIRROR_FAILED" in source
+    assert 'self.ledger.child(str(parent["id"]), "REVIEW")' in source
+    assert 'self.ledger.child(str(review["id"]), "REPAIR")' in source
+    assert 'self.ledger.child(str(old["id"]), "REVIEW", current_sha)' in source
+
+
+def test_codex_limit_and_worker_state_do_not_consume_or_leak():
+    source = MODULE_PATH.read_text()
+    codex = source[source.index("    def handle_codex("):source.index("    def invoke_codex(")]
+    assert "CODEX_WAITING_RATE_LIMIT" in codex
+    assert 'attempt=max(0, int(task["attempt"]) - 1)' in codex
+    assert 'self.ledger.update(task["id"], systemd_unit=unit)' in codex
+    assert "limit_text=limit_text" in codex
+    assert "systemd_unit=None" in codex
+
+
+def test_terminal_block_releases_worker_marker():
+    source = MODULE_PATH.read_text()
+    start = source.index("    def block(")
+    block = source[start:start + 2500]
+    assert 'status="BLOCKED"' in block
+    assert "systemd_unit=None" in block
