@@ -13,7 +13,13 @@ jobs:
     runs-on: [self-hosted, linux]
     timeout-minutes: 5
     steps:
-      - name: Read Hyperliquid AI-team status only
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          clean: true
+          persist-credentials: false
+
+      - name: Verify deployed continuity implementation and deterministic recovery
         shell: bash
         run: |
           set -euo pipefail
@@ -21,11 +27,23 @@ jobs:
           echo 'POLYMARKET_INSPECTION=NO'
           echo 'POLYMARKET_MUTATION=NO'
           echo 'REAL_TRADING_CHANGE=NO'
+
           hl-ai-team-status
+
+          cmp -s scripts/ai_team_orchestrator.py /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py
+          cmp -s scripts/ai_team_runtime_ledger.py /opt/hyperliquid-ai-team/scripts/ai_team_runtime_ledger.py
+          cmp -s config/ai_team_router.json /opt/hyperliquid-ai-team/config/ai_team_router.json
+          echo 'DEPLOYED_MAIN_PARITY=PASS'
+
+          grep -nE 'WAITING_RATE_LIMIT|CLAUDE_READINESS_PROBE|retry_or_block|recover_interrupted' \
+            /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py | tail -n 100
+
+          python3 -m pytest -q tests/test_ai_team_orchestrator.py \
+            -k 'rate_limit or probe_wait_and_success or non_limit_probe_failure or scheduler_skips_not_due_claude_wait_for_codex or watchdog_requeues_same_review_checkpoint or ledger_recovers_orchestrator_restart_mid_task'
+          echo 'CONTINUITY_DETERMINISTIC_PROOF=PASS'
+
           echo '=== AI TEAM SERVICE JOURNAL ==='
-          journalctl -u hyperliquid-ai-team-orchestrator.service -n 120 --no-pager -l || true
-          echo '=== INSTALLED CONTINUITY MARKERS ==='
-          grep -nE 'WAITING_RATE_LIMIT|CLAUDE_READINESS_PROBE|retry_or_block|recover_interrupted' /usr/local/lib/hyperliquid-ai-team/ai_team_orchestrator.py 2>/dev/null | tail -n 80 || true
-          echo 'PROBE_REVISION=4'
+          journalctl -u hyperliquid-ai-team-orchestrator.service -n 40 --no-pager -l || true
+          echo 'PROBE_REVISION=5'
           echo 'POLYMARKET_TOUCHED=NO'
           echo 'REAL_TRADING_TOUCHED=NO'
