@@ -267,3 +267,60 @@ def test_outage_retains_event_and_later_reconciliation_converges(tmp_path: Path)
         "processed": 1, "deferred": 0,
     }
     assert not pending.exists()
+
+
+def terminal_ledger(path: Path) -> None:
+    with sqlite3.connect(path) as db:
+        db.execute(
+            "CREATE TABLE tasks(id TEXT, issue_number INTEGER, pr_number INTEGER, "
+            "target_sha TEXT, task_type TEXT, status TEXT, last_error TEXT, updated_at TEXT)"
+        )
+        db.execute(
+            "INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?)",
+            ("review-157", 157, 158, "c" * 40, "REVIEW", "DONE", None,
+             "2026-09-01T12:00:00Z"),
+        )
+
+
+def test_terminal_ledger_repairs_pre_event_card_once_without_duplicate(tmp_path: Path) -> None:
+    ledger = tmp_path / "ledger.sqlite3"
+    terminal_ledger(ledger)
+
+    class Existing(FakeTrello):
+        def exact_issue_card(self, issue: int) -> str | None:
+            assert issue == 157
+            return "existing-157"
+
+    client = Existing()
+    state = tmp_path / "state.json"
+    assert bridge.reconcile(tmp_path / "missing-outbox", client, state, ledger) == {
+        "processed": 0, "deferred": 0, "repaired": 1,
+    }
+    update = next(call for call in client.calls if call[1] == "/cards/existing-157")
+    assert update[2]["idList"] == bridge.LISTS["DONE"]
+    assert "Status: DONE" in update[2]["desc"]
+    assert "Next action: Done / Proven" in update[2]["desc"]
+    assert not any(method == "POST" and path == "/cards" for method, path, _ in client.calls)
+    call_count = len(client.calls)
+    assert bridge.reconcile(tmp_path / "missing-outbox", client, state, ledger) == {
+        "processed": 0, "deferred": 0,
+    }
+    assert len(client.calls) == call_count
+
+
+def test_terminal_ledger_outage_later_converges(tmp_path: Path) -> None:
+    ledger = tmp_path / "ledger.sqlite3"
+    terminal_ledger(ledger)
+
+    class Outage(FakeTrello):
+        def exact_issue_card(self, issue: int) -> str | None:
+            raise OSError("offline")
+
+    state = tmp_path / "state.json"
+    assert bridge.reconcile(tmp_path / "outbox", Outage(), state, ledger) == {
+        "processed": 0, "deferred": 0,
+    }
+    healthy = FakeTrello()
+    assert bridge.reconcile(tmp_path / "outbox", healthy, state, ledger) == {
+        "processed": 0, "deferred": 0, "repaired": 1,
+    }

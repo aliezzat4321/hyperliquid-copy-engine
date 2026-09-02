@@ -526,6 +526,66 @@ def test_recoverable_automation_paths_do_not_terminally_block():
     assert "merge rejected; automatic retry scheduled" in handle_ci
 
 
+def test_successful_merge_durably_completes_before_terminal_projection(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    task_id = ledger.create_task(
+        issue_number=159, pr_number=160, target_sha="a" * 40,
+        task_type="REVIEW", agent="CLAUDE", model_class="SONNET",
+        task_class="ROUTINE", status="WAITING_CI",
+    )
+    actions = []
+
+    class GH:
+        def pr(self, number):
+            return {"head": {"sha": "a" * 40}}
+        def check_state(self, sha):
+            return "PASS", "green"
+        def changed_files(self, number):
+            return []
+        def issue(self, number):
+            return {"author_association": "OWNER", "body": ""}
+        def merge(self, number, sha):
+            actions.append("merge")
+            return {"merged": True}
+        def remove_label(self, *args):
+            actions.append("github")
+        def add_labels(self, *args):
+            actions.append("github")
+        def comment(self, *args):
+            actions.append("github")
+
+    class Runtime:
+        def event(self, kind, **payload):
+            assert ledger.get(task_id)["status"] == "DONE"
+            actions.append((kind, payload))
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.gh = orch.DEFAULT_CONFIG, ledger, GH()
+    team.runtime, team.trusted = Runtime(), {"OWNER"}
+    team.handle_ci(ledger.get(task_id))
+    kind, payload = actions[-1]
+    assert kind == "COMPLETED"
+    assert actions[-2] == "github"
+    assert payload == {
+        "assignment_id": task_id, "issue": 159, "pr": 160,
+        "target_sha": "a" * 40, "status": "DONE",
+        "result": "merged and proven", "next_action": "Done / Proven",
+    }
+
+
+def test_terminal_projection_failure_does_not_change_successful_merge(tmp_path):
+    team = object.__new__(orch.Orchestrator)
+
+    class Runtime:
+        def event(self, *args, **kwargs):
+            raise OSError("outbox unavailable")
+
+    team.runtime = Runtime()
+    team.emit_terminal_projection(
+        {"id": "review", "issue_number": 159, "pr_number": 160}, "b" * 40
+    )
+
+
 def test_continuity_loops_cover_review_pr_move_limits_and_restart():
     source = MODULE_PATH.read_text()
     assert "self.enqueue_repair(task, blockers)" in source
