@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import importlib.util
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+
+UTC_TZ = timezone(timedelta(0))
 
 PATH = Path(__file__).parents[1] / "scripts" / "storage_controller.py"
 SPEC = importlib.util.spec_from_file_location("storage_controller_test", PATH)
@@ -38,7 +40,7 @@ def test_growth_budget_stops_all_material_writers(tmp_path, monkeypatch):
         MODULE.shutil, "disk_usage",
         lambda _: MODULE.shutil._ntuple_diskusage(10_000, 5000, 5000),
     )
-    now = datetime(2026, 9, 1, 12, tzinfo=UTC)
+    now = datetime(2026, 9, 1, 12, tzinfo=UTC_TZ)
     previous = {
         "observed_at": (now - timedelta(hours=1)).isoformat(),
         "pressure_active": False,
@@ -56,7 +58,7 @@ def test_hysteresis_holds_pressure_until_resume(tmp_path, monkeypatch):
         MODULE.shutil, "disk_usage",
         lambda _: MODULE.shutil._ntuple_diskusage(10_000, 7900, 2100),
     )
-    now = datetime(2026, 9, 1, 12, tzinfo=UTC)
+    now = datetime(2026, 9, 1, 12, tzinfo=UTC_TZ)
     previous = {
         "observed_at": (now - timedelta(hours=1)).isoformat(),
         "pressure_active": True,
@@ -70,7 +72,7 @@ def test_policy_fails_closed_for_ungoverned_fields(tmp_path):
     del broken["datasets"][0]["owner"]
     with pytest.raises(ValueError, match="missing owner"):
         MODULE.decide(
-            broken, None, mount=tmp_path, now=datetime.now(UTC),
+            broken, None, mount=tmp_path, now=datetime.now(UTC_TZ),
             allow_baseline_without_previous=True,
         )
 
@@ -78,7 +80,7 @@ def test_policy_fails_closed_for_ungoverned_fields(tmp_path):
 def test_stale_previous_observation_fails_closed(tmp_path, monkeypatch):
     (tmp_path / "tape").mkdir()
     monkeypatch.setattr(MODULE, "_du", lambda _: 100)
-    now = datetime(2026, 9, 1, 12, tzinfo=UTC)
+    now = datetime(2026, 9, 1, 12, tzinfo=UTC_TZ)
     previous = {
         "observed_at": (now - timedelta(days=30)).isoformat(),
         "pressure_active": False,
@@ -91,14 +93,14 @@ def test_stale_previous_observation_fails_closed(tmp_path, monkeypatch):
 def test_missing_governed_dataset_fails_closed(tmp_path):
     with pytest.raises(FileNotFoundError, match="governed dataset path does not exist"):
         MODULE.decide(
-            policy(), None, mount=tmp_path, now=datetime.now(UTC),
+            policy(), None, mount=tmp_path, now=datetime.now(UTC_TZ),
             allow_baseline_without_previous=True,
         )
 
 
 def test_previous_missing_governed_dataset_fails_closed(tmp_path, monkeypatch):
     monkeypatch.setattr(MODULE, "_du", lambda _: 100)
-    now = datetime(2026, 9, 1, 12, tzinfo=UTC)
+    now = datetime(2026, 9, 1, 12, tzinfo=UTC_TZ)
     previous = {
         "observed_at": (now - timedelta(hours=1)).isoformat(),
         "pressure_active": False,
@@ -110,7 +112,7 @@ def test_previous_missing_governed_dataset_fails_closed(tmp_path, monkeypatch):
 
 def test_missing_previous_requires_explicit_baseline_flag(tmp_path):
     with pytest.raises(ValueError, match="previous observation is required"):
-        MODULE.decide(policy(), None, mount=tmp_path, now=datetime.now(UTC))
+        MODULE.decide(policy(), None, mount=tmp_path, now=datetime.now(UTC_TZ))
 
 
 def test_explicit_baseline_is_allowed(tmp_path, monkeypatch):
@@ -120,7 +122,7 @@ def test_explicit_baseline_is_allowed(tmp_path, monkeypatch):
         lambda _: MODULE.shutil._ntuple_diskusage(10_000, 8000, 2000),
     )
     result = MODULE.decide(
-        policy(), None, mount=tmp_path, now=datetime.now(UTC),
+        policy(), None, mount=tmp_path, now=datetime.now(UTC_TZ),
         allow_baseline_without_previous=True,
     )
     assert result["action"] == "WARN"

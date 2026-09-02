@@ -9,8 +9,10 @@ import argparse
 import json
 import shutil
 import subprocess
-from datetime import UTC, datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+UTC_TZ = timezone(timedelta(0))
 
 
 def _du(path: Path) -> int:
@@ -133,7 +135,7 @@ def decide(
     return {
         "schema_version": 1,
         "mode": "READ_ONLY_DECISION",
-        "observed_at": now.astimezone(UTC).isoformat(),
+        "observed_at": now.astimezone(UTC_TZ).isoformat(),
         "mount": str(mount),
         "used_bytes": usage.used,
         "available_bytes": usage.free,
@@ -167,7 +169,7 @@ def main() -> None:
         policy,
         _load(args.previous) if args.previous else None,
         mount=mount,
-        now=datetime.now(UTC),
+        now=datetime.now(UTC_TZ),
         allow_baseline_without_previous=args.allow_baseline_without_previous,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
