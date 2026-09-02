@@ -959,3 +959,60 @@ def test_newly_blocked_task_clears_queue_state_and_is_not_reclaimed(tmp_path):
     team.block(ledger.get(task_id), "terminal failure")
     assert {x["name"] for x in issue["labels"]} == {labels["blocked"]}
     assert team.promote_queued_issue() is False
+
+
+def test_trusted_manager_workflow_transform_matches_exact_checked_in_preimage():
+    workflow = (
+        MODULE_PATH.parents[1] / ".github/workflows/deploy-ai-team-orchestrator.yml"
+    ).read_text()
+    hardened = orch.trusted_manager_workflow_transform(workflow)
+    assert "codex/126-ai-orchestrator" not in hardened
+    assert "  pull_request:\n" in hardened
+    assert "runs-on: ubuntu-latest" in hardened
+    assert "if: github.event_name == 'push' && github.ref == 'refs/heads/main'" in hardened
+    validation = hardened.split("  validate-workflow:", 1)[1].split("  deploy:", 1)[0]
+    for forbidden in ("sudo", "systemctl", "install_ai_team_orchestrator.sh", "id -u"):
+        assert forbidden not in validation
+    assert orch.hashlib.sha256(hardened.encode()).hexdigest() == (
+        orch.TRUSTED_MANAGER_POSTIMAGE_SHA256
+    )
+
+
+def test_trusted_manager_workflow_transform_fails_closed_on_drift():
+    with pytest.raises(RuntimeError, match="preimage mismatch"):
+        orch.trusted_manager_workflow_transform(
+            orch.TRUSTED_MANAGER_WORKFLOW_PREIMAGE + "# drift\n"
+        )
+
+
+def test_policy_recovery_is_exact_preserves_history_and_does_not_duplicate(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    marker = (
+        "autonomous task touched owner-sensitive live path: "
+        + orch.TRUSTED_MANAGER_WORKFLOW
+    )
+    task_id = ledger.create_task(
+        issue_number=166, task_type="BUILD", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", task_class="ROUTINE", status="BLOCKED",
+        blockers=["original evidence"], last_error=marker,
+    )
+    recovered = ledger.recover_workflow_policy_block(166)
+    assert recovered and recovered["id"] == task_id
+    assert recovered["status"] == "RETRY"
+    history = json.loads(recovered["blockers_json"])
+    assert history[0] == "original evidence"
+    assert history[1]["resolved_blocker"] == marker
+    assert ledger.recover_workflow_policy_block(166) is None
+    assert ledger.db.execute(
+        "SELECT count(*) FROM tasks WHERE issue_number=166"
+    ).fetchone()[0] == 1
+
+
+def test_policy_recovery_refuses_non_exact_blocker(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    ledger.create_task(
+        issue_number=168, task_type="BUILD", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", task_class="ROUTINE", status="BLOCKED",
+        last_error="different blocker",
+    )
+    assert ledger.recover_workflow_policy_block(168) is None

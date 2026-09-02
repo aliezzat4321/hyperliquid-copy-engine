@@ -28,4 +28,10 @@ Example manager payload:
 
 Use one synthetic issue and observe, without an hourly wait: assignment moves its sole card to In Progress; PR/review moves it to Review / CI; deliberate blocker moves it to Blocked and comments `@aliezzat2`; completion moves it to Done; an external GitHub comment and CI event update that same card. Remove or invalidate the credential during a synthetic transition and confirm the orchestrator proceeds while a redacted sync failure is recorded. Finally discard chat context and recover the task entirely from VM ledger, GitHub, and Trello.
 
+## Issue #170 trusted-manager workflow bootstrap
+
+The root orchestrator owns one byte-exact preimage/postimage transformation for `.github/workflows/deploy-ai-team-orchestrator.yml`. It may create the manager-owned hardening branch only after trusted-author, `AI_TEAM_PROTECTED_CHANGE=YES`, ROUTINE, exact-current Sonnet PASS, green CI, and forbidden-live-enable gates have passed for the bootstrap code. Any preimage drift or second changed path fails closed.
+
+The generated PR is marked `LIVE-SENSITIVE: YES` and gets a new `WORKFLOW_REVIEW` assignment. Its own exact SHA must receive Sonnet PASS and green CI, including the hosted PR validator, before merge. The bootstrap review cannot be reused. Once merged, the manager records the hardened SHA and retries only the preserved #168/#166 ledger assignment whose blocker exactly names the deploy workflow policy rejection; it appends recovery evidence instead of creating a duplicate assignment. Runtime events `TRUSTED_MANAGER_WORKFLOW_APPLIED`, `TRUSTED_MANAGER_WORKFLOW_MERGED`, and `TRUSTED_MANAGER_POLICY_UNBLOCKED` provide #130/Trello transition evidence. No wildcard workflow permission is introduced.
+
 No part of this wiring may enable real trading, alter capital/risk authorization, or bypass `LIVE_TRADING_GATE`.

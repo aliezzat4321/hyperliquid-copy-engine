@@ -12,8 +12,10 @@ Security model:
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime as dt
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -56,6 +58,110 @@ MACHINE_RESULT = "AI_TEAM_RESULT_V1"
 ACTIVE_STATUSES = {"PENDING", "RETRY", "WAITING_RATE_LIMIT", "WAITING_CI", "RUNNING"}
 TERMINAL_STATUSES = {"DONE", "FAILED", "BLOCKED", "STALE"}
 TRELLO_BRIDGE = Path("/opt/hyperliquid-ai-team/scripts/trello_team_bridge.py")
+TRUSTED_MANAGER_BOOTSTRAP_ISSUE = 170
+TRUSTED_MANAGER_WORKFLOW = ".github/workflows/deploy-ai-team-orchestrator.yml"
+TRUSTED_MANAGER_BRANCH = "manager/170-harden-ai-team-deploy"
+TRUSTED_MANAGER_WORK = STATE_ROOT / "orchestrator" / "manager-worktrees"
+
+# This is deliberately a complete, byte-exact transformation.  The manager refuses
+# to make a best-effort YAML edit: an upstream change must be reviewed and encoded as
+# a new preimage before this privileged path can run.
+TRUSTED_MANAGER_WORKFLOW_PREIMAGE = r'''name: deploy-ai-team-orchestrator
+
+on:
+  push:
+    branches:
+      - main
+      - codex/126-ai-orchestrator
+    paths:
+      - "scripts/ai_team_orchestrator.py"
+      - "scripts/ai_team_runtime_ledger.py"
+      - "scripts/ai_team_auth_codex.sh"
+      - "scripts/ai_team_auth_claude.sh"
+      - "scripts/install_ai_team_orchestrator.sh"
+      - "scripts/install_codex_code_mode_host.sh"
+      - "config/ai_team_router.json"
+      - "deploy/systemd/hyperliquid-ai-team-orchestrator.service"
+      - "deploy/systemd/hyperliquid-ai-team-orchestrator.timer"
+      - ".github/workflows/deploy-ai-team-orchestrator.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-ai-team-orchestrator
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+          persist-credentials: false
+
+      - name: Assert hard boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "aliezzat4321/hyperliquid-copy-engine"
+          test "$(id -u)" = 0
+          echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
+          echo 'POLYMARKET_INSPECTION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+
+      - name: Static verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile scripts/ai_team_orchestrator.py scripts/ai_team_runtime_ledger.py
+          python3 -m json.tool config/ai_team_router.json >/dev/null
+          bash -n scripts/ai_team_auth_codex.sh
+          bash -n scripts/ai_team_auth_claude.sh
+          bash -n scripts/install_ai_team_orchestrator.sh
+          bash -n scripts/install_codex_code_mode_host.sh
+          systemd-analyze verify \
+            deploy/systemd/hyperliquid-ai-team-orchestrator.service \
+            deploy/systemd/hyperliquid-ai-team-orchestrator.timer
+
+      - name: Install namespaced Hyperliquid AI team components
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/install_ai_team_orchestrator.sh
+          test -x /usr/local/bin/codex-code-mode-host
+          test -x /usr/local/bin/bwrap
+          test -x /usr/local/sbin/hl-ai-team-auth-codex
+          systemctl start hyperliquid-ai-team-orchestrator.service
+          systemctl is-enabled hyperliquid-ai-team-orchestrator.timer
+          hl-ai-team-status
+          echo 'POLYMARKET_TOUCHED=NO'
+          echo 'REAL_TRADING_TOUCHED=NO'
+'''
+
+TRUSTED_MANAGER_WORKFLOW_POSTIMAGE = TRUSTED_MANAGER_WORKFLOW_PREIMAGE.replace(
+    '''on:\n  push:\n    branches:\n      - main\n      - codex/126-ai-orchestrator\n    paths:''',
+    '''on:\n  push:\n    branches:\n      - main\n    paths:''',
+).replace(
+    '''permissions:\n  contents: read\n\nconcurrency:''',
+    '''  pull_request:\n    paths:\n      - ".github/workflows/deploy-ai-team-orchestrator.yml"\n\npermissions:\n  contents: read\n\nconcurrency:''',
+).replace(
+    '''jobs:\n  deploy:\n    runs-on: [self-hosted, linux]''',
+    '''jobs:\n  validate-workflow:\n    if: github.event_name == 'pull_request'\n    runs-on: ubuntu-latest\n    timeout-minutes: 5\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          persist-credentials: false\n      - name: Validate deploy workflow safety\n        shell: bash\n        run: |\n          set -euo pipefail\n          python3 - <<'PY'\n          from pathlib import Path\n          workflow = Path(".github/workflows/deploy-ai-team-orchestrator.yml").read_text()\n          assert "codex/126-ai-orchestrator" not in workflow\n          assert "if: github.event_name == 'push' && github.ref == 'refs/heads/main'" in workflow\n          validate = workflow.split("  validate-workflow:", 1)[1].split("  deploy:", 1)[0]\n          assert "runs-on: ubuntu-latest" in validate\n          for forbidden in ("su" + "do", "system" + "ctl", "install_ai_team_" + "orchestrator.sh", "id " + "-u"):\n              assert forbidden not in validate\n          PY\n\n  deploy:\n    if: github.event_name == 'push' && github.ref == 'refs/heads/main'\n    runs-on: [self-hosted, linux]''',
+)
+TRUSTED_MANAGER_WORKFLOW_POSTIMAGE = TRUSTED_MANAGER_WORKFLOW_POSTIMAGE.replace(
+    '"codex/126-ai-orchestrator" not in workflow',
+    '"codex/126-" + "ai-orchestrator" not in workflow',
+)
+TRUSTED_MANAGER_PREIMAGE_SHA256 = hashlib.sha256(
+    TRUSTED_MANAGER_WORKFLOW_PREIMAGE.encode()
+).hexdigest()
+TRUSTED_MANAGER_POSTIMAGE_SHA256 = hashlib.sha256(
+    TRUSTED_MANAGER_WORKFLOW_POSTIMAGE.encode()
+).hexdigest()
 
 # Protected AI-control-plane files that Codex may propose, but never merge merely
 # because it changed them. Automatic apply additionally requires a trusted Issue
@@ -277,6 +383,16 @@ class GitHub:
         rows = self.api("GET", f"repos/{self.repo}/pulls/{pr_number}/files?per_page=100") or []
         return [str(row["filename"]) for row in rows]
 
+    def file_text(self, path: str, ref: str) -> str:
+        encoded_path = urllib.parse.quote(path, safe="/")
+        encoded_ref = urllib.parse.quote(ref, safe="")
+        row = self.api(
+            "GET", f"repos/{self.repo}/contents/{encoded_path}?ref={encoded_ref}"
+        ) or {}
+        if row.get("encoding") != "base64" or not isinstance(row.get("content"), str):
+            raise RuntimeError(f"GitHub returned no base64 content for {path} at {ref}")
+        return base64.b64decode(row["content"], validate=False).decode("utf-8")
+
     def check_state(self, sha: str) -> tuple[str, str]:
         checks = (
             self.api(
@@ -300,6 +416,20 @@ class GitHub:
                 f"combined status={statuses.get('state')}"
             )
         return "PASS", f"{len(runs)} check-runs green"
+
+    def check_run_state(self, sha: str, name: str) -> tuple[str, str]:
+        checks = self.api(
+            "GET", f"repos/{self.repo}/commits/{sha}/check-runs?per_page=100"
+        ) or {}
+        matches = [row for row in checks.get("check_runs", []) if row.get("name") == name]
+        if not matches:
+            return "PENDING", f"required check-run {name!r} not visible"
+        if any(row.get("status") != "completed" for row in matches):
+            return "PENDING", f"required check-run {name!r} pending"
+        bad = [row for row in matches if row.get("conclusion") != "success"]
+        if bad:
+            return "FAIL", f"required check-run {name!r}={bad[-1].get('conclusion')}"
+        return "PASS", f"required check-run {name!r} green"
 
     def merge(self, pr_number: int, sha: str) -> dict[str, Any]:
         return self.api(
@@ -537,6 +667,36 @@ class Ledger:
             (issue_number,),
         ).fetchone()
         return bool(row and row["status"] == "DONE" and not row["last_error"])
+
+    def latest_successful_task(self, issue_number: int) -> sqlite3.Row | None:
+        return self.db.execute(
+            "SELECT * FROM tasks WHERE issue_number=? AND status='DONE' "
+            "AND task_type='REVIEW' AND last_error IS NULL "
+            "ORDER BY updated_at DESC, created_at DESC LIMIT 1",
+            (issue_number,),
+        ).fetchone()
+
+    def recover_workflow_policy_block(self, issue_number: int) -> sqlite3.Row | None:
+        """Retry only the exact historical deploy-workflow policy rejection."""
+        marker = (
+            "autonomous task touched owner-sensitive live path: "
+            + TRUSTED_MANAGER_WORKFLOW
+        )
+        row = self.db.execute(
+            "SELECT * FROM tasks WHERE issue_number=? AND status='BLOCKED' "
+            "AND last_error=? ORDER BY updated_at DESC, created_at DESC LIMIT 1",
+            (issue_number, marker),
+        ).fetchone()
+        if not row:
+            return None
+        history = json.loads(row["blockers_json"] or "[]")
+        history.append({"recovered_at": utcnow(), "resolved_blocker": marker})
+        self.update(
+            str(row["id"]), status="RETRY", retry_at=utcnow(),
+            blockers_json=json.dumps(history),
+            last_error="trusted-manager workflow policy recovery",
+        )
+        return self.get(str(row["id"]))
 
     def meta_get(self, key: str) -> str | None:
         row = self.db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
@@ -1064,6 +1224,18 @@ def validate_changes(cfg: dict[str, Any], workdir: Path, base_sha: str) -> tuple
     return files, no_auto
 
 
+def trusted_manager_workflow_transform(current: str) -> str:
+    digest = hashlib.sha256(current.encode()).hexdigest()
+    if current != TRUSTED_MANAGER_WORKFLOW_PREIMAGE or digest != TRUSTED_MANAGER_PREIMAGE_SHA256:
+        raise RuntimeError(
+            "trusted-manager workflow preimage mismatch; refusing privileged transformation"
+        )
+    hardened = TRUSTED_MANAGER_WORKFLOW_POSTIMAGE
+    if hashlib.sha256(hardened.encode()).hexdigest() != TRUSTED_MANAGER_POSTIMAGE_SHA256:
+        raise RuntimeError("trusted-manager workflow postimage integrity mismatch")
+    return hardened
+
+
 class Orchestrator:
     def __init__(self) -> None:
         self.cfg = load_config()
@@ -1375,6 +1547,149 @@ class Orchestrator:
                     error=str(exc),
                 )
 
+    def reconcile_trusted_manager_bootstrap(self) -> bool:
+        """Generate the single allowlisted workflow PR after bootstrap gates pass."""
+        if self.ledger.meta_get("trusted_manager_workflow_hardened"):
+            return self.recover_trusted_manager_policy_blocks()
+        merge_sha = self.ledger.meta_get("trusted_manager_workflow_merge_sha")
+        if merge_sha:
+            state, detail = self.gh.check_run_state(merge_sha, "deploy")
+            if state == "PASS":
+                self.ledger.meta_set("trusted_manager_workflow_hardened", merge_sha)
+                self.runtime.event(
+                    "TRUSTED_MANAGER_WORKFLOW_DEPLOYED",
+                    issue=TRUSTED_MANAGER_BOOTSTRAP_ISSUE, target_sha=merge_sha,
+                    status="DEPLOYED", result=detail,
+                    next_action="recover exact #168/#166 workflow policy blockers",
+                )
+                return self.recover_trusted_manager_policy_blocks()
+            if state == "FAIL":
+                fingerprint = f"{merge_sha}:{detail}"
+                if self.ledger.meta_get("trusted_manager_deploy_failure") != fingerprint:
+                    self.ledger.meta_set("trusted_manager_deploy_failure", fingerprint)
+                    self.runtime.event(
+                        "TRUSTED_MANAGER_WORKFLOW_DEPLOY_FAILED",
+                        issue=TRUSTED_MANAGER_BOOTSTRAP_ISSUE, target_sha=merge_sha,
+                        status="BLOCKED", error=detail,
+                        next_action="repair deployment; policy recovery remains closed",
+                    )
+            return False
+        if self.ledger.meta_get("trusted_manager_bootstrap_pr"):
+            return False
+        bootstrap = self.ledger.latest_successful_task(TRUSTED_MANAGER_BOOTSTRAP_ISSUE)
+        if not bootstrap or bootstrap["task_type"] != "REVIEW":
+            return False
+        if bootstrap["model_class"] != "SONNET" or bootstrap["task_class"] != "ROUTINE":
+            return False
+        issue = self.gh.issue(TRUSTED_MANAGER_BOOTSTRAP_ISSUE)
+        body = str(issue.get("body") or "")
+        if (
+            str(issue.get("author_association") or "") not in self.trusted
+            or parse_task_class(body)[0] != "ROUTINE"
+            or not acceptance_flag(body, "AI_TEAM_PROTECTED_CHANGE")
+        ):
+            self.runtime.event(
+                "TRUSTED_MANAGER_BOOTSTRAP_REJECTED",
+                issue=TRUSTED_MANAGER_BOOTSTRAP_ISSUE,
+                status="BLOCKED",
+                next_action="restore trusted ROUTINE protected-change authorization",
+            )
+            return False
+        try:
+            workdir = TRUSTED_MANAGER_WORK / (
+                f"issue-{TRUSTED_MANAGER_BOOTSTRAP_ISSUE}-{uuid.uuid4().hex[:8]}"
+            )
+            workdir.parent.mkdir(parents=True, exist_ok=True)
+            run(
+                ["git", "clone", "--branch", "main", "--single-branch", GIT_PUSH_REMOTE,
+                 str(workdir)], timeout=120, check=True,
+            )
+            run(["git", "-C", str(workdir), "checkout", "-b", TRUSTED_MANAGER_BRANCH],
+                check=True)
+            workflow = workdir / TRUSTED_MANAGER_WORKFLOW
+            hardened = trusted_manager_workflow_transform(workflow.read_text())
+            for pattern in self.cfg["safety"]["forbidden_enable_patterns"]:
+                if re.search(pattern, hardened, flags=re.I):
+                    raise RuntimeError("trusted-manager postimage failed live-enable scan")
+            workflow.write_text(hardened)
+            changed = changed_files(workdir, "HEAD")
+            if changed != [TRUSTED_MANAGER_WORKFLOW]:
+                raise RuntimeError(f"trusted-manager transformation escaped allowlist: {changed}")
+            run(["git", "-C", str(workdir), "add", "--", TRUSTED_MANAGER_WORKFLOW], check=True)
+            run([
+                "git", "-c", "user.name=Hyperliquid AI Manager",
+                "-c", "user.email=ai-manager@localhost", "-C", str(workdir),
+                "commit", "-m",
+                "Issue #170: manager-owned deploy workflow hardening",
+            ], timeout=60, check=True)
+            sha = git_worktree(workdir, "rev-parse", "HEAD", check=True).stdout.strip()
+            run([
+                "git", "-C", str(workdir), "push", GIT_PUSH_REMOTE,
+                f"HEAD:refs/heads/{TRUSTED_MANAGER_BRANCH}",
+            ], timeout=120, check=True)
+            pr = self.gh.create_pr(
+                title="AI team: #170 harden orchestrator deploy workflow",
+                head=TRUSTED_MANAGER_BRANCH,
+                base="main",
+                body=(
+                    "## Objective\nManager-generated byte-exact hardening for Issue #170.\n\n"
+                    "## Safety\nOnly `.github/workflows/deploy-ai-team-orchestrator.yml` changed. "
+                    "Requires a fresh exact-SHA Claude Sonnet PASS and green CI/validator.\n\n"
+                    "REAL_TRADING_ENABLED remains disabled.\n\nLIVE-SENSITIVE: YES\n"
+                ),
+            )
+            task_id = self.ledger.create_task(
+                issue_number=TRUSTED_MANAGER_BOOTSTRAP_ISSUE,
+                pr_number=int(pr["number"]), task_type="WORKFLOW_REVIEW",
+                agent="CLAUDE", model_class="SONNET", task_class="ROUTINE",
+                target_sha=sha, parent_id=str(bootstrap["id"]),
+            )
+            self.ledger.meta_set("trusted_manager_bootstrap_pr", str(pr["number"]))
+            self.gh.comment(
+                int(pr["number"]),
+                assignment_marker(
+                    task_id=task_id, agent="CLAUDE", task_type="REVIEW",
+                    model_class="SONNET", task_class="ROUTINE",
+                    issue_number=TRUSTED_MANAGER_BOOTSTRAP_ISSUE,
+                    pr_number=int(pr["number"]), target_sha=sha,
+                    parent_id=str(bootstrap["id"]),
+                ),
+            )
+            self.gh.add_labels(int(pr["number"]), [self.cfg["labels"]["waiting_review"]])
+            self.runtime.event(
+                "TRUSTED_MANAGER_WORKFLOW_APPLIED",
+                issue=TRUSTED_MANAGER_BOOTSTRAP_ISSUE, pr=int(pr["number"]),
+                target_sha=sha, preimage_sha256=TRUSTED_MANAGER_PREIMAGE_SHA256,
+                postimage_sha256=TRUSTED_MANAGER_POSTIMAGE_SHA256,
+                status="WAITING_REVIEW", next_action="fresh exact-SHA Sonnet review and CI",
+            )
+            return True
+        except Exception as exc:
+            self.runtime.event(
+                "TRUSTED_MANAGER_BOOTSTRAP_APPLY_FAILED",
+                issue=TRUSTED_MANAGER_BOOTSTRAP_ISSUE, error=str(exc), status="BLOCKED",
+                next_action="fail closed; reconcile the exact workflow preimage",
+            )
+            return False
+
+    def recover_trusted_manager_policy_blocks(self) -> bool:
+        changed = False
+        for issue_number in (168, 166):
+            recovered = self.ledger.recover_workflow_policy_block(issue_number)
+            if not recovered:
+                continue
+            changed = True
+            labels = self.cfg["labels"]
+            self.gh.remove_label(issue_number, labels["blocked"])
+            self.gh.add_labels(issue_number, [labels["pending"]])
+            self.runtime.event(
+                "TRUSTED_MANAGER_POLICY_UNBLOCKED", issue=issue_number,
+                assignment_id=recovered["id"], status="RETRY",
+                result="exact deploy-workflow policy blocker resolved",
+                next_action="resume preserved assignment without duplicate claim",
+            )
+        return changed
+
     def cycle(self) -> None:
         for stale in self.ledger.recover_interrupted():
             self.reap_stale_child(stale)
@@ -1384,6 +1699,7 @@ class Orchestrator:
                 target_sha=stale["target_sha"], session_id=stale["session_id"],
             )
         self.reconcile_handoffs()
+        self.reconcile_trusted_manager_bootstrap()
         if self.ledger.due() is not None:
             self.reconcile_parent_finalizers()
         self.sync_runtime_checkpoint()
@@ -1404,7 +1720,7 @@ class Orchestrator:
                 self.handle_claude_probe(task)
             elif task["task_type"] in {"BUILD", "REPAIR"}:
                 self.handle_codex(task)
-            elif task["task_type"] == "REVIEW":
+            elif task["task_type"] in {"REVIEW", "WORKFLOW_REVIEW"}:
                 self.handle_review(task)
             else:
                 self.block(task, f"unsupported task type {task['task_type']}")
@@ -2176,6 +2492,14 @@ not run on re-review because previous_sha is then populated.
             + result[:7000],
         )
         if verdict == "FAIL":
+            if task["task_type"] == "WORKFLOW_REVIEW":
+                self.block(task, "manager-generated workflow failed exact-SHA review")
+                self.finish_runtime_run(
+                    run_id, str(task["id"]), stdout=cp.stdout, stderr=cp.stderr,
+                    exit_code=0, session_id=session_id, usage=usage, result=result,
+                    status="FAIL", blockers=blockers,
+                )
+                return
             self.ledger.update(
                 task["id"],
                 status="DONE",
@@ -2420,6 +2744,9 @@ The reviewed SHA must be exactly the target SHA.
             )
             return
         if state == "FAIL":
+            if task["task_type"] == "WORKFLOW_REVIEW":
+                self.block(task, f"manager-generated workflow CI/validator failed: {detail}")
+                return
             # CI failures are repairable code/test defects, not owner blockers.
             blockers = [f"CI failed at {target}: {detail}"]
             self.ledger.update(
@@ -2441,6 +2768,19 @@ The reviewed SHA must be exactly the target SHA.
             return
         files = self.gh.changed_files(int(task["pr_number"]))
         issue = self.gh.issue(int(task["issue_number"]))
+        workflow_review = task["task_type"] == "WORKFLOW_REVIEW"
+        if workflow_review and files != [TRUSTED_MANAGER_WORKFLOW]:
+            self.block(task, f"manager workflow PR escaped exact path allowlist: {files}")
+            return
+        if workflow_review:
+            try:
+                actual = self.gh.file_text(TRUSTED_MANAGER_WORKFLOW, target)
+            except Exception as exc:
+                self.block(task, f"cannot verify manager workflow postimage: {exc}")
+                return
+            if actual != TRUSTED_MANAGER_WORKFLOW_POSTIMAGE:
+                self.block(task, "manager workflow PR does not match exact postimage")
+                return
         sensitive = any(
             name.startswith(prefix)
             for name in files
@@ -2458,7 +2798,10 @@ The reviewed SHA must be exactly the target SHA.
                     for prefix in self.cfg["safety"]["no_auto_merge_path_prefixes"]
                 )
             ]
-            if not all(name in AUTO_APPLY_CONTROL_PLANE_PATHS for name in protected_files):
+            allowed = all(name in AUTO_APPLY_CONTROL_PLANE_PATHS for name in protected_files)
+            if workflow_review:
+                allowed = protected_files == [TRUSTED_MANAGER_WORKFLOW]
+            if not allowed:
                 self.block(
                     task,
                     "protected change contains path outside AI control-plane allowlist",
@@ -2510,6 +2853,20 @@ The reviewed SHA must be exactly the target SHA.
             )
             return
         self.ledger.update(task["id"], status="DONE", retry_at=None, last_error=None)
+        if workflow_review:
+            merge_sha = str(merged.get("sha") or "")
+            if not re.fullmatch(r"[0-9a-f]{40}", merge_sha):
+                self.block(task, "workflow merged but merge SHA was unavailable")
+                return
+            self.ledger.meta_set("trusted_manager_workflow_merge_sha", merge_sha)
+            self.runtime.event(
+                "TRUSTED_MANAGER_WORKFLOW_MERGED",
+                issue=task["issue_number"], pr=task["pr_number"], target_sha=target,
+                merge_sha=merge_sha,
+                status="DEPLOY_PENDING",
+                result="fresh Sonnet exact-SHA PASS and CI/validator green",
+                next_action="wait for successful main deploy check",
+            )
         self.gh.remove_label(int(task["pr_number"]), self.cfg["labels"]["waiting_review"])
         self.gh.add_labels(int(task["issue_number"]), [self.cfg["labels"]["done"]])
         self.gh.remove_label(int(task["issue_number"]), self.cfg["labels"]["pending"])
