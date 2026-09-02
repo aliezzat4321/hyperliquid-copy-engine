@@ -352,6 +352,31 @@ def test_live_sensitive_path_is_not_auto_mergeable():
     assert any("src/hlcopy/trading/permissions.py".startswith(p) for p in protected)
 
 
+def test_autonomous_pr_body_is_conservatively_live_sensitive():
+    captured = {}
+
+    class GH:
+        def create_pr(self, **kwargs):
+            captured.update(kwargs)
+            return {"number": 170}
+
+    team = object.__new__(orch.Orchestrator)
+    team.gh = GH()
+    task = {"id": "build-170", "task_class": "ROUTINE"}
+    issue = {"number": 170, "title": "trusted-manager bootstrap"}
+
+    team.create_pr(
+        issue,
+        task,
+        "codex/auto-170",
+        "a" * 40,
+        ["scripts/ai_team_orchestrator.py"],
+    )
+
+    assert "LIVE-SENSITIVE: YES" in captured["body"]
+    assert "LIVE-SENSITIVE: NO" not in captured["body"]
+
+
 @pytest.mark.parametrize(
     "path",
     [

@@ -2205,7 +2205,7 @@ Routine changes remain gated by exact-SHA Claude review and CI before merge.
 - [x] No real-trading permission, key, order-route or safety-threshold change
 - [x] REAL_TRADING_ENABLED remains disabled
 
-LIVE-SENSITIVE: NO
+LIVE-SENSITIVE: YES
 
 <!-- AI_TEAM_BUILDER_EVIDENCE
 BUILDER=CODEX_CHATGPT
