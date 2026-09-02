@@ -551,6 +551,8 @@ def test_successful_merge_durably_completes_before_terminal_projection(tmp_path)
             actions.append("github")
         def add_labels(self, *args):
             actions.append("github")
+        def close_issue(self, *args):
+            actions.append("github")
         def comment(self, *args):
             actions.append("github")
 
