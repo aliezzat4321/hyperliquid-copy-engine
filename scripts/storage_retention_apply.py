@@ -271,6 +271,15 @@ def apply_candidates(
     skipped_missing: list[str] = []
     if apply and not getattr(shutil.rmtree, "avoids_symlink_attacks", False):
         raise ValueError("platform does not provide symlink-attack-resistant shutil.rmtree")
+    usage = shutil.disk_usage(mount)
+    target_used_bytes = usage.total * target_used_pct / 100
+    required_reclaim_bytes = max(0, int(usage.used - target_used_bytes))
+    reviewed_candidate_bytes = sum(candidate.bytes_planned for candidate in candidates)
+    if apply and reviewed_candidate_bytes < required_reclaim_bytes:
+        raise ValueError(
+            "reviewed candidate pool cannot reach target; refusing before deletion: "
+            f"required={required_reclaim_bytes} reviewed={reviewed_candidate_bytes}"
+        )
 
     for candidate in candidates:
         current_pct = _used_pct(mount)
@@ -327,7 +336,7 @@ def main() -> None:
             "/root/hyperliquid-audit/storage-retention/storage_retention_apply.json"
         ),
     )
-    parser.add_argument("--target-used-pct", type=float, default=92.0)
+    parser.add_argument("--target-used-pct", type=float, default=79.0)
     parser.add_argument("--max-manifest-age-minutes", type=int, default=15)
     parser.add_argument("--expected-manifest-sha256", default="")
     parser.add_argument("--apply", action="store_true")
@@ -337,8 +346,8 @@ def main() -> None:
         raise SystemExit("market-root must be the exact Hyperliquid market-shadow directory")
     if args.mount.resolve(strict=True) != EXPECTED_MOUNT.resolve(strict=True):
         raise SystemExit("mount must be the exact Hyperliquid data volume")
-    if not (90.0 <= args.target_used_pct <= 92.0):
-        raise SystemExit("emergency target-used-pct must be between 90 and 92")
+    if not (70.0 <= args.target_used_pct < 80.0):
+        raise SystemExit("exit-gate target-used-pct must be at least 70 and below 80")
 
     actual_manifest_sha256 = _sha256(args.manifest)
     expected_sha = str(args.expected_manifest_sha256 or "").strip().lower()
