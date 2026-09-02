@@ -65,10 +65,6 @@ AUTO_APPLY_CONTROL_PLANE_PATHS = {
     "scripts/ai_team_orchestrator.py",
     "scripts/ai_team_runtime_ledger.py",
 }
-ASYNC_REVIEW_TEST_PATHS = {
-    "tests/test_ai_team_orchestrator.py",
-    "tests/test_ai_team_runtime_ledger.py",
-}
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "protocol_version": 1,
@@ -863,23 +859,6 @@ def bounded_limit_text(text: str) -> str:
     return re.sub(r"\s+", " ", bounded_redacted(text, 1200)).strip()[-1200:]
 
 
-def routine_async_review_allowed(
-    cfg: dict[str, Any], issue_body: str, task_class: str, files: list[str]
-) -> bool:
-    """The async exception is exact and deliberately excludes every high-risk path."""
-    return bool(
-        task_class == "ROUTINE"
-        and acceptance_flag(issue_body, "AI_TEAM_PROTECTED_CHANGE")
-        and acceptance_flag(issue_body, "AI_TEAM_ROUTINE_ASYNC_REVIEW")
-        and files
-        and all(
-            name in AUTO_APPLY_CONTROL_PLANE_PATHS or name in ASYNC_REVIEW_TEST_PATHS
-            for name in files
-        )
-        and any(name in AUTO_APPLY_CONTROL_PLANE_PATHS for name in files)
-    )
-
-
 def extract_review(result: str, target_sha: str) -> tuple[str, list[str], str]:
     verdict_m = re.search(r"(?mi)^\s*VERDICT\s*=\s*(PASS|FAIL)\s*$", result)
     sha_m = re.search(r"(?mi)^\s*REVIEWED_SHA\s*=\s*([0-9a-f]{40})\s*$", result)
@@ -1326,7 +1305,7 @@ class Orchestrator:
                 retry_at=None,
                 last_error=None,
             )
-            self.enqueue_review(task, pr_number, new_sha, files=files)
+            self.enqueue_review(task, pr_number, new_sha)
             self.finish_runtime_run(
                 run_id,
                 str(task["id"]),
@@ -1524,9 +1503,7 @@ TASK_CLASS={task["task_class"]}
             body=body,
         )
 
-    def enqueue_review(
-        self, parent: sqlite3.Row, pr_number: int, sha: str, *, files: list[str] | None = None
-    ) -> None:
+    def enqueue_review(self, parent: sqlite3.Row, pr_number: int, sha: str) -> None:
         issue = self.gh.issue(int(parent["issue_number"]))
         _, escalation_reason = parse_task_class(str(issue.get("body") or ""))
         model = route_review(self.cfg, str(parent["task_class"]), escalation_reason)
@@ -1559,21 +1536,6 @@ TASK_CLASS={task["task_class"]}
             ),
         )
         self.gh.add_labels(pr_number, [self.cfg["labels"]["waiting_review"]])
-        changed = files if files is not None else self.gh.changed_files(pr_number)
-        if routine_async_review_allowed(
-            self.cfg, str(issue.get("body") or ""), str(parent["task_class"]), changed
-        ):
-            gate_id = self.ledger.create_task(
-                issue_number=int(parent["issue_number"]), pr_number=pr_number,
-                task_type="ASYNC_MERGE", agent="CONTROL_PLANE", model_class="NONE",
-                task_class=str(parent["task_class"]), status="WAITING_CI", target_sha=sha,
-                parent_id=task_id, retry_at=utcnow(),
-            )
-            self.runtime.event(
-                "ASYNC_REVIEW_MERGE_GATE_ENQUEUED", assignment_id=gate_id,
-                audit_assignment_id=task_id, issue=parent["issue_number"], pr=pr_number,
-                target_sha=sha,
-            )
 
     def handle_review(self, task: sqlite3.Row) -> None:
         if not task["pr_number"] or not task["target_sha"]:
@@ -1810,7 +1772,7 @@ not run on re-review because previous_sha is then populated.
                 session_id=session_id,
                 last_error="review FAIL",
             )
-            self.enqueue_repair(task, blockers, post_merge=bool(after.get("merged_at")))
+            self.enqueue_repair(task, blockers)
             self.finish_runtime_run(
                 run_id,
                 str(task["id"]),
@@ -1946,12 +1908,10 @@ BLOCKERS_JSON=["concise blocker 1","concise blocker 2"]
 The reviewed SHA must be exactly the target SHA.
 """
 
-    def enqueue_repair(
-        self, review: sqlite3.Row, blockers: list[str], *, post_merge: bool = False
-    ) -> None:
+    def enqueue_repair(self, review: sqlite3.Row, blockers: list[str]) -> None:
         task_id = self.ledger.create_task(
             issue_number=int(review["issue_number"]),
-            pr_number=None if post_merge else int(review["pr_number"]),
+            pr_number=int(review["pr_number"]),
             task_type="REPAIR",
             agent="CODEX_CHATGPT",
             model_class="CODEX_DEFAULT",
@@ -1962,7 +1922,7 @@ The reviewed SHA must be exactly the target SHA.
             parent_id=str(review["id"]),
         )
         self.gh.comment(
-            int(review["issue_number"] if post_merge else review["pr_number"]),
+            int(review["pr_number"]),
             assignment_marker(
                 task_id=task_id,
                 agent="CODEX_CHATGPT",
@@ -1970,19 +1930,12 @@ The reviewed SHA must be exactly the target SHA.
                 model_class="CODEX_DEFAULT",
                 task_class=str(review["task_class"]),
                 issue_number=int(review["issue_number"]),
-                pr_number=None if post_merge else int(review["pr_number"]),
+                pr_number=int(review["pr_number"]),
                 target_sha=str(review["target_sha"]),
                 parent_id=str(review["id"]),
                 previous_sha=str(review["target_sha"]),
             ),
         )
-        if post_merge:
-            self.runtime.event(
-                "ASYNC_AUDIT_FAILED_REPAIR_ENQUEUED", assignment_id=task_id,
-                audit_assignment_id=review["id"], issue=review["issue_number"],
-                merged_pr=review["pr_number"], target_sha=review["target_sha"],
-                blockers=blockers,
-            )
 
     def enqueue_replacement_review(self, old: sqlite3.Row, current_sha: str) -> None:
         task_id = self.ledger.create_task(
@@ -2039,13 +1992,7 @@ The reviewed SHA must be exactly the target SHA.
             self.block(task, f"CI failed after review PASS: {detail}")
             return
         files = self.gh.changed_files(int(task["pr_number"]))
-        async_gate = str(task["task_type"]) == "ASYNC_MERGE"
         issue = self.gh.issue(int(task["issue_number"]))
-        if async_gate and not routine_async_review_allowed(
-            self.cfg, str(issue.get("body") or ""), str(task["task_class"]), files
-        ):
-            self.block(task, "async review gate no longer satisfies exact routine allowlist")
-            return
         sensitive = any(
             name.startswith(prefix)
             for name in files
@@ -2076,15 +2023,10 @@ The reviewed SHA must be exactly the target SHA.
                     "AI_TEAM_PROTECTED_CHANGE=YES",
                 )
                 return
-            gate_basis = (
-                "Trusted Issue async-review authorization + CI green; "
-                if async_gate
-                else "Trusted Issue authorization + independent exact-SHA Claude PASS + CI green; "
-            )
             self.gh.comment(
                 int(task["pr_number"]),
                 "AI_TEAM_PROTECTED_GATE=PASS\n"
-                + gate_basis
+                "Trusted Issue authorization + independent exact-SHA Claude PASS + CI green; "
                 + "all protected files are inside the narrow AI control-plane allowlist.",
             )
         if str(task["task_class"]) not in self.cfg["auto_merge_task_classes"]:
@@ -2111,7 +2053,7 @@ The reviewed SHA must be exactly the target SHA.
         self.gh.comment(
             int(task["issue_number"]),
             f"AI_TEAM_AUTONOMOUS_MERGE=YES\nPR={task['pr_number']}\nTARGET_SHA={target}\n"
-            f"CI=PASS\nASYNC_CLAUDE_AUDIT={'YES' if async_gate else 'NO'}\nMERGED_AT={utcnow()}",
+            f"CI=PASS\nASYNC_CLAUDE_AUDIT=NO\nMERGED_AT={utcnow()}",
         )
 
     def retry_or_block(

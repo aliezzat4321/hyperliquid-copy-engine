@@ -137,22 +137,7 @@ def test_unknown_rc_one_text_remains_ordinary_failure():
     assert orch.rate_limit_info("process exited rc=1: assertion failed", 300) == (False, None)
 
 
-def test_async_review_policy_is_exact_control_plane_only():
-    body = "AI_TEAM_PROTECTED_CHANGE=YES\nAI_TEAM_ROUTINE_ASYNC_REVIEW=YES"
-    allowed = [
-        "scripts/ai_team_orchestrator.py", "config/ai_team_router.json",
-        "tests/test_ai_team_orchestrator.py",
-    ]
-    assert orch.routine_async_review_allowed(orch.DEFAULT_CONFIG, body, "ROUTINE", allowed)
-    assert not orch.routine_async_review_allowed(
-        orch.DEFAULT_CONFIG, body, "QUANT_PROFITABILITY", allowed
-    )
-    assert not orch.routine_async_review_allowed(
-        orch.DEFAULT_CONFIG, body, "ROUTINE", ["src/hlcopy/trading/permissions.py"]
-    )
-
-
-def test_async_review_enqueue_creates_independent_audit_and_merge_gate(tmp_path):
+def test_review_enqueue_never_creates_pre_review_merge_gate(tmp_path):
     ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
     parent_id = ledger.create_task(
         issue_number=151, task_type="BUILD", agent="CODEX_CHATGPT",
@@ -178,18 +163,14 @@ def test_async_review_enqueue_creates_independent_audit_and_merge_gate(tmp_path)
     team.ledger = ledger
     team.gh = GitHubStub()
     team.runtime = RuntimeStub()
-    team.enqueue_review(
-        ledger.get(parent_id), 152, "a" * 40,
-        files=["scripts/ai_team_orchestrator.py", "config/ai_team_router.json"],
-    )
+    team.enqueue_review(ledger.get(parent_id), 152, "a" * 40)
     rows = ledger.db.execute("SELECT * FROM tasks WHERE parent_id=?", (parent_id,)).fetchall()
     audit = next(row for row in rows if row["task_type"] == "REVIEW")
-    gate = ledger.db.execute(
-        "SELECT * FROM tasks WHERE task_type='ASYNC_MERGE' AND parent_id=?", (audit["id"],)
-    ).fetchone()
     assert audit["status"] == "PENDING"
-    assert gate["status"] == "WAITING_CI"
-    assert gate["target_sha"] == audit["target_sha"] == "a" * 40
+    assert audit["target_sha"] == "a" * 40
+    assert ledger.db.execute(
+        "SELECT * FROM tasks WHERE task_type='ASYNC_MERGE'"
+    ).fetchone() is None
 
 
 def test_ledger_recovers_orchestrator_restart_mid_task(tmp_path):
