@@ -367,14 +367,205 @@ def test_orchestrator_control_plane_paths_are_not_auto_mergeable(path):
     assert any(path.startswith(prefix) for prefix in protected)
 
 
-def test_protected_control_plane_allowlist_excludes_live_and_deploy_paths():
+def test_protected_control_plane_allowlist_has_only_exact_deploy_workflow():
     allowed = orch.AUTO_APPLY_CONTROL_PLANE_PATHS
     assert "scripts/ai_team_orchestrator.py" in allowed
     assert "scripts/ai_team_runtime_ledger.py" in allowed
     assert "config/ai_team_router.json" in allowed
     assert "src/hlcopy/trading/permissions.py" not in allowed
     assert "docs/ai-team/LIVE_TRADING_GATE.md" not in allowed
-    assert ".github/workflows/deploy-ai-team-orchestrator.yml" not in allowed
+    assert ".github/workflows/deploy-ai-team-orchestrator.yml" in allowed
+    assert not any(
+        path.startswith(".github/workflows/")
+        for path in allowed
+        if path != ".github/workflows/deploy-ai-team-orchestrator.yml"
+    )
+
+
+def test_machine_policy_blocker_requires_exact_latest_marker():
+    valid = (
+        "<!-- AI_TEAM_BLOCKED_V1\nASSIGNMENT_ID=old-assignment\n"
+        "ERROR=autonomous task touched owner-sensitive live path: "
+        ".github/workflows/deploy-ai-team-orchestrator.yml\n-->\n"
+        "Autonomous task blocked"
+    )
+    assert orch.machine_policy_blocker([{"body": valid}]) == (
+        "old-assignment",
+        ".github/workflows/deploy-ai-team-orchestrator.yml",
+    )
+    assert orch.machine_policy_blocker([{"body": valid}, {"body": "title says blocked"}]) == (
+        "old-assignment",
+        ".github/workflows/deploy-ai-team-orchestrator.yml",
+    )
+    assert (
+        orch.machine_policy_blocker(
+            [
+                {"body": valid},
+                {
+                    "body": (
+                        "<!-- AI_TEAM_BLOCKED_V1\nASSIGNMENT_ID=new\n"
+                        "ERROR=genuine safety block\n-->"
+                    )
+                },
+            ]
+        )
+        is None
+    )
+
+
+def test_policy_reconciliation_readies_exact_allowed_path_and_preserves_history(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    old_id = ledger.create_task(
+        issue_number=166,
+        task_type="BUILD",
+        agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT",
+        task_class="ROUTINE",
+        status="BLOCKED",
+        last_error=(
+            "autonomous task touched owner-sensitive live path: "
+            ".github/workflows/deploy-ai-team-orchestrator.yml"
+        ),
+    )
+    labels = orch.DEFAULT_CONFIG["labels"]
+    issue = {
+        "number": 166,
+        "state": "open",
+        "author_association": "OWNER",
+        "body": "AI_TASK_CLASS=ROUTINE\nAI_TEAM_PROTECTED_CHANGE=YES",
+        "labels": [{"name": labels["blocked"]}],
+    }
+    marker = (
+        f"<!-- AI_TEAM_BLOCKED_V1\nASSIGNMENT_ID={old_id}\n"
+        "ERROR=autonomous task touched owner-sensitive live path: "
+        ".github/workflows/deploy-ai-team-orchestrator.yml\n-->"
+    )
+
+    class GH:
+        def __init__(self):
+            self.assignment_comments = []
+
+        def pending_issues(self, label):
+            return [issue] if any(x["name"] == label for x in issue["labels"]) else []
+
+        def ready_issues(self, label):
+            return self.pending_issues(label)
+
+        def comments(self, number):
+            return [{"body": marker}]
+
+        def add_labels(self, number, values):
+            for value in values:
+                if not any(x["name"] == value for x in issue["labels"]):
+                    issue["labels"].append({"name": value})
+
+        def remove_label(self, number, label):
+            issue["labels"] = [x for x in issue["labels"] if x["name"] != label]
+
+        def comment(self, number, body):
+            self.assignment_comments.append(body)
+
+    class Runtime:
+        def __init__(self):
+            self.events = []
+
+        def event(self, kind, **payload):
+            self.events.append((kind, payload))
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.gh = orch.DEFAULT_CONFIG, ledger, GH()
+    team.runtime, team.trusted = Runtime(), {"OWNER"}
+    team.sync_runtime_checkpoint = lambda: None
+    team.kick_trello_reconciliation = lambda: None
+
+    assert team.reconcile_policy_blockers() is True
+    assert team.reconcile_policy_blockers() is False
+    assert {x["name"] for x in issue["labels"]} == {labels["ready"]}
+    assert ledger.get(old_id)["status"] == "BLOCKED"
+    assert team.runtime.events == [
+        (
+            "POLICY_BLOCKER_CLEARED",
+            {
+                "issue": 166,
+                "previous_assignment_id": old_id,
+                "path": ".github/workflows/deploy-ai-team-orchestrator.yml",
+                "status": "PROTECTED_RETRY_READY",
+                "next_action": "Fresh Codex assignment",
+            },
+        )
+    ]
+
+    assert team.claim_ready_issue() is True
+    tasks = ledger.db.execute(
+        "SELECT id,status FROM tasks WHERE issue_number=166 ORDER BY created_at, rowid"
+    ).fetchall()
+    assert [(row["id"], row["status"]) for row in tasks] == [
+        (old_id, "BLOCKED"),
+        (tasks[1]["id"], "PENDING"),
+    ]
+    assert tasks[1]["id"] != old_id
+
+
+@pytest.mark.parametrize(
+    ("body", "author", "error"),
+    [
+        (
+            "AI_TASK_CLASS=ROUTINE",
+            "OWNER",
+            "autonomous task touched owner-sensitive live path: "
+            ".github/workflows/deploy-ai-team-orchestrator.yml",
+        ),
+        (
+            "AI_TASK_CLASS=MAJOR_ARCHITECTURE\nAI_TEAM_PROTECTED_CHANGE=YES",
+            "OWNER",
+            "autonomous task touched owner-sensitive live path: "
+            ".github/workflows/deploy-ai-team-orchestrator.yml",
+        ),
+        (
+            "AI_TASK_CLASS=ROUTINE\nAI_TEAM_PROTECTED_CHANGE=YES",
+            "NONE",
+            "autonomous task touched owner-sensitive live path: "
+            ".github/workflows/deploy-ai-team-orchestrator.yml",
+        ),
+        (
+            "AI_TASK_CLASS=ROUTINE\nAI_TEAM_PROTECTED_CHANGE=YES",
+            "OWNER",
+            "autonomous task touched owner-sensitive live path: .github/workflows/another.yml",
+        ),
+        (
+            "AI_TASK_CLASS=ROUTINE\nAI_TEAM_PROTECTED_CHANGE=YES",
+            "OWNER",
+            "genuine live-capital safety blocker",
+        ),
+    ],
+)
+def test_policy_reconciliation_fails_closed_for_other_blockers(tmp_path, body, author, error):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    labels = orch.DEFAULT_CONFIG["labels"]
+    issue = {
+        "number": 166,
+        "state": "open",
+        "author_association": author,
+        "body": body,
+        "labels": [{"name": labels["blocked"]}],
+    }
+    marker = f"<!-- AI_TEAM_BLOCKED_V1\nASSIGNMENT_ID=old\nERROR={error}\n-->"
+
+    class GH:
+        def pending_issues(self, label):
+            return [issue]
+
+        def comments(self, number):
+            return [{"body": marker}]
+
+    class Runtime:
+        def event(self, *args, **kwargs):
+            raise AssertionError("unexpected event")
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.gh = orch.DEFAULT_CONFIG, ledger, GH()
+    team.runtime, team.trusted = Runtime(), {"OWNER"}
+    assert team.reconcile_policy_blockers() is False
 
 
 def test_only_explicit_routine_class_is_auto_merge_eligible():

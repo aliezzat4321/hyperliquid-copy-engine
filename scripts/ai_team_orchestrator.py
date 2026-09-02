@@ -60,8 +60,10 @@ TRELLO_BRIDGE = Path("/opt/hyperliquid-ai-team/scripts/trello_team_bridge.py")
 # Protected AI-control-plane files that Codex may propose, but never merge merely
 # because it changed them. Automatic apply additionally requires a trusted Issue
 # flag, independent exact-SHA Claude PASS, green CI, and ROUTINE task class.
-# Trading/live/capital/deployment paths are intentionally excluded.
+# Trading/live/capital/deployment paths are intentionally excluded, except for the
+# exact workflow that deploys this AI-team control plane.
 AUTO_APPLY_CONTROL_PLANE_PATHS = {
+    ".github/workflows/deploy-ai-team-orchestrator.yml",
     "config/ai_team_router.json",
     "scripts/ai_team_orchestrator.py",
     "scripts/ai_team_runtime_ledger.py",
@@ -643,6 +645,25 @@ def parse_task_class(body: str) -> tuple[str, str | None]:
     return task_class, e.group(1) if e else None
 
 
+def machine_policy_blocker(comments: list[dict[str, Any]]) -> tuple[str, str] | None:
+    """Return the latest exact policy-path blocker, never inferring from prose."""
+    marker = re.compile(
+        r"<!--\s*AI_TEAM_BLOCKED_V1\s*\n"
+        r"ASSIGNMENT_ID=([^\n]+)\n"
+        r"ERROR=autonomous task touched owner-sensitive live path: ([^\n]+)\n"
+        r"-->",
+    )
+    for comment in reversed(comments):
+        body = str(comment.get("body") or "")
+        if "AI_TEAM_BLOCKED_V1" not in body:
+            continue
+        match = marker.search(body)
+        if not match:
+            return None
+        return match.group(1).strip(), match.group(2).strip()
+    return None
+
+
 def route_review(cfg: dict[str, Any], task_class: str, escalation_reason: str | None) -> str:
     if task_class in cfg["opus_allowed_task_classes"]:
         if escalation_reason and escalation_reason not in cfg["opus_allowed_reasons"]:
@@ -1213,6 +1234,59 @@ class Orchestrator:
             return True
         return False
 
+    def reconcile_policy_blockers(self) -> bool:
+        """Ready trusted issues whose exact, structured path blocker is now allowed."""
+        labels = self.cfg["labels"]
+        changed = False
+        for issue in self.gh.pending_issues(labels["blocked"]):
+            number = int(issue["number"])
+            body = str(issue.get("body") or "")
+            if (
+                str(issue.get("state") or "open").lower() != "open"
+                or str(issue.get("author_association") or "") not in self.trusted
+                or parse_task_class(body)[0] != "ROUTINE"
+                or not acceptance_flag(body, "AI_TEAM_PROTECTED_CHANGE")
+                or self.ledger.active_for_issue(number)
+            ):
+                continue
+            blocker = machine_policy_blocker(self.gh.comments(number))
+            if blocker is None:
+                continue
+            assignment_id, path = blocker
+            if path not in AUTO_APPLY_CONTROL_PLANE_PATHS:
+                continue
+            try:
+                blocked_task = self.ledger.get(assignment_id)
+            except KeyError:
+                continue
+            expected_error = f"autonomous task touched owner-sensitive live path: {path}"
+            if (
+                int(blocked_task["issue_number"]) != number
+                or blocked_task["status"] != "BLOCKED"
+                or blocked_task["last_error"] != expected_error
+            ):
+                continue
+            if not any(
+                path.startswith(prefix)
+                for prefix in self.cfg["safety"]["no_auto_merge_path_prefixes"]
+            ):
+                continue
+            self.gh.add_labels(number, [labels["ready"]])
+            self.gh.remove_label(number, labels["blocked"])
+            self.runtime.event(
+                "POLICY_BLOCKER_CLEARED",
+                issue=number,
+                previous_assignment_id=assignment_id,
+                path=path,
+                status="PROTECTED_RETRY_READY",
+                next_action="Fresh Codex assignment",
+            )
+            changed = True
+        if changed:
+            self.sync_runtime_checkpoint()
+            self.kick_trello_reconciliation()
+        return changed
+
     def promote_queued_issue(self) -> bool:
         """Promote exactly one explicit, dependency-satisfied pending issue."""
         if self.ledger.has_queue_claim_conflict():
@@ -1383,6 +1457,7 @@ class Orchestrator:
                 issue=stale["issue_number"], pr=stale["pr_number"],
                 target_sha=stale["target_sha"], session_id=stale["session_id"],
             )
+        self.reconcile_policy_blockers()
         self.reconcile_handoffs()
         if self.ledger.due() is not None:
             self.reconcile_parent_finalizers()
