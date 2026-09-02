@@ -57,7 +57,7 @@ FALLBACKS = {
 
 
 def utcnow() -> dt.datetime:
-    return dt.datetime.now(dt.timezone.utc)
+    return dt.datetime.now(dt.UTC)
 
 
 def iso(value: dt.datetime) -> str:
@@ -69,7 +69,7 @@ def parse_time(value: Any) -> dt.datetime | None:
         return None
     try:
         parsed = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.timezone.utc)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.UTC)
     except ValueError:
         return None
 
@@ -240,14 +240,16 @@ class Trello:
     def exact_issue_card(self, issue: int) -> str | None:
         """Reuse the board's existing exact-issue card when local state was lost."""
         rows = self.call(
-            "GET", f"/boards/{BOARD_ID}/cards", {"fields": "id,name,desc", "filter": "all"}
+            "GET", f"/boards/{BOARD_ID}/cards", {"fields": "id,name,desc", "filter": "open"}
         ) or []
-        marker = re.compile(rf"(?<!\d)#{issue}(?!\d)")
-        matches = [str(row["id"]) for row in rows if marker.search(
-            f"{row.get('name', '')}\n{row.get('desc', '')}"
-        )]
-        if len(matches) > 1:
-            raise RuntimeError(f"multiple exact cards for issue {issue}")
+        title_marker = re.compile(rf"(?:^|\s)#{issue}(?:\s|$)")
+        issue_field = re.compile(rf"(?m)^Issue:\s*#{issue}(?:\s|$)")
+        matches = sorted(
+            str(row["id"])
+            for row in rows
+            if title_marker.search(str(row.get("name", "")))
+            or issue_field.search(str(row.get("desc", "")))
+        )
         return matches[0] if matches else None
 
 
@@ -307,7 +309,7 @@ def reconcile(
             processed += 1
         except Exception:
             deferred += 1
-            break
+            continue
     return {"processed": processed, "deferred": deferred}
 
 

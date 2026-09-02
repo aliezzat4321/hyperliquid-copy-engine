@@ -181,6 +181,40 @@ def test_missing_mapping_discovers_existing_exact_issue_card(tmp_path: Path) -> 
     assert json.loads(state.read_text())["cards"][f"{bridge.REPOSITORY}#146"] == "existing-146"
 
 
+def test_exact_issue_card_ignores_pr_reference_and_archived_cards() -> None:
+    client = bridge.Trello("key", "token")
+    calls = []
+
+    def call(method, path, data=None):
+        calls.append((method, path, data))
+        return [
+            {"id": "wrong", "name": "[P0] #120 other", "desc": "PR / SHA: #146 / abc"},
+            {"id": "right", "name": "[P0] #146 task", "desc": "PR / SHA: #120 / def"},
+        ]
+
+    client.call = call
+    assert client.exact_issue_card(146) == "right"
+    assert calls[0][2]["filter"] == "open"
+
+
+def test_reconcile_continues_after_one_failed_event(tmp_path: Path) -> None:
+    outbox = tmp_path / "outbox"
+    outbox.mkdir()
+    (outbox / "001.json").write_text(json.dumps(event("CI_PASS", issue=145)))
+    (outbox / "002.json").write_text(json.dumps(event("CI_PASS", issue=146)))
+
+    class Selective(FakeTrello):
+        def exact_issue_card(self, issue: int) -> str | None:
+            if issue == 145:
+                raise OSError("offline")
+            return None
+
+    result = bridge.reconcile(outbox, Selective(), tmp_path / "state", tmp_path / "ledger")
+    assert result == {"processed": 1, "deferred": 1}
+    assert (outbox / "001.json").exists()
+    assert not (outbox / "002.json").exists()
+
+
 def test_outage_retains_event_and_later_reconciliation_converges(tmp_path: Path) -> None:
     outbox = tmp_path / "outbox"
     outbox.mkdir()

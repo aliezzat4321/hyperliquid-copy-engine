@@ -102,6 +102,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "trusted_author_associations": ["OWNER", "MEMBER", "COLLABORATOR"],
     "labels": {
         "ready": "ai-team:ready",
+        "queued": "ai-team:queued",
         "pending": "ai-team:pending",
         "running": "ai-team:running",
         "waiting_review": "ai-team:waiting-review",
@@ -488,6 +489,12 @@ class Ledger:
         row = self.db.execute(
             f"SELECT 1 FROM tasks WHERE issue_number=? AND status IN ({placeholders}) LIMIT 1",
             (issue_number, *ACTIVE_STATUSES),
+        ).fetchone()
+        return bool(row)
+
+    def has_task_for_issue(self, issue_number: int) -> bool:
+        row = self.db.execute(
+            "SELECT 1 FROM tasks WHERE issue_number=? LIMIT 1", (issue_number,)
         ).fetchone()
         return bool(row)
 
@@ -1121,6 +1128,7 @@ class Orchestrator:
             )
             self.gh.add_labels(number, [self.cfg["labels"]["pending"]])
             self.gh.remove_label(number, label)
+            self.gh.remove_label(number, self.cfg["labels"]["queued"])
             self.runtime.event(
                 "TASK_ASSIGNED",
                 assignment_id=task_id,
@@ -1139,14 +1147,14 @@ class Orchestrator:
         labels = self.cfg["labels"]
         blocked_labels = {labels["blocked"], labels["done"]}
         eligible: list[tuple[int, int, dict[str, Any]]] = []
-        for issue in self.gh.pending_issues(labels["pending"]):
+        for issue in self.gh.pending_issues(labels["queued"]):
             number = int(issue["number"])
             names = {str(x.get("name")) for x in issue.get("labels", [])}
             body = str(issue.get("body") or "")
             metadata = queue_metadata(body)
             if (
                 metadata is None or names & blocked_labels
-                or self.ledger.active_for_issue(number)
+                or self.ledger.has_task_for_issue(number)
                 or str(issue.get("author_association") or "") not in self.trusted
             ):
                 continue
@@ -2394,9 +2402,12 @@ The reviewed SHA must be exactly the target SHA.
             task["id"], status="BLOCKED", retry_at=None,
             last_error=error[:1500], systemd_unit=None,
         )
-        number = int(task["pr_number"] or task["issue_number"])
+        number = int(task["issue_number"])
         try:
             self.gh.add_labels(number, [self.cfg["labels"]["blocked"]])
+            self.gh.remove_label(number, self.cfg["labels"]["pending"])
+            self.gh.remove_label(number, self.cfg["labels"]["ready"])
+            self.gh.remove_label(number, self.cfg["labels"]["queued"])
             self.gh.comment(
                 number,
                 f"<!-- AI_TEAM_BLOCKED_V1\nASSIGNMENT_ID={task['id']}\n"

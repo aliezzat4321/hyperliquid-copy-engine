@@ -590,12 +590,27 @@ def test_queue_promotes_smallest_satisfied_priority_and_claims_once(tmp_path):
     ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
     labels = orch.DEFAULT_CONFIG["labels"]
     issues = [
-        {"number": 120, "body": "AI_TEAM_AUTO_QUEUE=YES\nAI_TEAM_QUEUE_PRIORITY=10\nAI_TEAM_DEPENDS_ON=154", "author_association": "OWNER",
-         "labels": [{"name": labels["pending"]}]},
-        {"number": 150, "body": "AI_TEAM_AUTO_QUEUE=YES\nAI_TEAM_QUEUE_PRIORITY=20", "author_association": "OWNER",
-         "labels": [{"name": labels["pending"]}]},
-        {"number": 151, "body": "AI_TEAM_QUEUE_PRIORITY=1",
-         "author_association": "OWNER", "labels": [{"name": labels["pending"]}]},
+        {
+            "number": 120,
+            "body": (
+                "AI_TEAM_AUTO_QUEUE=YES\nAI_TEAM_QUEUE_PRIORITY=10\n"
+                "AI_TEAM_DEPENDS_ON=154"
+            ),
+            "author_association": "OWNER",
+            "labels": [{"name": labels["queued"]}],
+        },
+        {
+            "number": 150,
+            "body": "AI_TEAM_AUTO_QUEUE=YES\nAI_TEAM_QUEUE_PRIORITY=20",
+            "author_association": "OWNER",
+            "labels": [{"name": labels["queued"]}],
+        },
+        {
+            "number": 151,
+            "body": "AI_TEAM_QUEUE_PRIORITY=1",
+            "author_association": "OWNER",
+            "labels": [{"name": labels["queued"]}],
+        },
     ]
 
     class GH:
@@ -630,3 +645,12 @@ def test_queue_promotes_smallest_satisfied_priority_and_claims_once(tmp_path):
     assert ledger.active_for_issue(120)
     assert team.promote_queued_issue() is False
     assert team.gh.comments == [120]
+
+
+def test_block_labels_issue_and_clears_queue_state():
+    source = MODULE_PATH.read_text()
+    start = source.index("    def block(")
+    block = source[start:start + 2500]
+    assert 'number = int(task["issue_number"])' in block
+    assert 'self.cfg["labels"]["queued"]' in block
+    assert 'self.cfg["labels"]["pending"]' in block

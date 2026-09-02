@@ -33,6 +33,7 @@
   "trusted_author_associations": ["OWNER", "MEMBER", "COLLABORATOR"],
   "labels": {
     "ready": "ai-team:ready",
+    "queued": "ai-team:queued",
     "pending": "ai-team:pending",
     "running": "ai-team:running",
     "waiting_review": "ai-team:waiting-review",
