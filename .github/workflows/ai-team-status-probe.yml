@@ -19,7 +19,7 @@ jobs:
           clean: true
           persist-credentials: false
 
-      - name: Verify deployed continuity implementation and deterministic recovery
+      - name: Verify deployed continuity state machine directly
         shell: bash
         run: |
           set -euo pipefail
@@ -35,15 +35,134 @@ jobs:
           cmp -s config/ai_team_router.json /opt/hyperliquid-ai-team/config/ai_team_router.json
           echo 'DEPLOYED_MAIN_PARITY=PASS'
 
-          grep -nE 'WAITING_RATE_LIMIT|CLAUDE_READINESS_PROBE|retry_or_block|recover_interrupted' \
-            /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py | tail -n 100
+          python3 - <<'PY'
+          import importlib.util
+          import subprocess
+          import tempfile
+          from pathlib import Path
 
-          python3 -m pytest -q tests/test_ai_team_orchestrator.py \
-            -k 'rate_limit or probe_wait_and_success or non_limit_probe_failure or scheduler_skips_not_due_claude_wait_for_codex or watchdog_requeues_same_review_checkpoint or ledger_recovers_orchestrator_restart_mid_task'
-          echo 'CONTINUITY_DETERMINISTIC_PROOF=PASS'
+          path = Path('/opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py')
+          spec = importlib.util.spec_from_file_location('deployed_ai_team_orchestrator', path)
+          assert spec and spec.loader
+          orch = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(orch)
+
+          class Events:
+              def event(self, *args, **kwargs):
+                  return None
+
+          # Exact real-world provider wording seen on this VM must classify as a limit.
+          limited, retry_at = orch.rate_limit_info(
+              "api_error_status=429 You've hit your session limit · resets 11:10pm (UTC)", 300
+          )
+          assert limited and retry_at
+
+          with tempfile.TemporaryDirectory() as td:
+              ledger = orch.Ledger(Path(td) / 'ledger.sqlite3')
+              wait_id = ledger.create_task(
+                  issue_number=900001, pr_number=900001, task_type='REVIEW', agent='CLAUDE',
+                  model_class='SONNET', task_class='ROUTINE', status='WAITING_RATE_LIMIT',
+                  retry_at='2999-01-01T00:00:00Z', session_id='session-preserved', attempt=2,
+                  target_sha='a' * 40,
+              )
+              codex_id = ledger.create_task(
+                  issue_number=900002, task_type='BUILD', agent='CODEX_CHATGPT',
+                  model_class='CODEX_DEFAULT', task_class='ROUTINE', status='PENDING',
+              )
+              due = ledger.due()
+              assert due and due['id'] == codex_id
+              assert ledger.get(wait_id)['attempt'] == 2
+              print('CLAUDE_WAIT_DOES_NOT_BLOCK_CODEX=PASS')
+
+          with tempfile.TemporaryDirectory() as td:
+              ledger = orch.Ledger(Path(td) / 'ledger.sqlite3')
+              task_id = ledger.create_task(
+                  issue_number=900003, pr_number=900003, task_type='REVIEW', agent='CLAUDE',
+                  model_class='SONNET', task_class='ROUTINE', status='WAITING_RATE_LIMIT',
+                  retry_at=orch.utcnow(), session_id='same-session', attempt=2,
+                  target_sha='b' * 40, systemd_unit='hl-ai-claude-test-worker',
+              )
+              team = object.__new__(orch.Orchestrator)
+              team.ledger = ledger
+              team.cfg = {
+                  **orch.DEFAULT_CONFIG,
+                  'claude_readiness_probe_seconds': 300,
+                  'claude_readiness_probe_timeout_seconds': 20,
+                  'claude_readiness_probe_output_bytes': 4096,
+                  'max_attempts': 3,
+              }
+              team.runtime = Events()
+              orch.model_sandbox_command = lambda **kw: kw['command']
+              replies = iter([
+                  subprocess.CompletedProcess([], 1, '', "api_error_status=429 You've hit your session limit; resets in 47 minutes"),
+                  subprocess.CompletedProcess([], 0, '{"result":"CLAUDE_READY_OK"}', ''),
+              ])
+              orch.run = lambda *args, **kwargs: next(replies)
+
+              team.handle_claude_probe(ledger.get(task_id))
+              waiting = ledger.get(task_id)
+              assert waiting['id'] == task_id
+              assert waiting['status'] == 'WAITING_RATE_LIMIT'
+              assert waiting['attempt'] == 2
+              assert waiting['session_id'] == 'same-session'
+              assert waiting['systemd_unit'] is None
+              print('RATE_LIMIT_WAIT_NO_ATTEMPT_BURN_WORKER_RELEASED=PASS')
+
+              team.handle_claude_probe(waiting)
+              ready = ledger.get(task_id)
+              assert ready['id'] == task_id
+              assert ready['status'] == 'PENDING'
+              assert ready['attempt'] == 2
+              assert ready['session_id'] == 'same-session'
+              print('SAME_ASSIGNMENT_AUTO_RESUME_AFTER_READY=PASS')
+
+          with tempfile.TemporaryDirectory() as td:
+              ledger = orch.Ledger(Path(td) / 'ledger.sqlite3')
+              task_id = ledger.create_task(
+                  issue_number=900004, pr_number=900004, task_type='REVIEW', agent='CLAUDE',
+                  model_class='SONNET', task_class='ROUTINE', status='WAITING_RATE_LIMIT',
+                  retry_at=orch.utcnow(), session_id='ordinary-failure-session', attempt=0,
+                  target_sha='c' * 40,
+              )
+              team = object.__new__(orch.Orchestrator)
+              team.ledger = ledger
+              team.cfg = {**orch.DEFAULT_CONFIG, 'max_attempts': 3,
+                          'claude_readiness_probe_seconds': 300,
+                          'claude_readiness_probe_timeout_seconds': 20,
+                          'claude_readiness_probe_output_bytes': 4096}
+              team.runtime = Events()
+              orch.model_sandbox_command = lambda **kw: kw['command']
+              orch.run = lambda *args, **kwargs: subprocess.CompletedProcess(
+                  [], 1, '', 'authentication configuration failed'
+              )
+              team.handle_claude_probe(ledger.get(task_id))
+              row = ledger.get(task_id)
+              assert row['status'] == 'RETRY'
+              assert row['attempt'] == 1
+              assert row['session_id'] == 'ordinary-failure-session'
+              print('ORDINARY_FAILURE_USES_BOUNDED_RETRY=PASS')
+
+          with tempfile.TemporaryDirectory() as td:
+              ledger = orch.Ledger(Path(td) / 'ledger.sqlite3')
+              task_id = ledger.create_task(
+                  issue_number=900005, pr_number=900005, task_type='REVIEW', agent='CLAUDE',
+                  model_class='SONNET', task_class='ROUTINE', status='RUNNING',
+                  target_sha='d' * 40, session_id='checkpoint-session', attempt=1,
+                  systemd_unit='hl-ai-claude-stale-worker',
+              )
+              stale = ledger.recover_interrupted()
+              assert stale and stale[0]['id'] == task_id
+              row = ledger.get(task_id)
+              assert row['status'] == 'RETRY'
+              assert row['target_sha'] == 'd' * 40
+              assert row['session_id'] == 'checkpoint-session'
+              print('STALE_WORKER_REQUEUES_SAME_CHECKPOINT=PASS')
+
+          print('CONTINUITY_DETERMINISTIC_PROOF=PASS')
+          PY
 
           echo '=== AI TEAM SERVICE JOURNAL ==='
-          journalctl -u hyperliquid-ai-team-orchestrator.service -n 40 --no-pager -l || true
-          echo 'PROBE_REVISION=5'
+          journalctl -u hyperliquid-ai-team-orchestrator.service -n 25 --no-pager -l || true
+          echo 'PROBE_REVISION=6'
           echo 'POLYMARKET_TOUCHED=NO'
           echo 'REAL_TRADING_TOUCHED=NO'
