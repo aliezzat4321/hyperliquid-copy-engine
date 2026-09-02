@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import datetime as dt
 import importlib.util
 import json
-import datetime as dt
 import subprocess
 from pathlib import Path
 
@@ -122,7 +122,7 @@ def test_claude_unavailability_detection_fixtures(message):
 def test_rate_limit_reset_time_fixtures(message):
     limited, retry_at = orch.rate_limit_info(f"usage limit; {message}", 300)
     assert limited is True
-    assert orch.parse_utc(retry_at) > dt.datetime.now(dt.timezone.utc)
+    assert orch.parse_utc(retry_at) > dt.datetime.now(dt.UTC)
 
 
 def test_rate_limit_iso_reset_fixture():
@@ -475,3 +475,22 @@ def test_codex_resume_places_exec_options_before_resume_subcommand(
         "session-123",
         "-",
     ]
+
+
+
+def test_recoverable_automation_paths_do_not_terminally_block():
+    source = MODULE_PATH.read_text()
+    handle_ci = source[source.index("    def handle_ci("):source.index("    def retry_or_block(")]
+    assert "CI_REPAIR_ENQUEUED" in handle_ci
+    assert "self.enqueue_repair(task, blockers)" in handle_ci
+    assert "CI failed after review PASS" not in handle_ci
+    assert "MERGE_RETRY_SCHEDULED" in handle_ci
+    assert "merge rejected; automatic retry scheduled" in handle_ci
+
+
+def test_continuity_loops_cover_review_pr_move_limits_and_restart():
+    source = MODULE_PATH.read_text()
+    assert "self.enqueue_repair(task, blockers)" in source
+    assert "self.enqueue_replacement_review(task, current_sha)" in source
+    assert "WAITING_RATE_LIMIT" in source
+    assert "STALE_RUN_REQUEUED" in source

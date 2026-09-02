@@ -1083,7 +1083,9 @@ class Orchestrator:
 
     def reap_stale_child(self, task: dict[str, Any] | sqlite3.Row) -> None:
         unit = task["systemd_unit"]
-        if not unit or not re.fullmatch(r"hl-ai-(?:claude|codex)(?:-probe)?-[A-Za-z0-9-]+", str(unit)):
+        if not unit or not re.fullmatch(
+            r"hl-ai-(?:claude|codex)(?:-probe)?-[A-Za-z0-9-]+", str(unit)
+        ):
             return
         run(["systemctl", "stop", str(unit)], timeout=15)
 
@@ -1989,7 +1991,24 @@ The reviewed SHA must be exactly the target SHA.
             )
             return
         if state == "FAIL":
-            self.block(task, f"CI failed after review PASS: {detail}")
+            # CI failures are repairable code/test defects, not owner blockers.
+            blockers = [f"CI failed at {target}: {detail}"]
+            self.ledger.update(
+                task["id"],
+                status="DONE",
+                blockers_json=json.dumps(blockers),
+                retry_at=None,
+                last_error="CI failure queued for autonomous repair",
+            )
+            self.runtime.event(
+                "CI_REPAIR_ENQUEUED",
+                assignment_id=task["id"],
+                issue=task["issue_number"],
+                pr=task["pr_number"],
+                target_sha=target,
+                detail=detail,
+            )
+            self.enqueue_repair(task, blockers)
             return
         files = self.gh.changed_files(int(task["pr_number"]))
         issue = self.gh.issue(int(task["issue_number"]))
@@ -2044,7 +2063,22 @@ The reviewed SHA must be exactly the target SHA.
             return
         merged = self.gh.merge(int(task["pr_number"]), target)
         if not merged or not merged.get("merged"):
-            self.block(task, f"merge rejected: {merged}")
+            # Merge/API rejection can be transient; retry this stage only.
+            retry_at = retry_at_after(max(60, int(self.cfg["poll_seconds"])))
+            self.ledger.update(
+                task["id"],
+                status="WAITING_CI",
+                retry_at=retry_at,
+                last_error=f"merge rejected; automatic retry scheduled: {merged}",
+            )
+            self.runtime.event(
+                "MERGE_RETRY_SCHEDULED",
+                assignment_id=task["id"],
+                issue=task["issue_number"],
+                pr=task["pr_number"],
+                target_sha=target,
+                retry_after=retry_at,
+            )
             return
         self.ledger.update(task["id"], status="DONE", retry_at=None, last_error=None)
         self.gh.remove_label(int(task["pr_number"]), self.cfg["labels"]["waiting_review"])
