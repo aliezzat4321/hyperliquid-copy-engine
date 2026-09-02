@@ -4,10 +4,25 @@ Status: Hyperliquid-only engineering/review automation. This document does not a
 
 ## Architecture
 
-GitHub remains the coordination record. A maintainer marks an Issue `ai-team:ready`; the VM timer wakes the orchestrator, not a model. The orchestrator creates a machine-readable assignment, launches exactly one scoped agent task, records the result, and exits.
+GitHub remains the coordination record. A maintainer can mark an Issue `ai-team:ready`
+for direct manual entry. For autonomous queue entry, an Issue must be open, authored
+by the trusted owner, labelled `ai-team:queued`, and contain both
+`AI_TEAM_AUTO_QUEUE=YES` and an integer `AI_TEAM_QUEUE_PRIORITY=<integer>`; lower
+priority values run first and issue number breaks ties. An optional
+`AI_TEAM_DEPENDS_ON=<issue numbers, comma-separated>` field delays promotion until
+every dependency is closed or labelled `ai-team:done`.
+
+When the ledger has no due or active work and no ready Issue exists, the orchestrator
+promotes exactly one highest-priority eligible queued Issue and claims it in the same
+cycle. Ready, active, previously attempted, blocked, closed, done, malformed,
+untrusted, and dependency-blocked Issues are not eligible. `ai-team:pending` denotes
+an already assigned Issue; it is not a queue-entry label. Queue eligibility is never
+inferred from an Issue title. The VM timer wakes the orchestrator, not a model; the
+orchestrator creates a machine-readable assignment, launches exactly one scoped agent
+task, records the result, and exits.
 
 ```text
-GitHub Issue ai-team:ready
+GitHub Issue ai-team:ready (direct) or eligible ai-team:queued (automatic promotion)
   -> root orchestrator + SQLite ledger + flock
   -> Codex isolated checkout (non-root, no GitHub credentials)
   -> root validates changes, commits/pushes, opens PR

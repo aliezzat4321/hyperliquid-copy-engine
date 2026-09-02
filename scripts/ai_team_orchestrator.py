@@ -55,6 +55,7 @@ MACHINE_ASSIGNMENT = "AI_TEAM_ASSIGNMENT_V1"
 MACHINE_RESULT = "AI_TEAM_RESULT_V1"
 ACTIVE_STATUSES = {"PENDING", "RETRY", "WAITING_RATE_LIMIT", "WAITING_CI", "RUNNING"}
 TERMINAL_STATUSES = {"DONE", "FAILED", "BLOCKED", "STALE"}
+TRELLO_BRIDGE = Path("/opt/hyperliquid-ai-team/scripts/trello_team_bridge.py")
 
 # Protected AI-control-plane files that Codex may propose, but never merge merely
 # because it changed them. Automatic apply additionally requires a trusted Issue
@@ -101,6 +102,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "trusted_author_associations": ["OWNER", "MEMBER", "COLLABORATOR"],
     "labels": {
         "ready": "ai-team:ready",
+        "queued": "ai-team:queued",
         "pending": "ai-team:pending",
         "running": "ai-team:running",
         "waiting_review": "ai-team:waiting-review",
@@ -234,6 +236,9 @@ class GitHub:
         q = urllib.parse.quote(label, safe="")
         rows = self.api("GET", f"repos/{self.repo}/issues?state=open&labels={q}&per_page=30") or []
         return [row for row in rows if "pull_request" not in row]
+
+    def pending_issues(self, label: str) -> list[dict[str, Any]]:
+        return self.ready_issues(label)
 
     def add_labels(self, number: int, labels: list[str]) -> None:
         if labels:
@@ -484,6 +489,20 @@ class Ledger:
         row = self.db.execute(
             f"SELECT 1 FROM tasks WHERE issue_number=? AND status IN ({placeholders}) LIMIT 1",
             (issue_number, *ACTIVE_STATUSES),
+        ).fetchone()
+        return bool(row)
+
+    def has_task_for_issue(self, issue_number: int) -> bool:
+        row = self.db.execute(
+            "SELECT 1 FROM tasks WHERE issue_number=? LIMIT 1", (issue_number,)
+        ).fetchone()
+        return bool(row)
+
+    def has_active_work(self) -> bool:
+        placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
+        row = self.db.execute(
+            f"SELECT 1 FROM tasks WHERE status IN ({placeholders}) LIMIT 1",
+            tuple(ACTIVE_STATUSES),
         ).fetchone()
         return bool(row)
 
@@ -795,6 +814,22 @@ def acceptance_flag(body: str, name: str) -> bool:
     return bool(re.search(rf"(?mi)^\s*{re.escape(name)}\s*=\s*YES\s*$", body))
 
 
+def queue_metadata(body: str) -> tuple[int, tuple[int, ...]] | None:
+    if not acceptance_flag(body, "AI_TEAM_AUTO_QUEUE"):
+        return None
+    priority = re.search(r"(?mi)^\s*AI_TEAM_QUEUE_PRIORITY\s*=\s*(-?\d+)\s*$", body)
+    if not priority:
+        return None
+    depends = re.search(r"(?mi)^\s*AI_TEAM_DEPENDS_ON\s*=\s*([^\n]*)$", body)
+    values: list[int] = []
+    if depends and depends.group(1).strip():
+        for value in depends.group(1).split(","):
+            if not re.fullmatch(r"\s*#?\d+\s*", value):
+                return None
+            values.append(int(value.strip().lstrip("#")))
+    return int(priority.group(1)), tuple(values)
+
+
 def retry_at_after(seconds: int) -> str:
     value = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=seconds)
     return value.replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -982,6 +1017,20 @@ class Orchestrator:
         self.runtime = RuntimeLedgerFiles(STATE_ROOT, DB_PATH, REPO, RUNTIME_STATUS_ISSUE)
         self.trusted = set(self.cfg["trusted_author_associations"])
 
+    def kick_trello_reconciliation(self) -> None:
+        """Start projection outside model workers; canonical work never waits for it."""
+        if not TRELLO_BRIDGE.exists():
+            return
+        try:
+            subprocess.Popen(
+                [sys.executable, str(TRELLO_BRIDGE), "--reconcile-dir",
+                 str(self.runtime.trello_outbox_dir), "--max-events", "50"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True,
+            )
+        except OSError as exc:
+            self.runtime.event("TRELLO_RECONCILE_DEFERRED", error=type(exc).__name__)
+
     def sync_runtime_checkpoint(self) -> None:
         """Project SQLite runtime state and mirror a compact chat-independent handoff."""
         try:
@@ -1079,6 +1128,7 @@ class Orchestrator:
             )
             self.gh.add_labels(number, [self.cfg["labels"]["pending"]])
             self.gh.remove_label(number, label)
+            self.gh.remove_label(number, self.cfg["labels"]["queued"])
             self.runtime.event(
                 "TASK_ASSIGNED",
                 assignment_id=task_id,
@@ -1089,6 +1139,48 @@ class Orchestrator:
             self.sync_runtime_checkpoint()
             return True
         return False
+
+    def promote_queued_issue(self) -> bool:
+        """Promote exactly one explicit, dependency-satisfied pending issue."""
+        if self.ledger.has_active_work():
+            return False
+        labels = self.cfg["labels"]
+        blocked_labels = {labels["blocked"], labels["done"]}
+        eligible: list[tuple[int, int, dict[str, Any]]] = []
+        for issue in self.gh.pending_issues(labels["queued"]):
+            number = int(issue["number"])
+            names = {str(x.get("name")) for x in issue.get("labels", [])}
+            body = str(issue.get("body") or "")
+            metadata = queue_metadata(body)
+            if (
+                metadata is None or names & blocked_labels
+                or self.ledger.has_task_for_issue(number)
+                or str(issue.get("author_association") or "") not in self.trusted
+            ):
+                continue
+            priority, dependencies = metadata
+            satisfied = True
+            for dependency in dependencies:
+                try:
+                    dep = self.gh.issue(dependency)
+                except Exception:
+                    satisfied = False
+                    break
+                dep_labels = {str(x.get("name")) for x in dep.get("labels", [])}
+                if (
+                    str(dep.get("state") or "open").lower() != "closed"
+                    and labels["done"] not in dep_labels
+                ):
+                    satisfied = False
+                    break
+            if satisfied:
+                eligible.append((priority, number, issue))
+        if not eligible:
+            return False
+        _, number, _issue = min(eligible, key=lambda row: (row[0], row[1]))
+        self.gh.add_labels(number, [labels["ready"]])
+        self.runtime.event("QUEUE_PROMOTED", issue=number)
+        return self.claim_ready_issue()
 
     def reconcile_handoffs(self) -> None:
         """Recover a child task if a restart/API failure interrupted a handoff."""
@@ -1153,9 +1245,11 @@ class Orchestrator:
             )
         self.reconcile_handoffs()
         self.sync_runtime_checkpoint()
+        self.kick_trello_reconciliation()
         task = self.ledger.due()
         if task is None:
-            self.claim_ready_issue()
+            if not self.claim_ready_issue():
+                self.promote_queued_issue()
             task = self.ledger.due()
         if task is None:
             return
@@ -1172,6 +1266,7 @@ class Orchestrator:
                 self.block(task, f"unsupported task type {task['task_type']}")
         finally:
             self.sync_runtime_checkpoint()
+            self.kick_trello_reconciliation()
 
     def reap_stale_child(self, task: dict[str, Any] | sqlite3.Row) -> None:
         unit = task["systemd_unit"]
@@ -2307,9 +2402,12 @@ The reviewed SHA must be exactly the target SHA.
             task["id"], status="BLOCKED", retry_at=None,
             last_error=error[:1500], systemd_unit=None,
         )
-        number = int(task["pr_number"] or task["issue_number"])
+        number = int(task["issue_number"])
         try:
             self.gh.add_labels(number, [self.cfg["labels"]["blocked"]])
+            self.gh.remove_label(number, self.cfg["labels"]["pending"])
+            self.gh.remove_label(number, self.cfg["labels"]["ready"])
+            self.gh.remove_label(number, self.cfg["labels"]["queued"])
             self.gh.comment(
                 number,
                 f"<!-- AI_TEAM_BLOCKED_V1\nASSIGNMENT_ID={task['id']}\n"

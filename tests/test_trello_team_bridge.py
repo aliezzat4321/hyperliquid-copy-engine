@@ -21,6 +21,9 @@ class FakeTrello:
         self.calls.append((method, path, data or {}))
         return {"id": self.next_id}
 
+    def exact_issue_card(self, issue: int) -> str | None:
+        return None
+
 
 def event(kind: str, **values: object) -> dict:
     return {
@@ -162,3 +165,105 @@ def test_observation_requires_explicit_estimate() -> None:
         payload, Path("/missing"), bridge.utcnow()
     )
     assert (value, checkpoint, over) == ("measured estimate required", "not estimated", False)
+
+
+def test_missing_mapping_discovers_existing_exact_issue_card(tmp_path: Path) -> None:
+    class Existing(FakeTrello):
+        def exact_issue_card(self, issue: int) -> str | None:
+            assert issue == 146
+            return "existing-146"
+
+    client = Existing()
+    state = tmp_path / "state.json"
+    result = bridge.sync(event("ASSIGNED"), client, state, tmp_path / "ledger")
+    assert result["card_id"] == "existing-146"
+    assert not any(method == "POST" and path == "/cards" for method, path, _ in client.calls)
+    assert json.loads(state.read_text())["cards"][f"{bridge.REPOSITORY}#146"] == "existing-146"
+
+
+def test_exact_issue_card_ignores_pr_reference_and_archived_cards() -> None:
+    client = bridge.Trello("key", "token")
+    calls = []
+
+    def call(method, path, data=None):
+        calls.append((method, path, data))
+        return [
+            {"id": "wrong", "name": "[P0] #120 other", "desc": "PR / SHA: #146 / abc"},
+            {"id": "right", "name": "[P0] #146 task", "desc": "PR / SHA: #120 / def"},
+        ]
+
+    client.call = call
+    assert client.exact_issue_card(146) == "right"
+    assert calls[0][2]["filter"] == "open"
+
+
+def test_reconcile_continues_after_one_failed_event(tmp_path: Path) -> None:
+    outbox = tmp_path / "outbox"
+    outbox.mkdir()
+    (outbox / "001.json").write_text(json.dumps(event("CI_PASS", issue=145)))
+    (outbox / "002.json").write_text(json.dumps(event("CI_PASS", issue=146)))
+
+    class Selective(FakeTrello):
+        def exact_issue_card(self, issue: int) -> str | None:
+            if issue == 145:
+                raise OSError("offline")
+            return None
+
+    result = bridge.reconcile(outbox, Selective(), tmp_path / "state", tmp_path / "ledger")
+    assert result == {"processed": 1, "deferred": 1}
+    assert (outbox / "001.json").exists()
+    assert not (outbox / "002.json").exists()
+
+
+def test_reconcile_defers_later_events_for_issue_after_partial_failure(tmp_path: Path) -> None:
+    outbox = tmp_path / "outbox"
+    outbox.mkdir()
+    first = outbox / "001.json"
+    later_same_issue = outbox / "002.json"
+    unrelated = outbox / "003.json"
+    first.write_text(json.dumps(event("COMPLETED", result="done")))
+    later_same_issue.write_text(json.dumps(event("ASSIGNED", status="RUNNING")))
+    unrelated.write_text(json.dumps(event("ASSIGNED", issue=145, status="RUNNING")))
+
+    class CommentOutage(FakeTrello):
+        def call(self, method: str, path: str, data: dict | None = None) -> dict:
+            result = super().call(method, path, data)
+            if path.endswith("/actions/comments"):
+                raise OSError("comment endpoint offline")
+            return result
+
+    client = CommentOutage()
+    result = bridge.reconcile(outbox, client, tmp_path / "state", tmp_path / "ledger")
+
+    assert result == {"processed": 1, "deferred": 2}
+    assert first.exists()
+    assert later_same_issue.exists()
+    assert not unrelated.exists()
+    issue_146_card_writes = [
+        (method, path, data)
+        for method, path, data in client.calls
+        if path in {"/cards", "/cards/card-146"}
+        and "#146 " in str(data.get("name", ""))
+    ]
+    assert len(issue_146_card_writes) == 1
+
+
+def test_outage_retains_event_and_later_reconciliation_converges(tmp_path: Path) -> None:
+    outbox = tmp_path / "outbox"
+    outbox.mkdir()
+    pending = outbox / "001.json"
+    pending.write_text(json.dumps(event("CI_PASS", pr=55)))
+
+    class Outage(FakeTrello):
+        def exact_issue_card(self, issue: int) -> str | None:
+            raise OSError("offline")
+
+    assert bridge.reconcile(outbox, Outage(), tmp_path / "state", tmp_path / "ledger") == {
+        "processed": 0, "deferred": 1,
+    }
+    assert pending.exists()
+    healthy = FakeTrello()
+    assert bridge.reconcile(outbox, healthy, tmp_path / "state", tmp_path / "ledger") == {
+        "processed": 1, "deferred": 0,
+    }
+    assert not pending.exists()
