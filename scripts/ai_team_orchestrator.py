@@ -1853,7 +1853,7 @@ Finish by stating what changed, tests run, and any blocker. Keep changes scoped.
 Autonomous implementation for Issue #{issue["number"]}: {issue.get("title", "")}
 
 ## GitHub Issue
-Closes #{issue["number"]}
+Refs #{issue["number"]}
 
 ## Lane / subsystem
 AI-team infrastructure / assigned Issue scope
