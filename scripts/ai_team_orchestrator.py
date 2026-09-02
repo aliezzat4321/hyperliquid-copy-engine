@@ -156,6 +156,9 @@ TRUSTED_MANAGER_WORKFLOW_POSTIMAGE = TRUSTED_MANAGER_WORKFLOW_POSTIMAGE.replace(
     '"codex/126-ai-orchestrator" not in workflow',
     '"codex/126-" + "ai-orchestrator" not in workflow',
 )
+TRUSTED_MANAGER_WORKFLOW_POSTIMAGE = TRUSTED_MANAGER_WORKFLOW_POSTIMAGE.replace(
+    'split("  deploy:", 1)', 'split("\\n  deploy:", 1)'
+)
 TRUSTED_MANAGER_PREIMAGE_SHA256 = hashlib.sha256(
     TRUSTED_MANAGER_WORKFLOW_PREIMAGE.encode()
 ).hexdigest()

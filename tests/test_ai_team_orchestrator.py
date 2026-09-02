@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import ast
 import datetime as dt
 import importlib.util
 import json
 import subprocess
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -976,6 +978,16 @@ def test_trusted_manager_workflow_transform_matches_exact_checked_in_preimage():
     assert orch.hashlib.sha256(hardened.encode()).hexdigest() == (
         orch.TRUSTED_MANAGER_POSTIMAGE_SHA256
     )
+
+
+def test_trusted_manager_hosted_validator_is_valid_python():
+    hardened = orch.trusted_manager_workflow_transform(
+        orch.TRUSTED_MANAGER_WORKFLOW_PREIMAGE
+    )
+    script = hardened.split("          python3 - <<'PY'\n", 1)[1].split(
+        "\n          PY", 1
+    )[0]
+    ast.parse(textwrap.dedent(script))
 
 
 def test_trusted_manager_workflow_transform_fails_closed_on_drift():
