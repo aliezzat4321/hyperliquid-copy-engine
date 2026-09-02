@@ -1154,7 +1154,6 @@ class Orchestrator:
             metadata = queue_metadata(body)
             if (
                 metadata is None or names & blocked_labels
-                or self.ledger.has_task_for_issue(number)
                 or str(issue.get("author_association") or "") not in self.trusted
             ):
                 continue

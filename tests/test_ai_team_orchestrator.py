@@ -647,10 +647,122 @@ def test_queue_promotes_smallest_satisfied_priority_and_claims_once(tmp_path):
     assert team.gh.comments == [120]
 
 
-def test_block_labels_issue_and_clears_queue_state():
-    source = MODULE_PATH.read_text()
-    start = source.index("    def block(")
-    block = source[start:start + 2500]
-    assert 'number = int(task["issue_number"])' in block
-    assert 'self.cfg["labels"]["queued"]' in block
-    assert 'self.cfg["labels"]["pending"]' in block
+@pytest.mark.parametrize("terminal_status", ["BLOCKED", "STALE", "DONE"])
+def test_fresh_explicit_queue_entry_ignores_terminal_history(tmp_path, terminal_status):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    ledger.create_task(
+        issue_number=120, task_type="BUILD", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", task_class="ROUTINE", status=terminal_status,
+    )
+    labels = orch.DEFAULT_CONFIG["labels"]
+    issue = {
+        "number": 120,
+        "body": "AI_TEAM_AUTO_QUEUE=YES\nAI_TEAM_QUEUE_PRIORITY=10",
+        "author_association": "OWNER",
+        "labels": [{"name": labels["queued"]}],
+    }
+
+    class GH:
+        def pending_issues(self, label):
+            return [issue]
+
+        def ready_issues(self, label):
+            return [issue]
+
+        def add_labels(self, number, values):
+            pass
+
+        def remove_label(self, number, label):
+            pass
+
+        def comment(self, number, body):
+            pass
+
+    class Runtime:
+        def event(self, *args, **kwargs):
+            pass
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.gh = orch.DEFAULT_CONFIG, ledger, GH()
+    team.runtime, team.trusted = Runtime(), {"OWNER"}
+    team.sync_runtime_checkpoint = lambda: None
+    assert team.promote_queued_issue() is True
+    assert ledger.active_for_issue(120) is True
+
+
+@pytest.mark.parametrize("ineligible_label", ["blocked", "done"])
+def test_terminal_issue_label_prevents_queued_issue_promotion(
+    tmp_path, ineligible_label
+):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    labels = orch.DEFAULT_CONFIG["labels"]
+    issue = {
+        "number": 120,
+        "body": "AI_TEAM_AUTO_QUEUE=YES\nAI_TEAM_QUEUE_PRIORITY=10",
+        "author_association": "OWNER",
+        "labels": [{"name": labels["queued"]}, {"name": labels[ineligible_label]}],
+    }
+
+    class GH:
+        def pending_issues(self, label):
+            return [issue]
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.gh = orch.DEFAULT_CONFIG, ledger, GH()
+    team.trusted = {"OWNER"}
+    assert team.promote_queued_issue() is False
+
+
+def test_active_task_prevents_duplicate_queue_claim(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    ledger.create_task(
+        issue_number=120, task_type="BUILD", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", task_class="ROUTINE",
+    )
+    team = object.__new__(orch.Orchestrator)
+    team.ledger = ledger
+    team.gh = None
+    assert team.promote_queued_issue() is False
+
+
+def test_newly_blocked_task_clears_queue_state_and_is_not_reclaimed(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    task_id = ledger.create_task(
+        issue_number=120, task_type="BUILD", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", task_class="ROUTINE",
+    )
+    labels = orch.DEFAULT_CONFIG["labels"]
+    issue = {
+        "number": 120,
+        "body": "AI_TEAM_AUTO_QUEUE=YES\nAI_TEAM_QUEUE_PRIORITY=10",
+        "author_association": "OWNER",
+        "labels": [
+            {"name": labels["queued"]}, {"name": labels["ready"]},
+            {"name": labels["pending"]},
+        ],
+    }
+
+    class GH:
+        def pending_issues(self, label):
+            return [issue] if any(x["name"] == label for x in issue["labels"]) else []
+
+        def add_labels(self, number, values):
+            issue["labels"].extend({"name": value} for value in values)
+
+        def remove_label(self, number, label):
+            issue["labels"] = [x for x in issue["labels"] if x["name"] != label]
+
+        def comment(self, number, body):
+            pass
+
+    class Runtime:
+        def event(self, *args, **kwargs):
+            pass
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.gh = orch.DEFAULT_CONFIG, ledger, GH()
+    team.runtime, team.trusted = Runtime(), {"OWNER"}
+    team.sync_runtime_checkpoint = lambda: None
+    team.block(ledger.get(task_id), "terminal failure")
+    assert {x["name"] for x in issue["labels"]} == {labels["blocked"]}
+    assert team.promote_queued_issue() is False
