@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import fcntl
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -34,6 +36,7 @@ OWNER = "aliezzat2"
 DEFAULT_STATE = Path("/var/lib/hyperliquid-ai-team/trello/bridge.json")
 DEFAULT_FAILURES = Path("/var/lib/hyperliquid-ai-team/trello/sync-failures.jsonl")
 DEFAULT_LEDGER = Path("/var/lib/hyperliquid-ai-team/orchestrator/ledger.sqlite3")
+DEFAULT_OUTBOX = Path("/var/lib/hyperliquid-ai-team/trello-outbox")
 NOTIFY = {
     "BLOCKED",
     "OWNER_ACTION",
@@ -54,7 +57,7 @@ FALLBACKS = {
 
 
 def utcnow() -> dt.datetime:
-    return dt.datetime.now(dt.UTC)
+    return dt.datetime.now(dt.timezone.utc)
 
 
 def iso(value: dt.datetime) -> str:
@@ -66,7 +69,7 @@ def parse_time(value: Any) -> dt.datetime | None:
         return None
     try:
         parsed = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.UTC)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.timezone.utc)
     except ValueError:
         return None
 
@@ -234,6 +237,19 @@ class Trello:
                 time.sleep(2**attempt)
         raise RuntimeError("unreachable")
 
+    def exact_issue_card(self, issue: int) -> str | None:
+        """Reuse the board's existing exact-issue card when local state was lost."""
+        rows = self.call(
+            "GET", f"/boards/{BOARD_ID}/cards", {"fields": "id,name,desc", "filter": "all"}
+        ) or []
+        marker = re.compile(rf"(?<!\d)#{issue}(?!\d)")
+        matches = [str(row["id"]) for row in rows if marker.search(
+            f"{row.get('name', '')}\n{row.get('desc', '')}"
+        )]
+        if len(matches) > 1:
+            raise RuntimeError(f"multiple exact cards for issue {issue}")
+        return matches[0] if matches else None
+
 
 def sync(event: dict[str, Any], client: Trello, state_path: Path, ledger: Path) -> dict[str, Any]:
     if event.get("repository", REPOSITORY) != REPOSITORY:
@@ -250,6 +266,10 @@ def sync(event: dict[str, Any], client: Trello, state_path: Path, ledger: Path) 
         "desc": description(event, now, ledger),
         "idList": LISTS[phase(event)],
     }
+    if not card_id:
+        card_id = client.exact_issue_card(issue)
+        if card_id:
+            cards[key] = card_id
     if card_id:
         client.call("PUT", f"/cards/{card_id}", payload)
     else:
@@ -274,6 +294,23 @@ def sync(event: dict[str, Any], client: Trello, state_path: Path, ledger: Path) 
     return {"card_id": card_id, "issue": issue, "list": phase(event), "notified": kind in NOTIFY}
 
 
+def reconcile(
+    outbox: Path, client: Trello, state_path: Path, ledger: Path, limit: int = 50
+) -> dict[str, int]:
+    """Drain a bounded durable outbox; retain failures for a later convergence pass."""
+    processed = deferred = 0
+    for path in sorted(outbox.glob("*.json"))[: max(0, limit)]:
+        try:
+            event = json.loads(path.read_text(encoding="utf-8"))
+            sync(event, client, state_path, ledger)
+            path.unlink()
+            processed += 1
+        except Exception:
+            deferred += 1
+            break
+    return {"processed": processed, "deferred": deferred}
+
+
 def record_failure(path: Path, event: dict[str, Any], error: Exception) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     row = {
@@ -294,6 +331,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
     parser.add_argument("--failures", type=Path, default=DEFAULT_FAILURES)
     parser.add_argument("--ledger", type=Path, default=DEFAULT_LEDGER)
+    parser.add_argument("--reconcile-dir", type=Path)
+    parser.add_argument("--max-events", type=int, default=50)
     parser.add_argument(
         "--env-file",
         type=Path,
@@ -313,11 +352,27 @@ def read_env(path: Path) -> dict[str, str]:
 
 def main() -> int:
     args = parse_args()
-    event = json.loads(args.event_file.read_text() if args.event_file else sys.stdin.read())
+    event: dict[str, Any] = {}
     try:
         credentials = read_env(args.env_file)
         client = Trello(credentials["TRELLO_API_KEY"], credentials["TRELLO_TOKEN"])
-        result = sync(event, client, args.state, args.ledger)
+        if args.reconcile_dir:
+            args.state.parent.mkdir(parents=True, exist_ok=True)
+            with (args.state.parent / "reconcile.lock").open("a+") as lock:
+                try:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    result = {"processed": 0, "deferred": 0}
+                else:
+                    result = reconcile(
+                        args.reconcile_dir, client, args.state, args.ledger,
+                        args.max_events,
+                    )
+        else:
+            event = json.loads(
+                args.event_file.read_text() if args.event_file else sys.stdin.read()
+            )
+            result = sync(event, client, args.state, args.ledger)
     except Exception as exc:  # Trello observability must never block canonical work.
         record_failure(args.failures, event, exc)
         print(f"TRELLO_SYNC=DEFERRED issue={event.get('issue')} reason={type(exc).__name__}")

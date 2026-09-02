@@ -21,6 +21,9 @@ class FakeTrello:
         self.calls.append((method, path, data or {}))
         return {"id": self.next_id}
 
+    def exact_issue_card(self, issue: int) -> str | None:
+        return None
+
 
 def event(kind: str, **values: object) -> dict:
     return {
@@ -162,3 +165,38 @@ def test_observation_requires_explicit_estimate() -> None:
         payload, Path("/missing"), bridge.utcnow()
     )
     assert (value, checkpoint, over) == ("measured estimate required", "not estimated", False)
+
+
+def test_missing_mapping_discovers_existing_exact_issue_card(tmp_path: Path) -> None:
+    class Existing(FakeTrello):
+        def exact_issue_card(self, issue: int) -> str | None:
+            assert issue == 146
+            return "existing-146"
+
+    client = Existing()
+    state = tmp_path / "state.json"
+    result = bridge.sync(event("ASSIGNED"), client, state, tmp_path / "ledger")
+    assert result["card_id"] == "existing-146"
+    assert not any(method == "POST" and path == "/cards" for method, path, _ in client.calls)
+    assert json.loads(state.read_text())["cards"][f"{bridge.REPOSITORY}#146"] == "existing-146"
+
+
+def test_outage_retains_event_and_later_reconciliation_converges(tmp_path: Path) -> None:
+    outbox = tmp_path / "outbox"
+    outbox.mkdir()
+    pending = outbox / "001.json"
+    pending.write_text(json.dumps(event("CI_PASS", pr=55)))
+
+    class Outage(FakeTrello):
+        def exact_issue_card(self, issue: int) -> str | None:
+            raise OSError("offline")
+
+    assert bridge.reconcile(outbox, Outage(), tmp_path / "state", tmp_path / "ledger") == {
+        "processed": 0, "deferred": 1,
+    }
+    assert pending.exists()
+    healthy = FakeTrello()
+    assert bridge.reconcile(outbox, healthy, tmp_path / "state", tmp_path / "ledger") == {
+        "processed": 1, "deferred": 0,
+    }
+    assert not pending.exists()

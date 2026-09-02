@@ -14,6 +14,7 @@ import json
 import os
 import re
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any
 
@@ -160,10 +161,12 @@ class RuntimeLedgerFiles:
         self.repository = repository
         self.status_issue = int(status_issue)
         self.events_dir = root / "events"
+        self.trello_outbox_dir = root / "trello-outbox"
         self.runs_dir = root / "runs"
         self.checkpoints_dir = root / "checkpoints"
         _mkdir(root, 0o711)
         _mkdir(self.events_dir, 0o700)
+        _mkdir(self.trello_outbox_dir, 0o700)
         _mkdir(self.runs_dir, 0o700)
         _mkdir(self.checkpoints_dir, 0o700)
 
@@ -186,6 +189,12 @@ class RuntimeLedgerFiles:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         with os.fdopen(fd, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n")
+        # Trello is a projection only.  Queue after the canonical material event is
+        # durable; a separate root-owned bridge drains these files asynchronously.
+        if isinstance(row.get("issue"), int):
+            stamp = row["at"].replace(":", "").replace("-", "")
+            outbox = self.trello_outbox_dir / f"{stamp}-{os.getpid()}-{time.time_ns()}.json"
+            _atomic_json(outbox, {"repository": self.repository, **row})
         return row
 
     def _task_view(self, task: dict[str, Any] | None) -> dict[str, Any] | None:

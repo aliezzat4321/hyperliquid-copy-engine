@@ -574,3 +574,59 @@ def test_terminal_block_releases_worker_marker():
     block = source[start:start + 2500]
     assert 'status="BLOCKED"' in block
     assert "systemd_unit=None" in block
+
+
+def test_queue_metadata_is_explicit_and_strict():
+    assert orch.queue_metadata("AI_TEAM_QUEUE_PRIORITY=1") is None
+    assert orch.queue_metadata(
+        "AI_TEAM_AUTO_QUEUE=YES\nAI_TEAM_QUEUE_PRIORITY=20\nAI_TEAM_DEPENDS_ON=#120, 154"
+    ) == (20, (120, 154))
+    assert orch.queue_metadata(
+        "AI_TEAM_AUTO_QUEUE=YES\nAI_TEAM_QUEUE_PRIORITY=20\nAI_TEAM_DEPENDS_ON=title"
+    ) is None
+
+
+def test_queue_promotes_smallest_satisfied_priority_and_claims_once(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    labels = orch.DEFAULT_CONFIG["labels"]
+    issues = [
+        {"number": 120, "body": "AI_TEAM_AUTO_QUEUE=YES\nAI_TEAM_QUEUE_PRIORITY=10\nAI_TEAM_DEPENDS_ON=154", "author_association": "OWNER",
+         "labels": [{"name": labels["pending"]}]},
+        {"number": 150, "body": "AI_TEAM_AUTO_QUEUE=YES\nAI_TEAM_QUEUE_PRIORITY=20", "author_association": "OWNER",
+         "labels": [{"name": labels["pending"]}]},
+        {"number": 151, "body": "AI_TEAM_QUEUE_PRIORITY=1",
+         "author_association": "OWNER", "labels": [{"name": labels["pending"]}]},
+    ]
+
+    class GH:
+        def __init__(self):
+            self.ready = []
+            self.comments = []
+        def pending_issues(self, label):
+            return issues
+        def ready_issues(self, label):
+            return [x for x in issues if x["number"] in self.ready]
+        def issue(self, number):
+            state = "closed" if number == 154 else "open"
+            return {"number": number, "state": state, "labels": []}
+        def add_labels(self, number, values):
+            if labels["ready"] in values:
+                self.ready.append(number)
+        def remove_label(self, number, label):
+            pass
+        def comment(self, number, body):
+            self.comments.append(number)
+
+    class Runtime:
+        def event(self, *args, **kwargs):
+            pass
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg = orch.DEFAULT_CONFIG
+    team.ledger, team.gh, team.runtime = ledger, GH(), Runtime()
+    team.trusted = {"OWNER"}
+    assert team.promote_queued_issue() is True
+    assert team.gh.comments == [120]
+    assert ledger.active_for_issue(120)
+    assert team.promote_queued_issue() is False
+    assert team.gh.comments == [120]
