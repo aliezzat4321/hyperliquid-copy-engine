@@ -207,6 +207,8 @@ class RuntimeLedgerFiles:
             "worktree": task.get("workdir"),
             "session_id": task.get("session_id"),
             "retry_after": task.get("retry_at"),
+            "limit_text": redact(str(task.get("limit_text") or ""))[:1200] or None,
+            "systemd_unit": task.get("systemd_unit"),
             "blockers": _safe_blockers(task.get("blockers_json")),
             "blocker": redact(str(task.get("last_error") or ""))[:1200] or None,
             "current_step": _current_step(task),
