@@ -1031,6 +1031,24 @@ class Orchestrator:
         except OSError as exc:
             self.runtime.event("TRELLO_RECONCILE_DEFERRED", error=type(exc).__name__)
 
+    def emit_terminal_projection(self, task: sqlite3.Row, target_sha: str) -> None:
+        """Queue terminal observability only after canonical completion is durable."""
+        try:
+            self.runtime.event(
+                "COMPLETED",
+                assignment_id=task["id"],
+                issue=task["issue_number"],
+                pr=task["pr_number"],
+                target_sha=target_sha,
+                status="DONE",
+                result="merged and proven",
+                next_action="Done / Proven",
+            )
+        except Exception:
+            # The ledger-derived bridge reconciliation repairs a missing projection.
+            # Trello/runtime observability must not turn a successful merge into failure.
+            return
+
     def sync_runtime_checkpoint(self) -> None:
         """Project SQLite runtime state and mirror a compact chat-independent handoff."""
         try:
@@ -2373,6 +2391,7 @@ The reviewed SHA must be exactly the target SHA.
             f"AI_TEAM_AUTONOMOUS_MERGE=YES\nPR={task['pr_number']}\nTARGET_SHA={target}\n"
             f"CI=PASS\nASYNC_CLAUDE_AUDIT=NO\nMERGED_AT={utcnow()}",
         )
+        self.emit_terminal_projection(task, target)
 
     def retry_or_block(
         self,

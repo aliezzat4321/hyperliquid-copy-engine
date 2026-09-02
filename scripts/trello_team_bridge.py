@@ -283,6 +283,14 @@ def sync(event: dict[str, Any], client: Trello, state_path: Path, ledger: Path) 
         card_id = str(card["id"])
         cards[key] = card_id
     state.update({"version": 1, "last_success_at": iso(now), "last_error": None})
+    if phase(event) == "DONE" and event.get("pr") and (
+        event.get("target_sha") or event.get("sha")
+    ):
+        terminal = state.setdefault("terminal_projections", {})
+        terminal[key] = {
+            "pr": int(event["pr"]),
+            "target_sha": str(event.get("target_sha") or event.get("sha")),
+        }
     atomic_json(state_path, state)
     kind = str(event.get("event", "")).upper()
     if kind in NOTIFY:
@@ -298,6 +306,57 @@ def sync(event: dict[str, Any], client: Trello, state_path: Path, ledger: Path) 
             {"text": f"@{OWNER} {kind}: {summary[:500]}"},
         )
     return {"card_id": card_id, "issue": issue, "list": phase(event), "notified": kind in NOTIFY}
+
+
+def reconcile_terminal_ledger(
+    client: Trello, state_path: Path, ledger: Path, limit: int
+) -> int:
+    """Repair bounded pre-event successful merges from canonical ledger state."""
+    if limit <= 0 or not ledger.exists():
+        return 0
+    state = load_state(state_path)
+    projected = state.get("terminal_projections", {})
+    try:
+        with sqlite3.connect(ledger) as db:
+            db.row_factory = sqlite3.Row
+            rows = db.execute(
+                """SELECT id, issue_number, pr_number, target_sha, updated_at
+                     FROM tasks
+                    WHERE task_type='REVIEW' AND status='DONE'
+                      AND pr_number IS NOT NULL AND target_sha IS NOT NULL
+                      AND last_error IS NULL
+                    ORDER BY updated_at DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+    except (sqlite3.Error, OSError):
+        return 0
+    repaired = 0
+    for row in rows:
+        key = f"{REPOSITORY}#{int(row['issue_number'])}"
+        marker = projected.get(key, {}) if isinstance(projected, dict) else {}
+        if (
+            marker.get("pr") == int(row["pr_number"])
+            and marker.get("target_sha") == str(row["target_sha"])
+        ):
+            continue
+        event = {
+            "repository": REPOSITORY,
+            "event": "COMPLETED",
+            "assignment_id": str(row["id"]),
+            "issue": int(row["issue_number"]),
+            "pr": int(row["pr_number"]),
+            "target_sha": str(row["target_sha"]),
+            "status": "DONE",
+            "result": "merged and proven (canonical ledger reconciliation)",
+            "next_action": "Done / Proven",
+            "phase_started_at": row["updated_at"],
+        }
+        try:
+            sync(event, client, state_path, ledger)
+        except Exception:
+            continue
+        repaired += 1
+    return repaired
 
 
 def reconcile(
@@ -325,7 +384,13 @@ def reconcile(
                 except (TypeError, ValueError):
                     pass
             continue
-    return {"processed": processed, "deferred": deferred}
+    repaired = reconcile_terminal_ledger(
+        client, state_path, ledger, max(0, limit - processed - deferred)
+    )
+    result = {"processed": processed, "deferred": deferred}
+    if repaired:
+        result["repaired"] = repaired
+    return result
 
 
 def record_failure(path: Path, event: dict[str, Any], error: Exception) -> None:
