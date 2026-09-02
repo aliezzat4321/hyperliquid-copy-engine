@@ -382,6 +382,107 @@ def test_protected_control_plane_allowlist_has_only_exact_deploy_workflow():
     )
 
 
+def test_deploy_workflow_pr_is_declared_live_sensitive():
+    captured = {}
+
+    class GH:
+        def create_pr(self, **kwargs):
+            captured.update(kwargs)
+            return {"number": 1}
+
+    team = object.__new__(orch.Orchestrator)
+    team.gh = GH()
+    result = team.create_pr(
+        {"number": 166, "title": "deploy validation"},
+        {"id": "build", "task_class": "ROUTINE"},
+        "codex/166",
+        "a" * 40,
+        [orch.DEPLOY_WORKFLOW_PATH],
+    )
+    assert result == {"number": 1}
+    assert orch.live_sensitive_declaration(captured["body"]) == "YES"
+
+
+def test_non_deploy_pr_remains_declared_not_live_sensitive():
+    captured = {}
+
+    class GH:
+        def create_pr(self, **kwargs):
+            captured.update(kwargs)
+            return {"number": 1}
+
+    team = object.__new__(orch.Orchestrator)
+    team.gh = GH()
+    team.create_pr(
+        {"number": 168, "title": "orchestrator policy"},
+        {"id": "build", "task_class": "ROUTINE"},
+        "codex/168",
+        "a" * 40,
+        ["scripts/ai_team_orchestrator.py"],
+    )
+    assert orch.live_sensitive_declaration(captured["body"]) == "NO"
+
+
+def test_deploy_workflow_requires_safe_pr_validation_structure():
+    valid = """name: deploy
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    paths:
+      - ".github/workflows/deploy-ai-team-orchestrator.yml"
+jobs:
+  validate-deploy-ai-team-orchestrator:
+    name: validate-deploy-ai-team-orchestrator
+    runs-on: ubuntu-latest
+    steps:
+      - run: test -n "$GITHUB_SHA"
+  deploy:
+    if: ${{ github.event_name == 'push' }}
+    runs-on: [self-hosted, linux]
+    steps:
+      - run: systemctl restart example
+"""
+    orch.validate_deploy_workflow_source(valid)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda text: text.replace("  pull_request:\n", ""),
+        lambda text: text.replace("      - main", "      - main\n      - codex/**"),
+        lambda text: text.replace("runs-on: ubuntu-latest", "runs-on: self-hosted"),
+        lambda text: text.replace("    if: ${{ github.event_name == 'push' }}\n", ""),
+        lambda text: text.replace(
+            '      - run: test -n "$GITHUB_SHA"',
+            "      - run: sudo systemctl restart example",
+        ),
+    ],
+)
+def test_deploy_workflow_rejects_unsafe_pr_validation_structure(mutation):
+    source = """name: deploy
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    paths:
+      - ".github/workflows/deploy-ai-team-orchestrator.yml"
+jobs:
+  validate-deploy-ai-team-orchestrator:
+    name: validate-deploy-ai-team-orchestrator
+    runs-on: ubuntu-latest
+    steps:
+      - run: test -n "$GITHUB_SHA"
+  deploy:
+    if: ${{ github.event_name == 'push' }}
+    runs-on: [self-hosted, linux]
+"""
+    with pytest.raises(RuntimeError, match="unsafe deploy workflow proposal"):
+        orch.validate_deploy_workflow_source(mutation(source))
+
+
 def test_machine_policy_blocker_requires_exact_latest_marker():
     valid = (
         "<!-- AI_TEAM_BLOCKED_V1\nASSIGNMENT_ID=old-assignment\n"
@@ -764,6 +865,79 @@ def test_successful_merge_durably_completes_before_terminal_projection(tmp_path)
         "target_sha": "a" * 40, "status": "DONE",
         "result": "merged and proven", "next_action": "Done / Proven",
     }
+
+
+def test_deploy_workflow_waits_for_dedicated_pr_validation_check(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    task_id = ledger.create_task(
+        issue_number=166, pr_number=167, target_sha="a" * 40,
+        task_type="REVIEW", agent="CLAUDE", model_class="SONNET",
+        task_class="ROUTINE", status="WAITING_CI",
+    )
+
+    class GH:
+        def pr(self, number):
+            return {"head": {"sha": "a" * 40}, "body": "LIVE-SENSITIVE: YES"}
+
+        def check_state(self, sha):
+            return "PASS", "other checks green"
+
+        def changed_files(self, number):
+            return [orch.DEPLOY_WORKFLOW_PATH]
+
+        def issue(self, number):
+            return {
+                "author_association": "OWNER",
+                "body": "AI_TASK_CLASS=ROUTINE\nAI_TEAM_PROTECTED_CHANGE=YES",
+            }
+
+        def named_check_state(self, sha, name):
+            assert name == orch.DEPLOY_WORKFLOW_PR_CHECK
+            return "PENDING", "required deploy validation check absent"
+
+        def merge(self, *args):
+            raise AssertionError("workflow must not merge without its PR validation check")
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.gh = orch.DEFAULT_CONFIG, ledger, GH()
+    team.runtime, team.trusted = object(), {"OWNER"}
+    team.handle_ci(ledger.get(task_id))
+    task = ledger.get(task_id)
+    assert task["status"] == "WAITING_CI"
+    assert task["last_error"] == "required deploy validation check absent"
+
+
+def test_deploy_workflow_requires_live_sensitive_yes_even_with_green_ci(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    task_id = ledger.create_task(
+        issue_number=166, pr_number=167, target_sha="a" * 40,
+        task_type="REVIEW", agent="CLAUDE", model_class="SONNET",
+        task_class="ROUTINE", status="WAITING_CI",
+    )
+    blocked = []
+
+    class GH:
+        def pr(self, number):
+            return {"head": {"sha": "a" * 40}, "body": "LIVE-SENSITIVE: NO"}
+
+        def check_state(self, sha):
+            return "PASS", "green"
+
+        def changed_files(self, number):
+            return [orch.DEPLOY_WORKFLOW_PATH]
+
+        def issue(self, number):
+            return {
+                "author_association": "OWNER",
+                "body": "AI_TASK_CLASS=ROUTINE\nAI_TEAM_PROTECTED_CHANGE=YES",
+            }
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.gh = orch.DEFAULT_CONFIG, ledger, GH()
+    team.runtime, team.trusted = object(), {"OWNER"}
+    team.block = lambda task, error: blocked.append(error)
+    team.handle_ci(ledger.get(task_id))
+    assert blocked == ["deploy workflow change lacks LIVE-SENSITIVE: YES classification"]
 
 
 def test_terminal_projection_failure_does_not_change_successful_merge(tmp_path):

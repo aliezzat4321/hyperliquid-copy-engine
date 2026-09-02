@@ -68,6 +68,11 @@ AUTO_APPLY_CONTROL_PLANE_PATHS = {
     "scripts/ai_team_orchestrator.py",
     "scripts/ai_team_runtime_ledger.py",
 }
+DEPLOY_WORKFLOW_PATH = ".github/workflows/deploy-ai-team-orchestrator.yml"
+DEPLOY_WORKFLOW_PR_CHECK = "validate-deploy-ai-team-orchestrator"
+LIVE_SENSITIVE_RE = re.compile(
+    r"^\s*LIVE-SENSITIVE:\s*(YES|NO)\s*$", re.IGNORECASE | re.MULTILINE
+)
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "protocol_version": 1,
@@ -302,6 +307,25 @@ class GitHub:
                 f"combined status={statuses.get('state')}"
             )
         return "PASS", f"{len(runs)} check-runs green"
+
+    def named_check_state(self, sha: str, name: str) -> tuple[str, str]:
+        """Return the state of a required check, failing closed on ambiguity."""
+        checks = (
+            self.api(
+                "GET",
+                f"repos/{self.repo}/commits/{sha}/check-runs?per_page=100",
+            )
+            or {}
+        )
+        matching = [run for run in checks.get("check_runs", []) if run.get("name") == name]
+        if len(matching) != 1:
+            return "PENDING", f"required check {name!r} count={len(matching)}"
+        check = matching[0]
+        if check.get("status") != "completed":
+            return "PENDING", f"required check {name!r} is {check.get('status')}"
+        if check.get("conclusion") != "success":
+            return "FAIL", f"required check {name!r}={check.get('conclusion')}"
+        return "PASS", f"required check {name!r}=success"
 
     def merge(self, pr_number: int, sha: str) -> dict[str, Any]:
         return self.api(
@@ -643,6 +667,12 @@ def parse_task_class(body: str) -> tuple[str, str | None]:
     task_class = m.group(1) if m and m.group(1) in allowed else "UNCLASSIFIED"
     e = re.search(r"(?mi)^\s*OPUS_ESCALATION_REASON\s*=\s*([A-Z_]+)\s*$", body or "")
     return task_class, e.group(1) if e else None
+
+
+def live_sensitive_declaration(body: str) -> str | None:
+    """Read the PR classification used by the live-sensitive CI guard."""
+    match = LIVE_SENSITIVE_RE.search(body or "")
+    return match.group(1).upper() if match else None
 
 
 def machine_policy_blocker(comments: list[dict[str, Any]]) -> tuple[str, str] | None:
@@ -1063,6 +1093,61 @@ def change_scan_text(workdir: Path, base_sha: str) -> str:
     return "\n".join(parts)
 
 
+def _yaml_indented_block(source: str, heading: str, indent: int) -> str | None:
+    """Extract a narrowly expected YAML mapping block without accepting aliases."""
+    lines = source.splitlines()
+    prefix = " " * indent + heading + ":"
+    for index, line in enumerate(lines):
+        if line.rstrip() != prefix:
+            continue
+        block = [line]
+        for child in lines[index + 1 :]:
+            if child.strip() and len(child) - len(child.lstrip(" ")) <= indent:
+                break
+            block.append(child)
+        return "\n".join(block)
+    return None
+
+
+def validate_deploy_workflow_source(source: str) -> None:
+    """Require a safe PR validator before the root deploy workflow can be proposed.
+
+    GitHub parsing and successfully executing the named ubuntu-hosted job provides
+    the authoritative workflow syntax check. These deliberately narrow structural
+    checks run before push so adding ``pull_request`` cannot also launch the root,
+    self-hosted deployment job for an unreviewed branch.
+    """
+    push = _yaml_indented_block(source, "push", 2)
+    pull_request = _yaml_indented_block(source, "pull_request", 2)
+    validator = _yaml_indented_block(source, DEPLOY_WORKFLOW_PR_CHECK, 2)
+    deploy = _yaml_indented_block(source, "deploy", 2)
+    failures = []
+    if push is None or re.findall(r"(?m)^\s*-\s*[\"']?([^\s\"']+)[\"']?\s*$", push) != [
+        "main"
+    ]:
+        failures.append("push trigger must be limited to main")
+    if pull_request is None or re.findall(
+        r"(?m)^\s*-\s*[\"']?([^\s\"']+)[\"']?\s*$", pull_request
+    ) != [DEPLOY_WORKFLOW_PATH]:
+        failures.append("pull_request must be path-limited to the deploy workflow")
+    if validator is None:
+        failures.append(f"missing {DEPLOY_WORKFLOW_PR_CHECK} job")
+    else:
+        if f"name: {DEPLOY_WORKFLOW_PR_CHECK}" not in validator:
+            failures.append("validator job must expose the required check name")
+        if "runs-on: ubuntu-latest" not in validator or "self-hosted" in validator:
+            failures.append("validator job must run only on ubuntu-latest")
+        if re.search(r"\b(systemctl|sudo)\b", validator):
+            failures.append("validator job must not use sudo or systemctl")
+    if deploy is None or not re.search(
+        r"(?m)^\s{4}if:\s*\$\{\{\s*github\.event_name\s*==\s*'push'\s*\}\}\s*$",
+        deploy,
+    ):
+        failures.append("deploy job must be explicitly restricted to push events")
+    if failures:
+        raise RuntimeError("unsafe deploy workflow proposal: " + "; ".join(failures))
+
+
 def validate_changes(cfg: dict[str, Any], workdir: Path, base_sha: str) -> tuple[list[str], bool]:
     files = changed_files(workdir, base_sha)
     if not files:
@@ -1082,6 +1167,8 @@ def validate_changes(cfg: dict[str, Any], workdir: Path, base_sha: str) -> tuple
     for pat in cfg["safety"]["forbidden_enable_patterns"]:
         if re.search(pat, diff, flags=re.I):
             raise RuntimeError(f"forbidden live-trading enablement pattern detected: {pat}")
+    if DEPLOY_WORKFLOW_PATH in files:
+        validate_deploy_workflow_source((workdir / DEPLOY_WORKFLOW_PATH).read_text())
     return files, no_auto
 
 
@@ -1769,6 +1856,7 @@ class Orchestrator:
             current = self.ledger.get(task["id"])
             fail_closed_markers = (
                 "unsafe changed path",
+                "unsafe deploy workflow proposal",
                 "owner-sensitive live path",
                 "forbidden live-trading enablement",
                 "unsafe untracked symlink",
@@ -1924,6 +2012,7 @@ Finish by stating what changed, tests run, and any blocker. Keep changes scoped.
         sha: str,
         files: list[str],
     ) -> dict[str, Any]:
+        live_sensitive = "YES" if DEPLOY_WORKFLOW_PATH in files else "NO"
         body = f"""## Objective
 Autonomous implementation for Issue #{issue["number"]}: {issue.get("title", "")}
 
@@ -1961,7 +2050,7 @@ Routine changes remain gated by exact-SHA Claude review and CI before merge.
 - [x] No real-trading permission, key, order-route or safety-threshold change
 - [x] REAL_TRADING_ENABLED remains disabled
 
-LIVE-SENSITIVE: NO
+LIVE-SENSITIVE: {live_sensitive}
 
 <!-- AI_TEAM_BUILDER_EVIDENCE
 BUILDER=CODEX_CHATGPT
@@ -2546,6 +2635,46 @@ The reviewed SHA must be exactly the target SHA.
                     "AI_TEAM_PROTECTED_CHANGE=YES",
                 )
                 return
+            if DEPLOY_WORKFLOW_PATH in protected_files:
+                if live_sensitive_declaration(str(pr.get("body") or "")) != "YES":
+                    self.block(
+                        task,
+                        "deploy workflow change lacks LIVE-SENSITIVE: YES classification",
+                    )
+                    return
+                required_state, required_detail = self.gh.named_check_state(
+                    target, DEPLOY_WORKFLOW_PR_CHECK
+                )
+                if required_state == "PENDING":
+                    retry = dt.datetime.now(dt.timezone.utc) + dt.timedelta(
+                        seconds=int(self.cfg["poll_seconds"])
+                    )
+                    self.ledger.update(
+                        task["id"],
+                        status="WAITING_CI",
+                        retry_at=retry.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+                        last_error=required_detail,
+                    )
+                    return
+                if required_state == "FAIL":
+                    blockers = [required_detail]
+                    self.ledger.update(
+                        task["id"],
+                        status="DONE",
+                        blockers_json=json.dumps(blockers),
+                        retry_at=None,
+                        last_error="deploy workflow PR validation failed; repair queued",
+                    )
+                    self.runtime.event(
+                        "CI_REPAIR_ENQUEUED",
+                        assignment_id=task["id"],
+                        issue=task["issue_number"],
+                        pr=task["pr_number"],
+                        target_sha=target,
+                        detail=required_detail,
+                    )
+                    self.enqueue_repair(task, blockers)
+                    return
             self.gh.comment(
                 int(task["pr_number"]),
                 "AI_TEAM_PROTECTED_GATE=PASS\n"
