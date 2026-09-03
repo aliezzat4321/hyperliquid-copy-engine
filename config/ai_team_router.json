@@ -39,7 +39,14 @@
     "UNRESOLVED_DISAGREEMENT",
     "CAPITAL_SENSITIVE_METHODOLOGY"
   ],
-  "auto_merge_task_classes": ["ROUTINE"],
+  "auto_merge_task_classes": [
+    "ROUTINE",
+    "QUANT_PROFITABILITY",
+    "STATISTICAL_METHODOLOGY",
+    "MAJOR_ARCHITECTURE",
+    "UNRESOLVED_DISAGREEMENT",
+    "CAPITAL_SENSITIVE_METHODOLOGY"
+  ],
   "max_attempts": 3,
   "poll_seconds": 60,
   "default_rate_limit_retry_seconds": 3600,
