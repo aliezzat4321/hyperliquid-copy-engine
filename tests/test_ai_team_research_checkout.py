@@ -1,9 +1,15 @@
+import importlib.util
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
-import ai_team_orchestrator as orch
+spec = importlib.util.spec_from_file_location(
+    "ai_team_orchestrator", ROOT / "scripts" / "ai_team_orchestrator.py"
+)
+assert spec and spec.loader
+orch = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = orch
+spec.loader.exec_module(orch)
 
 
 def test_prepare_checkout_allows_read_only_call_without_branch(tmp_path, monkeypatch):
