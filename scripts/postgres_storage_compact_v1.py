@@ -207,7 +207,12 @@ def _leaderboard_structure() -> dict[str, Any]:
     indexes = _json_value(
         "SELECT COALESCE(json_agg(item ORDER BY item->>0),'[]') FROM ("
         " SELECT json_build_array(c.relname,i.indisunique,i.indisprimary,i.indpred IS NULL,"
-        " array_agg(pg_get_indexdef(i.indexrelid,k.n::integer,true) ORDER BY k.n)) item"
+        " array_agg(pg_get_indexdef(i.indexrelid,k.n::integer,true) ||"
+        " CASE WHEN (i.indoption[k.n-1] & 1)=1 THEN ' DESC' ELSE '' END ||"
+        " CASE WHEN (i.indoption[k.n-1] & 2)=2 AND (i.indoption[k.n-1] & 1)=0"
+        " THEN ' NULLS FIRST'"
+        " WHEN (i.indoption[k.n-1] & 2)=0 AND (i.indoption[k.n-1] & 1)=1"
+        " THEN ' NULLS LAST' ELSE '' END ORDER BY k.n)) item"
         " FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid"
         " CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY k(attnum,n)"
         " WHERE i.indrelid='leaderboard_snapshots'::regclass"

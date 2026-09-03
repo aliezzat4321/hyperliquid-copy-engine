@@ -78,6 +78,9 @@ def test_leaderboard_structure_accepts_canonical_schema(
         _install_schema_psql(monkeypatch, schema)
         structure = MODULE._leaderboard_structure()
 
+        # pg_get_indexdef(index_oid, column_no, pretty) returns the key expression
+        # without its ordering flags. The drift guard must reconstruct DESC from
+        # pg_index.indoption instead of expecting pg_get_indexdef to include it.
         assert structure["indexes"] == [
             [
                 "idx_leaderboard_snapshots_address_time",
