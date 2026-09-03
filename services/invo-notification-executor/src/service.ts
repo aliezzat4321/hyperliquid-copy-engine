@@ -8,6 +8,7 @@ import * as hl from './hl-client.js';
 import { extractNotificationHints, hintsMatchSignal, InvoSignal, NotificationHints, signalFromFeedPost } from './notification-signal.js';
 import { ManagedPosition, NotificationState } from './notification-state.js';
 import { TraderTracker } from './trader-tracker.js';
+import { liveScopeSkipReason } from './live-scope.js';
 
 if (INVO_TOKEN) invo.setToken(INVO_TOKEN);
 if (INVO_REFRESH_TOKEN) invo.setRefreshToken(INVO_REFRESH_TOKEN);
@@ -300,7 +301,7 @@ async function shadowReup(managed: ManagedPosition, signal: InvoSignal, wakeSour
   });
 }
 
-async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: number) {
+async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: number, feedFilter: string) {
   if (state.hasSeen(signal.key) || inFlight.has(signal.key)) return;
   inFlight.add(signal.key);
   const decisionAtMs = Date.now();
@@ -308,14 +309,12 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
   try {
     // Wide shadow research deliberately includes every trader in the selected Invo feed.
     // Trader scope restrictions remain live-only.
-    if (cfg.live && signal.action !== 'close' && cfg.allow.size && !cfg.allow.has(signal.username)) {
+    const liveScopeReason = cfg.live
+      ? liveScopeSkipReason(signal, feedFilter, cfg.allow, cfg.copyAllFollowed)
+      : null;
+    if (liveScopeReason) {
       state.markSeen(signal.key);
-      log({ type: 'skip', reason: 'trader_not_allowlisted', signal, wakeSource });
-      return;
-    }
-    if (cfg.live && signal.action !== 'close' && !cfg.allow.size && !cfg.copyAllFollowed) {
-      state.markSeen(signal.key);
-      log({ type: 'skip', reason: 'no_live_trader_scope', signal, wakeSource });
+      log({ type: 'skip', reason: liveScopeReason, feedFilter, signal, wakeSource });
       return;
     }
 
@@ -666,7 +665,7 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
     initialized = true;
     lastSuccessPollMs = Date.now();
     log({ type: 'baseline_indexed', posts: posts.length, recoverableCloses: recoverableCloses.length, live: cfg.live, feedFilter, feedLimit: cfg.feedLimit, traderFunnel: tracker.report().funnel });
-    for (const signal of recoverableCloses) await execute(signal, 'startup_recovery', receivedAtMs);
+    for (const signal of recoverableCloses) await execute(signal, 'startup_recovery', receivedAtMs, feedFilter);
     return recoverableCloses.length;
   }
 
@@ -681,9 +680,9 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
 
   // In shadow, sources are independent and can be hydrated in parallel. Live remains sequential.
   if (cfg.live) {
-    for (const signal of ordered) await execute(signal, source, receivedAtMs);
+    for (const signal of ordered) await execute(signal, source, receivedAtMs, feedFilter);
   } else {
-    await Promise.all(ordered.map(signal => execute(signal, source, receivedAtMs)));
+    await Promise.all(ordered.map(signal => execute(signal, source, receivedAtMs, feedFilter)));
   }
   lastSuccessPollMs = Date.now();
   return ordered.length;
