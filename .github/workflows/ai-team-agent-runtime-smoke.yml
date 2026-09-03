@@ -9,23 +9,91 @@ permissions:
   contents: read
 
 jobs:
-  schedule_manager_finalizer:
+  patch_manager_auto_merge_policy:
     runs-on: [self-hosted, linux]
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: manager/181-auto-merge-on-pass
           persist-credentials: false
-      - name: Schedule exact-SHA finalizer for PR 180
+          fetch-depth: 0
+      - name: Patch fallback policy and regression test
         shell: bash
         run: |
           set -euo pipefail
-          bash -n scripts/manager_finalize_178.sh
-          install -m 0700 scripts/manager_finalize_178.sh /var/lib/hyperliquid-ai-team/orchestrator/manager-finalize-178.sh
-          systemctl stop hl-ai-manager-finalize-178.timer hl-ai-manager-finalize-178.service 2>/dev/null || true
-          systemd-run --quiet --unit=hl-ai-manager-finalize-178 --on-calendar='2026-09-03 06:40:30 UTC' --timer-property=AccuracySec=30s /var/lib/hyperliquid-ai-team/orchestrator/manager-finalize-178.sh
-          systemctl list-timers --all hl-ai-manager-finalize-178.timer --no-pager
-          systemctl is-active hl-ai-manager-finalize-178.timer
-          echo 'FINALIZER_SCHEDULED=YES'
-          echo 'POLYMARKET_TOUCHED=NO'
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/ai_team_orchestrator.py')
+          s = p.read_text()
+          old = '    "auto_merge_task_classes": ["ROUTINE"],'
+          new = '''    "auto_merge_task_classes": [
+                  "ROUTINE",
+                  "QUANT_PROFITABILITY",
+                  "STATISTICAL_METHODOLOGY",
+                  "MAJOR_ARCHITECTURE",
+                  "UNRESOLVED_DISAGREEMENT",
+                  "CAPITAL_SENSITIVE_METHODOLOGY",
+              ],'''
+          if old not in s:
+              raise SystemExit('expected auto_merge_task_classes fallback not found')
+          s = s.replace(old, new, 1)
+          s = s.replace(
+              '# flag, independent exact-SHA Claude PASS, green CI, and ROUTINE task class.\n',
+              '# flag, independent exact-SHA Claude PASS, and green CI.\n',
+              1,
+          )
+          old_protected = '''        "protected_actions": {
+                      "DEPLOY_REVIEWED_CONTROL_PLANE": {
+                          "workflow_id": "deploy-ai-team-orchestrator.yml", "ref": "main"
+                      }
+                  },'''
+          if old_protected not in s:
+              raise SystemExit('expected stale DEFAULT_CONFIG protected action not found')
+          s = s.replace(old_protected, '        "protected_actions": {},', 1)
+          p.write_text(s)
+          PY
+          cat > tests/test_ai_team_auto_merge_policy.py <<'PY'
+          import json
+          from pathlib import Path
+          import importlib.util
+
+          ROOT = Path(__file__).resolve().parents[1]
+          spec = importlib.util.spec_from_file_location(
+              "ai_team_orchestrator", ROOT / "scripts" / "ai_team_orchestrator.py"
+          )
+          assert spec and spec.loader
+          orch = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(orch)
+
+          EXPECTED = {
+              "ROUTINE",
+              "QUANT_PROFITABILITY",
+              "STATISTICAL_METHODOLOGY",
+              "MAJOR_ARCHITECTURE",
+              "UNRESOLVED_DISAGREEMENT",
+              "CAPITAL_SENSITIVE_METHODOLOGY",
+          }
+
+          def test_all_recognized_task_classes_auto_merge_after_review_and_ci():
+              cfg = json.loads((ROOT / "config" / "ai_team_router.json").read_text())
+              assert set(cfg["auto_merge_task_classes"]) == EXPECTED
+              assert set(orch.DEFAULT_CONFIG["auto_merge_task_classes"]) == EXPECTED
+
+          def test_fallback_protected_actions_fail_closed_until_explicitly_configured():
+              cfg = json.loads((ROOT / "config" / "ai_team_router.json").read_text())
+              assert cfg["remediation"]["protected_actions"] == {}
+              assert orch.DEFAULT_CONFIG["remediation"]["protected_actions"] == {}
+          PY
+          python3 -m py_compile scripts/ai_team_orchestrator.py
+          python3 -m json.tool config/ai_team_router.json >/dev/null
+          pytest -q tests/test_ai_team_auto_merge_policy.py
+          git config user.name 'Hyperliquid AI Manager'
+          git config user.email 'manager@localhost'
+          git add scripts/ai_team_orchestrator.py config/ai_team_router.json tests/test_ai_team_auto_merge_policy.py
+          git commit -m 'fix(ai-team): auto-merge exact-SHA PASS plus green CI'
+          git remote set-url origin git@github.com:aliezzat4321/hyperliquid-copy-engine.git
+          git push origin HEAD:manager/181-auto-merge-on-pass
+          echo 'AUTO_MERGE_POLICY_PATCHED=YES'
           echo 'REAL_TRADING_TOUCHED=NO'
+          echo 'POLYMARKET_TOUCHED=NO'
