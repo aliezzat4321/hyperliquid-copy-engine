@@ -50,9 +50,15 @@ EXPECTED_LEADERBOARD_COLUMNS = [
 ]
 EXPECTED_LEADERBOARD_INDEXES = [
     ["idx_leaderboard_snapshots_address_time", False, False, True,
-     ["address", "snapshot_at DESC"]],
+     ["address", "snapshot_at"]],
     ["leaderboard_snapshots_pkey", True, True, True,
      ["snapshot_at", "address", "ranking_period"]],
+]
+EXPECTED_LEADERBOARD_CONSTRAINTS = [
+    ["leaderboard_snapshots_address_fkey", "f", True, False, False,
+     "FOREIGN KEY (address) REFERENCES wallets(address)"],
+    ["leaderboard_snapshots_pkey", "p", True, False, False,
+     "PRIMARY KEY (snapshot_at, address, ranking_period)"],
 ]
 
 
@@ -207,6 +213,13 @@ def _leaderboard_structure() -> dict[str, Any]:
         " WHERE i.indrelid='leaderboard_snapshots'::regclass"
         " GROUP BY c.relname,i.indisunique,i.indisprimary,i.indpred) indexed"
     )
+    constraints = _json_value(
+        "SELECT COALESCE(json_agg(json_build_array(c.conname,c.contype,"
+        " c.convalidated,c.condeferrable,c.condeferred,"
+        " pg_get_constraintdef(c.oid,true)) ORDER BY c.conname),'[]')"
+        " FROM pg_constraint c"
+        " WHERE c.conrelid='leaderboard_snapshots'::regclass"
+    )
     dependents = _json_value(
         "SELECT COALESCE(json_agg(name ORDER BY name),'[]') FROM ("
         " SELECT DISTINCT n.nspname||'.'||c.relname name FROM pg_depend d"
@@ -216,11 +229,18 @@ def _leaderboard_structure() -> dict[str, Any]:
         " AND c.relkind IN ('v','m')"
         " AND c.oid<>'leaderboard_snapshots'::regclass) dependent_relations"
     )
-    structure = {"columns": columns, "indexes": indexes, "dependent_views": dependents}
+    structure = {
+        "columns": columns,
+        "indexes": indexes,
+        "constraints": constraints,
+        "dependent_views": dependents,
+    }
     if columns != EXPECTED_LEADERBOARD_COLUMNS:
         raise RuntimeError(f"leaderboard column drift: {columns}")
     if indexes != EXPECTED_LEADERBOARD_INDEXES:
         raise RuntimeError(f"leaderboard index drift: {indexes}")
+    if constraints != EXPECTED_LEADERBOARD_CONSTRAINTS:
+        raise RuntimeError(f"leaderboard constraint drift: {constraints}")
     if dependents:
         raise RuntimeError(f"leaderboard has dependent views: {dependents}")
     return structure
@@ -512,6 +532,7 @@ def _validate_plan(path: Path, expected_sha256: str) -> dict[str, Any]:
     if plan["leaderboard"].get("structure") != {
         "columns": EXPECTED_LEADERBOARD_COLUMNS,
         "indexes": EXPECTED_LEADERBOARD_INDEXES,
+        "constraints": EXPECTED_LEADERBOARD_CONSTRAINTS,
         "dependent_views": [],
     }:
         raise RuntimeError("reviewed leaderboard structure mismatch")

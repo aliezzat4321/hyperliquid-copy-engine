@@ -52,6 +52,39 @@ def _drop_schema(schema: str) -> None:
 
 
 @pytest.mark.skipif("DATABASE_URL" not in os.environ, reason="PostgreSQL not configured")
+def test_leaderboard_structure_accepts_canonical_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schema = _schema()
+    _create_schema(schema)
+    try:
+        database_url = os.environ["DATABASE_URL"]
+        schema_sql = (
+            Path(__file__).resolve().parents[1] / "src" / "hlcopy" / "db" / "schema.sql"
+        ).read_text()
+        with psycopg.connect(database_url, autocommit=True) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(f'SET search_path TO "{schema}", public')
+                cursor.execute(schema_sql, prepare=False)
+
+        _install_schema_psql(monkeypatch, schema)
+        structure = MODULE._leaderboard_structure()
+
+        assert structure["indexes"] == MODULE.EXPECTED_LEADERBOARD_INDEXES
+        assert structure["constraints"] == MODULE.EXPECTED_LEADERBOARD_CONSTRAINTS
+        assert [
+            "leaderboard_snapshots_address_fkey",
+            "f",
+            True,
+            False,
+            False,
+            "FOREIGN KEY (address) REFERENCES wallets(address)",
+        ] in structure["constraints"]
+    finally:
+        _drop_schema(schema)
+
+
+@pytest.mark.skipif("DATABASE_URL" not in os.environ, reason="PostgreSQL not configured")
 def test_plan_rejects_missing_provenance_for_discarded_snapshot(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
