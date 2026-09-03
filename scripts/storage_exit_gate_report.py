@@ -49,14 +49,16 @@ def evaluate(
             int(value) == 0 for value in provenance.values()
         ),
         "relations_materially_smaller": (
-            int(apply.get("leaderboard_relation_bytes_after", 0))
+            "leaderboard_relation_bytes_after" in apply
+            and "raw_api_observations_bytes_after" in apply
+            and int(apply["leaderboard_relation_bytes_after"])
             < int(apply.get("leaderboard_relation_bytes_before", 0))
-            and int(apply.get("raw_api_observations_bytes_after", 0))
+            and int(apply["raw_api_observations_bytes_after"])
             < int(apply.get("raw_api_observations_bytes_before", 0))
         ),
         "filesystem_reclaimed": int(apply.get("after_available_bytes", 0))
         > int(apply.get("before_available_bytes", 0)),
-        "lossless_lifecycle": lifecycle is None or (
+        "lossless_lifecycle": lifecycle is not None and (
             int(lifecycle.get("rows_lost", -1)) == 0
             and lifecycle.get("reader_column_registry_satisfied") is True
             and int(lifecycle.get("compress_candidates_deleted", -1)) == 0
@@ -92,8 +94,8 @@ def evaluate(
             "reviewed_commit_sha", "postgres_manifest_sha256", "reviewer",
         )) and review.get("postgres_manifest_sha256") == apply.get("manifest_sha256")
         and (
-            lifecycle is None
-            or review.get("lifecycle_manifest_sha256")
+            lifecycle is not None
+            and review.get("lifecycle_manifest_sha256")
             == lifecycle.get("manifest_sha256")
         ),
         "safety_boundaries": apply.get("real_trading_change") is False

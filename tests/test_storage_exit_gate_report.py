@@ -39,17 +39,44 @@ def test_exit_gate_requires_uncontaminated_24_hour_allow_window() -> None:
         "byte_budget": 1, "growth_budget_bytes_per_hour": 1,
         "pressure_control": "STOP_WRITER",
     }]}
-    review = {"reviewed_commit_sha": "commit", "postgres_manifest_sha256": "manifest",
-              "reviewer": "CLAUDE_OPUS"}
+    lifecycle = {
+        "rows_lost": 0, "reader_column_registry_satisfied": True,
+        "compress_candidates_deleted": 0, "manifest_sha256": "lifecycle-manifest",
+    }
+    review = {
+        "reviewed_commit_sha": "commit", "postgres_manifest_sha256": "manifest",
+        "lifecycle_manifest_sha256": "lifecycle-manifest", "reviewer": "CLAUDE_OPUS",
+    }
+    result = MODULE.evaluate(
+        apply=apply, controller_history={"observations": observations},
+        policy=policy, review=review, lifecycle=lifecycle,
+    )
+    assert result["exit_ready"] is True
+
     result = MODULE.evaluate(
         apply=apply, controller_history={"observations": observations},
         policy=policy, review=review,
     )
-    assert result["exit_ready"] is True
+    assert result["exit_ready"] is False
+    assert result["checks"]["lossless_lifecycle"] is False
+    assert result["checks"]["review_provenance_complete"] is False
+
+    for after_key in (
+        "leaderboard_relation_bytes_after", "raw_api_observations_bytes_after",
+    ):
+        apply_without_after = dict(apply)
+        del apply_without_after[after_key]
+        result = MODULE.evaluate(
+            apply=apply_without_after, controller_history={"observations": observations},
+            policy=policy, review=review, lifecycle=lifecycle,
+        )
+        assert result["exit_ready"] is False
+        assert result["checks"]["relations_materially_smaller"] is False
+
     observations[0]["observed_at"] = (completed - timedelta(hours=1)).isoformat()
     result = MODULE.evaluate(
         apply=apply, controller_history={"observations": observations},
-        policy=policy, review=review,
+        policy=policy, review=review, lifecycle=lifecycle,
     )
     assert result["exit_ready"] is False
     assert result["checks"]["at_least_24_post_reclaim_observations"] is False
