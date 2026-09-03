@@ -9,6 +9,7 @@ UNIT="hlcopy-profitability-funnel.service"
 WIDE="/mnt/HC_Volume_106576526/hyperliquid/shadow/wide-enriched-live"
 CUTOFF="/mnt/HC_Volume_106576526/hyperliquid/shadow/wide_clean_cutoff_ns.txt"
 MARKET="/mnt/HC_Volume_106576526/hyperliquid/market-shadow"
+UNIVERSE="/mnt/HC_Volume_106576526/hyperliquid/discovery/universe_state.json"
 
 cd "$REPO"
 
@@ -16,7 +17,7 @@ if [[ ! -x "$PY" ]]; then
   echo "missing python: $PY" >&2
   exit 2
 fi
-for required in "$WIDE" "$CUTOFF" "$MARKET"; do
+for required in "$WIDE" "$CUTOFF" "$MARKET" "$UNIVERSE"; do
   if [[ ! -e "$required" ]]; then
     echo "missing required input: $required" >&2
     exit 2
@@ -40,6 +41,7 @@ systemd-run \
   --wide-enriched-dir "$WIDE" \
   --wide-cutoff-ns-file "$CUTOFF" \
   --market-dir "$MARKET" \
+  --universe-state "$UNIVERSE" \
   --output-dir "$OUT"
 
 sleep 3
