@@ -27,7 +27,7 @@ jobs:
           chown -R hl-claude-agent:hl-claude-agent "$review"
           prompt='You are CLAUDE OPUS, independent final adversarial reviewer for Hyperliquid Issue #178 / PR #180. Review exactly SHA 1db0ed66e682fde17a2c0a026008e97e62765426 against main. Do not edit files or use GitHub credentials. Do not inspect or discuss Polymarket. REAL_TRADING_ENABLED remains NO. Read AGENTS.md, docs/ai-team/OPUS_REPAIR_LOOP_DIAGNOSIS.md, docs/ai-team/DECISIONS.md, PR-changed files and necessary adjacent tests only. Prior remaining blockers at 585d7bcb were: (1) invalid production protected-action mapping to deploy-ai-team-orchestrator.yml without workflow_dispatch; (2) missing behavioral tests for repository-issued protected authorization/config-sourced target, CI failure classification, and immutable Opus research input reaching Codex BUILD. New delta removes that production mapping, adds behavioral tests, and intentionally does not edit workflows; #166 owns later deploy-workflow changes. Falsify the fix and do not demand #166 in #178. End with REVIEWED_SHA=1db0ed66e682fde17a2c0a026008e97e62765426 then VERDICT=PASS and BLOCKERS_JSON=[]; or VERDICT=FAIL with concise actionable blockers.'
           set +e
-          output="$(systemd-run --pipe --wait --collect --quiet \
+          output="$(printf '%s\n' "$prompt" | systemd-run --pipe --wait --collect --quiet \
             --unit="hl-ai-claude-manager-review-180-$GITHUB_RUN_ID" \
             --uid=hl-claude-agent --gid=hl-claude-agent \
             --working-directory="$review" \
@@ -40,7 +40,7 @@ jobs:
             --property="ReadWritePaths=$review $a_home" \
             --setenv="HOME=$a_home" --setenv="CLAUDE_CONFIG_DIR=$a_home/.claude" \
             /usr/bin/claude -p --model opus --output-format text --permission-mode dontAsk \
-            --allowedTools Read,Glob,Grep,Bash "$prompt" 2>&1)"
+            --allowedTools Read,Glob,Grep,Bash 2>&1)"
           rc=$?
           set -e
           printf '%s\n' "$output"
