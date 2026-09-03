@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 import uuid
@@ -30,7 +31,14 @@ def _install_schema_psql(monkeypatch: pytest.MonkeyPatch, schema: str) -> None:
                     return ""
                 rows = cursor.fetchall()
                 return "\n".join(
-                    "|".join("" if value is None else str(value) for value in row)
+                    "|".join(
+                        ""
+                        if value is None
+                        else json.dumps(value)
+                        if isinstance(value, (dict, list))
+                        else str(value)
+                        for value in row
+                    )
                     for row in rows
                 )
 
