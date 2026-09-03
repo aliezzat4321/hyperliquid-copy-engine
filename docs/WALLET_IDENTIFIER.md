@@ -61,13 +61,21 @@ waits for 20 canonical independent trades before invoking the resolver, avoiding
 `hyperliquid-invo-source-miner.timer` runs the read-only collector every five minutes. A
 successful collection triggers `hyperliquid-invo-wallet-identifier.service`. The identifier:
 
-- reuses one SQD client and its coverage/header cache across the batch;
+- reuses one SQD client and its concurrency-safe coverage/header cache across the batch;
 - skips unchanged verified evidence and exponentially backs off unchanged unresolved evidence
   from one hour to a 24-hour maximum while still allowing SQD coverage to catch up;
 - retries transport/runtime errors on the next successful collector cycle;
 - processes at most four changed portfolios per run;
 - writes only current-digest/current-rule verified identities to `identified_wallets.json`;
 - never directly changes the shadow registry or live-trading approval.
+
+Each run emits queue-ready, pending and backlog counts; bounded concurrency and throughput;
+queue-delay and portfolio/candidate/verified p50/p90/p99 latency; proof-stage reduction totals;
+verified, unresolved and error yield; and SQD request count, cumulative request latency and
+retry count. Tier B remains bounded to eight discovery windows plus at most six candidates
+times twelve held-out windows per trader. These measurements are emitted even at zero yield;
+an unresolved result remains in the resolution queue for Lane 3 rather than being promoted as
+an identity.
 
 A successful identifier run triggers
 `hyperliquid-invo-verified-shadow-sync.service`. That handoff is deliberately separate from

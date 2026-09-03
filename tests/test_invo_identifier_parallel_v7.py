@@ -11,6 +11,14 @@ from hlcopy.resolver.identifier import WalletIdentificationResult
 
 
 class _FakeClient:
+    instances = 0
+
+    def __init__(self) -> None:
+        type(self).instances += 1
+        self.request_count = 7
+        self.request_latency_ms = 12.5
+        self.retry_count = 1
+
     async def __aenter__(self) -> _FakeClient:
         return self
 
@@ -43,6 +51,7 @@ def test_identifier_runs_portfolios_concurrently_but_bounded(
     monkeypatch,
 ) -> None:
     state_dir = tmp_path / "invo"
+    _FakeClient.instances = 0
     queue_dir = state_dir / "resolution_queue"
     queue_dir.mkdir(parents=True)
     queue = []
@@ -92,6 +101,17 @@ def test_identifier_runs_portfolios_concurrently_but_bounded(
     assert result["errors"] == 0
     assert result["concurrency"] == 2
     assert peak == 2
+    assert _FakeClient.instances == 1
+    assert result["api"] == {
+        "query_count": 7,
+        "query_latency_ms": 12.5,
+        "retry_count": 1,
+    }
+    assert result["queue_backlog"] == 0
+    assert result["portfolio_latency_ms"]["p50"] is not None
+    assert result["time_to_first_candidate_ms"]["p99"] is not None
+    assert result["time_to_verified_identity_ms"]["p90"] is not None
+    assert result["verified_yield"] == 1.0
 
 
 def test_production_identifier_uses_wide_bounded_batch() -> None:
