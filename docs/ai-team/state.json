@@ -57,11 +57,11 @@
         {"key": "confirmed_rows", "label": "confirmation rows", "value": 800, "unit": "count", "observed_at": "2026-08-31T07:37:45Z", "source_type": "WORKFLOW_RUN", "source_ref": "33369211976"},
         {"key": "robust_candidates", "label": "robust candidates", "value": 186, "unit": "count", "observed_at": "2026-08-31T07:37:45Z", "source_type": "WORKFLOW_RUN", "source_ref": "33369211976"},
         {"key": "realized_slice_rows", "label": "realized slice rows", "value": 26238, "unit": "count", "observed_at": "2026-08-31T07:37:45Z", "source_type": "WORKFLOW_RUN", "source_ref": "33369211976"},
-        {"key": "frozen_prospective_targets", "label": "hard-coded prospective wallet-by-coin targets", "value": 4, "unit": "count", "observed_at": "2026-08-31T11:40:40Z", "source_type": "WORKFLOW_RUN", "source_ref": "33388075503"},
+        {"key": "frozen_prospective_targets", "label": "frozen prospective target source", "value": "FRESHNESS_GATED_CHALLENGER_QUEUE", "unit": "text", "observed_at": "2026-09-03T17:14:49Z", "source_type": "COMMIT", "source_ref": "6530191c524e3b069fd12db7e4a99ed513211440"},
         {"key": "frozen_targets_approved", "label": "frozen targets approved", "value": 2, "unit": "count", "observed_at": "2026-08-31T11:40:40Z", "source_type": "WORKFLOW_RUN", "source_ref": "33388075503"},
         {"key": "frozen_target_zero_evidence", "label": "frozen targets with zero observed events", "value": 1, "unit": "count", "observed_at": "2026-08-31T11:40:40Z", "source_type": "WORKFLOW_RUN", "source_ref": "33388075503"}
       ],
-      "blocker": "The broad research funnel (1551 screened cohorts) does not feed the frozen prospective queue, which remains a hard-coded four-row constant in scripts/prospective_champion_lane.py.",
+      "blocker": "The code path now feeds frozen prospective evaluation from the freshness-gated selective challenger queue produced by src/hlcopy/profitability/lane1_handoff.py; a current runtime observation is still required to demonstrate cadence and end-to-end candidate traversal in production.",
       "next": "Issue #93"
     },
     "lane_2": {
