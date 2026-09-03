@@ -61,10 +61,12 @@ def test_resolution_queue_requires_independent_trades_and_deduplicates_trade_id(
     )
 
     assert result["ready_count"] == 1
+    assert result["generated_at"]
     item = result["queue"][0]
     assert item["username"] == "carmine"
     assert item["evidence_count"] == 12
     assert item["distinct_coin_count"] == 2
+    assert item["resolution_ready_at"] == result["generated_at"]
     csv_path = Path(str(item["resolver_csv"]))
     assert csv_path.exists()
     assert len(csv_path.read_text(encoding="utf-8").splitlines()) == 13

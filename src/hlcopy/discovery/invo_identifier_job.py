@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import json
 import os
+import time
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -177,23 +178,27 @@ async def _identify_one(
     *,
     reports_dir: Path,
     semaphore: asyncio.Semaphore,
-) -> tuple[dict[str, Any], EvidenceSnapshot, str, Any | None, str | None]:
+    client: SqdHyperliquidFillsClient,
+) -> tuple[
+    dict[str, Any], EvidenceSnapshot, str, Any | None, str | None, float, dict[str, Any]
+]:
     async with semaphore:
+        started = time.perf_counter()
         portfolio_id = str(row["portfolio_id"])
         attempted_at = datetime.now(tz=UTC).isoformat()
         report_key = hashlib.sha256(portfolio_id.encode("utf-8")).hexdigest()[:16]
+        telemetry: dict[str, Any] = {}
         try:
-            # One client per active portfolio keeps HTTP/session state isolated while
-            # the semaphore bounds aggregate pressure on SQD.
-            async with SqdHyperliquidFillsClient() as client:
-                result = await identify_wallet_from_csv(
-                    evidence_path,
-                    output_dir=reports_dir / report_key,
-                    client=client,
-                    snapshot=snapshot,
-                    expected_source_identity=portfolio_id,
-                )
-            return row, snapshot, attempted_at, result, None
+            result = await identify_wallet_from_csv(
+                evidence_path,
+                output_dir=reports_dir / report_key,
+                client=client,
+                snapshot=snapshot,
+                expected_source_identity=portfolio_id,
+                telemetry=telemetry,
+            )
+            latency_ms = (time.perf_counter() - started) * 1000
+            return row, snapshot, attempted_at, result, None, latency_ms, telemetry
         except Exception as exc:
             return (
                 row,
@@ -201,10 +206,38 @@ async def _identify_one(
                 attempted_at,
                 None,
                 f"{type(exc).__name__}: {exc}",
+                (time.perf_counter() - started) * 1000,
+                telemetry,
             )
 
 
+def _percentiles(values: Sequence[float]) -> dict[str, float | None]:
+    ordered = sorted(values)
+    if not ordered:
+        return {"p50": None, "p90": None, "p99": None}
+
+    def pick(percent: float) -> float:
+        index = min(len(ordered) - 1, int((len(ordered) - 1) * percent))
+        return round(ordered[index], 3)
+
+    return {"p50": pick(0.50), "p90": pick(0.90), "p99": pick(0.99)}
+
+
+def _queue_delay_ms(row: Mapping[str, Any], *, now: datetime) -> float | None:
+    raw = row.get("resolution_ready_at")
+    if not raw:
+        return None
+    try:
+        ready_at = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if ready_at.tzinfo is None:
+        ready_at = ready_at.replace(tzinfo=UTC)
+    return max(0.0, (now - ready_at).total_seconds() * 1000)
+
+
 async def run_once(args: argparse.Namespace) -> dict[str, object]:
+    run_started = time.perf_counter()
     state_dir: Path = args.state_dir
     queue_path = state_dir / "resolution_queue" / "resolution_queue.json"
     identifier_state_path = state_dir / "identifier_state.json"
@@ -280,22 +313,32 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
 
     if selected:
         semaphore = asyncio.Semaphore(concurrency)
-        outcomes = await asyncio.gather(
-            *(
-                _identify_one(
-                    row,
-                    evidence_path,
-                    snapshot,
-                    reports_dir=reports_dir,
-                    semaphore=semaphore,
+        async with SqdHyperliquidFillsClient() as client:
+            outcomes = await asyncio.gather(
+                *(
+                    _identify_one(
+                        row,
+                        evidence_path,
+                        snapshot,
+                        reports_dir=reports_dir,
+                        semaphore=semaphore,
+                        client=client,
+                    )
+                    for row, evidence_path, snapshot in selected
                 )
-                for row, evidence_path, snapshot in selected
             )
-        )
+            api_metrics = {
+                "query_count": int(getattr(client, "request_count", 0)),
+                "query_latency_ms": round(
+                    float(getattr(client, "request_latency_ms", 0.0)), 3
+                ),
+                "retry_count": int(getattr(client, "retry_count", 0)),
+            }
 
         # Network work is concurrent, but all durable state publication remains
         # single-writer and deterministic in queue order.
-        for row, snapshot, attempted_at, result, error in outcomes:
+        portfolio_latencies_ms = [outcome[5] for outcome in outcomes]
+        for row, snapshot, attempted_at, result, error, _latency_ms, _telemetry in outcomes:
             portfolio_id = str(row["portfolio_id"])
             evidence_sha = snapshot.sha256
             previous = items.get(portfolio_id)
@@ -401,6 +444,112 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
         "concurrency": concurrency,
         "priority_traders": list(_priority_names(args.priority_trader)),
         "state_dir": str(state_dir),
+        "queue_backlog": max(0, len(pending) - attempted),
+        "portfolio_latency_ms": _percentiles(portfolio_latencies_ms if selected else []),
+        "time_to_first_candidate_ms": _percentiles(
+            [
+                float(outcome[6].get("candidate_generation_ms", latency))
+                for outcome, latency in zip(
+                    outcomes, portfolio_latencies_ms, strict=True
+                )
+                if outcome[3] is not None and outcome[3].candidate is not None
+            ]
+            if selected
+            else []
+        ),
+        "time_to_verified_identity_ms": _percentiles(
+            [
+                latency
+                for outcome, latency in zip(
+                    outcomes, portfolio_latencies_ms, strict=True
+                )
+                if outcome[3] is not None and outcome[3].status == "VERIFIED"
+            ]
+            if selected
+            else []
+        ),
+        "candidate_generation_latency_ms": _percentiles(
+            [
+                float(outcome[6]["candidate_generation_ms"])
+                for outcome in outcomes
+                if "candidate_generation_ms" in outcome[6]
+            ]
+            if selected
+            else []
+        ),
+        "verification_latency_ms": _percentiles(
+            [
+                float(outcome[6]["verification_ms"])
+                for outcome in outcomes
+                if "verification_ms" in outcome[6]
+            ]
+            if selected
+            else []
+        ),
+        "candidate_fanout": sum(
+            int(outcome[6].get("candidate_fanout", 0)) for outcome in outcomes
+        )
+        if selected
+        else 0,
+        "verification_candidates": sum(
+            int(outcome[6].get("verification_candidates", 0)) for outcome in outcomes
+        )
+        if selected
+        else 0,
+        "queue_delay_ms": _percentiles(
+            [
+                delay
+                for row, _, _ in selected
+                if (delay := _queue_delay_ms(row, now=now)) is not None
+            ]
+        ),
+        "run_latency_ms": round((time.perf_counter() - run_started) * 1000, 3),
+        "throughput_per_minute": round(
+            attempted * 60 / max(0.001, time.perf_counter() - run_started), 3
+        ),
+        "verified_yield": round(verified / attempted, 6) if attempted else 0.0,
+        "ambiguity_count": unresolved,
+        "contradiction_count": errors,
+        "proof_stage_totals": {
+            "input_trades": sum(
+                outcome[3].input_trades for outcome in outcomes if outcome[3] is not None
+            )
+            if selected
+            else 0,
+            "discovery_anchors": sum(
+                outcome[3].discovery_anchors
+                for outcome in outcomes
+                if outcome[3] is not None
+            )
+            if selected
+            else 0,
+            "discovery_matches": sum(
+                outcome[3].discovery_matches
+                for outcome in outcomes
+                if outcome[3] is not None
+            )
+            if selected
+            else 0,
+            "held_out_attempted": sum(
+                outcome[3].historical_attempted
+                for outcome in outcomes
+                if outcome[3] is not None
+            )
+            if selected
+            else 0,
+            "held_out_matches": sum(
+                outcome[3].historical_matches
+                for outcome in outcomes
+                if outcome[3] is not None
+            )
+            if selected
+            else 0,
+        },
+        "api": api_metrics
+        if selected
+        else {"query_count": 0, "query_latency_ms": 0.0, "retry_count": 0},
+        "verification_window_query_bound_per_trader": 80,
+        "cache_reuse": "shared_batch_sqd_coverage_and_header_cache",
     }
     if errors > 0:
         raise PortfolioResolutionBatchError(

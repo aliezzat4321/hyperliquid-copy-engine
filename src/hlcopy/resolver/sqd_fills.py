@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import time
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -224,6 +225,10 @@ class SqdHyperliquidFillsClient:
         )
         self._bounds: tuple[tuple[int, int], tuple[int, int]] | None = None
         self._headers: dict[int, int] = {}
+        self._bounds_lock = asyncio.Lock()
+        self.request_count = 0
+        self.request_latency_ms = 0.0
+        self.retry_count = 0
 
     async def __aenter__(self) -> SqdHyperliquidFillsClient:
         return self
@@ -241,21 +246,27 @@ class SqdHyperliquidFillsClient:
     ) -> httpx.Response:
         url = f"{self.base_url}/{path.lstrip('/')}"
         for attempt in range(retries + 1):
+            started = time.perf_counter()
             try:
+                self.request_count += 1
                 response = await self._client.request(method, url, json=payload)
+                self.request_latency_ms += (time.perf_counter() - started) * 1000
                 if response.status_code in {429, 521, 522, 523, 529} or response.status_code >= 500:
                     if attempt == retries:
                         response.raise_for_status()
                     await asyncio.sleep(min(8.0, 0.4 * (2**attempt)))
+                    self.retry_count += 1
                     continue
                 if response.status_code == 204:
                     return response
                 response.raise_for_status()
                 return response
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                self.request_latency_ms += (time.perf_counter() - started) * 1000
                 if attempt == retries:
                     raise SqdPortalError(f"SQD request failed after retries: {url}") from exc
                 await asyncio.sleep(min(8.0, 0.4 * (2**attempt)))
+                self.retry_count += 1
         raise AssertionError("unreachable")
 
     async def _stream(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -300,17 +311,20 @@ class SqdHyperliquidFillsClient:
     async def _coverage_bounds(self) -> tuple[tuple[int, int], tuple[int, int]]:
         if self._bounds is not None:
             return self._bounds
-        metadata_response = await self._request("GET", "metadata")
-        head_response = await self._request("GET", "finalized-head")
-        metadata = metadata_response.json()
-        head = head_response.json()
-        start_block = int(metadata.get("start_block") or metadata.get("first_block") or 0)
-        head_block = int(head["number"])
-        if head_block <= start_block:
-            raise SqdPortalError("SQD Hyperliquid fills dataset has invalid coverage bounds")
-        start_ts = await self._header_timestamp(start_block)
-        head_ts = await self._header_timestamp(head_block)
-        self._bounds = ((start_block, start_ts), (head_block, head_ts))
+        async with self._bounds_lock:
+            if self._bounds is not None:
+                return self._bounds
+            metadata_response = await self._request("GET", "metadata")
+            head_response = await self._request("GET", "finalized-head")
+            metadata = metadata_response.json()
+            head = head_response.json()
+            start_block = int(metadata.get("start_block") or metadata.get("first_block") or 0)
+            head_block = int(head["number"])
+            if head_block <= start_block:
+                raise SqdPortalError("SQD Hyperliquid fills dataset has invalid coverage bounds")
+            start_ts = await self._header_timestamp(start_block)
+            head_ts = await self._header_timestamp(head_block)
+            self._bounds = ((start_block, start_ts), (head_block, head_ts))
         return self._bounds
 
     async def coverage_start_ms(self) -> int:

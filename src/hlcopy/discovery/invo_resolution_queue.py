@@ -193,6 +193,7 @@ def _materialize_grouped(
     portfolios: Sequence[Mapping[str, object]],
     min_trades: int,
 ) -> dict[str, object]:
+    generated_at = datetime.now(tz=UTC).isoformat()
     metadata = {
         str(row.get("portfolio_id") or ""): row
         for row in portfolios
@@ -228,6 +229,7 @@ def _materialize_grouped(
                 "distinct_coin_count": len(coins),
                 "resolver_csv": str(csv_path),
                 "status": "READY_FOR_WALLET_RESOLUTION",
+                "resolution_ready_at": generated_at,
             }
         )
 
@@ -242,6 +244,7 @@ def _materialize_grouped(
         "source": "invo",
         "minimum_evidence_trades": max(3, min_trades),
         "ready_count": len(queue),
+        "generated_at": generated_at,
         "queue": queue,
     }
     path = output_dir / "resolution_queue.json"
