@@ -28,7 +28,6 @@
   "opus_allowed_task_classes": [
     "QUANT_PROFITABILITY",
     "STATISTICAL_METHODOLOGY",
-    "MAJOR_ARCHITECTURE",
     "UNRESOLVED_DISAGREEMENT",
     "CAPITAL_SENSITIVE_METHODOLOGY"
   ],
@@ -53,7 +52,9 @@
   "claude_readiness_probe_seconds": 300,
   "claude_readiness_probe_timeout_seconds": 20,
   "claude_readiness_probe_output_bytes": 4096,
+  "claude_turn_budgets": {"REVIEW": 12, "RESEARCH": 16},
   "review_timeout_seconds": 1200,
+  "research_timeout_seconds": 1800,
   "build_timeout_seconds": 1800,
   "trusted_author_associations": ["OWNER", "MEMBER", "COLLABORATOR"],
   "labels": {

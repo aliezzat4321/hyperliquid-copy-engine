@@ -30,6 +30,21 @@ def test_quant_review_routes_to_opus_only_under_explicit_class():
     )
 
 
+@pytest.mark.parametrize("task_class", [
+    "QUANT_PROFITABILITY", "STATISTICAL_METHODOLOGY",
+    "CAPITAL_SENSITIVE_METHODOLOGY", "UNRESOLVED_DISAGREEMENT",
+])
+def test_high_stakes_final_reviews_always_route_to_opus(task_class):
+    assert orch.route_review(orch.DEFAULT_CONFIG, task_class, None) == "OPUS"
+
+
+def test_major_architecture_review_uses_sonnet_unless_explicitly_escalated():
+    assert orch.route_review(orch.DEFAULT_CONFIG, "MAJOR_ARCHITECTURE", None) == "SONNET"
+    assert orch.route_review(
+        orch.DEFAULT_CONFIG, "MAJOR_ARCHITECTURE", "MAJOR_ARCHITECTURE"
+    ) == "OPUS"
+
+
 def test_opus_escalation_is_rejected_for_routine_work():
     with pytest.raises(RuntimeError, match="non-Opus"):
         orch.route_review(orch.DEFAULT_CONFIG, "ROUTINE", "MAJOR_ARCHITECTURE")
@@ -128,6 +143,45 @@ def test_machine_assignment_contains_exact_sha_and_model():
     assert f"TARGET_SHA={sha}" in text
     assert "MODEL_CLASS=SONNET" in text
     assert "STATUS=PENDING" in text
+
+
+def test_review_prompt_is_explicitly_delta_scoped_and_forbids_repo_wide_rereads(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    target = "b" * 40
+    task_id = ledger.create_task(
+        issue_number=150, pr_number=151, task_type="REVIEW", agent="CLAUDE",
+        model_class="SONNET", task_class="ROUTINE", target_sha=target,
+    )
+    team = object.__new__(orch.Orchestrator)
+    prompt = team.review_prompt(
+        {"title": "bounded review", "body": "body", "base": {"sha": "a" * 40}},
+        ledger.get(task_id), ["scripts/ai_team_orchestrator.py"], [], [],
+    )
+    assert f"git diff {'a' * 40}..{target} -- <changed files>" in prompt
+    assert "only the changed files listed below" in prompt
+    assert "Do not reread the whole repository" in prompt
+    assert "Never perform or restart a recursive/repository-wide audit" in prompt
+
+
+def test_claude_invocation_applies_task_specific_turn_budget(tmp_path, monkeypatch):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    task_id = ledger.create_task(
+        issue_number=150, task_type="RESEARCH", agent="CLAUDE", model_class="OPUS",
+        task_class="MAJOR_ARCHITECTURE",
+    )
+    captured = {}
+    monkeypatch.setattr(orch, "model_sandbox_command", lambda **kw: kw["command"])
+    monkeypatch.setattr(
+        orch, "run",
+        lambda command, **kw: captured.update(command=command, timeout=kw["timeout"])
+        or subprocess.CompletedProcess(command, 0, "", ""),
+    )
+    team = object.__new__(orch.Orchestrator)
+    team.cfg = orch.DEFAULT_CONFIG
+    team.invoke_claude(ledger.get(task_id), tmp_path, "prompt", "unit")
+    budget_at = captured["command"].index("--max-turns")
+    assert captured["command"][budget_at + 1] == "16"
+    assert captured["timeout"] == orch.DEFAULT_CONFIG["research_timeout_seconds"]
 
 
 def test_review_parser_requires_exact_sha():

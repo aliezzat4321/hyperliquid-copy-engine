@@ -100,7 +100,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "opus_allowed_task_classes": [
         "QUANT_PROFITABILITY",
         "STATISTICAL_METHODOLOGY",
-        "MAJOR_ARCHITECTURE",
         "UNRESOLVED_DISAGREEMENT",
         "CAPITAL_SENSITIVE_METHODOLOGY",
     ],
@@ -125,7 +124,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "claude_readiness_probe_seconds": 300,
     "claude_readiness_probe_timeout_seconds": 20,
     "claude_readiness_probe_output_bytes": 4096,
+    "claude_turn_budgets": {"REVIEW": 12, "RESEARCH": 16},
     "review_timeout_seconds": 1200,
+    "research_timeout_seconds": 1800,
     "build_timeout_seconds": 1800,
     "trusted_author_associations": ["OWNER", "MEMBER", "COLLABORATOR"],
     "labels": {
@@ -851,6 +852,12 @@ def route_review(cfg: dict[str, Any], task_class: str, escalation_reason: str | 
         if escalation_reason and escalation_reason not in cfg["opus_allowed_reasons"]:
             raise RuntimeError(f"invalid Opus escalation reason: {escalation_reason}")
         return "OPUS"
+    if task_class == "MAJOR_ARCHITECTURE":
+        if escalation_reason is None:
+            return "SONNET"
+        if escalation_reason == "MAJOR_ARCHITECTURE":
+            return "OPUS"
+        raise RuntimeError(f"invalid Opus escalation reason: {escalation_reason}")
     if escalation_reason:
         raise RuntimeError("Opus escalation reason supplied for non-Opus task class")
     return "SONNET"
@@ -2304,7 +2311,9 @@ TASK_CLASS={task["task_class"]}
         prompt = (
             f"Research GitHub Issue #{task['issue_number']} as CLAUDE OPUS. Produce an "
             "implementation-ready architecture artifact; do not edit files or use GitHub. "
-            "REAL TRADING remains disabled. Issue body:\n" + str(issue.get("body") or "")
+            "Use only the Issue-linked files and the minimum necessary adjacent context. "
+            "Do not recursively inspect or reread the repository. REAL TRADING remains "
+            "disabled. Issue body:\n" + str(issue.get("body") or "")
         )
         unit = f"hl-ai-claude-{task['id'][:10]}-{int(time.time())}"
         log_path = CLAUDE_LOG / f"{task['id']}-attempt-{task['attempt']}.json"
@@ -2650,6 +2659,9 @@ not run on re-review because previous_sha is then populated.
                 "--allowedTools",
                 "Read,Glob,Grep,Bash",
             ]
+        task_type = str(task["task_type"])
+        turn_budget = int(self.cfg["claude_turn_budgets"][task_type])
+        command.extend(["--max-turns", str(turn_budget)])
         full = model_sandbox_command(
             unit=unit,
             user=CLAUDE_USER,
@@ -2657,7 +2669,10 @@ not run on re-review because previous_sha is then populated.
             workdir=workdir,
             command=command,
         )
-        return run(full, input_text=prompt, timeout=int(self.cfg["review_timeout_seconds"]))
+        timeout_key = (
+            "research_timeout_seconds" if task_type == "RESEARCH" else "review_timeout_seconds"
+        )
+        return run(full, input_text=prompt, timeout=int(self.cfg[timeout_key]))
 
     def review_prompt(
         self,
@@ -2668,16 +2683,24 @@ not run on re-review because previous_sha is then populated.
         blockers: list[str],
     ) -> str:
         target = str(task["target_sha"])
+        base = str((pr.get("base") or {}).get("sha") or "")
         blocker_text = "\n".join(
             "- " + (canonical_json(x) if isinstance(x, dict) else str(x)) for x in blockers
         ) if blockers else "(none)"
-        delta = ""
+        delta_start = str(task["previous_sha"] or base)
+        delta = (
+            f"\nReview ONLY the bounded delta `git diff {delta_start}..{target} -- "
+            "<changed files>`, the prior blockers, and necessary adjacent context. "
+            "Do not inspect unchanged files unless a specific changed-file finding requires it. "
+            "Never perform or restart a recursive/repository-wide audit.\n"
+        )
         if task["previous_sha"]:
             delta = (
                 f"\nThis is a re-review. Previous reviewed SHA: {task['previous_sha']}. "
                 f"Review the prior blockers plus ONLY the delta "
                 f"`git diff {task['previous_sha']}..{target} -- <changed files>` and "
-                "necessary adjacent context. Do not restart a repository audit.\n"
+                "necessary adjacent context. Never perform or restart a recursive/"
+                "repository-wide audit.\n"
             )
         return f"""You are CLAUDE, the independent adversarial reviewer for the Hyperliquid project.
 Review exactly PR #{task["pr_number"]} at exact SHA {target}.
@@ -2692,7 +2715,8 @@ Hard boundaries:
 
 Context discipline:
 1. Read AGENTS.md and docs/ai-team/CURRENT_STATE.md.
-2. Read the PR body below and only the changed files listed below.
+2. Read the PR body below and only the changed files listed below, starting from the
+   explicit base/previous-reviewed-SHA delta. Do not reread the whole repository.
 3. Use linked policy/subsystem docs only if needed.
 4. No recursive whole-repository audit.
 {delta}
