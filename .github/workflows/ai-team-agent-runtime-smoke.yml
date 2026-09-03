@@ -9,11 +9,11 @@ permissions:
   contents: read
 
 jobs:
-  seed_exact_sha_opus_review:
+  schedule_manager_finalizer:
     runs-on: [self-hosted, linux]
     timeout-minutes: 5
     steps:
-      - name: Seed one idempotent Opus review checkpoint in VM ledger
+      - name: Install bounded exact-SHA finalizer for PR 180
         shell: bash
         run: |
           set -euo pipefail
@@ -21,41 +21,72 @@ jobs:
           echo 'POLYMARKET_INSPECTION=NO'
           echo 'POLYMARKET_MUTATION=NO'
           echo 'REAL_TRADING_CHANGE=NO'
-          /usr/bin/python3 - <<'PY'
-          import datetime as dt
-          import json
-          import sqlite3
-          import uuid
+          script=/var/lib/hyperliquid-ai-team/orchestrator/manager-finalize-178.sh
+          cat > "$script" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          unset GITHUB_TOKEN GH_TOKEN
+          repo=aliezzat4321/hyperliquid-copy-engine
+          pr=180
+          issue=178
+          target=1db0ed66e682fde17a2c0a026008e97e62765426
+          deadline=$(( $(date +%s) + 7200 ))
+          while [[ $(date +%s) -lt $deadline ]]; do
+            pr_json="$(gh api "repos/$repo/pulls/$pr")"
+            state="$(jq -r .state <<<"$pr_json")"
+            merged="$(jq -r .merged <<<"$pr_json")"
+            head="$(jq -r .head.sha <<<"$pr_json")"
+            if [[ "$merged" == true ]]; then
+              echo 'FINALIZER=ALREADY_MERGED'
+              exit 0
+            fi
+            [[ "$state" == open ]] || { echo "FINALIZER=STOP_PR_STATE_$state"; exit 20; }
+            [[ "$head" == "$target" ]] || { echo "FINALIZER=STOP_HEAD_MOVED_$head"; exit 21; }
 
-          db_path = '/var/lib/hyperliquid-ai-team/orchestrator/ledger.sqlite3'
-          target = '1db0ed66e682fde17a2c0a026008e97e62765426'
-          previous = '585d7bcb49e72dcdbaa7a07df22fd5f438fd60e2'
-          db = sqlite3.connect(db_path)
-          db.row_factory = sqlite3.Row
-          existing = db.execute(
-              "SELECT id,status FROM tasks WHERE issue_number=? AND pr_number=? AND task_type='REVIEW' AND model_class='OPUS' AND target_sha=? ORDER BY created_at DESC LIMIT 1",
-              (178, 180, target),
-          ).fetchone()
-          if existing:
-              print(f"REVIEW_CHECKPOINT=EXISTS id={existing['id']} status={existing['status']}")
-          else:
-              now = dt.datetime.now(dt.timezone.utc).isoformat()
-              task_id = uuid.uuid4().hex[:16]
-              db.execute(
-                  """INSERT INTO tasks
-                  (id,issue_number,pr_number,task_type,agent,model_class,task_class,status,branch,target_sha,previous_sha,blockers_json,workdir,session_id,attempt,retry_at,limit_text,systemd_unit,last_error,parent_id,created_at,updated_at)
-                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                  (
-                      task_id,178,180,'REVIEW','CLAUDE','OPUS','MAJOR_ARCHITECTURE','PENDING',
-                      'codex/auto-178-5b387161',target,previous,'[]',None,None,0,None,None,None,None,None,now,now,
-                  ),
-              )
-              db.commit()
-              print(f"REVIEW_CHECKPOINT=CREATED id={task_id} target={target}")
-          db.close()
-          PY
-          systemctl start hyperliquid-ai-team-orchestrator.service || true
-          sleep 2
-          hl-ai-team-status
+            issue_json="$(gh api "repos/$repo/issues/$issue")"
+            assoc="$(jq -r .author_association <<<"$issue_json")"
+            body="$(jq -r .body <<<"$issue_json")"
+            [[ "$assoc" =~ ^(OWNER|MEMBER|COLLABORATOR)$ ]] || { echo 'FINALIZER=STOP_UNTRUSTED_ISSUE'; exit 22; }
+            grep -q '^AI_TEAM_PROTECTED_CHANGE=YES$' <<<"$body" || { echo 'FINALIZER=STOP_MISSING_PROTECTED_AUTH'; exit 23; }
+
+            runs="$(gh api "repos/$repo/actions/runs?head_sha=$target&per_page=100")"
+            ci_ok="$(python3 -c 'import json,sys; d=json.load(sys.stdin); req={"ci","ai-team-contract","live-sensitive-guard"}; latest={};
+for r in d.get("workflow_runs",[]):
+ n=r.get("name");
+ if n in req and n not in latest: latest[n]=r.get("conclusion")
+print("YES" if req <= latest.keys() and all(latest[n]=="success" for n in req) else "NO")' <<<"$runs")"
+
+            comments="$(gh api --paginate --slurp "repos/$repo/issues/$pr/comments?per_page=100")"
+            verdict="$(python3 -c 'import json,sys,re; pages=json.load(sys.stdin); rows=[x for p in pages for x in p]; target=sys.argv[1]; found=[]
+for x in rows:
+ b=x.get("body") or ""
+ if "AI_TEAM_RESULT_V1" in b and f"REVIEWED_SHA={target}" in b and "MODEL_CLASS=OPUS" in b:
+  m=re.search(r"(?:^|\\n)VERDICT=(PASS|FAIL)(?:\\n|$)",b)
+  if m: found.append((x.get("created_at") or "",m.group(1)))
+print(sorted(found)[-1][1] if found else "NONE")' "$target" <<<"$comments")"
+
+            echo "FINALIZER_CHECK ci=$ci_ok opus=$verdict head=$head"
+            if [[ "$verdict" == FAIL ]]; then
+              echo 'FINALIZER=STOP_OPUS_FAIL'
+              exit 30
+            fi
+            if [[ "$ci_ok" == YES && "$verdict" == PASS ]]; then
+              gh pr merge "$pr" --repo "$repo" --merge --match-head-commit "$target"
+              echo 'FINALIZER=MERGED_EXACT_REVIEWED_SHA'
+              exit 0
+            fi
+            sleep 120
+          done
+          echo 'FINALIZER=TIMEOUT_NO_MUTATION'
+          exit 40
+          SH
+          chmod 0700 "$script"
+          systemctl stop hl-ai-manager-finalize-178.timer hl-ai-manager-finalize-178.service 2>/dev/null || true
+          systemd-run --quiet --unit=hl-ai-manager-finalize-178 \
+            --on-calendar='2026-09-03 06:40:30 UTC' \
+            --timer-property=AccuracySec=30s \
+            "$script"
+          systemctl list-timers hl-ai-manager-finalize-178.timer --no-pager
+          echo 'FINALIZER_SCHEDULED=YES'
           echo 'POLYMARKET_TOUCHED=NO'
           echo 'REAL_TRADING_TOUCHED=NO'
