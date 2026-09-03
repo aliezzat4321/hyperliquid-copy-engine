@@ -20,6 +20,7 @@ Update this file only when a component moves, is added, or is retired.
 | Wallet registry | `src/hlcopy/shadow/registry.py` | `research → validation → approved`; enforces the 10-user-per-IP cap |
 | Trading permission boundary | `src/hlcopy/trading/permissions.py` | `REAL_TRADING_ENABLED`; **live-sensitive** |
 | Config | `src/hlcopy/config.py` | `HLCOPY_*` settings |
+| Experiment freeze/audit | `src/hlcopy/research/experiment_controller.py` | Fingerprints ex-ante contracts; fail-closed promotion-report verdict |
 | Storage pressure controller | `scripts/storage_controller.py`, `config/storage_policy.json` | Read-only fail-closed budgets, forecast and writer decisions |
 | Market tape lifecycle | `scripts/market_tape_lifecycle.py`, `config/market_tape_lifecycle.json` | Exact-SHA lossless historical Parquet compaction; no deletion without review |
 | Database | `src/hlcopy/db/postgres.py`, `db/schema.sql` | Append-only raw + derived tables |
