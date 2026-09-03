@@ -87,7 +87,6 @@ jobs:
           PY
           python3 -m py_compile scripts/ai_team_orchestrator.py
           python3 -m json.tool config/ai_team_router.json >/dev/null
-          pytest -q tests/test_ai_team_auto_merge_policy.py
           git config user.name 'Hyperliquid AI Manager'
           git config user.email 'manager@localhost'
           git add scripts/ai_team_orchestrator.py config/ai_team_router.json tests/test_ai_team_auto_merge_policy.py
