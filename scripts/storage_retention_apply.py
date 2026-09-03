@@ -7,11 +7,15 @@ import json
 import shutil
 import stat
 import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from hlcopy.storage.metrics import disk_usage
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from hlcopy.storage.metrics import disk_usage  # noqa: E402
 
 UTC_TZ = timezone(timedelta(0))
 EXPECTED_MARKET_ROOT = Path("/mnt/HC_Volume_106576526/hyperliquid/market-shadow")
