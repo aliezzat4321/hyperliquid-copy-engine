@@ -115,3 +115,13 @@ This supersedes the earlier task-class policy that withheld automatic merge from
 - Protected AI-control-plane changes still require trusted Issue authorization, `AI_TEAM_PROTECTED_CHANGE=YES`, and the narrow `AUTO_APPLY_CONTROL_PLANE_PATHS` allowlist before merge. Workflow, systemd deployment, trading/live, capital, credential, and other paths outside that allowlist remain fail-closed.
 - PR-head movement invalidates the old review; merge/API rejection retries only the merge stage against the exact reviewed SHA.
 - This changes no live-trading permission. `REAL_TRADING_ENABLED` remains disabled.
+
+## 2026-09-03 — Canonical storage accounting and lossless tape lifecycle
+
+- Storage `used_pct` is `used / (used + f_bavail)`, matching `df -P`; available bytes are
+  `f_bavail`, never privileged `f_bfree`.
+- Historical market-tape compaction is lossless and exact-SHA reviewed. Lossy downsampling
+  is deferred because it can change the liquidity evidence visible to copyability replay.
+- Durable fills capture is `NEVER_STOP`; pressure responses are emitted per writer.
+- Dataset budgets plus unallocated reserve must fit below each mount's target-used band.
+  Unaccounted filesystem bytes are explicitly measured so unnamed growth fails closed.

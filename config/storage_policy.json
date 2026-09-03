@@ -1,15 +1,5 @@
-{
-  "schema_version": 1,
-  "mount": "/mnt/HC_Volume_106576526",
-  "warn_used_pct": 75.0,
-  "stop_used_pct": 85.0,
-  "resume_used_pct": 78.0,
-  "minimum_forecast_hours": 48.0,
-  "history_window_hours": 24.0,
-  "datasets": [
-    {"name": "postgresql", "path": "hyperliquid/postgresql", "owner": "postgresql-5433", "writer": "hlcopy-db-writers", "retention_class": "KEEP_DURABLE", "byte_budget": 26843545600, "growth_budget_bytes_per_hour": 268435456, "pressure_control": "STOP_WRITER"},
-    {"name": "market-shadow", "path": "hyperliquid/market-shadow", "owner": "market-data", "writer": "hyperliquid-market-capture", "retention_class": "LIFECYCLE", "byte_budget": 21474836480, "growth_budget_bytes_per_hour": 536870912, "pressure_control": "STOP_WRITER"},
-    {"name": "shadow", "path": "hyperliquid/shadow", "owner": "shadow-research", "writer": "hyperliquid-wide-trade-watch", "retention_class": "KEEP_RESEARCH", "byte_budget": 4294967296, "growth_budget_bytes_per_hour": 134217728, "pressure_control": "STOP_WRITER"},
-    {"name": "profitability", "path": "hyperliquid/profitability", "owner": "profitability-research", "writer": "hyperliquid-profitability", "retention_class": "KEEP_RESEARCH", "byte_budget": 4294967296, "growth_budget_bytes_per_hour": 134217728, "pressure_control": "STOP_WRITER"}
-  ]
-}
+{"schema_version":2,"mounts":[{"name":"hyperliquid-data","path":"/mnt/HC_Volume_106576526","warn_used_pct":75.0,"resume_used_pct":78.0,"stop_used_pct":85.0,"target_used_pct":75.0,"minimum_forecast_hours":48.0,"history_window_hours":24.0,"unallocated_reserve_bytes":2147483648,"unaccounted_budget_bytes":4294967296}],"datasets":[
+{"name":"postgresql","mount":"hyperliquid-data","path":"hyperliquid/postgresql","owner":"postgresql-5433","writer":"hlcopy-db-writers","retention_class":"KEEP_DURABLE","byte_budget":10737418240,"steady_state_bytes":9663676416,"growth_budget_bytes_per_hour":11184810,"pressure_control":"NEVER_STOP","retention_horizon_hours":96,"reclaim_actuator":"reviewed-postgres-compaction"},
+{"name":"market-shadow","mount":"hyperliquid-data","path":"hyperliquid/market-shadow","owner":"market-data","writer":"hyperliquid-market-capture","retention_class":"LIFECYCLE","byte_budget":17179869184,"steady_state_bytes":15032385536,"growth_budget_bytes_per_hour":22369621,"pressure_control":"STOP_WRITER","retention_horizon_hours":96,"reclaim_actuator":"market-tape-lifecycle"},
+{"name":"shadow","mount":"hyperliquid-data","path":"hyperliquid/shadow","owner":"shadow-research","writer":"hyperliquid-wide-trade-watch","retention_class":"KEEP_RESEARCH","byte_budget":3221225472,"steady_state_bytes":2147483648,"growth_budget_bytes_per_hour":11184810,"pressure_control":"THROTTLE","retention_horizon_hours":96,"reclaim_actuator":"reviewed-retention-audit"},
+{"name":"profitability","mount":"hyperliquid-data","path":"hyperliquid/profitability","owner":"profitability-research","writer":"hyperliquid-profitability","retention_class":"KEEP_RESEARCH","byte_budget":3221225472,"steady_state_bytes":2147483648,"growth_budget_bytes_per_hour":11184810,"pressure_control":"THROTTLE","retention_horizon_hours":96,"reclaim_actuator":"reviewed-retention-audit"}]}

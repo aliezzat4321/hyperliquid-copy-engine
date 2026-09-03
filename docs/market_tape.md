@@ -137,3 +137,16 @@ a fresh, exact-SHA reviewed manifest and targets the Issue #120 exit band below 
 aggregate time-to-full, budget breaches and hysteretic pressure decisions. It emits
 decisions rather than controlling services; protected manager wiring must stop all listed
 writers on pressure and may resume only after a later `ALLOW` decision.
+
+## Historical lifecycle
+
+`scripts/market_tape_lifecycle.py` is the reviewed lifecycle path for historical tape.
+It excludes the configured recent window (never less than three days), plans immutable
+source identities, and requires the exact manifest SHA-256 before apply. It merges old
+channel partitions using zstd level 19 and verifies row counts and reader-required
+columns before removing any source file. For `l2Book`, `raw_json` is removed only when
+every value is byte-exactly reconstructible from the retained coin, timestamp, bid and
+ask columns. Otherwise the column is retained.
+
+This lifecycle is lossless. Lossy time bucketing or depth truncation is deferred to a
+separate experiment because it could weaken execution-realistic replay evidence.

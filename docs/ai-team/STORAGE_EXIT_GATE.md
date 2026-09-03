@@ -12,16 +12,21 @@ independent Claude Opus review is required before either apply step.
 2. Generate a fresh PostgreSQL plan with `scripts/postgres_storage_compact_v1.py`. Record
    its SHA-256 and obtain exact-SHA independent review. Apply that exact manifest using
    `--apply --manifest ... --expected-sha256 ...`; preserve the audit output.
-3. Re-run the retention audit against complete current funnel evidence. Obtain exact-SHA
+3. Generate a lossless historical tape plan with `scripts/market_tape_lifecycle.py` while
+   writers are quiesced. Obtain exact-SHA independent review and apply only that exact
+   manifest. Verification must report zero rows lost. Re-run the retention audit against
+   complete current funnel evidence only if PostgreSQL plus lossless tape compaction leave
+   usage at or above 80%. Obtain exact-SHA
    review of the resulting manifest, then apply only that manifest with
    `scripts/storage_retention_apply.py`. Its target defaults to 79% and must remain below
    80%. Before deletion it verifies the reviewed pool can reach the target.
 4. Run `scripts/storage_controller.py --allow-baseline-without-previous` exactly once for
    a baseline. The manager-owned hourly job must
-   pass the preceding successful observation and stop every name in `controlled_writers`
+   pass a bounded observation history and honor every entry in `writer_actions`
    on `STOP_ALL_MATERIAL_WRITERS`. Resume only after a later `ALLOW`. Deployment and
    service changes are owner-sensitive and deliberately excluded from this checkout.
-   The manager must retire the incumbent guard's independent capture-resume path.
+   `scripts/hyperliquid_storage_guard.sh` now fails closed on a missing/stale decision and
+   has no independent resume authority.
 5. Restart capture/research/profitability loops through manager controls and collect
    successive controller observations across at least the configured 24-hour window.
 
@@ -40,7 +45,8 @@ builder cannot edit this protected path.
 
 - PostgreSQL apply succeeds; both target relations materially shrink; provenance checks
   remain zero; and `fills_after >= fills_before`.
-- Retention apply reaches below 80% (preferably at or below 75%) using only reviewed
+- Lossless lifecycle reports identical row totals and satisfies the reader-column registry.
+  If still needed, retention apply reaches below 80% (preferably at or below 75%) using only reviewed
   candidates. Recent and robust tape remains full fidelity. Useful older evidence remains
   protected as `COMPRESS_CANDIDATE` until a separately reviewed compression implementation
   exists; it must not be deleted to satisfy this gate.

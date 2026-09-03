@@ -10,6 +10,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from hlcopy.storage.metrics import disk_usage
+
 PG_PORT = "5433"
 PG_DB = "hlcopy"
 DATA_MOUNT = Path("/mnt/HC_Volume_106576526")
@@ -69,8 +71,7 @@ def _float(sql: str) -> float:
 
 
 def _available_bytes() -> int:
-    stat = os.statvfs(DATA_MOUNT)
-    return stat.f_bavail * stat.f_frsize
+    return disk_usage(DATA_MOUNT).available
 
 
 def _relation_bytes(name: str) -> int:

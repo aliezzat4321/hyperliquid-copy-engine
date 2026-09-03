@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from hlcopy.storage.metrics import disk_usage
+
 UTC_TZ = timezone(timedelta(0))
 EXPECTED_MARKET_ROOT = Path("/mnt/HC_Volume_106576526/hyperliquid/market-shadow")
 EXPECTED_MOUNT = Path("/mnt/HC_Volume_106576526")
@@ -57,8 +59,7 @@ def _parse_time(value: str) -> datetime:
 
 
 def _used_pct(path: Path) -> float:
-    usage = shutil.disk_usage(path)
-    return (usage.used / usage.total) * 100 if usage.total else 100.0
+    return disk_usage(path).used_pct
 
 
 def _is_direct_partition(path: Path, market_root: Path) -> bool:
@@ -244,7 +245,7 @@ def validate_manifest(
     return candidates
 
 
-def _revalidate_identity(candidate: Candidate, market_root: Path) -> None:
+def _revalidate_identity(candidate: Candidate, market_root: Path) -> int:
     _assert_no_symlink_components(candidate.path, market_root)
     st = candidate.path.lstat()
     if not stat.S_ISDIR(st.st_mode):
@@ -257,6 +258,7 @@ def _revalidate_identity(candidate: Candidate, market_root: Path) -> None:
             "candidate bytes changed since reviewed manifest: "
             f"{candidate.path} planned={candidate.bytes_planned} observed={observed_bytes}"
         )
+    return observed_bytes
 
 
 def apply_candidates(
@@ -272,8 +274,8 @@ def apply_candidates(
     skipped_missing: list[str] = []
     if apply and not getattr(shutil.rmtree, "avoids_symlink_attacks", False):
         raise ValueError("platform does not provide symlink-attack-resistant shutil.rmtree")
-    usage = shutil.disk_usage(mount)
-    target_used_bytes = usage.total * target_used_pct / 100
+    usage = disk_usage(mount)
+    target_used_bytes = usage.capacity_df * target_used_pct / 100
     required_reclaim_bytes = max(0, int(usage.used - target_used_bytes))
     reviewed_candidate_bytes = sum(candidate.bytes_planned for candidate in candidates)
     if apply and reviewed_candidate_bytes < required_reclaim_bytes:
@@ -289,7 +291,7 @@ def apply_candidates(
         if not candidate.path.exists():
             skipped_missing.append(str(candidate.path))
             continue
-        _revalidate_identity(candidate, market_root)
+        observed_bytes = _revalidate_identity(candidate, market_root)
         if apply:
             shutil.rmtree(candidate.path)
         processed.append(
@@ -299,7 +301,7 @@ def apply_candidates(
                 "coin": candidate.coin,
                 "canonical_coin": candidate.canonical_coin,
                 "planned_bytes": candidate.bytes_planned,
-                "observed_file_bytes": candidate.bytes_planned,
+                "observed_file_bytes": observed_bytes,
                 "applied": apply,
             }
         )
