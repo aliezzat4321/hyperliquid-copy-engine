@@ -557,7 +557,7 @@ def _normalize_raw_api_payloads(plan: dict[str, Any]) -> None:
         )
 
     _psql(
-        """
+        f"""
 BEGIN;
 SET LOCAL lock_timeout='30s';
 LOCK TABLE raw_api_responses IN ACCESS EXCLUSIVE MODE;
@@ -571,7 +571,7 @@ BEGIN
   IF EXISTS (
     SELECT 1
     FROM raw_api_responses
-    WHERE response_json <> '{}'::jsonb
+    WHERE response_json <> '{{}}'::jsonb
     GROUP BY content_sha256
     HAVING count(DISTINCT response_json) > 1
   ) THEN
@@ -584,7 +584,7 @@ BEGIN
   IF EXISTS (
     SELECT 1 FROM raw_api_responses r JOIN raw_api_payloads p
       ON p.content_sha256=r.content_sha256
-    WHERE r.response_json <> '{}'::jsonb
+    WHERE r.response_json <> '{{}}'::jsonb
       AND p.response_json IS DISTINCT FROM r.response_json
   ) THEN
     RAISE EXCEPTION 'existing content-addressed payload disagrees with source body';
@@ -594,14 +594,14 @@ $verify$;
 INSERT INTO raw_api_payloads(content_sha256,response_json,first_seen)
 SELECT DISTINCT ON(content_sha256) content_sha256,response_json,fetched_at
 FROM raw_api_responses
-WHERE response_json <> '{}'::jsonb
+WHERE response_json <> '{{}}'::jsonb
 ORDER BY content_sha256,fetched_at
 ON CONFLICT(content_sha256) DO UPDATE
 SET first_seen=LEAST(raw_api_payloads.first_seen, EXCLUDED.first_seen);
 INSERT INTO raw_api_payloads(content_sha256,response_json,first_seen)
-SELECT content_sha256,'{}'::jsonb,min(fetched_at)
+SELECT content_sha256,'{{}}'::jsonb,min(fetched_at)
 FROM raw_api_responses
-WHERE response_json='{}'::jsonb
+WHERE response_json='{{}}'::jsonb
   AND content_sha256='{EMPTY_PAYLOAD_SHA256}'
 GROUP BY content_sha256
 ON CONFLICT(content_sha256) DO UPDATE
@@ -620,8 +620,8 @@ BEGIN
 END
 $verify$;
 UPDATE raw_api_responses
-SET response_json='{}'::jsonb
-WHERE response_json <> '{}'::jsonb;
+SET response_json='{{}}'::jsonb
+WHERE response_json <> '{{}}'::jsonb;
 COMMIT;
 """
     )
