@@ -28,6 +28,28 @@ Invo push (optional wake) ─┐
              copied P&L + latency + persistent ownership
 ```
 
+## Discovery and assessment population
+
+Shadow mode rotates through the authenticated `following`, `all`, and `trending`
+feed surfaces. It stores a durable, source-provenanced trader registry independently
+of whether a Hyperliquid wallet is known. Invo owner ID is canonical; portfolio and
+username aliases are retained and merged when a stronger identity appears.
+
+The assessment-entry rule is frozen before economics are inspected: by default a
+trader needs at least 20 canonical events collected across 7 distinct observation
+days. Source timestamps are retained for freshness, but old posts seen together at
+startup count as one observation day. No PnL field participates in queue admission.
+Traders become stale after 3 unseen days and inactive after 14; only active traders
+can remain in the shadow-assessment queue, allowing newly observed candidates to
+replace dead ones automatically.
+The registry freezes `assessmentEligibleAtMs` at first qualification; profitability
+work must use only subsequent shadow evidence rather than back-selecting earlier PnL.
+
+`GET /health` exposes the aggregate funnel (discovered, trackable, active tracked,
+notification-producing, sufficiently observed, and shadow-assessable). `GET /traders`
+adds each trader's identity aliases, source surfaces, event count, symbols, freshness,
+observation days, lifecycle, and missing/failed reasons.
+
 A notification is only a **wake-up hint**. Notification text can never directly place an order; every candidate is hydrated from authenticated Invo API data first.
 
 ## Default gates
@@ -88,6 +110,7 @@ npm run check
 
 ```bash
 curl -s http://127.0.0.1:8787/health
+curl -s http://127.0.0.1:8787/traders
 ```
 
 ## Optional push wake

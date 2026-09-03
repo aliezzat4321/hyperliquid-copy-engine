@@ -2,9 +2,9 @@
 
 Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
-**Snapshot:** 2026-08-31T12:32:51Z  
-**Updated by:** CLAUDE  
-**Observed main head:** `316918cd5df171b8f27b13495c64cf0fafa7a06e`  
+**Snapshot:** 2026-09-03T17:14:49Z  
+**Updated by:** CODEX_CHATGPT  
+**Observed main head:** `e341451361f5327740ded688ff803dc78e3afe9a`  
 **Mission:** Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.
 
 ## Live trading

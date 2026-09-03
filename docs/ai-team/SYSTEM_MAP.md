@@ -64,6 +64,7 @@ Update this file only when a component moves, is added, or is retired.
 | Executor service (TypeScript) | `services/invo-notification-executor/src/service.ts` | `hyperliquid-invo-notification-executor.service` |
 | Signal parsing | `services/invo-notification-executor/src/notification-signal.ts` | `verifiedTrade` gate, open/increase/close |
 | Ownership state | `services/invo-notification-executor/src/notification-state.ts` | Persists across restarts |
+| Trader discovery / lifecycle | `services/invo-notification-executor/src/trader-tracker.ts` | PnL-blind multi-surface funnel and shadow-assessment queue |
 | Invo API client | `services/invo-notification-executor/src/invo-client.ts` | `/v1_0/posts/get_feed`; **live-sensitive** (`/dex/position/*`) |
 | Hyperliquid client | `services/invo-notification-executor/src/hl-client.ts` | **live-sensitive** (order placement) |
 | Signal import (Python) | `src/hlcopy/signals/invo.py`, `generic_csv.py` | — |
