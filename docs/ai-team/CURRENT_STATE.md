@@ -28,11 +28,11 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 | confirmation rows | 800 | `2026-08-31T07:37:45Z` | run `33369211976` |
 | robust candidates | 186 | `2026-08-31T07:37:45Z` | run `33369211976` |
 | realized slice rows | 26,238 | `2026-08-31T07:37:45Z` | run `33369211976` |
-| hard-coded prospective wallet-by-coin targets | 4 | `2026-08-31T11:40:40Z` | run `33388075503` |
+| frozen prospective target source | FRESHNESS_GATED_CHALLENGER_QUEUE | `2026-09-03T17:14:49Z` | commit `6530191c524e3b069fd12db7e4a99ed513211440` |
 | frozen targets approved | 2 | `2026-08-31T11:40:40Z` | run `33388075503` |
 | frozen targets with zero observed events | 1 | `2026-08-31T11:40:40Z` | run `33388075503` |
 
-**Blocker:** The broad research funnel (1551 screened cohorts) does not feed the frozen prospective queue, which remains a hard-coded four-row constant in scripts/prospective_champion_lane.py.  
+**Blocker:** The code path now feeds frozen prospective evaluation from the freshness-gated selective challenger queue produced by src/hlcopy/profitability/lane1_handoff.py; a current runtime observation is still required to demonstrate cadence and end-to-end candidate traversal in production.  
 **Next:** Issue #93.
 
 ## Lane 2 — Third-party identity resolution

@@ -36,7 +36,7 @@ Update this file only when a component moves, is added, or is retired.
 | Execution-realistic replay | `src/hlcopy/profitability/position_copy.py`, `portfolio_position_copy.py`, `causal_book.py` | — |
 | Path truth / streaming | `src/hlcopy/profitability/path_truth.py`, `streaming_path_truth.py`, `parquet_stream_evaluator.py` | — |
 | Research funnel | `src/hlcopy/profitability/incremental_funnel_cli.py`, `max_profitability.py` | `hyperliquid-profitability.timer` |
-| Frozen prospective champions | `scripts/prospective_champion_lane.py` | `prospective-champion-lane.yml` — **hard-coded 4-target constant; Issue #93** |
+| Selective challenger handoff / frozen prospective evaluation | `src/hlcopy/profitability/lane1_handoff.py`, `scripts/prospective_champion_lane.py` | Robust wallet×coin candidates are freshness-gated against the official leaderboard and receive immutable per-candidate prospective cutoffs |
 | Trader forensics | `src/hlcopy/profiling.py`, `src/hlcopy/analytics/trader_profile.py`, `performance.py` | `hyperliquid-wallet-research.timer` |
 | Cohort / policy | `src/hlcopy/research/cohort.py`, `selective_policy_publisher.py` | `hyperliquid-validation-cohort.service` |
 
