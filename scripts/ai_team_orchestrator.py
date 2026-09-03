@@ -805,8 +805,8 @@ def parse_task_class(body: str) -> tuple[str, str | None]:
     """Parse an explicit task class, failing closed when absent or invalid.
 
     UNCLASSIFIED uses the routine Sonnet review route but is deliberately absent
-    from auto_merge_task_classes, so only an explicitly declared ROUTINE task can
-    reach automatic merge.
+    from auto_merge_task_classes. Every explicitly declared recognized task class can
+    reach automatic merge only after the independent exact-SHA review and CI gates.
     """
     allowed = {
         "ROUTINE",

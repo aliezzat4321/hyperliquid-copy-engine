@@ -100,9 +100,9 @@ Policy lives in `config/ai_team_router.json`.
 - `SONNET`: routine independent PR review, normal reasoning, routine second opinion.
 - `OPUS`: only task classes explicitly allowlisted for quant/profitability, statistical methodology, major architecture, unresolved disagreement, or capital-sensitive methodology.
 
-Agents cannot choose Opus. The orchestrator validates the task class and escalation reason. Routine work with an Opus escalation request is rejected. Non-routine/Opus task classes are never automatically merged even after review and CI.
+Agents cannot choose Opus. The orchestrator validates the task class and escalation reason. Routine work with an Opus escalation request is rejected. Review-model routing is independent of merge eligibility: every recognized task class becomes merge-eligible only after an independent exact-SHA review PASS and green CI.
 
-Automatic merge requires an explicit `TASK_CLASS=ROUTINE` (or `AI_TASK_CLASS=ROUTINE`) field. A missing or invalid task class is recorded as `UNCLASSIFIED` and cannot be automatically merged. Changes to GitHub workflows, systemd deployment files, or the orchestrator's own scripts also always require a non-automatic merge.
+Automatic merge requires an explicit recognized task class (`TASK_CLASS` or `AI_TASK_CLASS`). A missing or invalid task class is recorded as `UNCLASSIFIED` and cannot be automatically merged. Protected AI-control-plane files additionally require a trusted Issue author, `AI_TEAM_PROTECTED_CHANGE=YES`, and membership in the narrow `AUTO_APPLY_CONTROL_PLANE_PATHS` allowlist before the same exact-SHA PASS + green-CI merge step. GitHub workflow, systemd deployment, trading/live, capital, credential, and other paths outside that allowlist remain non-automatically mergeable.
 
 For an Issue that truly requires Opus, use an explicit trusted Issue field, for example:
 
