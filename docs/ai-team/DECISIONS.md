@@ -2,6 +2,18 @@
 
 Append-only record of accepted architecture / policy decisions. New decisions may supersede old ones but should not erase them.
 
+## 2026-09-03 — Risk eligibility is separate from credible edge
+
+- Promotion policy v2 retains the v1 profitability floors and adds a versioned,
+  deterministic risk-governor contract.
+- Edge credibility is a required input but cannot select a capital state. Audited and
+  complete risk evidence independently limits a candidate to `NO_CAPITAL`,
+  `MICRO_CANDIDATE`, `SMALL_CANDIDATE`, or `SCALE_CANDIDATE`.
+- Unknown, malformed, stale or deteriorating required evidence fails closed and can
+  automatically demote or halt a candidate.
+- These states are eligibility ceilings only. They never enable trading or replace the
+  owner authorization required by `LIVE_TRADING_GATE.md`.
+
 ## 2026-08-31 — AI team operating model
 - GitHub is the durable communication and memory layer between ChatGPT/Codex and Claude.
 - One builder owns each Issue; the other AI agent is the preferred independent reviewer for profitability-critical work.

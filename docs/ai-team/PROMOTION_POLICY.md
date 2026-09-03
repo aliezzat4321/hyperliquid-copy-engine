@@ -2,7 +2,10 @@
 
 Machine-readable form: `docs/ai-team/promotion_policy.json`.
 
-**Current version: `quant-promotion-policy-v1` — status `PROVISIONAL`.**
+**Current version: `quant-promotion-policy-v2` — status `PROVISIONAL`.**
+
+Version 2 adds the deterministic `risk-governor-v1` capital-eligibility ceiling. It
+does not alter the v1 profitability floors and does not authorize real trading.
 
 ## Why this exists
 
@@ -32,6 +35,25 @@ as evidence-derived until the review trigger below has been worked.
 | `reference_round_trip_cost_bps` | 15 | Two Hyperliquid base-tier taker fees (9 bps) plus a modest spread allowance. **Assumed, not measured** — Lane 3 records no book depth. | Low — must become a measurement |
 | `max_profit_concentration` | 0.50 | Blocks a slice whose profit is carried by one trade. | Low — arbitrary |
 | `max_unresolved_share` | 0.35 | Unclosed positions never emit a close, so a slice that is mostly open is biased upward. | Low — should probably scale with mean hold time |
+
+## Risk eligibility (version 2)
+
+`src/hlcopy/risk/governor.py` consumes the `risk_governor` object from the machine
+policy. Credible edge is only one required input. The evaluator independently checks
+audited evidence, drawdown, profit and loss concentration, leverage/margin,
+correlated exposure, decision-time liquidity and capacity, latency/staleness,
+rejections, tail loss/adverse excursion, unresolved/open/holding exposure, costs,
+sample size, days and uncertainty.
+
+The output states are `NO_CAPITAL`, `MICRO_CANDIDATE`, `SMALL_CANDIDATE`, and
+`SCALE_CANDIDATE`. They are eligibility ceilings, not capital grants. Shadow evidence
+can reach only `MICRO_CANDIDATE`; progressively higher states require validated live
+evidence and realized costs. Missing or malformed inputs map to `NO_CAPITAL`, and
+deterioration emits `DEMOTE` or `HALT`. Actual capital remains exclusively subject to
+`LIVE_TRADING_GATE.md` and explicit owner authorization.
+
+Numeric risk limits are in `promotion_policy.json`. Like profitability thresholds,
+changing them requires a new policy version and independent review.
 
 ## Known weaknesses
 
