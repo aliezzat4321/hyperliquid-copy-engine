@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-09-03T02:45:12Z",
+  "updated_at": "2026-09-03T02:48:44Z",
   "experiments": [
     {
       "id": "EXP-001",
@@ -20,7 +20,7 @@
     },
     {
       "id": "EXP-002",
-      "lane": "systematic_research",
+      "lane": "lane_1",
       "hypothesis": "A causal previous-day high/low liquidity-sweep reversal rule has positive execution-cost-adjusted expectancy on liquid crypto markets during the London morning and survives an untouched holdout.",
       "slice": "BTCUSDT and ETHUSDT Binance USD-M 5-minute proxy data; first 08:00-10:00 Europe/London PDH/PDL sweep-reclaim with immediate-next-bar confirmation; frozen 1R/1.5R/2R/3R targets.",
       "status": "IN_REVIEW",
@@ -32,7 +32,7 @@
       "reviewer": "CLAUDE",
       "reviewed_commit": null,
       "retest_condition": "Do not retune or rerun the frozen rule after seeing the holdout. Open a new experiment only for a materially different preregistered causal hypothesis or new Hyperliquid-specific execution evidence, with a new untouched validation window.",
-      "updated_at": "2026-09-03T02:45:12Z"
+      "updated_at": "2026-09-03T02:48:44Z"
     }
   ]
 }
