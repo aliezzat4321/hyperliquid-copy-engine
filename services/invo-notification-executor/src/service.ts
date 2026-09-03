@@ -7,6 +7,7 @@ import * as invo from './invo-client.js';
 import * as hl from './hl-client.js';
 import { extractNotificationHints, hintsMatchSignal, InvoSignal, NotificationHints, signalFromFeedPost } from './notification-signal.js';
 import { ManagedPosition, NotificationState } from './notification-state.js';
+import { TraderTracker } from './trader-tracker.js';
 
 if (INVO_TOKEN) invo.setToken(INVO_TOKEN);
 if (INVO_REFRESH_TOKEN) invo.setRefreshToken(INVO_REFRESH_TOKEN);
@@ -31,6 +32,11 @@ function loadConfig() {
   if (!['following', 'all', 'trending'].includes(feedFilter)) {
     throw new Error(`Invalid NOTIFICATION_TRADER_FEED_FILTER: ${feedFilter}`);
   }
+  const discoverySurfaces = (process.env.NOTIFICATION_TRADER_DISCOVERY_SURFACES ?? 'following,all,trending')
+    .split(',').map(v => v.trim().toLowerCase()).filter(Boolean);
+  if (!discoverySurfaces.length || discoverySurfaces.some(v => !['following', 'all', 'trending'].includes(v))) {
+    throw new Error(`Invalid NOTIFICATION_TRADER_DISCOVERY_SURFACES: ${discoverySurfaces.join(',')}`);
+  }
   return {
     live: b('NOTIFICATION_TRADER_LIVE', false),
     host: process.env.NOTIFICATION_TRADER_HOST ?? '127.0.0.1',
@@ -39,6 +45,7 @@ function loadConfig() {
     // Research requirement: accept canonical Invo signals up to 25 seconds old.
     maxSignalAgeMs: Math.max(1000, n('NOTIFICATION_TRADER_MAX_SIGNAL_AGE_MS', 25_000)),
     feedFilter,
+    discoverySurfaces: [...new Set(discoverySurfaces)],
     feedLimit: Math.max(1, Math.min(100, Math.trunc(n('NOTIFICATION_TRADER_FEED_LIMIT', 100)))),
     marginPct: Math.max(0.01, n('NOTIFICATION_TRADER_MARGIN_PCT', 1)),
     // These are live-account safety controls only. Shadow research is intentionally uncapped.
@@ -52,6 +59,11 @@ function loadConfig() {
     allow: new Set(allow),
     statePath: resolve(process.env.NOTIFICATION_TRADER_STATE_PATH ?? 'data/notification-trader-state.json'),
     auditPath: resolve(process.env.NOTIFICATION_TRADER_AUDIT_PATH ?? 'data/notification-trader-audit.jsonl'),
+    trackerPath: resolve(process.env.NOTIFICATION_TRADER_TRACKER_PATH ?? 'data/notification-trader-population.json'),
+    minEvidenceEvents: Math.max(1, Math.trunc(n('NOTIFICATION_TRADER_MIN_EVIDENCE_EVENTS', 20))),
+    minObservationDays: Math.max(1, Math.trunc(n('NOTIFICATION_TRADER_MIN_OBSERVATION_DAYS', 7))),
+    staleAfterMs: Math.max(60_000, n('NOTIFICATION_TRADER_STALE_AFTER_MS', 3 * 24 * 60 * 60 * 1000)),
+    inactiveAfterMs: Math.max(60_000, n('NOTIFICATION_TRADER_INACTIVE_AFTER_MS', 14 * 24 * 60 * 60 * 1000)),
   };
 }
 
@@ -65,18 +77,30 @@ if (cfg.live && cfg.allow.size === 0 && !cfg.copyAllFollowed) {
 validateEnv(cfg.live);
 const WALLET_ADDRESS = resolveWalletAddress();
 const state = new NotificationState(cfg.statePath);
+if (cfg.inactiveAfterMs <= cfg.staleAfterMs) throw new Error('NOTIFICATION_TRADER_INACTIVE_AFTER_MS must exceed NOTIFICATION_TRADER_STALE_AFTER_MS');
+const tracker = new TraderTracker(cfg.trackerPath, {
+  minEvents: cfg.minEvidenceEvents,
+  minObservationDays: cfg.minObservationDays,
+  staleAfterMs: cfg.staleAfterMs,
+  inactiveAfterMs: cfg.inactiveAfterMs,
+});
 const inFlight = new Set<string>();
 let initialized = false;
 let hydrating = false;
-let pendingWake: { source: string; hints?: NotificationHints; receivedAtMs: number } | null = null;
+let pendingWake: { source: string; hints?: NotificationHints; receivedAtMs: number; feedFilter?: string } | null = null;
 let lastSuccessPollMs = 0;
 let backoffMs = 0;
+let discoverySurfaceIndex = 0;
 
 function log(event: Record<string, unknown>) {
   const row = { ts: new Date().toISOString(), ...event };
   console.log(JSON.stringify(row));
   mkdirSync(dirname(cfg.auditPath), { recursive: true });
   appendFileSync(cfg.auditPath, `${JSON.stringify(row)}\n`);
+  const signal = event.signal as InvoSignal | undefined;
+  if (signal && (event.type === 'skip' || event.type === 'execution_error')) {
+    tracker.recordFailure(`invo-user:${signal.ownerId}`, String(event.reason ?? event.type));
+  }
 }
 
 function detectionLatencyMs(signal: InvoSignal, receivedAtMs: number): number | null {
@@ -621,14 +645,19 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
   }
 }
 
-async function fetchAndProcess(source: string, hints: NotificationHints | undefined, receivedAtMs: number): Promise<number> {
-  const data = await invo.getFeed(cfg.feedFilter, null, cfg.feedLimit);
+async function fetchAndProcess(source: string, hints: NotificationHints | undefined, receivedAtMs: number, feedFilter = cfg.feedFilter): Promise<number> {
+  const data = await invo.getFeed(feedFilter, null, cfg.feedLimit);
   const posts = data?.items ?? [];
+  const tracked = (posts as any[]).map((post: any) => {
+    const signal = signalFromFeedPost(post);
+    tracker.observe(post, feedFilter, signal, receivedAtMs, false);
+    return { signal };
+  });
+  if (tracked.length) tracker.flush();
 
   if (!initialized) {
     const recoverableCloses: InvoSignal[] = [];
-    for (const post of posts) {
-      const signal = signalFromFeedPost(post);
+    for (const { signal } of tracked) {
       if (!signal) continue;
       const managed = signal.action === 'close' ? state.getManagedBySource(signal.sourceBaseId) : null;
       if (managed) recoverableCloses.push(signal);
@@ -636,13 +665,13 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
     }
     initialized = true;
     lastSuccessPollMs = Date.now();
-    log({ type: 'baseline_indexed', posts: posts.length, recoverableCloses: recoverableCloses.length, live: cfg.live, feedFilter: cfg.feedFilter, feedLimit: cfg.feedLimit });
+    log({ type: 'baseline_indexed', posts: posts.length, recoverableCloses: recoverableCloses.length, live: cfg.live, feedFilter, feedLimit: cfg.feedLimit, traderFunnel: tracker.report().funnel });
     for (const signal of recoverableCloses) await execute(signal, 'startup_recovery', receivedAtMs);
     return recoverableCloses.length;
   }
 
-  const signals: InvoSignal[] = (posts as any[])
-    .map((post: any) => signalFromFeedPost(post))
+  const signals: InvoSignal[] = tracked
+    .map(({ signal }) => signal)
     .filter((s: InvoSignal | null): s is InvoSignal => Boolean(s))
     .filter((s: InvoSignal) => !state.hasSeen(s.key));
 
@@ -660,8 +689,8 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
   return ordered.length;
 }
 
-async function wake(source: string, hints?: NotificationHints, receivedAtMs = Date.now()) {
-  pendingWake = { source, hints, receivedAtMs };
+async function wake(source: string, hints?: NotificationHints, receivedAtMs = Date.now(), feedFilter = cfg.feedFilter) {
+  pendingWake = { source, hints, receivedAtMs, feedFilter };
   if (hydrating) return;
   hydrating = true;
   try {
@@ -669,11 +698,11 @@ async function wake(source: string, hints?: NotificationHints, receivedAtMs = Da
       const current = pendingWake;
       pendingWake = null;
       try {
-        let found = await fetchAndProcess(current.source, current.hints, current.receivedAtMs);
+        let found = await fetchAndProcess(current.source, current.hints, current.receivedAtMs, current.feedFilter);
         if (current.source === 'push_notification' && current.hints && found === 0) {
           for (const delayMs of [120, 280, 600]) {
             await new Promise(r => setTimeout(r, delayMs));
-            found = await fetchAndProcess('push_hydration_retry', current.hints, current.receivedAtMs);
+            found = await fetchAndProcess('push_hydration_retry', current.hints, current.receivedAtMs, current.feedFilter);
             if (found > 0) break;
           }
         }
@@ -714,6 +743,7 @@ function json(res: ServerResponse, status: number, body: any) {
 function startServer() {
   const server = createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/health') {
+      const population = tracker.report();
       return json(res, 200, {
         ok: true,
         initialized,
@@ -724,7 +754,14 @@ function startServer() {
         lastSuccessPollMs,
         managedCount: state.managedCount(),
         managed: state.snapshot().managed,
+        traderFunnel: population.funnel,
+        evidencePolicy: population.policy,
+        assessmentQueue: population.assessmentQueue,
       });
+    }
+
+    if (req.method === 'GET' && req.url === '/traders') {
+      return json(res, 200, tracker.report());
     }
 
     if (req.method === 'POST' && req.url === '/invo-notification') {
@@ -760,7 +797,9 @@ async function pollLoop() {
   while (true) {
     const wait = backoffMs || cfg.pollMs;
     await new Promise(r => setTimeout(r, wait));
-    await wake('api_poll', undefined, Date.now());
+    const surface = cfg.discoverySurfaces[discoverySurfaceIndex % cfg.discoverySurfaces.length];
+    discoverySurfaceIndex += 1;
+    await wake(`api_poll:${surface}`, undefined, Date.now(), surface);
   }
 }
 
@@ -779,7 +818,9 @@ async function main() {
     pollMs: cfg.pollMs,
     maxSignalAgeMs: cfg.maxSignalAgeMs,
     feedFilter: cfg.feedFilter,
+    discoverySurfaces: cfg.discoverySurfaces,
     feedLimit: cfg.feedLimit,
+    evidencePolicy: tracker.report().policy,
     leverageMode: 'source_exact_up_to_hl_asset_max',
     reups: true,
     shadowChaseGate: false,
