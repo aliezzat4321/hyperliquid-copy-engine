@@ -70,7 +70,22 @@ def test_leaderboard_structure_accepts_canonical_schema(
         _install_schema_psql(monkeypatch, schema)
         structure = MODULE._leaderboard_structure()
 
-        assert structure["indexes"] == MODULE.EXPECTED_LEADERBOARD_INDEXES
+        assert structure["indexes"] == [
+            [
+                "idx_leaderboard_snapshots_address_time",
+                False,
+                False,
+                True,
+                ["address", "snapshot_at DESC"],
+            ],
+            [
+                "leaderboard_snapshots_pkey",
+                True,
+                True,
+                True,
+                ["snapshot_at", "address", "ranking_period"],
+            ],
+        ]
         assert structure["constraints"] == MODULE.EXPECTED_LEADERBOARD_CONSTRAINTS
         assert [
             "leaderboard_snapshots_address_fkey",

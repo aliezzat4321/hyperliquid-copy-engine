@@ -50,7 +50,7 @@ EXPECTED_LEADERBOARD_COLUMNS = [
 ]
 EXPECTED_LEADERBOARD_INDEXES = [
     ["idx_leaderboard_snapshots_address_time", False, False, True,
-     ["address", "snapshot_at"]],
+     ["address", "snapshot_at DESC"]],
     ["leaderboard_snapshots_pkey", True, True, True,
      ["snapshot_at", "address", "ranking_period"]],
 ]
