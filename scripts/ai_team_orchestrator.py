@@ -93,7 +93,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "budgets": {"CODE_CHANGE": 1, "PR_METADATA": 3, "PROTECTED_ACTION": 1,
                     "CI_RETRY": 3, "REVIEW_RERUN": 0, "POLICY_RECONCILIATION": 3,
                     "TERMINAL": 0},
-        "protected_action_allowlist": ["DEPLOY_REVIEWED_CONTROL_PLANE"],
+        "protected_actions": {
+            "DEPLOY_REVIEWED_CONTROL_PLANE": {
+                "workflow_id": "deploy-ai-team-orchestrator.yml", "ref": "main"
+            }
+        },
     },
     "legacy_remediation_migration": {"version": 1, "issues": [166, 168, 170],
                                      "supersede_issue": 170, "release_issue": 120},
@@ -330,15 +334,18 @@ class GitHub:
             conclusion = check.get("conclusion")
             if check.get("status") != "completed" or conclusion in {"success", "skipped"}:
                 continue
-            klass = "CI_RETRY" if conclusion in transient and check.get("id") else "TERMINAL"
+            klass = "CI_RETRY" if conclusion in transient and check.get("id") else "CODE_CHANGE"
             result.append({
                 "protocol_version": 1, "class": klass, "source_kind": "CI",
                 "source_id": str(check.get("id")), "subject_sha": sha,
-                "rule_id": "TRANSIENT_CHECK" if klass == "CI_RETRY" else "UNCLASSIFIED_CI_FAILURE",
+                "rule_id": "TRANSIENT_CHECK" if klass == "CI_RETRY" else "DETERMINISTIC_CI_FAILURE",
                 "observed": {"name": str(check.get("name") or "").strip().lower(),
                              "conclusion": conclusion, "run_id": check.get("id")},
-                "requested_action": {"check_run_id": check.get("id"),
-                                     "check_name": check.get("name")},
+                "requested_action": ({"check_run_id": check.get("id"),
+                                      "check_name": check.get("name")}
+                                     if klass == "CI_RETRY" else
+                                     {"check_name": check.get("name"),
+                                      "reproducer": str(check.get("name") or "CI check")}),
             })
         return result
 
@@ -620,8 +627,15 @@ class Ledger:
         return bool(row)
 
     def has_queue_claim_conflict(self) -> bool:
-        """Capacity is not dependency: unrelated ready components may be claimed."""
-        return False
+        """Keep one active claim, except for a future provider-capacity wait."""
+        placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
+        row = self.db.execute(
+            f"SELECT 1 FROM tasks WHERE status IN ({placeholders}) "
+            "AND NOT (agent='CLAUDE' AND status='WAITING_RATE_LIMIT' "
+            "AND retry_at IS NOT NULL AND retry_at > ?) LIMIT 1",
+            (*ACTIVE_STATUSES, utcnow()),
+        ).fetchone()
+        return bool(row)
 
     def successful_issue(self, issue_number: int) -> bool:
         """Require the latest terminal assignment to be cleanly successful."""
@@ -739,6 +753,9 @@ def parse_initial_route(body: str, cfg: dict[str, Any] | None = None) -> dict[st
         raise ValueError("INVALID_INITIAL_ROUTE: duplicate/contradictory task class")
     if not task_class and len(legacy) == 1 and legacy[0] == "ROUTINE":
         task_class = "ROUTINE"
+    legacy_queue = acceptance_flag(body, "AI_TEAM_AUTO_QUEUE")
+    if not task_class and legacy_queue:
+        task_class = "ROUTINE"
     if not task_class:
         raise ValueError("INVALID_INITIAL_ROUTE: missing AI_TASK_CLASS")
     expected = cfg.get("initial_routes", {}).get(task_class)
@@ -749,11 +766,36 @@ def parse_initial_route(body: str, cfg: dict[str, Any] | None = None) -> dict[st
         "agent": values["AI_INITIAL_AGENT"][0] if values["AI_INITIAL_AGENT"] else None,
         "model_class": values["AI_INITIAL_MODEL"][0] if values["AI_INITIAL_MODEL"] else None,
     }
-    if task_class == "ROUTINE" and not any(supplied.values()):
+    # Existing trusted queue entries predate the explicit route triple. Migrate them
+    # through the reviewed class allowlist; new non-queue entries remain strict.
+    if not any(supplied.values()) and (task_class == "ROUTINE" or legacy_queue):
         supplied = dict(expected)
     if supplied != expected:
         raise ValueError("INVALID_INITIAL_ROUTE: incomplete or contradictory route")
     return {"task_class": task_class, **supplied}  # type: ignore[arg-type]
+
+
+def parse_protected_action_authorization(body: str) -> dict[str, Any] | None:
+    """Read the user-issued authorization from the trusted repository Issue."""
+    names = (
+        "AI_PROTECTED_AUTH_ID", "AI_PROTECTED_AUTH_ACTION",
+        "AI_PROTECTED_AUTH_SUBJECT_SHA", "AI_PROTECTED_AUTH_EXPIRES_AT",
+        "AI_PROTECTED_AUTH_MAX_ACTIONS",
+    )
+    values = {name: _machine_values(body, name) for name in names}
+    if any(len(items) != 1 for items in values.values()):
+        return None
+    try:
+        maximum = int(values["AI_PROTECTED_AUTH_MAX_ACTIONS"][0])
+    except ValueError:
+        return None
+    return {
+        "id": values["AI_PROTECTED_AUTH_ID"][0],
+        "action": values["AI_PROTECTED_AUTH_ACTION"][0],
+        "subject_sha": values["AI_PROTECTED_AUTH_SUBJECT_SHA"][0],
+        "expires_at": values["AI_PROTECTED_AUTH_EXPIRES_AT"][0],
+        "max_actions": maximum,
+    }
 
 
 def parse_task_class(body: str) -> tuple[str, str | None]:
@@ -2070,6 +2112,13 @@ class Orchestrator:
                     f"- {canonical_json(x) if isinstance(x, dict) else x}" for x in blockers
                 )
             )
+        elif task["task_type"] == "BUILD" and blockers:
+            repair = (
+                "\nIMMUTABLE OPUS RESEARCH INPUT:\n"
+                + "\n".join(
+                    canonical_json(x) if isinstance(x, dict) else str(x) for x in blockers
+                )
+            )
         return f"""You are the CODEX_CHATGPT engineering builder for the Hyperliquid project.
 One scoped task only: GitHub Issue #{issue["number"]}: {issue.get("title", "")}
 
@@ -2740,23 +2789,41 @@ that non-code work needs a CODE_CHANGE. Unknown or contradictory evidence is TER
                                                    "authoritative projection reconciled"
                                                ))
             elif klass == "PROTECTED_ACTION":
-                auth = blocker["observed"].get("authorization")
                 name = action.get("name")
-                expiry = parse_utc(auth.get("expires_at")) if isinstance(auth, dict) else None
+                protected = (self.cfg["remediation"].get("protected_actions", {}).get(name)
+                             if isinstance(name, str) else None)
+                issue = self.gh.issue(int(parent["issue_number"]))
+                auth = parse_protected_action_authorization(str(issue.get("body") or ""))
+                expiry = parse_utc(auth.get("expires_at")) if auth else None
+                prior_uses = 0
+                if auth:
+                    for used in self.ledger.db.execute(
+                        "SELECT completion_evidence FROM remediations "
+                        "WHERE class='PROTECTED_ACTION' AND status='COMPLETED'"
+                    ):
+                        try:
+                            evidence = json.loads(used["completion_evidence"] or "{}")
+                        except json.JSONDecodeError:
+                            continue
+                        prior_uses += evidence.get("authorization_id") == auth["id"]
                 valid = (
-                    isinstance(auth, dict) and auth.get("valid") is True and auth.get("id")
+                    str(issue.get("author_association") or "") in self.trusted
+                    and auth is not None and auth.get("id")
+                    and auth.get("action") == name
                     and auth.get("subject_sha") == parent["target_sha"]
                     and isinstance(auth.get("max_actions"), int) and auth["max_actions"] >= 1
+                    and prior_uses < auth["max_actions"]
                     and expiry is not None and expiry > dt.datetime.now(dt.timezone.utc)
                 )
-                if not valid or name not in self.cfg["remediation"]["protected_action_allowlist"]:
+                if not valid or not isinstance(protected, dict):
                     self.ledger.update_remediation(rid, status="TERMINAL",
                                                    completion_evidence=(
                                                        "missing/invalid authorization"
                                                    ))
+                    self.block(parent, "PROTECTED_ACTION missing/invalid repository authorization")
                 else:
-                    workflow = action.get("workflow_id")
-                    ref = action.get("ref")
+                    workflow = protected.get("workflow_id")
+                    ref = protected.get("ref")
                     if not isinstance(workflow, str) or not isinstance(ref, str):
                         self.ledger.update_remediation(
                             rid, status="TERMINAL",

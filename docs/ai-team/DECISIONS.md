@@ -96,3 +96,10 @@ Issue #172 accepts the single architecture in
 - This is an architecture decision, not implementation authorization. Existing exact-SHA
   review, CI, protected-path and live-trading gates remain intact;
   `REAL_TRADING_ENABLED` remains disabled.
+
+Implementation note for Issue #178: the accepted `BLOCKER_V1` router is now the
+control-plane contract. Legacy trusted queue entries are migrated through the reviewed
+class allowlist, deterministic CI failures remain autonomous `CODE_CHANGE` work, and
+protected workflow targets come only from repository configuration after a trusted,
+unexpired, exact-SHA Issue authorization is verified. Model-emitted blocker data cannot
+select a workflow or ref. This changes no live-trading permission.

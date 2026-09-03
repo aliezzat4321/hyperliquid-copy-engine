@@ -68,6 +68,35 @@ def test_routine_route_and_bad_route_fail_closed():
         )
 
 
+def test_legacy_queued_route_migrates_without_weakening_new_entry_validation():
+    assert orch.parse_initial_route(
+        "AI_TEAM_AUTO_QUEUE=YES\nAI_TEAM_QUEUE_PRIORITY=1"
+    ) == {"task_class": "ROUTINE", "task_type": "BUILD",
+          "agent": "CODEX_CHATGPT", "model_class": "CODEX_DEFAULT"}
+    assert orch.parse_initial_route(
+        "AI_TEAM_AUTO_QUEUE=YES\nAI_TASK_CLASS=MAJOR_ARCHITECTURE"
+    )["model_class"] == "OPUS"
+    with pytest.raises(ValueError, match="missing AI_TASK_CLASS"):
+        orch.parse_initial_route("ordinary new issue")
+
+
+def test_protected_authorization_is_repository_issued_and_exact_sha():
+    sha = "a" * 40
+    auth = orch.parse_protected_action_authorization(
+        "AI_PROTECTED_AUTH_ID=user-1\n"
+        "AI_PROTECTED_AUTH_ACTION=DEPLOY_REVIEWED_CONTROL_PLANE\n"
+        f"AI_PROTECTED_AUTH_SUBJECT_SHA={sha}\n"
+        "AI_PROTECTED_AUTH_EXPIRES_AT=2099-01-01T00:00:00Z\n"
+        "AI_PROTECTED_AUTH_MAX_ACTIONS=1"
+    )
+    assert auth == {"id": "user-1", "action": "DEPLOY_REVIEWED_CONTROL_PLANE",
+                    "subject_sha": sha, "expires_at": "2099-01-01T00:00:00Z",
+                    "max_actions": 1}
+    assert orch.parse_protected_action_authorization(
+        "AI_PROTECTED_AUTH_ID=model-only"
+    ) is None
+
+
 def test_remediation_fingerprint_is_idempotent(tmp_path):
     ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
     blocker = {"protocol_version": 1, "class": "CODE_CHANGE", "source_kind": "REVIEW",
