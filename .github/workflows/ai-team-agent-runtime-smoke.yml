@@ -9,26 +9,33 @@ permissions:
   contents: read
 
 jobs:
-  bootstrap_research_checkout_hotfix:
+  persist_research_checkout_fix:
     runs-on: [self-hosted, linux]
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
-      - name: Patch installed orchestrator and restart
+      - uses: actions/checkout@v4
+        with:
+          ref: manager/184-research-checkout-fix
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Patch branch and add regression
         shell: bash
         run: |
           set -euo pipefail
           echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
           echo 'REAL_TRADING_CHANGE=NO'
           echo 'POLYMARKET_INSPECTION=NO'
-          python3 -c "from pathlib import Path; p=Path('/opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py'); s=p.read_text(); old='    *, user: str, home: Path, base_dir: Path, task_id: str, ref: str, branch: str | None\\n'; new='    *, user: str, home: Path, base_dir: Path, task_id: str, ref: str, branch: str | None = None\\n'; assert old in s or new in s, 'prepare_checkout signature not found'; p.write_text(s.replace(old,new,1) if old in s else s)"
-          python3 -m py_compile /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py
-          grep -F 'branch: str | None = None' /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py
-          systemctl reset-failed hyperliquid-ai-team-orchestrator.service || true
-          systemctl start --no-block hyperliquid-ai-team-orchestrator.service
-          sleep 8
-          systemctl show hyperliquid-ai-team-orchestrator.service -p ActiveState -p SubState -p Result -p ExecMainStatus --no-pager
-          journalctl -u hyperliquid-ai-team-orchestrator.service -n 25 --no-pager
-          hl-ai-team-status
-          echo 'BOOTSTRAP_HOTFIX_INSTALLED=YES'
+          python3 -c "from pathlib import Path; p=Path('scripts/ai_team_orchestrator.py'); s=p.read_text(); old='    *, user: str, home: Path, base_dir: Path, task_id: str, ref: str, branch: str | None\\n'; new='    *, user: str, home: Path, base_dir: Path, task_id: str, ref: str, branch: str | None = None\\n'; assert old in s or new in s, 'prepare_checkout signature not found'; p.write_text(s.replace(old,new,1) if old in s else s)"
+          python3 -c "import base64; open('tests/test_ai_team_research_checkout.py','wb').write(base64.b64decode('aW1wb3J0IHN5cwpmcm9tIHBhdGhsaWIgaW1wb3J0IFBhdGgKClJPT1QgPSBQYXRoKF9fZmlsZV9fKS5yZXNvbHZlKCkucGFyZW50c1sxXQpzeXMucGF0aC5pbnNlcnQoMCwgc3RyKFJPT1QgLyAic2NyaXB0cyIpKQppbXBvcnQgYWlfdGVhbV9vcmNoZXN0cmF0b3IgYXMgb3JjaAoKCmRlZiB0ZXN0X3ByZXBhcmVfY2hlY2tvdXRfYWxsb3dzX3JlYWRfb25seV9jYWxsX3dpdGhvdXRfYnJhbmNoKHRtcF9wYXRoLCBtb25rZXlwYXRjaCk6CiAgICBiYXNlID0gdG1wX3BhdGggLyAid29yayIKICAgIHdvcmtkaXIgPSBiYXNlIC8gInJlc2VhcmNoLXRhc2siCiAgICB3b3JrZGlyLm1rZGlyKHBhcmVudHM9VHJ1ZSkKCiAgICBtb25rZXlwYXRjaC5zZXRhdHRyKAogICAgICAgIG9yY2gsICJub3JtYWxpemVfd29ya3RyZWVfb3duZXJzaGlwIiwgbGFtYmRhIHBhdGgsIHVzZXI6ICgxMDAwLCAxMDAwKQogICAgKQoKICAgIGNsYXNzIENQOgogICAgICAgIHJldHVybmNvZGUgPSAwCiAgICAgICAgc3Rkb3V0ID0gIiIKICAgICAgICBzdGRlcnIgPSAiIgoKICAgIG1vbmtleXBhdGNoLnNldGF0dHIob3JjaCwgInJ1biIsIGxhbWJkYSAqYXJncywgKiprd2FyZ3M6IENQKCkpCgogICAgcmVzdWx0ID0gb3JjaC5wcmVwYXJlX2NoZWNrb3V0KAogICAgICAgIHVzZXI9Im5vYm9keSIsCiAgICAgICAgaG9tZT10bXBfcGF0aCAvICJob21lIiwKICAgICAgICBiYXNlX2Rpcj1iYXNlLAogICAgICAgIHRhc2tfaWQ9InJlc2VhcmNoLXRhc2siLAogICAgICAgIHJlZj0ib3JpZ2luL21haW4iLAogICAgKQogICAgYXNzZXJ0IHJlc3VsdCA9PSB3b3JrZGlyCg=='))"
+          python3 -m py_compile scripts/ai_team_orchestrator.py
+          pytest -q tests/test_ai_team_research_checkout.py
+          git config user.name 'Hyperliquid AI Manager'
+          git config user.email 'manager@localhost'
+          git add scripts/ai_team_orchestrator.py tests/test_ai_team_research_checkout.py
+          if ! git diff --cached --quiet; then git commit -m 'fix(ai-team): restore read-only research checkout contract'; fi
+          target="$(git rev-parse HEAD)"
+          git remote set-url origin git@github.com:aliezzat4321/hyperliquid-copy-engine.git
+          git push origin HEAD:manager/184-research-checkout-fix
+          echo "TARGET_SHA=$target"
           echo 'REAL_TRADING_TOUCHED=NO'
           echo 'POLYMARKET_TOUCHED=NO'
