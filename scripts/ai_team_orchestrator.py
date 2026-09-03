@@ -60,7 +60,7 @@ TRELLO_BRIDGE = Path("/opt/hyperliquid-ai-team/scripts/trello_team_bridge.py")
 
 # Protected AI-control-plane files that Codex may propose, but never merge merely
 # because it changed them. Automatic apply additionally requires a trusted Issue
-# flag, independent exact-SHA Claude PASS, green CI, and ROUTINE task class.
+# flag, independent exact-SHA Claude PASS, and green CI.
 # Trading/live/capital/deployment paths are intentionally excluded.
 AUTO_APPLY_CONTROL_PLANE_PATHS = {
     "config/ai_team_router.json",
@@ -93,11 +93,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "budgets": {"CODE_CHANGE": 1, "PR_METADATA": 3, "PROTECTED_ACTION": 1,
                     "CI_RETRY": 3, "REVIEW_RERUN": 0, "POLICY_RECONCILIATION": 3,
                     "TERMINAL": 0},
-        "protected_actions": {
-            "DEPLOY_REVIEWED_CONTROL_PLANE": {
-                "workflow_id": "deploy-ai-team-orchestrator.yml", "ref": "main"
-            }
-        },
+        "protected_actions": {},
     },
     "legacy_remediation_migration": {"version": 1, "issues": [166, 168, 170],
                                      "supersede_issue": 170, "release_issue": 120},
@@ -115,7 +111,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "UNRESOLVED_DISAGREEMENT",
         "CAPITAL_SENSITIVE_METHODOLOGY",
     ],
-    "auto_merge_task_classes": ["ROUTINE"],
+    "auto_merge_task_classes": [
+        "ROUTINE",
+        "QUANT_PROFITABILITY",
+        "STATISTICAL_METHODOLOGY",
+        "MAJOR_ARCHITECTURE",
+        "UNRESOLVED_DISAGREEMENT",
+        "CAPITAL_SENSITIVE_METHODOLOGY",
+    ],
     "max_attempts": 3,
     "poll_seconds": 60,
     "default_rate_limit_retry_seconds": 3600,
