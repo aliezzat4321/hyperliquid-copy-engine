@@ -20,6 +20,14 @@ artifact, or propose a follow-up repair commit as the result of this review. A
 transport PR is not completion of Issue #172. The issue remains open until the
 actual Opus diagnosis is durably captured.
 
+The review body is the deliverable, not commentary about whether this request is
+adequate. A review that contains only `VERDICT`, prompt-quality feedback, or a
+request for Codex to change repository files has not executed Issue #172. Even
+when some historical evidence is unavailable in the review context, Opus must
+complete the architecture from verified evidence, label each evidence gap and
+resulting inference, and reserve `VERDICT=FAIL` for a genuine safety or evidence
+blocker that makes a single recovery architecture impossible to prescribe.
+
 ## Safety and scope constraints
 
 - Repository: `aliezzat4321/hyperliquid-copy-engine` only.
@@ -152,7 +160,35 @@ route metadata.
 
 ## Required diagnosis deliverable and durable follow-up
 
-The Opus response must, before its final machine-readable lines:
+The Opus review must use the following ordered output contract. Every section is
+mandatory and must contain the diagnosis itself rather than instructions for a
+future agent:
+
+1. `Evidence and confidence`: verified facts, unavailable evidence, and clearly
+   labelled inferences.
+2. `Failure-chain root cause`: an event-by-event mapping for issue #168 / PR
+   #169 and issue #170 / PR #171, plus the relationship to #166 and the stalled
+   #120 queue path.
+3. `Normative remediation table`: the finite blocker classes, deterministic
+   inputs, actor, action, allowed next states, and terminal condition.
+4. `State, progress, and retries`: persisted state, blocker fingerprint,
+   idempotency key, progress predicate, retry budgets, and behavior for an
+   unchanged fingerprint.
+5. `Queue isolation and recovery migration`: dependency-scoped scheduling and
+   exact automatic transitions for #166, #168, #170, #120, then #93/#92/#91.
+6. `Opus-first entry route`: explicit metadata schema, allowlist and fail-closed
+   validation, task-class routes, implementation handoff, and review escalation.
+7. `Minimal implementation footprint`: exact later files/functions that may
+   change and explicit exclusions.
+8. `Acceptance-test matrix`: inputs, starting state, expected actor/action,
+   expected persistent state, attempt-count effect, and expected queue result.
+9. `Safety argument`: real trading remains disabled and protected actions remain
+   manager-authorized and fail closed.
+10. `#170 disposition`: exactly one of supersede, salvage, or close, with the
+    deterministic transition.
+11. `Protocol footer`: the three machine-readable lines specified below.
+
+Across those sections, the Opus response must:
 
 1. State the root causes and map each observed #168/#169/#170/#171 failure to
    them.
@@ -166,6 +202,11 @@ The Opus response must, before its final machine-readable lines:
    cases above.
 6. Identify any evidence unavailable to Opus and distinguish verified facts from
    inferences; do not fill evidence gaps with assumptions.
+7. Specify the zero-diff metadata recovery end-to-end test concretely: a review
+   emits a machine-readable PR-metadata blocker; no Codex task is created; the
+   manager applies an idempotent metadata mutation; the same fingerprint cannot
+   spend a repair attempt; review/CI resumes; and the issue returns to the
+   appropriate non-blocked state without a repository diff.
 
 After Opus returns the diagnosis, the accepted text must be persisted to
 `docs/ai-team/OPUS_REPAIR_LOOP_DIAGNOSIS.md`, and the accepted architecture must
