@@ -9,30 +9,40 @@ permissions:
   contents: read
 
 jobs:
-  seed_opus_review_181:
+  prioritize_opus_review_181:
     runs-on: [self-hosted, linux]
     timeout-minutes: 5
     steps:
-      - name: Seed exact-SHA Opus review for PR 183
+      - name: Replace stale review checkpoint with current exact SHA
         shell: bash
         run: |
           set -euo pipefail
           /usr/bin/python3 - <<'PY'
           import datetime as dt
-          import json
           import sqlite3
           import uuid
 
           db_path = '/var/lib/hyperliquid-ai-team/orchestrator/ledger.sqlite3'
-          target = 'd8d5f5c147bc8df3663085497e65141d5f99f1b0'
+          target = 'ed9c70bcd325a100abf2f0c42ff9d95ddf71d867'
           db = sqlite3.connect(db_path)
           db.row_factory = sqlite3.Row
+          db.execute(
+              "UPDATE tasks SET status='STALE', retry_at=NULL, last_error='PR moved before review dispatch', updated_at=? "
+              "WHERE issue_number=181 AND pr_number=183 AND task_type='REVIEW' AND target_sha<>? "
+              "AND status IN ('PENDING','RETRY','WAITING_RATE_LIMIT','WAITING_CI')",
+              (dt.datetime.now(dt.timezone.utc).isoformat(), target),
+          )
           existing = db.execute(
-              "SELECT id,status FROM tasks WHERE issue_number=? AND pr_number=? AND task_type='REVIEW' AND model_class='OPUS' AND target_sha=? ORDER BY created_at DESC LIMIT 1",
-              (181, 183, target),
+              "SELECT id,status FROM tasks WHERE issue_number=181 AND pr_number=183 AND task_type='REVIEW' "
+              "AND model_class='OPUS' AND target_sha=? ORDER BY created_at DESC LIMIT 1",
+              (target,),
           ).fetchone()
           if existing:
-              print(f"REVIEW_CHECKPOINT=EXISTS id={existing['id']} status={existing['status']}")
+              db.execute(
+                  "UPDATE tasks SET status='PENDING', retry_at=NULL, last_error=NULL, created_at=?, updated_at=? WHERE id=?",
+                  ('2026-09-03T07:50:00+00:00', dt.datetime.now(dt.timezone.utc).isoformat(), existing['id']),
+              )
+              print(f"REVIEW_CHECKPOINT=REUSED id={existing['id']}")
           else:
               now = dt.datetime.now(dt.timezone.utc).isoformat()
               task_id = uuid.uuid4().hex[:16]
@@ -42,11 +52,12 @@ jobs:
                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                   (
                       task_id,181,183,'REVIEW','CLAUDE','OPUS','MAJOR_ARCHITECTURE','PENDING',
-                      'manager/181-auto-merge-on-pass',target,None,'[]',None,None,0,None,None,None,None,None,now,now,
+                      'manager/181-auto-merge-on-pass',target,None,'[]',None,None,0,None,None,None,None,None,
+                      '2026-09-03T07:50:00+00:00',now,
                   ),
               )
-              db.commit()
-              print(f"REVIEW_CHECKPOINT=CREATED id={task_id} target={target}")
+              print(f"REVIEW_CHECKPOINT=CREATED id={task_id}")
+          db.commit()
           db.close()
           PY
           systemctl start hyperliquid-ai-team-orchestrator.service || true
