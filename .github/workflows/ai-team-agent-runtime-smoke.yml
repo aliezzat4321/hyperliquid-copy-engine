@@ -9,37 +9,30 @@ permissions:
   contents: read
 
 jobs:
-  requeue_current_opus_review:
+  diagnose_orchestrator_startup:
     runs-on: [self-hosted, linux]
-    timeout-minutes: 8
+    timeout-minutes: 5
     steps:
-      - name: Requeue PR 183 exact SHA after head convergence
+      - name: Read deployed runtime failure only
         shell: bash
         run: |
           set -euo pipefail
-          /usr/bin/python3 - <<'PY'
-          import datetime as dt
-          import sqlite3
-          import uuid
-
-          target = '192029b18e205517f397963bcd8be9a593aaf0e9'
-          db = sqlite3.connect('/var/lib/hyperliquid-ai-team/orchestrator/ledger.sqlite3')
-          db.row_factory = sqlite3.Row
-          now = dt.datetime.now(dt.timezone.utc).isoformat()
-          db.execute("UPDATE tasks SET status='STALE',retry_at=NULL,last_error='superseded by exact current PR head',updated_at=? WHERE issue_number=181 AND pr_number=183 AND task_type='REPAIR' AND status IN ('PENDING','RETRY','WAITING_CI','WAITING_RATE_LIMIT')", (now,))
-          row = db.execute("SELECT id FROM tasks WHERE issue_number=181 AND pr_number=183 AND task_type='REVIEW' AND model_class='OPUS' AND target_sha=? ORDER BY created_at DESC LIMIT 1", (target,)).fetchone()
-          if row:
-              task_id = row['id']
-              db.execute("UPDATE tasks SET status='PENDING',retry_at=NULL,last_error=NULL,created_at=?,updated_at=? WHERE id=?", ('2026-09-03T07:48:00+00:00',now,task_id))
-          else:
-              task_id = uuid.uuid4().hex[:16]
-              db.execute("INSERT INTO tasks (id,issue_number,pr_number,task_type,agent,model_class,task_class,status,branch,target_sha,previous_sha,blockers_json,workdir,session_id,attempt,retry_at,limit_text,systemd_unit,last_error,parent_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (task_id,181,183,'REVIEW','CLAUDE','OPUS','MAJOR_ARCHITECTURE','PENDING','manager/181-auto-merge-on-pass',target,'ed9c70bcd325a100abf2f0c42ff9d95ddf71d867','[]',None,None,0,None,None,None,None,None,'2026-09-03T07:48:00+00:00',now))
-          db.commit()
-          print(f'REVIEW_CHECKPOINT={task_id} target={target}')
-          db.close()
+          echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
+          echo 'REAL_TRADING_CHANGE=NO'
+          echo 'POLYMARKET_INSPECTION=NO'
+          systemctl status hyperliquid-ai-team-orchestrator.service --no-pager -l || true
+          echo '--- JOURNAL ---'
+          journalctl -u hyperliquid-ai-team-orchestrator.service -n 120 --no-pager || true
+          echo '--- INSTALLED POLICY ---'
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          for p in [Path('/etc/hyperliquid-ai-team/router.json'), Path('/var/lib/hyperliquid-ai-team/config/ai_team_router.json')]:
+              if p.exists():
+                  try:
+                      d=json.loads(p.read_text())
+                      print(p, d.get('auto_merge_task_classes'))
+                  except Exception as e:
+                      print(p, 'ERR', repr(e))
           PY
-          systemctl start hyperliquid-ai-team-orchestrator.service || true
-          sleep 2
-          hl-ai-team-status
-          echo 'REAL_TRADING_TOUCHED=NO'
-          echo 'POLYMARKET_TOUCHED=NO'
+          hl-ai-team-status || true
