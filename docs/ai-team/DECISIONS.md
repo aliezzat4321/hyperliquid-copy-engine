@@ -90,7 +90,9 @@ Issue #172 accepts the single architecture in
   `UNRESOLVED_DISAGREEMENT`, and `CAPITAL_SENSITIVE_METHODOLOGY` may start as Claude
   Opus RESEARCH; routine engineering remains Codex BUILD. Invalid or unauthorized route
   combinations fail closed.
-- The **legacy #170 build/repair chain and PR #171** are superseded rather than salvaged. Issue #170 may serve only as a fresh implementation carrier from current `main`, with no reuse of the old branch/commits; legacy #166/#168 state is reconciled from authoritative evidence, #120 is automatically released when its own dependencies are satisfied, and #93/#92/#91 proceed through their class-appropriate routes.
+- #170 is superseded rather than salvaged. Legacy #166/#168 state is reconciled from
+  authoritative evidence, #120 is automatically released when its own dependencies are
+  satisfied, and #93/#92/#91 proceed through their class-appropriate routes.
 - This is an architecture decision, not implementation authorization. Existing exact-SHA
   review, CI, protected-path and live-trading gates remain intact;
   `REAL_TRADING_ENABLED` remains disabled.
