@@ -9,92 +9,65 @@ permissions:
   contents: read
 
 jobs:
-  smoke:
+  opus_exact_sha_review:
     runs-on: [self-hosted, linux]
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
-      - name: Assert boundary
+      - name: Exact-SHA isolated Opus review for PR 180
         shell: bash
         run: |
           set -euo pipefail
           test "$GITHUB_REPOSITORY" = "aliezzat4321/hyperliquid-copy-engine"
-          echo 'POLYMARKET_INSPECTION=NO'
-          echo 'POLYMARKET_MUTATION=NO'
-          echo 'REAL_TRADING_CHANGE=NO'
-
-      - name: Verify isolated auth and resume CLI surface
-        shell: bash
-        run: |
-          set -euo pipefail
-          c_uid="$(id -u hl-codex-agent)"
-          c_gid="$(id -g hl-codex-agent)"
-          c_home=/var/lib/hyperliquid-ai-team/agents/codex/home
-          env -i HOME="$c_home" CODEX_HOME="$c_home/.codex" PATH=/usr/local/bin:/usr/bin:/bin \
-            setpriv --reuid="$c_uid" --regid="$c_gid" --init-groups \
-            /usr/local/bin/codex login status
-          /usr/local/bin/codex exec resume --help | head -n 40
-
-          a_uid="$(id -u hl-claude-agent)"
-          a_gid="$(id -g hl-claude-agent)"
+          target=1db0ed66e682fde17a2c0a026008e97e62765426
+          review=/var/lib/hyperliquid-ai-team/agents/claude/worktrees/manager-review-180-$GITHUB_RUN_ID
           a_home=/var/lib/hyperliquid-ai-team/agents/claude/home
-          test -s "$a_home/.claude/.credentials.json"
-          env -i HOME="$a_home" CLAUDE_CONFIG_DIR="$a_home/.claude" PATH=/usr/local/bin:/usr/bin:/bin \
-            setpriv --reuid="$a_uid" --regid="$a_gid" --init-groups \
-            /usr/bin/claude -p --model sonnet --output-format text \
-            'Reply exactly: CLAUDE_AUTH_SMOKE_OK'
-          echo 'CLAUDE_AGENT_AUTH=READY'
+          rm -rf "$review"
+          git clone --quiet https://github.com/aliezzat4321/hyperliquid-copy-engine.git "$review"
+          git -C "$review" checkout --quiet "$target"
+          test "$(git -C "$review" rev-parse HEAD)" = "$target"
+          chown -R hl-claude-agent:hl-claude-agent "$review"
+          prompt="$review/.manager-opus-review-prompt.txt"
+          cat > "$prompt" <<'EOF'
+          You are CLAUDE OPUS, the independent final adversarial reviewer for Hyperliquid Issue #178 / PR #180.
+          Review exactly SHA 1db0ed66e682fde17a2c0a026008e97e62765426 against main. Do not edit files, do not use GitHub credentials, and do not inspect or discuss Polymarket. REAL_TRADING_ENABLED must remain NO.
 
-      - name: Prove Codex non-interactive execution in sandbox
-        shell: bash
-        run: |
-          set -euo pipefail
-          smoke=/var/lib/hyperliquid-ai-team/agents/codex/worktrees/runtime-smoke
-          c_home=/var/lib/hyperliquid-ai-team/agents/codex/home
-          install -d -o hl-codex-agent -g hl-codex-agent -m 0750 "$smoke"
-          output="$(systemd-run --pipe --wait --collect --quiet \
-            --unit="hl-ai-codex-runtime-smoke-$GITHUB_RUN_ID" \
-            --uid=hl-codex-agent --gid=hl-codex-agent \
-            --working-directory="$smoke" \
-            --property=NoNewPrivileges=yes \
-            --property=PrivateTmp=yes \
-            --property=ProtectHome=yes \
-            --property=ProtectSystem=strict \
-            --property=RestrictSUIDSGID=yes \
-            --property=InaccessiblePaths=/mnt \
-            --property="ReadWritePaths=$smoke $c_home" \
-            --setenv="HOME=$c_home" --setenv="CODEX_HOME=$c_home/.codex" \
-            /usr/local/bin/codex exec --json --sandbox read-only --skip-git-repo-check \
-            'Return exactly CODEX_NONINTERACTIVE_OK and do not call tools.' 2>&1)"
-          printf '%s\n' "$output" | tail -n 20
-          grep -q 'CODEX_NONINTERACTIVE_OK' <<<"$output"
-          rm -rf "$smoke"
-          echo 'CODEX_NONINTERACTIVE=PASS'
+          Read only: AGENTS.md, docs/ai-team/OPUS_REPAIR_LOOP_DIAGNOSIS.md, docs/ai-team/DECISIONS.md, the PR-changed files, and necessary adjacent code/tests. Run narrow relevant tests if useful.
 
-      - name: Prove Claude non-interactive execution in sandbox
-        shell: bash
-        run: |
-          set -euo pipefail
-          smoke=/var/lib/hyperliquid-ai-team/agents/claude/worktrees/runtime-smoke
-          a_home=/var/lib/hyperliquid-ai-team/agents/claude/home
-          install -d -o hl-claude-agent -g hl-claude-agent -m 0750 "$smoke"
+          The prior Opus review at 585d7bcb49e72dcdbaa7a07df22fd5f438fd60e2 had exactly two remaining blockers:
+          1) config/ai_team_router.json mapped DEPLOY_REVIEWED_CONTROL_PLANE to deploy-ai-team-orchestrator.yml even though that workflow had no workflow_dispatch; an authorized protected action would 422 and escape the remediation loop.
+          2) security-critical routing lacked behavioral tests for repository-issued protected authorization/config-sourced target, CI failure classification, and immutable Opus research input reaching Codex BUILD.
+
+          The new delta intentionally does NOT edit .github/workflows/**. It removes the invalid production protected-action mapping and adds behavioral tests. The actual deploy workflow change remains Issue #166 after this router is live.
+
+          Falsify the fix. Verify prior blockers are truly closed and no new merge-blocking regression/security issue is introduced. Do not demand implementation of #166 inside #178.
+
+          End with exactly:
+          REVIEWED_SHA=1db0ed66e682fde17a2c0a026008e97e62765426
+          VERDICT=PASS
+          BLOCKERS_JSON=[]
+
+          Or, if a true merge blocker remains:
+          REVIEWED_SHA=1db0ed66e682fde17a2c0a026008e97e62765426
+          VERDICT=FAIL
+          BLOCKERS_JSON=["concise actionable blocker"]
+          EOF
+          chown hl-claude-agent:hl-claude-agent "$prompt"
           output="$(systemd-run --pipe --wait --collect --quiet \
-            --unit="hl-ai-claude-runtime-smoke-$GITHUB_RUN_ID" \
+            --unit="hl-ai-claude-manager-review-180-$GITHUB_RUN_ID" \
             --uid=hl-claude-agent --gid=hl-claude-agent \
-            --working-directory="$smoke" \
+            --working-directory="$review" \
             --property=NoNewPrivileges=yes \
             --property=PrivateTmp=yes \
             --property=ProtectHome=yes \
             --property=ProtectSystem=strict \
             --property=RestrictSUIDSGID=yes \
             --property=InaccessiblePaths=/mnt \
-            --property="ReadWritePaths=$smoke $a_home" \
+            --property="ReadWritePaths=$review $a_home" \
             --setenv="HOME=$a_home" --setenv="CLAUDE_CONFIG_DIR=$a_home/.claude" \
-            /usr/bin/claude -p --model sonnet --output-format text \
-            --permission-mode dontAsk \
-            'Reply exactly: CLAUDE_NONINTERACTIVE_OK' 2>&1)"
-          printf '%s\n' "$output" | tail -n 20
-          grep -q 'CLAUDE_NONINTERACTIVE_OK' <<<"$output"
-          rm -rf "$smoke"
-          echo 'CLAUDE_NONINTERACTIVE=PASS'
+            /usr/bin/claude -p --model opus --output-format text --permission-mode dontAsk \
+            --allowedTools Read,Glob,Grep,Bash "$(cat "$prompt")" 2>&1)"
+          printf '%s\n' "$output"
+          grep -q '^REVIEWED_SHA=1db0ed66e682fde17a2c0a026008e97e62765426$' <<<"$output"
+          grep -Eq '^VERDICT=(PASS|FAIL)$' <<<"$output"
           echo 'POLYMARKET_TOUCHED=NO'
           echo 'REAL_TRADING_TOUCHED=NO'
