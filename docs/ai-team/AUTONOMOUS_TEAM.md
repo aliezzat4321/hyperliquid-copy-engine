@@ -97,8 +97,11 @@ A PR whose head changes during or after review is not mergeable from the old ver
 Policy lives in `config/ai_team_router.json`.
 
 - `CODEX_DEFAULT`: build, repair, engineering, CI, deployment code, ordinary debugging.
-- `SONNET`: routine independent PR review, normal reasoning, routine second opinion.
-- `OPUS`: only task classes explicitly allowlisted for quant/profitability, statistical methodology, major architecture, unresolved disagreement, or capital-sensitive methodology.
+- `SONNET`: routine and ordinary major-architecture independent PR review.
+- `OPUS`: entry research for every high-value class; final review for quant/profitability,
+  statistical methodology, unresolved disagreement, and capital-sensitive methodology.
+  Major architecture uses Opus for final review only when the trusted Issue contains
+  `OPUS_ESCALATION_REASON=MAJOR_ARCHITECTURE`.
 
 Agents cannot choose Opus. The orchestrator validates the task class and escalation reason. Routine work with an Opus escalation request is rejected. Review-model routing is independent of merge eligibility: every recognized task class becomes merge-eligible only after an independent exact-SHA review PASS and green CI.
 
@@ -115,7 +118,7 @@ Do not add these fields to routine work.
 
 ## Context and token efficiency
 
-Each normal invocation starts fresh. Codex is instructed to read `AGENTS.md`, `CURRENT_STATE.md`, the assigned Issue, latest trusted comments and only relevant/linked files. Claude receives the exact PR/SHA and changed-file list. Re-review receives prior blockers plus the new SHA delta.
+Each normal invocation starts fresh. Codex is instructed to read `AGENTS.md`, `CURRENT_STATE.md`, the assigned Issue, latest trusted comments and only relevant/linked files. Claude receives the exact PR/SHA, base or previous-reviewed SHA, changed-file list, prior blockers, and only necessary adjacent context. Both first review and re-review explicitly forbid recursive or repository-wide rereads. Claude invocations have configured turn budgets (`REVIEW=12`, `RESEARCH=16`) in addition to wall-clock timeouts.
 
 An interrupted task may resume by the vendor session/thread ID so rate-limit or timeout recovery does not discard work. A review failure is not resumed as an old conversation; it creates a fresh narrow repair/re-review cycle.
 
