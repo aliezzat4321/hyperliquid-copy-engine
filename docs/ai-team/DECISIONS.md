@@ -103,3 +103,15 @@ class allowlist, deterministic CI failures remain autonomous `CODE_CHANGE` work,
 protected workflow targets come only from repository configuration after a trusted,
 unexpired, exact-SHA Issue authorization is verified. Model-emitted blocker data cannot
 select a workflow or ref. This changes no live-trading permission.
+
+
+## 2026-09-03 — Exact-SHA reviewer PASS + green CI is the merge decision for recognized task classes
+
+This supersedes the earlier task-class policy that withheld automatic merge from non-routine / Opus-class work after successful review.
+
+- Builder and reviewer responsibilities remain separate: Codex implements; the routed independent Claude reviewer evaluates the immutable PR head SHA.
+- For every recognized task class (`ROUTINE`, `QUANT_PROFITABILITY`, `STATISTICAL_METHODOLOGY`, `MAJOR_ARCHITECTURE`, `UNRESOLVED_DISAGREEMENT`, and `CAPITAL_SENSITIVE_METHODOLOGY`), an independent exact-SHA `PASS` plus green required CI is the merge decision. The credential-holding manager executes that decision immediately; it is not a second approval stage and no timer, human click, or separate finalizer is required.
+- `UNCLASSIFIED` or invalid task classes remain ineligible for automatic merge.
+- Protected AI-control-plane changes still require trusted Issue authorization, `AI_TEAM_PROTECTED_CHANGE=YES`, and the narrow `AUTO_APPLY_CONTROL_PLANE_PATHS` allowlist before merge. Workflow, systemd deployment, trading/live, capital, credential, and other paths outside that allowlist remain fail-closed.
+- PR-head movement invalidates the old review; merge/API rejection retries only the merge stage against the exact reviewed SHA.
+- This changes no live-trading permission. `REAL_TRADING_ENABLED` remains disabled.
