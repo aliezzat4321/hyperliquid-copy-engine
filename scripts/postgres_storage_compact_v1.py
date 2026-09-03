@@ -30,7 +30,30 @@ FIXED_PEAK_MARGIN_BYTES = 512 * 1024**2
 RAW_PAYLOAD_OVERHEAD_FACTOR = 1.35
 LEADERBOARD_RELATION_OVERHEAD_FACTOR = 1.50
 LEADERBOARD_WAL_FACTOR = 1.50
+RAW_API_WAL_FACTOR = 1.50
 UTC = timezone(timedelta(0))
+EMPTY_PAYLOAD_SHA256 = hashlib.sha256(
+    json.dumps({}, sort_keys=True, separators=(",", ":")).encode()
+).hexdigest()
+assert EMPTY_PAYLOAD_SHA256 == hashlib.sha256(b"{}").hexdigest()
+
+EXPECTED_LEADERBOARD_COLUMNS = [
+    ["snapshot_at", "timestamp with time zone", True],
+    ["address", "text", True],
+    ["ranking_period", "text", True],
+    ["rank", "integer", False],
+    ["pnl", "numeric", False],
+    ["roi", "numeric", False],
+    ["volume", "numeric", False],
+    ["account_value", "numeric", False],
+    ["raw_json", "jsonb", True],
+]
+EXPECTED_LEADERBOARD_INDEXES = [
+    ["idx_leaderboard_snapshots_address_time", False, False, True,
+     ["address", "snapshot_at DESC"]],
+    ["leaderboard_snapshots_pkey", True, True, True,
+     ["snapshot_at", "address", "ranking_period"]],
+]
 
 
 def _psql(sql: str) -> str:
@@ -164,6 +187,66 @@ def _source_payload_conflicts() -> int:
     )
 
 
+def _json_value(sql: str) -> Any:
+    return json.loads(_scalar(sql))
+
+
+def _leaderboard_structure() -> dict[str, Any]:
+    columns = _json_value(
+        "SELECT COALESCE(json_agg(json_build_array(a.attname,"
+        " format_type(a.atttypid,a.atttypmod),a.attnotnull) ORDER BY a.attnum),'[]')"
+        " FROM pg_attribute a WHERE a.attrelid='leaderboard_snapshots'::regclass"
+        " AND a.attnum>0 AND NOT a.attisdropped"
+    )
+    indexes = _json_value(
+        "SELECT COALESCE(json_agg(item ORDER BY item->>0),'[]') FROM ("
+        " SELECT json_build_array(c.relname,i.indisunique,i.indisprimary,i.indpred IS NULL,"
+        " array_agg(pg_get_indexdef(i.indexrelid,k.n::integer,true) ORDER BY k.n)) item"
+        " FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid"
+        " CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY k(attnum,n)"
+        " WHERE i.indrelid='leaderboard_snapshots'::regclass"
+        " GROUP BY c.relname,i.indisunique,i.indisprimary,i.indpred) indexed"
+    )
+    dependents = _json_value(
+        "SELECT COALESCE(json_agg(name ORDER BY name),'[]') FROM ("
+        " SELECT DISTINCT n.nspname||'.'||c.relname name FROM pg_depend d"
+        " JOIN pg_rewrite r ON r.oid=d.objid JOIN pg_class c ON c.oid=r.ev_class"
+        " JOIN pg_namespace n ON n.oid=c.relnamespace"
+        " WHERE d.refobjid='leaderboard_snapshots'::regclass"
+        " AND c.relkind IN ('v','m')"
+        " AND c.oid<>'leaderboard_snapshots'::regclass) dependent_relations"
+    )
+    structure = {"columns": columns, "indexes": indexes, "dependent_views": dependents}
+    if columns != EXPECTED_LEADERBOARD_COLUMNS:
+        raise RuntimeError(f"leaderboard column drift: {columns}")
+    if indexes != EXPECTED_LEADERBOARD_INDEXES:
+        raise RuntimeError(f"leaderboard index drift: {indexes}")
+    if dependents:
+        raise RuntimeError(f"leaderboard has dependent views: {dependents}")
+    return structure
+
+
+def _blank_payload_orphans() -> tuple[int, int]:
+    if not _relation_exists("raw_api_payloads"):
+        total = _int("SELECT count(*) FROM raw_api_responses WHERE response_json='{}'::jsonb")
+        empty = _int(
+            "SELECT count(*) FROM raw_api_responses WHERE response_json='{}'::jsonb "
+            f"AND content_sha256='{EMPTY_PAYLOAD_SHA256}'"
+        )
+        return empty, total - empty
+    empty = _int(
+        "SELECT count(*) FROM raw_api_responses r WHERE r.response_json='{}'::jsonb "
+        f"AND r.content_sha256='{EMPTY_PAYLOAD_SHA256}' AND NOT EXISTS (SELECT 1 FROM "
+        "raw_api_payloads p WHERE p.content_sha256=r.content_sha256)"
+    )
+    nonempty = _int(
+        "SELECT count(*) FROM raw_api_responses r WHERE r.response_json='{}'::jsonb "
+        f"AND r.content_sha256<>'{EMPTY_PAYLOAD_SHA256}' AND NOT EXISTS (SELECT 1 FROM "
+        "raw_api_payloads p WHERE p.content_sha256=r.content_sha256)"
+    )
+    return empty, nonempty
+
+
 def build_plan(path: Path) -> dict[str, Any]:
     cutoff = _scalar("SELECT max(snapshot_at)::text FROM leaderboard_snapshots")
     if not cutoff:
@@ -234,6 +317,12 @@ def build_plan(path: Path) -> dict[str, Any]:
         raise RuntimeError(
             f"existing content-addressed payloads disagree: {existing_payload_conflicts}"
         )
+    empty_payload_orphans, nonempty_payload_orphans = _blank_payload_orphans()
+    if nonempty_payload_orphans:
+        raise RuntimeError(
+            "blank raw API observations have unrecoverable non-empty payloads: "
+            f"{nonempty_payload_orphans}"
+        )
 
     leaderboard_raw_observations = _int(
         "SELECT count(*) FROM raw_api_responses WHERE endpoint='leaderboard'"
@@ -245,6 +334,7 @@ def build_plan(path: Path) -> dict[str, Any]:
     if leaderboard_raw_observations < 1 or exact_cutoff_raw < 1:
         raise RuntimeError("raw leaderboard provenance does not cover the compaction cutoff")
 
+    leaderboard_structure = _leaderboard_structure()
     source_relation_bytes = _relation_bytes("leaderboard_snapshots")
     raw_api_relation_bytes = _relation_bytes("raw_api_responses")
     existing_payload_relation_bytes = _optional_relation_bytes("raw_api_payloads")
@@ -276,7 +366,7 @@ def build_plan(path: Path) -> dict[str, Any]:
     raw_api_phase_required = max(
         MIN_AVAILABLE_BYTES,
         max(0, payload_relation_estimate - existing_payload_relation_bytes)
-        + raw_observation_after_estimate
+        + int(math.ceil(raw_observation_after_estimate * RAW_API_WAL_FACTOR))
         + FIXED_PEAK_MARGIN_BYTES,
     )
     projected_raw_api_net_reclaim = max(
@@ -299,7 +389,7 @@ def build_plan(path: Path) -> dict[str, Any]:
         )
 
     plan: dict[str, Any] = {
-        "schema_version": 3,
+        "schema_version": 4,
         "mode": "REVIEW_ONLY_NO_MUTATION",
         "generated_at": datetime.now(UTC).isoformat(),
         "database": {"port": int(PG_PORT), "name": PG_DB},
@@ -330,6 +420,7 @@ def build_plan(path: Path) -> dict[str, Any]:
             "exact_cutoff_raw_observations": exact_cutoff_raw,
             "missing_retained_provenance": missing_retained_provenance,
             "missing_discarded_provenance": missing_discarded_provenance,
+            "structure": leaderboard_structure,
         },
         "raw_api": {
             "observation_rows": raw_api_rows,
@@ -343,6 +434,9 @@ def build_plan(path: Path) -> dict[str, Any]:
             "projected_net_reclaim_bytes": projected_raw_api_net_reclaim,
             "source_payload_conflicts": source_payload_conflicts,
             "existing_payload_conflicts": existing_payload_conflicts,
+            "blank_empty_payload_observations_without_payload": empty_payload_orphans,
+            "blank_nonempty_payload_observations_without_payload": nonempty_payload_orphans,
+            "wal_factor": RAW_API_WAL_FACTOR,
         },
         "fills": {
             "rows_at_plan": _int("SELECT count(*) FROM fills"),
@@ -369,7 +463,7 @@ def _validate_plan(path: Path, expected_sha256: str) -> dict[str, Any]:
     if actual != expected_sha256:
         raise RuntimeError(f"manifest hash mismatch: {actual}")
     plan = json.loads(path.read_text())
-    if int(plan.get("schema_version", 0)) != 3:
+    if int(plan.get("schema_version", 0)) != 4:
         raise RuntimeError("unexpected plan schema")
     if plan.get("mode") != "REVIEW_ONLY_NO_MUTATION":
         raise RuntimeError("unexpected plan mode")
@@ -411,6 +505,16 @@ def _validate_plan(path: Path, expected_sha256: str) -> dict[str, Any]:
         raise RuntimeError("reviewed raw API source hash identity is inconsistent")
     if int(plan["raw_api"]["existing_payload_conflicts"]) != 0:
         raise RuntimeError("reviewed existing raw API payloads are inconsistent")
+    if int(plan["raw_api"]["blank_nonempty_payload_observations_without_payload"]) != 0:
+        raise RuntimeError("reviewed plan contains unrecoverable blank payload observations")
+    if float(plan["raw_api"]["wal_factor"]) != RAW_API_WAL_FACTOR:
+        raise RuntimeError("reviewed raw API WAL factor mismatch")
+    if plan["leaderboard"].get("structure") != {
+        "columns": EXPECTED_LEADERBOARD_COLUMNS,
+        "indexes": EXPECTED_LEADERBOARD_INDEXES,
+        "dependent_views": [],
+    }:
+        raise RuntimeError("reviewed leaderboard structure mismatch")
     plan["_cutoff_dt"] = cutoff
     return plan
 
@@ -473,6 +577,14 @@ WHERE response_json <> '{}'::jsonb
 ORDER BY content_sha256,fetched_at
 ON CONFLICT(content_sha256) DO UPDATE
 SET first_seen=LEAST(raw_api_payloads.first_seen, EXCLUDED.first_seen);
+INSERT INTO raw_api_payloads(content_sha256,response_json,first_seen)
+SELECT content_sha256,'{}'::jsonb,min(fetched_at)
+FROM raw_api_responses
+WHERE response_json='{}'::jsonb
+  AND content_sha256='{EMPTY_PAYLOAD_SHA256}'
+GROUP BY content_sha256
+ON CONFLICT(content_sha256) DO UPDATE
+SET first_seen=LEAST(raw_api_payloads.first_seen, EXCLUDED.first_seen);
 DO $verify$
 BEGIN
   IF EXISTS (
@@ -492,6 +604,13 @@ WHERE response_json <> '{}'::jsonb;
 COMMIT;
 """
     )
+    _psql("VACUUM raw_api_responses")
+    post_plain_vacuum_available = _available_bytes()
+    if post_plain_vacuum_available < required:
+        raise RuntimeError(
+            "raw API VACUUM FULL headroom is insufficient after plain VACUUM: "
+            f"{post_plain_vacuum_available} < {required}"
+        )
     _psql("VACUUM (FULL, ANALYZE) raw_api_responses")
     _psql("ANALYZE raw_api_payloads")
     remaining = _int(
@@ -505,6 +624,9 @@ COMMIT;
 
 
 def _compact_leaderboard(plan: dict[str, Any]) -> None:
+    current_structure = _leaderboard_structure()
+    if current_structure != plan["leaderboard"]["structure"]:
+        raise RuntimeError("leaderboard structure changed after planning")
     cutoff = plan["_cutoff_dt"].isoformat()
     expected_source = int(plan["leaderboard"]["source_rows_through_cutoff"])
     current_source = _int(
@@ -562,7 +684,7 @@ CREATE TABLE leaderboard_snapshots_compact_v1 (
     roi NUMERIC,
     volume NUMERIC,
     account_value NUMERIC,
-    raw_json JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+    raw_json JSONB NOT NULL,
     PRIMARY KEY (snapshot_at, address, ranking_period)
 );
 WITH keep_times AS (
@@ -639,7 +761,19 @@ def apply_plan(path: Path, expected_sha256: str) -> None:
         raise RuntimeError(
             f"other hlcopy database client sessions are active: {other_sessions}"
         )
+    archive_mode = _scalar("SHOW archive_mode")
+    replication_slots = _int("SELECT count(*) FROM pg_replication_slots")
+    if archive_mode != "off" or replication_slots:
+        raise RuntimeError(
+            "WAL retention preflight failed: "
+            f"archive_mode={archive_mode} replication_slots={replication_slots}"
+        )
+    data_directory = Path(_scalar("SHOW data_directory")).resolve()
+    pg_wal_path = (data_directory / "pg_wal").resolve()
+    wal_on_data_mount = pg_wal_path == DATA_MOUNT or DATA_MOUNT in pg_wal_path.parents
     fills_before = _int("SELECT count(*) FROM fills")
+    leaderboard_bytes_before = _relation_bytes("leaderboard_snapshots")
+    raw_api_bytes_before = _relation_bytes("raw_api_responses")
 
     audit: dict[str, Any] = {
         "manifest_sha256": expected_sha256,
@@ -648,6 +782,23 @@ def apply_plan(path: Path, expected_sha256: str) -> None:
         "before_available_bytes": before_available,
         "fills_before": fills_before,
         "fills_at_plan": int(plan["fills"]["rows_at_plan"]),
+        "leaderboard_relation_bytes_before": leaderboard_bytes_before,
+        "raw_api_observations_bytes_before": raw_api_bytes_before,
+        "provenance": {
+            "missing_retained": int(plan["leaderboard"]["missing_retained_provenance"]),
+            "missing_discarded": int(plan["leaderboard"]["missing_discarded_provenance"]),
+            "source_payload_conflicts": int(plan["raw_api"]["source_payload_conflicts"]),
+            "existing_payload_conflicts": int(plan["raw_api"]["existing_payload_conflicts"]),
+            "unrecoverable_blank_payloads": int(
+                plan["raw_api"]["blank_nonempty_payload_observations_without_payload"]
+            ),
+        },
+        "wal_preflight": {
+            "archive_mode": archive_mode,
+            "replication_slots": replication_slots,
+            "pg_wal_path": str(pg_wal_path),
+            "shares_data_mount": wal_on_data_mount,
+        },
         "leaderboard_compaction_completed": False,
         "raw_api_normalization_completed": False,
         "polymarket_mutation": False,

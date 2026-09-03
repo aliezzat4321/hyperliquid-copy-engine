@@ -202,6 +202,19 @@ def _write(path: Path, value: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+def _fail_closed_actions(policy_path: Path) -> tuple[list[dict[str, str]], list[str]]:
+    """Best-effort enumeration; an invalid policy must never yield an empty stop set."""
+    try:
+        datasets = _load(policy_path).get("datasets", [])
+        writers = sorted(
+            {str(item.get("writer", "")).strip() for item in datasets}
+            - {""}
+        )
+    except Exception:
+        writers = []
+    return ([{"writer": writer, "action": "STOP_WRITER"} for writer in writers], writers)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--policy", type=Path, default=Path("config/storage_policy.json"))
@@ -223,11 +236,13 @@ def main() -> None:
             allow_baseline_without_previous=args.allow_baseline_without_previous,
         )
     except Exception as exc:
+        writer_actions, controlled_writers = _fail_closed_actions(args.policy)
         result = {"schema_version": 2, "mode": "READ_ONLY_DECISION",
                   "observed_at": datetime.now(UTC_TZ).isoformat(),
                   "pressure_active": True, "action": "STOP_ALL_MATERIAL_WRITERS",
-                  "controlled_writers": [],
-                  "writer_actions": [], "fail_closed_reason": f"{type(exc).__name__}: {exc}",
+                  "controlled_writers": controlled_writers,
+                  "writer_actions": writer_actions,
+                  "fail_closed_reason": f"{type(exc).__name__}: {exc}",
                   "real_trading_changed": False, "polymarket_mutation": False}
         _write(args.output, result)
         print(json.dumps(result, indent=2, sort_keys=True))

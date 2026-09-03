@@ -135,3 +135,28 @@ INSERT INTO raw_api_responses(content_sha256,response_json,fetched_at) VALUES
         ) == 0
     finally:
         _drop_schema(schema)
+
+
+def test_raw_api_normalization_seeds_empty_payload_and_vacuums_before_full(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    statements: list[str] = []
+    row_counts = iter((2, 0))
+
+    def fake_psql(sql: str) -> str:
+        statements.append(sql)
+        if sql.startswith("SELECT count(*) FROM raw_api_responses"):
+            return str(next(row_counts))
+        return ""
+
+    monkeypatch.setattr(MODULE, "_psql", fake_psql)
+    monkeypatch.setattr(MODULE, "_available_bytes", lambda: 10 * 1024**3)
+    MODULE._normalize_raw_api_payloads({
+        "raw_api": {"observation_rows": 2, "required_peak_available_bytes": 1}
+    })
+    transaction = statements[1]
+    assert MODULE.EMPTY_PAYLOAD_SHA256 in transaction
+    assert "SELECT content_sha256,'{}'::jsonb,min(fetched_at)" in transaction
+    assert statements.index("VACUUM raw_api_responses") < statements.index(
+        "VACUUM (FULL, ANALYZE) raw_api_responses"
+    )

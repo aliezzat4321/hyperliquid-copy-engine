@@ -125,3 +125,16 @@ This supersedes the earlier task-class policy that withheld automatic merge from
 - Durable fills capture is `NEVER_STOP`; pressure responses are emitted per writer.
 - Dataset budgets plus unallocated reserve must fit below each mount's target-used band.
   Unaccounted filesystem bytes are explicitly measured so unnamed growth fails closed.
+
+## 2026-09-03 — Storage closure uses one machine-readable exit gate
+
+- The `market-shadow` byte budget is 11 GiB with a 9 GiB steady-state bound so declared
+  budgets plus reserve fit the measured 75% target band without weakening thresholds.
+  Lossless tape lifecycle is therefore mandatory before restart; inability to reach the
+  bound requires reviewed retention or volume growth.
+- Historical PostgreSQL compaction fails closed on unrecoverable blank payloads, schema
+  drift, retained WAL, replication slots and insufficient WAL-aware headroom.
+- Issue #120 can close only when the read-only exit-gate report passes all apply,
+  provenance, policy, safety and uncontaminated 24-observation stability conjuncts.
+- This decision changes no live-trading permission. `REAL_TRADING_ENABLED` remains
+  disabled.

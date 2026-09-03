@@ -21,6 +21,7 @@ Update this file only when a component moves, is added, or is retired.
 | Trading permission boundary | `src/hlcopy/trading/permissions.py` | `REAL_TRADING_ENABLED`; **live-sensitive** |
 | Config | `src/hlcopy/config.py` | `HLCOPY_*` settings |
 | Storage pressure controller | `scripts/storage_controller.py`, `config/storage_policy.json` | Read-only fail-closed budgets, forecast and writer decisions |
+| Storage exit-gate evaluator | `scripts/storage_exit_gate_report.py` | Read-only conjunction over reviewed apply, policy and uncontaminated controller evidence |
 | Market tape lifecycle | `scripts/market_tape_lifecycle.py`, `config/market_tape_lifecycle.json` | Exact-SHA lossless historical Parquet compaction; no deletion without review |
 | Database | `src/hlcopy/db/postgres.py`, `db/schema.sql` | Append-only raw + derived tables |
 | CLI | `src/hlcopy/cli.py` | `hlcopy` entry point |
