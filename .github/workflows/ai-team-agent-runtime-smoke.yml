@@ -9,20 +9,30 @@ permissions:
   contents: read
 
 jobs:
-  enqueue_pr185_opus_review:
+  retarget_pr185_opus_review:
     runs-on: [self-hosted, linux]
     timeout-minutes: 5
     steps:
-      - name: Enqueue exact-SHA review without interrupting active work
+      - name: Retarget pending exact-SHA review
         shell: bash
         run: |
           set -euo pipefail
           echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
           echo 'REAL_TRADING_CHANGE=NO'
           echo 'POLYMARKET_INSPECTION=NO'
-          python3 -c "import base64; exec(base64.b64decode('aW1wb3J0IGRhdGV0aW1lIGFzIGR0CmltcG9ydCBzcWxpdGUzCmltcG9ydCB1dWlkCgp0YXJnZXQgPSAiOTdlOTE4MTQxY2Q1NmE1ZWMyMmE0M2EyNThjNjY2Njc2YTU3NmYzNyIKZGIgPSBzcWxpdGUzLmNvbm5lY3QoIi92YXIvbGliL2h5cGVybGlxdWlkLWFpLXRlYW0vb3JjaGVzdHJhdG9yL2xlZGdlci5zcWxpdGUzIiwgdGltZW91dD0zMCkKbm93ID0gZHQuZGF0ZXRpbWUubm93KGR0LnRpbWV6b25lLnV0YykuaXNvZm9ybWF0KCkKZGIuZXhlY3V0ZSgKICAgICJVUERBVEUgdGFza3MgU0VUIHN0YXR1cz0nU1RBTEUnLHJldHJ5X2F0PU5VTEwsbGFzdF9lcnJvcj0nc3VwZXJzZWRlZCBieSBidWlsdCBQUiAjMTg1IGV4YWN0LVNIQSByZXZpZXcnLHVwZGF0ZWRfYXQ9PyAiCiAgICAiV0hFUkUgaXNzdWVfbnVtYmVyPTE4NCBBTkQgdGFza190eXBlPSdSRVNFQVJDSCcgQU5EIHN0YXR1cyBJTiAoJ1BFTkRJTkcnLCdSRVRSWScsJ1dBSVRJTkdfUkFURV9MSU1JVCcpIiwKICAgIChub3csKSwKKQpyb3cgPSBkYi5leGVjdXRlKAogICAgIlNFTEVDVCBpZCBGUk9NIHRhc2tzIFdIRVJFIGlzc3VlX251bWJlcj0xODQgQU5EIHByX251bWJlcj0xODUgQU5EIHRhc2tfdHlwZT0nUkVWSUVXJyAiCiAgICAiQU5EIG1vZGVsX2NsYXNzPSdPUFVTJyBBTkQgdGFyZ2V0X3NoYT0/IEFORCBzdGF0dXMgTk9UIElOICgnU1RBTEUnLCdCTE9DS0VEJykgIgogICAgIk9SREVSIEJZIGNyZWF0ZWRfYXQgREVTQyBMSU1JVCAxIiwKICAgICh0YXJnZXQsKSwKKS5mZXRjaG9uZSgpCmlmIHJvdzoKICAgIHRhc2tfaWQgPSByb3dbMF0KZWxzZToKICAgIHRhc2tfaWQgPSB1dWlkLnV1aWQ0KCkuaGV4WzoxNl0KICAgIGRiLmV4ZWN1dGUoCiAgICAgICAgIklOU0VSVCBJTlRPIHRhc2tzICIKICAgICAgICAiKGlkLGlzc3VlX251bWJlcixwcl9udW1iZXIsdGFza190eXBlLGFnZW50LG1vZGVsX2NsYXNzLHRhc2tfY2xhc3Msc3RhdHVzLGJyYW5jaCx0YXJnZXRfc2hhLCIKICAgICAgICAicHJldmlvdXNfc2hhLGJsb2NrZXJzX2pzb24sd29ya2RpcixzZXNzaW9uX2lkLGF0dGVtcHQscmV0cnlfYXQsbGltaXRfdGV4dCxzeXN0ZW1kX3VuaXQsbGFzdF9lcnJvciwiCiAgICAgICAgInBhcmVudF9pZCxjcmVhdGVkX2F0LHVwZGF0ZWRfYXQpIFZBTFVFUyAoPyw/LD8sPyw/LD8sPyw/LD8sPyw/LD8sPyw/LD8sPyw/LD8sPyw/LD8sPykiLAogICAgICAgICgKICAgICAgICAgICAgdGFza19pZCwxODQsMTg1LCJSRVZJRVciLCJDTEFVREUiLCJPUFVTIiwiTUFKT1JfQVJDSElURUNUVVJFIiwiUEVORElORyIsCiAgICAgICAgICAgICJtYW5hZ2VyLzE4NC1yZXNlYXJjaC1jaGVja291dC1maXgiLHRhcmdldCxOb25lLCJbXSIsTm9uZSxOb25lLDAsTm9uZSxOb25lLE5vbmUsTm9uZSxOb25lLG5vdyxub3cKICAgICAgICApLAogICAgKQpkYi5jb21taXQoKQpwcmludChmIk9QVVNfUkVWSUVXX1RBU0s9e3Rhc2tfaWR9IFRBUkdFVF9TSEE9e3RhcmdldH0iKQpkYi5jbG9zZSgpCg=='))"
+          python3 - <<'PY'
+          import datetime as dt
+          import sqlite3
+          db = sqlite3.connect('/var/lib/hyperliquid-ai-team/orchestrator/ledger.sqlite3', timeout=30)
+          now = dt.datetime.now(dt.timezone.utc).isoformat()
+          old = '97e918141cd56a5ec22a43a258c666676a576f37'
+          new = '07666bf8ebf613fab5e1e3fb73b425d48363e42d'
+          cur = db.execute("UPDATE tasks SET target_sha=?, previous_sha=?, retry_at=NULL, last_error=NULL, updated_at=? WHERE id=? AND issue_number=184 AND pr_number=185 AND task_type='REVIEW' AND status='PENDING' AND target_sha=?", (new, old, now, '75982ca3900b4054', old))
+          db.commit()
+          print(f'RETARGETED={cur.rowcount} TARGET_SHA={new}')
+          db.close()
+          PY
           systemctl start --no-block hyperliquid-ai-team-orchestrator.service || true
           hl-ai-team-status
-          echo 'PR185_OPUS_REVIEW_ENQUEUED=YES'
           echo 'REAL_TRADING_TOUCHED=NO'
           echo 'POLYMARKET_TOUCHED=NO'
