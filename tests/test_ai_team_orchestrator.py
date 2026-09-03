@@ -49,6 +49,69 @@ def test_task_class_fails_closed_and_parses_explicit_class():
     ) == ("STATISTICAL_METHODOLOGY", "STATISTICAL_METHODOLOGY")
 
 
+@pytest.mark.parametrize("task_class", ["MAJOR_ARCHITECTURE", "QUANT_PROFITABILITY"])
+def test_high_value_initial_route_is_opus_research(task_class):
+    route = orch.parse_initial_route(
+        f"AI_TASK_CLASS={task_class}\nAI_INITIAL_ROUTE=RESEARCH\n"
+        "AI_INITIAL_AGENT=CLAUDE\nAI_INITIAL_MODEL=OPUS"
+    )
+    assert route == {"task_class": task_class, "task_type": "RESEARCH",
+                     "agent": "CLAUDE", "model_class": "OPUS"}
+
+
+def test_routine_route_and_bad_route_fail_closed():
+    assert orch.parse_initial_route("AI_TASK_CLASS=ROUTINE")["agent"] == "CODEX_CHATGPT"
+    with pytest.raises(ValueError, match="INVALID_INITIAL_ROUTE"):
+        orch.parse_initial_route(
+            "AI_TASK_CLASS=MAJOR_ARCHITECTURE\nAI_INITIAL_ROUTE=BUILD\n"
+            "AI_INITIAL_AGENT=CODEX_CHATGPT\nAI_INITIAL_MODEL=CODEX_DEFAULT"
+        )
+
+
+def test_legacy_queued_route_migrates_without_weakening_new_entry_validation():
+    assert orch.parse_initial_route(
+        "AI_TEAM_AUTO_QUEUE=YES\nAI_TEAM_QUEUE_PRIORITY=1"
+    ) == {"task_class": "ROUTINE", "task_type": "BUILD",
+          "agent": "CODEX_CHATGPT", "model_class": "CODEX_DEFAULT"}
+    assert orch.parse_initial_route(
+        "AI_TEAM_AUTO_QUEUE=YES\nAI_TASK_CLASS=MAJOR_ARCHITECTURE"
+    )["model_class"] == "OPUS"
+    with pytest.raises(ValueError, match="missing AI_TASK_CLASS"):
+        orch.parse_initial_route("ordinary new issue")
+
+
+def test_protected_authorization_is_repository_issued_and_exact_sha():
+    sha = "a" * 40
+    auth = orch.parse_protected_action_authorization(
+        "AI_PROTECTED_AUTH_ID=user-1\n"
+        "AI_PROTECTED_AUTH_ACTION=DEPLOY_REVIEWED_CONTROL_PLANE\n"
+        f"AI_PROTECTED_AUTH_SUBJECT_SHA={sha}\n"
+        "AI_PROTECTED_AUTH_EXPIRES_AT=2099-01-01T00:00:00Z\n"
+        "AI_PROTECTED_AUTH_MAX_ACTIONS=1"
+    )
+    assert auth == {"id": "user-1", "action": "DEPLOY_REVIEWED_CONTROL_PLANE",
+                    "subject_sha": sha, "expires_at": "2099-01-01T00:00:00Z",
+                    "max_actions": 1}
+    assert orch.parse_protected_action_authorization(
+        "AI_PROTECTED_AUTH_ID=model-only"
+    ) is None
+
+
+def test_remediation_fingerprint_is_idempotent(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    blocker = {"protocol_version": 1, "class": "CODE_CHANGE", "source_kind": "REVIEW",
+               "source_id": "review-1", "subject_sha": "a" * 40, "rule_id": "broken",
+               "observed": {"paths": ["x.py"], "reproducer": "pytest -q"},
+               "requested_action": {"paths": ["x.py"]}}
+    first = ledger.observe_remediation(blocker, issue_number=1, pr_number=2,
+                                       actor="CODEX_CHATGPT")
+    second = ledger.observe_remediation(blocker, issue_number=1, pr_number=2,
+                                        actor="CODEX_CHATGPT")
+    assert first["fingerprint"] == second["fingerprint"]
+    assert second["occurrence_count"] == 2
+    assert second["action_attempts"] == 0
+
+
 def test_machine_assignment_contains_exact_sha_and_model():
     sha = "a" * 40
     text = orch.assignment_marker(
@@ -519,8 +582,8 @@ def test_codex_resume_places_exec_options_before_resume_subcommand(
 def test_recoverable_automation_paths_do_not_terminally_block():
     source = MODULE_PATH.read_text()
     handle_ci = source[source.index("    def handle_ci("):source.index("    def retry_or_block(")]
-    assert "CI_REPAIR_ENQUEUED" in handle_ci
-    assert "self.enqueue_repair(task, blockers)" in handle_ci
+    assert "failed_check_blockers" in handle_ci
+    assert "self.dispatch_remediations(task, blockers" in handle_ci
     assert "CI failed after review PASS" not in handle_ci
     assert "MERGE_RETRY_SCHEDULED" in handle_ci
     assert "merge rejected; automatic retry scheduled" in handle_ci
@@ -590,7 +653,7 @@ def test_terminal_projection_failure_does_not_change_successful_merge(tmp_path):
 
 def test_continuity_loops_cover_review_pr_move_limits_and_restart():
     source = MODULE_PATH.read_text()
-    assert "self.enqueue_repair(task, blockers)" in source
+    assert "self.dispatch_remediations(task, blockers" in source
     assert "self.enqueue_replacement_review(task, current_sha)" in source
     assert "WAITING_RATE_LIMIT" in source
     assert "STALE_RUN_REQUEUED" in source
