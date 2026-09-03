@@ -9,30 +9,26 @@ permissions:
   contents: read
 
 jobs:
-  retarget_pr185_opus_review:
+  verify_runtime_handoff:
     runs-on: [self-hosted, linux]
     timeout-minutes: 5
     steps:
-      - name: Retarget pending exact-SHA review
+      - name: Read runtime and exact task states
         shell: bash
         run: |
           set -euo pipefail
           echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
           echo 'REAL_TRADING_CHANGE=NO'
           echo 'POLYMARKET_INSPECTION=NO'
+          hl-ai-team-status
           python3 - <<'PY'
-          import datetime as dt
           import sqlite3
           db = sqlite3.connect('/var/lib/hyperliquid-ai-team/orchestrator/ledger.sqlite3', timeout=30)
-          now = dt.datetime.now(dt.timezone.utc).isoformat()
-          old = '97e918141cd56a5ec22a43a258c666676a576f37'
-          new = '07666bf8ebf613fab5e1e3fb73b425d48363e42d'
-          cur = db.execute("UPDATE tasks SET target_sha=?, previous_sha=?, retry_at=NULL, last_error=NULL, updated_at=? WHERE id=? AND issue_number=184 AND pr_number=185 AND task_type='REVIEW' AND status='PENDING' AND target_sha=?", (new, old, now, '75982ca3900b4054', old))
-          db.commit()
-          print(f'RETARGETED={cur.rowcount} TARGET_SHA={new}')
+          db.row_factory = sqlite3.Row
+          for row in db.execute("SELECT id,issue_number,pr_number,task_type,agent,model_class,status,target_sha,attempt,retry_at,last_error,updated_at FROM tasks WHERE issue_number IN (120,184) ORDER BY updated_at DESC LIMIT 12"):
+              print(dict(row))
           db.close()
           PY
-          systemctl start --no-block hyperliquid-ai-team-orchestrator.service || true
-          hl-ai-team-status
+          systemctl show hyperliquid-ai-team-orchestrator.service -p ActiveState -p SubState -p Result -p ExecMainStatus --no-pager
           echo 'REAL_TRADING_TOUCHED=NO'
           echo 'POLYMARKET_TOUCHED=NO'
