@@ -44,6 +44,8 @@ def prepare(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sizes=(100, 100)) -
 
 def test_smoothed_growth_requires_three_samples_and_never_stop_excluded(tmp_path, monkeypatch):
     prepare(tmp_path, monkeypatch, (130, 100))
+    value = policy(tmp_path)
+    value["datasets"][0]["growth_budget_bytes_per_hour"] = 9
     now = datetime(2026, 9, 3, 12, tzinfo=UTC)
     history = [{"observed_at": (now - timedelta(hours=n)).isoformat(), "pressure_active": False,
                 "datasets": [
@@ -51,7 +53,7 @@ def test_smoothed_growth_requires_three_samples_and_never_stop_excluded(tmp_path
                     {"name": "fills", "bytes": 100},
                 ]}
                for n in (2, 1)]
-    result = MODULE.decide(policy(tmp_path), history, now=now)
+    result = MODULE.decide(value, history, now=now)
     assert result["pressure_active"]
     assert result["datasets"][0]["bytes_per_hour"] == 10
     assert result["controlled_writers"] == ["capture"]
