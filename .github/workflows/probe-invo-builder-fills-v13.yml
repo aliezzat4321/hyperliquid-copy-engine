@@ -1,0 +1,54 @@
+name: probe-invo-builder-fills-v13
+on:
+  push:
+    branches: [wallet-pipeline/multibatch-close-proof-v13]
+    paths: [.github/workflows/probe-invo-builder-fills-v13.yml]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: [self-hosted, hyperliquid]
+    steps:
+      - name: Inspect public Invo builder fill availability
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILDER=0x557edb253b1d7ed5f15b248a5a3fd919fa5d3c81
+          TMP=$(mktemp -d)
+          trap 'rm -rf "$TMP"' EXIT
+          found=''
+          for ago in $(seq 2 30); do
+            DAY=$(date -u -d "$ago days ago" +%Y%m%d)
+            URL="https://stats-data.hyperliquid.xyz/Mainnet/builder_fills/${BUILDER}/${DAY}.csv.lz4"
+            code=$(curl -sS -L -o "$TMP/candidate.lz4" -w '%{http_code}' "$URL")
+            bytes=$(wc -c < "$TMP/candidate.lz4")
+            echo "day=$DAY status=$code bytes=$bytes"
+            if [ "$code" = 200 ] && [ "$bytes" -gt 100 ]; then
+              cp "$TMP/candidate.lz4" "$TMP/fills.lz4"
+              found="$DAY"
+              break
+            fi
+          done
+          test -n "$found"
+          if command -v lz4 >/dev/null 2>&1; then
+            lz4 -dc "$TMP/fills.lz4" > "$TMP/fills.csv"
+          else
+            python3 -m venv "$TMP/venv"
+            "$TMP/venv/bin/pip" -q install lz4
+            "$TMP/venv/bin/python" - "$TMP/fills.lz4" "$TMP/fills.csv" <<'PY'
+          import lz4.frame, pathlib, sys
+          src, dst = map(pathlib.Path, sys.argv[1:])
+          dst.write_bytes(lz4.frame.decompress(src.read_bytes()))
+          PY
+          fi
+          python3 - "$TMP/fills.csv" "$found" <<'PY'
+          import csv, json, pathlib, sys
+          p=pathlib.Path(sys.argv[1])
+          with p.open(newline='') as f:
+              r=csv.reader(f)
+              rows=[]
+              for i,row in enumerate(r):
+                  rows.append(row)
+                  if i>=2: break
+          print('BUILDER_SCHEMA_JSON='+json.dumps({'day':sys.argv[2],'rows':rows,'line_count':sum(1 for _ in p.open())}))
+          PY

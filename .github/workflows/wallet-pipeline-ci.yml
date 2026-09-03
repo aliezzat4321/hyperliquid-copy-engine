@@ -4,10 +4,12 @@ on:
   pull_request:
     paths:
       - "src/hlcopy/discovery/invo_*.py"
+      - "src/hlcopy/resolver/invo_builder_identifier.py"
       - "src/hlcopy/third_party/**"
       - "deploy/systemd/hyperliquid-invo-*.service"
       - "deploy/systemd/hyperliquid-third-party-*.service"
       - "scripts/deploy_invo_universe_self_hosted.sh"
+      - "scripts/deploy_wallet_identifier_self_hosted.sh"
       - "tests/test_invo_*.py"
       - "tests/test_third_party_profitability_track_v1.py"
       - ".github/workflows/wallet-pipeline-ci.yml"
@@ -33,12 +35,15 @@ jobs:
             src/hlcopy/discovery/invo_identifier_job.py \
             src/hlcopy/discovery/invo_identifier_durable_job.py \
             src/hlcopy/discovery/invo_durable_identity.py \
+            src/hlcopy/resolver/invo_builder_identifier.py \
+            tests/test_invo_builder_identifier_v13.py \
             tests/test_invo_direct_history_v4.py \
             tests/test_invo_identifier_parallel_v7.py \
             tests/test_invo_durable_identity_attestation_v1.py
       - name: Test identity and third-party handoff
         run: |
           pytest -q \
+            tests/test_invo_builder_identifier_v13.py \
             tests/test_invo_direct_history_v4.py \
             tests/test_invo_resolution_threshold_v3.py \
             tests/test_invo_identifier_job_v2.py \

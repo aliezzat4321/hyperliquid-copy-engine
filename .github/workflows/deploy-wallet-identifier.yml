@@ -6,6 +6,8 @@ on:
       - main
     paths:
       - "src/hlcopy/discovery/**"
+      - "src/hlcopy/resolver/invo_builder_identifier.py"
+      - "pyproject.toml"
       - "deploy/systemd/hyperliquid-invo-*.service"
       - "deploy/systemd/hyperliquid-invo-*.timer"
       - "scripts/deploy_wallet_identifier_self_hosted.sh"
@@ -30,6 +32,17 @@ jobs:
         with:
           persist-credentials: false
           clean: true
+
+      - name: Ensure builder-fill codec is installed
+        shell: bash
+        run: |
+          set -euo pipefail
+          python_bin="/root/hyperliquid-copy-engine/.venv/bin/python"
+          if [[ "$(id -u)" -eq 0 ]]; then
+            "$python_bin" -m pip install --disable-pip-version-check 'lz4>=4.3,<5'
+          else
+            sudo -n "$python_bin" -m pip install --disable-pip-version-check 'lz4>=4.3,<5'
+          fi
 
       - name: Deploy and run wallet identifier pipeline
         shell: bash
