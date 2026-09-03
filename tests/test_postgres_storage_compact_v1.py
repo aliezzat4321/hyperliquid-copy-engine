@@ -109,7 +109,7 @@ def test_plan_rejects_missing_provenance_for_discarded_snapshot(
     try:
         _install_schema_psql(monkeypatch, schema)
         MODULE._psql(
-            """
+            f"""
 CREATE TABLE leaderboard_snapshots (
     snapshot_at TIMESTAMPTZ NOT NULL
 );
@@ -124,8 +124,10 @@ INSERT INTO leaderboard_snapshots(snapshot_at) VALUES
     ('2026-08-18 01:00:00+00'),
     ('2026-08-18 09:00:00+00');
 INSERT INTO raw_api_responses(endpoint,fetched_at,content_sha256,response_json) VALUES
-    ('leaderboard','2026-08-18 01:00:00+00','keep-1','{}'::jsonb),
-    ('leaderboard','2026-08-18 09:00:00+00','keep-2','{}'::jsonb);
+    ('leaderboard','2026-08-18 01:00:00+00','{MODULE.EMPTY_PAYLOAD_SHA256}',
+     '{{}}'::jsonb),
+    ('leaderboard','2026-08-18 09:00:00+00','{MODULE.EMPTY_PAYLOAD_SHA256}',
+     '{{}}'::jsonb);
 """
         )
 
