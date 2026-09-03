@@ -6,11 +6,34 @@ from argparse import Namespace
 from decimal import Decimal
 from pathlib import Path
 
+import httpx
+
 from hlcopy.discovery import invo_identifier_durable_job, invo_identifier_job
 from hlcopy.resolver.identifier import WalletIdentificationResult
+from hlcopy.resolver.sqd_fills import SqdHyperliquidFillsClient
 
 
 class _FakeClient:
+    instances = 0
+
+    def __init__(self) -> None:
+        type(self).instances += 1
+        self.request_count = 9
+        self.request_latency_ms = 18.5
+        self.retry_count = 1
+        self.request_metrics_by_owner = {
+            "portfolio-0": {
+                "query_count": 5,
+                "query_latency_ms": 10.0,
+                "retry_count": 1,
+            },
+            "portfolio-1": {
+                "query_count": 4,
+                "query_latency_ms": 8.5,
+                "retry_count": 0,
+            },
+        }
+
     async def __aenter__(self) -> _FakeClient:
         return self
 
@@ -43,6 +66,7 @@ def test_identifier_runs_portfolios_concurrently_but_bounded(
     monkeypatch,
 ) -> None:
     state_dir = tmp_path / "invo"
+    _FakeClient.instances = 0
     queue_dir = state_dir / "resolution_queue"
     queue_dir.mkdir(parents=True)
     queue = []
@@ -92,6 +116,48 @@ def test_identifier_runs_portfolios_concurrently_but_bounded(
     assert result["errors"] == 0
     assert result["concurrency"] == 2
     assert peak == 2
+    assert _FakeClient.instances == 1
+    assert result["api"]["query_count"] == 9
+    assert result["api"]["by_portfolio"]["portfolio-0"] == {
+        "query_count": 5,
+        "query_latency_ms": 10.0,
+        "retry_count": 1,
+    }
+    assert result["api"]["by_portfolio"]["portfolio-5"]["query_count"] == 0
+    assert result["queue_backlog"] == 0
+    assert result["portfolio_latency_ms"]["p50"] is not None
+    assert result["time_to_first_candidate_ms"]["p99"] is not None
+    assert result["time_to_verified_identity_ms"]["p90"] is not None
+    assert result["verified_yield"] == 1.0
+
+
+def test_sqd_request_metrics_are_attributed_across_concurrent_portfolios() -> None:
+    async def exercise() -> SqdHyperliquidFillsClient:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            await asyncio.sleep(0)
+            return httpx.Response(204, request=request)
+
+        client = SqdHyperliquidFillsClient()
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        async with client:
+            async def request_for(portfolio_id: str) -> None:
+                with client.request_scope(portfolio_id):
+                    await client._request("GET", "probe", retries=0)
+
+            await asyncio.gather(request_for("portfolio-a"), request_for("portfolio-b"))
+        return client
+
+    client = asyncio.run(exercise())
+
+    assert client.request_count == 2
+    assert client.request_metrics_by_owner["portfolio-a"]["query_count"] == 1
+    assert client.request_metrics_by_owner["portfolio-b"]["query_count"] == 1
+    attributed_latency = sum(
+        float(metrics["query_latency_ms"])
+        for metrics in client.request_metrics_by_owner.values()
+    )
+    assert attributed_latency == client.request_latency_ms
 
 
 def test_production_identifier_uses_wide_bounded_batch() -> None:

@@ -193,6 +193,23 @@ def _materialize_grouped(
     portfolios: Sequence[Mapping[str, object]],
     min_trades: int,
 ) -> dict[str, object]:
+    generated_at = datetime.now(tz=UTC).isoformat()
+    queue_path = output_dir / "resolution_queue.json"
+    previous_ready_at: dict[str, str] = {}
+    if queue_path.exists():
+        try:
+            previous = json.loads(queue_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            previous = {}
+        previous_rows = previous.get("queue") if isinstance(previous, Mapping) else None
+        if isinstance(previous_rows, list):
+            for previous_row in previous_rows:
+                if not isinstance(previous_row, Mapping):
+                    continue
+                previous_id = str(previous_row.get("portfolio_id") or "").strip()
+                ready_at = str(previous_row.get("resolution_ready_at") or "").strip()
+                if previous_id and ready_at:
+                    previous_ready_at[previous_id] = ready_at
     metadata = {
         str(row.get("portfolio_id") or ""): row
         for row in portfolios
@@ -228,6 +245,9 @@ def _materialize_grouped(
                 "distinct_coin_count": len(coins),
                 "resolver_csv": str(csv_path),
                 "status": "READY_FOR_WALLET_RESOLUTION",
+                "resolution_ready_at": previous_ready_at.get(
+                    portfolio_id, generated_at
+                ),
             }
         )
 
@@ -242,9 +262,10 @@ def _materialize_grouped(
         "source": "invo",
         "minimum_evidence_trades": max(3, min_trades),
         "ready_count": len(queue),
+        "generated_at": generated_at,
         "queue": queue,
     }
-    path = output_dir / "resolution_queue.json"
+    path = queue_path
     temporary = path.with_suffix(".json.tmp")
     rendered = json.dumps(payload, indent=2, sort_keys=True) + "\n"
     temporary.write_text(rendered, encoding="utf-8")
