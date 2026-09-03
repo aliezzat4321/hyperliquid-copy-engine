@@ -65,3 +65,34 @@ Accepted, superseding parts of the 2026-08-31 operating-model entry above:
   forward repair.
 - This decision does not change live-trading permissions. `REAL_TRADING_ENABLED` remains
   disabled, and trading, live, deployment, capital and credential paths remain excluded.
+
+## 2026-09-03 — Typed remediation and explicit Opus-first entry supersede blind repair routing
+
+Issue #172 accepts the single architecture in
+`docs/ai-team/OPUS_REPAIR_LOOP_DIAGNOSIS.md` for the next control-plane implementation.
+
+- Review and CI failures must be structured as one of seven fail-closed remediation
+  classes: `CODE_CHANGE`, `PR_METADATA`, `PROTECTED_ACTION`, `CI_RETRY`,
+  `REVIEW_RERUN`, `POLICY_RECONCILIATION`, or `TERMINAL`. Unknown or contradictory
+  input is terminal; title and free-form prose are not classifier inputs.
+- Each blocker has a canonical fingerprint and each requested action an idempotency key.
+  Re-observing an unchanged fingerprint cannot create another child or consume another
+  attempt. Progress is the class-specific postcondition, not the existence of a file
+  diff; only `CODE_CHANGE` requires a repository diff.
+- Actor follows remediation type: Codex repairs code, the manager changes PR metadata or
+  reconciles state, the trusted manager performs separately authorized protected actions,
+  CI reruns checks, and the required reviewer reruns exact-SHA review.
+- Scheduling and blocking are dependency-component scoped. Control-plane maintenance or
+  Opus/provider waiting cannot block unrelated safe storage/profitability work merely by
+  occupying a global queue state.
+- Initial routing is explicit machine metadata. The approved high-value classes
+  `QUANT_PROFITABILITY`, `STATISTICAL_METHODOLOGY`, `MAJOR_ARCHITECTURE`,
+  `UNRESOLVED_DISAGREEMENT`, and `CAPITAL_SENSITIVE_METHODOLOGY` may start as Claude
+  Opus RESEARCH; routine engineering remains Codex BUILD. Invalid or unauthorized route
+  combinations fail closed.
+- #170 is superseded rather than salvaged. Legacy #166/#168 state is reconciled from
+  authoritative evidence, #120 is automatically released when its own dependencies are
+  satisfied, and #93/#92/#91 proceed through their class-appropriate routes.
+- This is an architecture decision, not implementation authorization. Existing exact-SHA
+  review, CI, protected-path and live-trading gates remain intact;
+  `REAL_TRADING_ENABLED` remains disabled.
