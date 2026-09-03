@@ -2,6 +2,22 @@
 
 Status: Hyperliquid-only engineering/review automation. This document does not authorize live trading.
 
+## Typed remediation protocol
+
+Review and CI failures are `BLOCKER_V1` records, not implicit requests for a code
+change. The manager persists a canonical fingerprint and idempotent action key and
+routes exactly one of `CODE_CHANGE`, `PR_METADATA`, `PROTECTED_ACTION`, `CI_RETRY`,
+`REVIEW_RERUN`, `POLICY_RECONCILIATION`, or `TERMINAL`. Only `CODE_CHANGE` requires a
+repository diff. Re-observing the same blocker changes its occurrence count but does
+not create a child or spend an action attempt. Unknown, contradictory, and unauthorized
+records fail closed for their dependency component.
+
+Fresh high-value issues must supply the strict `AI_INITIAL_*` route authorized for
+their `AI_TASK_CLASS` and begin as Claude Opus `RESEARCH`; successful research creates
+a Codex `BUILD` child tied to the immutable research result. Explicit routine work
+starts as Codex `BUILD`. Provider waits and scoped terminal blockers do not stop
+unrelated dependency components.
+
 ## Architecture
 
 GitHub remains the coordination record. A maintainer can mark an Issue `ai-team:ready`

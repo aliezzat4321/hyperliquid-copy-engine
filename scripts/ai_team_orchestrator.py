@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -74,8 +75,28 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "BUILD": {"agent": "CODEX_CHATGPT", "model_class": "CODEX_DEFAULT"},
         "REPAIR": {"agent": "CODEX_CHATGPT", "model_class": "CODEX_DEFAULT"},
         "REVIEW": {"agent": "CLAUDE", "model_class": "SONNET"},
-        "RESEARCH": {"agent": "CLAUDE", "model_class": "SONNET"},
+        "RESEARCH": {"agent": "CLAUDE", "model_class": "OPUS"},
     },
+    "initial_routes": {
+        "ROUTINE": {"task_type": "BUILD", "agent": "CODEX_CHATGPT", "model_class": "CODEX_DEFAULT"},
+        **{name: {"task_type": "RESEARCH", "agent": "CLAUDE", "model_class": "OPUS"}
+           for name in ("QUANT_PROFITABILITY", "STATISTICAL_METHODOLOGY", "MAJOR_ARCHITECTURE",
+                        "UNRESOLVED_DISAGREEMENT", "CAPITAL_SENSITIVE_METHODOLOGY")},
+    },
+    "remediation": {
+        "classes": ["CODE_CHANGE", "PR_METADATA", "PROTECTED_ACTION", "CI_RETRY",
+                    "REVIEW_RERUN", "POLICY_RECONCILIATION", "TERMINAL"],
+        "actors": {"CODE_CHANGE": "CODEX_CHATGPT", "PR_METADATA": "MANAGER",
+                   "PROTECTED_ACTION": "TRUSTED_MANAGER", "CI_RETRY": "MANAGER",
+                   "REVIEW_RERUN": "MANAGER", "POLICY_RECONCILIATION": "MANAGER",
+                   "TERMINAL": "MANAGER"},
+        "budgets": {"CODE_CHANGE": 1, "PR_METADATA": 3, "PROTECTED_ACTION": 1,
+                    "CI_RETRY": 3, "REVIEW_RERUN": 0, "POLICY_RECONCILIATION": 3,
+                    "TERMINAL": 0},
+        "protected_action_allowlist": ["DEPLOY_REVIEWED_CONTROL_PLANE"],
+    },
+    "legacy_remediation_migration": {"version": 1, "issues": [166, 168, 170],
+                                     "supersede_issue": 170, "release_issue": 120},
     "opus_allowed_task_classes": [
         "QUANT_PROFITABILITY",
         "STATISTICAL_METHODOLOGY",
@@ -301,11 +322,44 @@ class GitHub:
             )
         return "PASS", f"{len(runs)} check-runs green"
 
+    def failed_check_blockers(self, sha: str) -> list[dict[str, Any]]:
+        data = self.api("GET", f"repos/{self.repo}/commits/{sha}/check-runs?per_page=100") or {}
+        result = []
+        transient = {"cancelled", "timed_out", "stale", "neutral", "action_required"}
+        for check in data.get("check_runs", []):
+            conclusion = check.get("conclusion")
+            if check.get("status") != "completed" or conclusion in {"success", "skipped"}:
+                continue
+            klass = "CI_RETRY" if conclusion in transient and check.get("id") else "TERMINAL"
+            result.append({
+                "protocol_version": 1, "class": klass, "source_kind": "CI",
+                "source_id": str(check.get("id")), "subject_sha": sha,
+                "rule_id": "TRANSIENT_CHECK" if klass == "CI_RETRY" else "UNCLASSIFIED_CI_FAILURE",
+                "observed": {"name": str(check.get("name") or "").strip().lower(),
+                             "conclusion": conclusion, "run_id": check.get("id")},
+                "requested_action": {"check_run_id": check.get("id"),
+                                     "check_name": check.get("name")},
+            })
+        return result
+
     def merge(self, pr_number: int, sha: str) -> dict[str, Any]:
         return self.api(
             "PUT",
             f"repos/{self.repo}/pulls/{pr_number}/merge",
             {"merge_method": "squash", "sha": sha},
+        )
+
+    def patch_pr(self, number: int, fields: dict[str, Any]) -> dict[str, Any]:
+        return self.api("PATCH", f"repos/{self.repo}/pulls/{number}", fields)
+
+    def rerun_check(self, check_run_id: int) -> Any:
+        return self.api("POST", f"repos/{self.repo}/check-runs/{check_run_id}/rerequest")
+
+    def dispatch_workflow(self, workflow_id: str, ref: str, inputs: dict[str, Any]) -> Any:
+        workflow = urllib.parse.quote(workflow_id, safe="")
+        return self.api(
+            "POST", f"repos/{self.repo}/actions/workflows/{workflow}/dispatches",
+            {"ref": ref, "inputs": inputs},
         )
 
     def close_issue(self, number: int) -> None:
@@ -365,12 +419,60 @@ class Ledger:
               key TEXT PRIMARY KEY,
               value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS remediations (
+              remediation_id TEXT PRIMARY KEY, issue_number INTEGER NOT NULL,
+              pr_number INTEGER, subject_sha TEXT NOT NULL, class TEXT NOT NULL,
+              rule_id TEXT NOT NULL, source_kind TEXT NOT NULL, source_id TEXT NOT NULL,
+              observed_canonical_json TEXT NOT NULL, fingerprint TEXT NOT NULL UNIQUE,
+              actor TEXT NOT NULL, action_key TEXT NOT NULL UNIQUE, status TEXT NOT NULL,
+              occurrence_count INTEGER NOT NULL DEFAULT 1,
+              action_attempts INTEGER NOT NULL DEFAULT 0, last_action_at TEXT,
+              completion_evidence TEXT, parent_assignment_id TEXT,
+              requested_action_json TEXT NOT NULL, created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
             """
         )
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(tasks)")}
         for name in ("limit_text", "systemd_unit"):
             if name not in columns:
                 self.db.execute(f"ALTER TABLE tasks ADD COLUMN {name} TEXT")
+        self.db.commit()
+
+    def observe_remediation(self, blocker: dict[str, Any], *, issue_number: int,
+                            pr_number: int | None, actor: str,
+                            parent_assignment_id: str | None = None) -> sqlite3.Row:
+        observed = canonical_json(blocker["observed"])
+        identity = "\0".join((str(blocker.get("protocol_version", 1)), blocker["class"],
+                              blocker["rule_id"], blocker["source_kind"],
+                              str(blocker["source_id"]), blocker["subject_sha"], observed))
+        fingerprint = hashlib.sha256(identity.encode()).hexdigest()
+        action_json = canonical_json(blocker.get("requested_action", {}))
+        action_key = hashlib.sha256(
+            (fingerprint + "\0" + actor + "\0" + action_json).encode()
+        ).hexdigest()
+        now = utcnow()
+        self.db.execute(
+            "INSERT INTO remediations(remediation_id,issue_number,pr_number,subject_sha,"
+            "class,rule_id,"
+            "source_kind,source_id,observed_canonical_json,fingerprint,actor,action_key,status,"
+            "parent_assignment_id,requested_action_json,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(fingerprint) DO UPDATE SET "
+            "occurrence_count=occurrence_count+1,updated_at=excluded.updated_at",
+            (fingerprint[:24], issue_number, pr_number, blocker["subject_sha"], blocker["class"],
+             blocker["rule_id"], blocker["source_kind"], str(blocker["source_id"]), observed,
+             fingerprint, actor, action_key, "OBSERVED", parent_assignment_id,
+             action_json, now, now),
+        )
+        self.db.commit()
+        return self.db.execute(
+            "SELECT * FROM remediations WHERE fingerprint=?", (fingerprint,)
+        ).fetchone()
+
+    def update_remediation(self, remediation_id: str, **kw: Any) -> None:
+        kw["updated_at"] = utcnow()
+        self.db.execute("UPDATE remediations SET " + ",".join(f"{k}=?" for k in kw) +
+                        " WHERE remediation_id=?", [*kw.values(), remediation_id])
         self.db.commit()
 
     def recover_interrupted(self) -> list[dict[str, Any]]:
@@ -518,15 +620,8 @@ class Ledger:
         return bool(row)
 
     def has_queue_claim_conflict(self) -> bool:
-        """Allow unrelated Codex work while Claude is waiting on a future limit reset."""
-        placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
-        row = self.db.execute(
-            f"SELECT 1 FROM tasks WHERE status IN ({placeholders}) "
-            "AND NOT (agent='CLAUDE' AND status='WAITING_RATE_LIMIT' "
-            "AND retry_at IS NOT NULL AND retry_at > ?) LIMIT 1",
-            (*ACTIVE_STATUSES, utcnow()),
-        ).fetchone()
-        return bool(row)
+        """Capacity is not dependency: unrelated ready components may be claimed."""
+        return False
 
     def successful_issue(self, issue_number: int) -> bool:
         """Require the latest terminal assignment to be cleanly successful."""
@@ -622,6 +717,45 @@ class Ledger:
         }
 
 
+def canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _machine_values(body: str, name: str) -> list[str]:
+    return re.findall(rf"(?mi)^\s*{re.escape(name)}\s*=\s*([^\s]+)\s*$", body or "")
+
+
+def parse_initial_route(body: str, cfg: dict[str, Any] | None = None) -> dict[str, str]:
+    """Strictly parse the initial route. Invalid high-stakes metadata never defaults."""
+    cfg = cfg or DEFAULT_CONFIG
+    names = ("AI_TASK_CLASS", "AI_INITIAL_ROUTE", "AI_INITIAL_AGENT", "AI_INITIAL_MODEL")
+    values = {name: _machine_values(body, name) for name in names}
+    if any(len(items) > 1 for items in values.values()):
+        raise ValueError("INVALID_INITIAL_ROUTE: duplicate routing field")
+    task_class = values["AI_TASK_CLASS"][0] if values["AI_TASK_CLASS"] else None
+    # Backward-compatible spelling is accepted only for explicitly routine work.
+    legacy = _machine_values(body, "TASK_CLASS")
+    if len(legacy) > 1 or (legacy and task_class):
+        raise ValueError("INVALID_INITIAL_ROUTE: duplicate/contradictory task class")
+    if not task_class and len(legacy) == 1 and legacy[0] == "ROUTINE":
+        task_class = "ROUTINE"
+    if not task_class:
+        raise ValueError("INVALID_INITIAL_ROUTE: missing AI_TASK_CLASS")
+    expected = cfg.get("initial_routes", {}).get(task_class)
+    if not expected:
+        raise ValueError("INVALID_INITIAL_ROUTE: task class is not allowlisted")
+    supplied = {
+        "task_type": values["AI_INITIAL_ROUTE"][0] if values["AI_INITIAL_ROUTE"] else None,
+        "agent": values["AI_INITIAL_AGENT"][0] if values["AI_INITIAL_AGENT"] else None,
+        "model_class": values["AI_INITIAL_MODEL"][0] if values["AI_INITIAL_MODEL"] else None,
+    }
+    if task_class == "ROUTINE" and not any(supplied.values()):
+        supplied = dict(expected)
+    if supplied != expected:
+        raise ValueError("INVALID_INITIAL_ROUTE: incomplete or contradictory route")
+    return {"task_class": task_class, **supplied}  # type: ignore[arg-type]
+
+
 def parse_task_class(body: str) -> tuple[str, str | None]:
     """Parse an explicit task class, failing closed when absent or invalid.
 
@@ -641,6 +775,30 @@ def parse_task_class(body: str) -> tuple[str, str | None]:
     task_class = m.group(1) if m and m.group(1) in allowed else "UNCLASSIFIED"
     e = re.search(r"(?mi)^\s*OPUS_ESCALATION_REASON\s*=\s*([A-Z_]+)\s*$", body or "")
     return task_class, e.group(1) if e else None
+
+
+def normalize_blocker(blocker: Any, *, subject_sha: str, source_kind: str,
+                      source_id: str) -> dict[str, Any]:
+    """Validate BLOCKER_V1 without inferring a remediation class from prose."""
+    terminal = {"protocol_version": 1, "class": "TERMINAL", "source_kind": source_kind,
+                "source_id": str(source_id), "subject_sha": subject_sha,
+                "rule_id": "UNCLASSIFIED_BLOCKER", "observed": {"invalid": True},
+                "requested_action": {}}
+    if not isinstance(blocker, dict):
+        return terminal
+    required = {"class", "source_kind", "source_id", "subject_sha", "rule_id", "observed"}
+    if not required.issubset(blocker) or not isinstance(blocker.get("observed"), dict):
+        return terminal
+    if blocker["class"] not in DEFAULT_CONFIG["remediation"]["classes"]:
+        return terminal
+    if (str(blocker["subject_sha"]) != subject_sha or blocker["source_kind"] != source_kind
+            or str(blocker["source_id"]) != str(source_id)):
+        return terminal
+    result = dict(blocker)
+    result["protocol_version"] = 1
+    result["source_id"] = str(result["source_id"])
+    result.setdefault("requested_action", {})
+    return result
 
 
 def route_review(cfg: dict[str, Any], task_class: str, escalation_reason: str | None) -> str:
@@ -692,7 +850,7 @@ def result_marker(
     verdict: str,
     reviewer: str,
     model_class: str,
-    blockers: list[str],
+    blockers: list[Any],
     summary: str,
 ) -> str:
     safe_summary = " ".join(summary.split())[:600]
@@ -987,7 +1145,7 @@ def bounded_limit_text(text: str) -> str:
     return re.sub(r"\s+", " ", bounded_redacted(text, 1200)).strip()[-1200:]
 
 
-def extract_review(result: str, target_sha: str) -> tuple[str, list[str], str]:
+def extract_review(result: str, target_sha: str) -> tuple[str, list[Any], str]:
     verdict_m = re.search(r"(?mi)^\s*VERDICT\s*=\s*(PASS|FAIL)\s*$", result)
     sha_m = re.search(r"(?mi)^\s*REVIEWED_SHA\s*=\s*([0-9a-f]{40})\s*$", result)
     if not verdict_m or not sha_m:
@@ -995,13 +1153,13 @@ def extract_review(result: str, target_sha: str) -> tuple[str, list[str], str]:
     if sha_m.group(1) != target_sha:
         raise RuntimeError(f"stale reviewer SHA {sha_m.group(1)} != {target_sha}")
     verdict = verdict_m.group(1)
-    blockers: list[str] = []
+    blockers: list[Any] = []
     b = re.search(r"(?mi)^\s*BLOCKERS_JSON\s*=\s*(\[.*\])\s*$", result)
     if b:
         try:
             raw = json.loads(b.group(1))
-            if isinstance(raw, list):
-                blockers = [str(x)[:1000] for x in raw]
+            if isinstance(raw, list) and all(isinstance(x, (str, dict)) for x in raw):
+                blockers = raw
         except json.JSONDecodeError:
             pass
     if verdict == "FAIL" and not blockers:
@@ -1042,9 +1200,12 @@ def change_scan_text(workdir: Path, base_sha: str) -> str:
     return "\n".join(parts)
 
 
-def validate_changes(cfg: dict[str, Any], workdir: Path, base_sha: str) -> tuple[list[str], bool]:
+def validate_changes(cfg: dict[str, Any], workdir: Path, base_sha: str,
+                     expected_effect: str = "REPO_DIFF") -> tuple[list[str], bool]:
     files = changed_files(workdir, base_sha)
     if not files:
+        if expected_effect == "NO_REPO_DIFF":
+            return [], False
         raise RuntimeError("agent produced no file changes")
     no_auto = False
     for name in files:
@@ -1179,24 +1340,37 @@ class Orchestrator:
             if str(issue.get("author_association") or "") not in self.trusted:
                 continue
             body = str(issue.get("body") or "")
-            task_class, escalation_reason = parse_task_class(body)
+            try:
+                route = parse_initial_route(body, self.cfg)
+            except ValueError as exc:
+                task_id = self.ledger.create_task(
+                    issue_number=number, task_type="TERMINAL", agent="MANAGER",
+                    model_class="NONE", task_class="UNCLASSIFIED", status="BLOCKED",
+                    last_error=str(exc),
+                )
+                blocker = normalize_blocker({}, subject_sha="INITIAL", source_kind="ISSUE",
+                                            source_id=str(number))
+                blocker["rule_id"] = "INVALID_INITIAL_ROUTE"
+                self.ledger.observe_remediation(blocker, issue_number=number, pr_number=None,
+                                                actor="MANAGER", parent_assignment_id=task_id)
+                self.block(self.ledger.get(task_id), str(exc))
+                return True
+            task_class = route["task_class"]
             task_id = self.ledger.create_task(
                 issue_number=number,
-                task_type="BUILD",
-                agent="CODEX_CHATGPT",
-                model_class="CODEX_DEFAULT",
+                task_type=route["task_type"],
+                agent=route["agent"],
+                model_class=route["model_class"],
                 task_class=task_class,
             )
             self.gh.comment(
                 number,
                 assignment_marker(
                     task_id=task_id,
-                    agent="CODEX_CHATGPT",
-                    task_type="BUILD",
-                    model_class="CODEX_DEFAULT",
+                    agent=route["agent"], task_type=route["task_type"],
+                    model_class=route["model_class"],
                     task_class=task_class,
                     issue_number=number,
-                    escalation_reason=escalation_reason,
                 ),
             )
             self.gh.add_labels(number, [self.cfg["labels"]["pending"]])
@@ -1206,8 +1380,7 @@ class Orchestrator:
                 "TASK_ASSIGNED",
                 assignment_id=task_id,
                 issue=number,
-                agent="CODEX_CHATGPT",
-                task_type="BUILD",
+                agent=route["agent"], task_type=route["task_type"],
             )
             self.sync_runtime_checkpoint()
             return True
@@ -1341,7 +1514,8 @@ class Orchestrator:
                 elif row["status"] == "DONE":
                     if not self.ledger.child(str(row["id"]), "REPAIR"):
                         blockers = json.loads(row["blockers_json"] or "[]")
-                        self.enqueue_repair(row, blockers)
+                        self.dispatch_remediations(row, blockers, source_kind="REVIEW",
+                                                   source_id=str(row["id"]))
                         self.runtime.event(
                             "HANDOFF_RECOVERED",
                             assignment_id=row["id"],
@@ -1375,6 +1549,92 @@ class Orchestrator:
                     error=str(exc),
                 )
 
+    def migrate_legacy_remediation(self) -> None:
+        """One-shot, restart-safe projection of legacy #166/#168/#170 assignments."""
+        migration = self.cfg.get("legacy_remediation_migration", {})
+        version = str(migration.get("version", 1))
+        key = f"remediation_migration_v{version}"
+        if self.ledger.meta_get(key) == "DONE":
+            return
+        issues = tuple(int(x) for x in migration.get("issues", (166, 168, 170)))
+        placeholders = ",".join("?" for _ in issues)
+        now = utcnow()
+        self.ledger.db.execute(
+            f"UPDATE tasks SET status='STALE',last_error='SUPERSEDED_BY_REMEDIATION_V1',"
+            f"retry_at=NULL,updated_at=? WHERE issue_number IN ({placeholders}) "
+            "AND status IN "
+            "('PENDING','RETRY','WAITING_RATE_LIMIT','WAITING_CI','RUNNING','BLOCKED')",
+            (now, *issues),
+        )
+        self.ledger.db.commit()
+        # The snapshot is authoritative input for the deployed manager. Missing API
+        # evidence is recorded per issue and never expands into unrelated queue blocking.
+        for number in issues:
+            marker = f"legacy_reconciled_v{version}:{number}"
+            if self.ledger.meta_get(marker):
+                continue
+            try:
+                issue = self.gh.issue(number)
+                snapshot = {"state": issue.get("state"),
+                            "labels": sorted(str(x.get("name")) for x in issue.get("labels", [])),
+                            "authorization": {
+                                "author_association": issue.get("author_association"),
+                                "protected_change": acceptance_flag(
+                                    str(issue.get("body") or ""), "AI_TEAM_PROTECTED_CHANGE"
+                                ),
+                            }}
+                pr_number = {166: 167, 168: 169, 170: 171}[number]
+                try:
+                    pr = self.gh.pr(pr_number)
+                    head = str((pr.get("head") or {}).get("sha") or "")
+                    snapshot["pr"] = {"number": pr_number, "state": pr.get("state"),
+                                      "head": head,
+                                      "checks": self.gh.check_state(head) if head else None}
+                    snapshot["machine_reviews"] = [
+                        c.get("body") for c in self.gh.comments(pr_number)
+                        if MACHINE_RESULT in str(c.get("body") or "")
+                    ]
+                except Exception as exc:
+                    snapshot["pr_error"] = type(exc).__name__
+            except Exception as exc:
+                snapshot = {"error": type(exc).__name__}
+            self.ledger.meta_set(marker, canonical_json(snapshot))
+            if "error" in snapshot:
+                blocker = normalize_blocker({}, subject_sha="LEGACY", source_kind="ISSUE",
+                                            source_id=str(number))
+                self.ledger.observe_remediation(
+                    blocker, issue_number=number, pr_number=None, actor="MANAGER"
+                )
+        # #170/#171 are explicitly superseded by the accepted diagnosis; this is
+        # idempotent against already-closed GitHub objects.
+        try:
+            self.gh.api("PATCH", f"repos/{REPO}/pulls/171", {"state": "closed"})
+            self.gh.close_issue(int(migration.get("supersede_issue", 170)))
+        except Exception as exc:
+            self.runtime.event("LEGACY_SUPERSEDE_RETRY", issue=170, pr=171, error=str(exc))
+            return
+        # Restore #120 only when its own declared dependency closure is satisfied.
+        release = int(migration.get("release_issue", 120))
+        try:
+            candidate = self.gh.issue(release)
+            metadata = queue_metadata(str(candidate.get("body") or ""))
+            dependencies = metadata[1] if metadata else ()
+            satisfied = True
+            for dep in dependencies:
+                dependency = self.gh.issue(dep)
+                dep_labels = {str(x.get("name")) for x in dependency.get("labels", [])}
+                if (str(dependency.get("state") or "open").lower() != "closed"
+                        and self.cfg["labels"]["done"] not in dep_labels):
+                    satisfied = False
+                    break
+            if satisfied:
+                self.gh.add_labels(release, [self.cfg["labels"]["queued"]])
+                self.gh.remove_label(release, self.cfg["labels"]["blocked"])
+        except Exception as exc:
+            self.runtime.event("LEGACY_RELEASE_RETRY", issue=release, error=str(exc))
+            return
+        self.ledger.meta_set(key, "DONE")
+
     def cycle(self) -> None:
         for stale in self.ledger.recover_interrupted():
             self.reap_stale_child(stale)
@@ -1383,6 +1643,7 @@ class Orchestrator:
                 issue=stale["issue_number"], pr=stale["pr_number"],
                 target_sha=stale["target_sha"], session_id=stale["session_id"],
             )
+        self.migrate_legacy_remediation()
         self.reconcile_handoffs()
         if self.ledger.due() is not None:
             self.reconcile_parent_finalizers()
@@ -1406,6 +1667,8 @@ class Orchestrator:
                 self.handle_codex(task)
             elif task["task_type"] == "REVIEW":
                 self.handle_review(task)
+            elif task["task_type"] == "RESEARCH":
+                self.handle_research(task)
             else:
                 self.block(task, f"unsupported task type {task['task_type']}")
         finally:
@@ -1677,6 +1940,16 @@ class Orchestrator:
                 last_error=None,
                 systemd_unit=None,
             )
+            remediation = self.ledger.db.execute(
+                "SELECT remediation_id FROM remediations WHERE parent_assignment_id=? "
+                "AND class='CODE_CHANGE' ORDER BY created_at DESC LIMIT 1",
+                (str(task["parent_id"]),),
+            ).fetchone()
+            if remediation:
+                self.ledger.update_remediation(
+                    str(remediation["remediation_id"]), status="COMPLETED",
+                    completion_evidence=canonical_json({"new_sha": new_sha}),
+                )
             self.enqueue_review(task, pr_number, new_sha)
             self.finish_runtime_run(
                 run_id,
@@ -1692,6 +1965,24 @@ class Orchestrator:
         except Exception as exc:
             error = str(exc)
             current = self.ledger.get(task["id"])
+            if task["task_type"] == "REPAIR" and error == "agent produced no file changes":
+                remediation = self.ledger.db.execute(
+                    "SELECT remediation_id FROM remediations WHERE parent_assignment_id=? "
+                    "AND class='CODE_CHANGE' ORDER BY created_at DESC LIMIT 1",
+                    (str(task["parent_id"]),),
+                ).fetchone()
+                if remediation:
+                    self.ledger.update_remediation(
+                        str(remediation["remediation_id"]), status="TERMINAL",
+                        completion_evidence="completed code action produced no progress",
+                    )
+                self.block(current, "unchanged CODE_CHANGE fingerprint after one completed action")
+                self.finish_runtime_run(
+                    run_id, str(task["id"]), stdout=cp.stdout, stderr=cp.stderr,
+                    exit_code=1, session_id=session_id, usage=usage, result=result,
+                    error=error, status="BLOCKED",
+                )
+                return
             fail_closed_markers = (
                 "unsafe changed path",
                 "owner-sensitive live path",
@@ -1775,7 +2066,9 @@ class Orchestrator:
                 "\nThis is a repair pass. Fix ONLY the review blockers below "
                 "and necessary adjacent tests. "
                 "Do not re-audit the repository.\nBLOCKERS:\n"
-                + "\n".join(f"- {x}" for x in blockers)
+                + "\n".join(
+                    f"- {canonical_json(x) if isinstance(x, dict) else x}" for x in blockers
+                )
             )
         return f"""You are the CODEX_CHATGPT engineering builder for the Hyperliquid project.
 One scoped task only: GitHub Issue #{issue["number"]}: {issue.get("title", "")}
@@ -1944,6 +2237,60 @@ TASK_CLASS={task["task_class"]}
                 issue=parent["issue_number"], pr=pr_number,
                 child_type="REVIEW", error=str(exc),
             )
+
+    def handle_research(self, task: sqlite3.Row) -> None:
+        """Run Opus research and hand its immutable result to a Codex BUILD child."""
+        issue = self.gh.issue(int(task["issue_number"]))
+        if task["agent"] != "CLAUDE" or task["model_class"] != "OPUS":
+            self.block(task, "INVALID_INITIAL_ROUTE: research must be CLAUDE/OPUS")
+            return
+        workdir = prepare_checkout(user=CLAUDE_USER, home=CLAUDE_HOME, base_dir=CLAUDE_WORK,
+                                   task_id=str(task["id"]), ref="origin/main")
+        self.ledger.update(task["id"], status="RUNNING", workdir=str(workdir),
+                           attempt=int(task["attempt"]) + 1)
+        task = self.ledger.get(str(task["id"]))
+        prompt = (
+            f"Research GitHub Issue #{task['issue_number']} as CLAUDE OPUS. Produce an "
+            "implementation-ready architecture artifact; do not edit files or use GitHub. "
+            "REAL TRADING remains disabled. Issue body:\n" + str(issue.get("body") or "")
+        )
+        unit = f"hl-ai-claude-{task['id'][:10]}-{int(time.time())}"
+        log_path = CLAUDE_LOG / f"{task['id']}-attempt-{task['attempt']}.json"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        run_id = self.ledger.open_run(task, log_path)
+        try:
+            cp = self.invoke_claude(task, workdir, prompt, unit)
+        except subprocess.TimeoutExpired:
+            self.retry_or_block(task, "Opus research timeout")
+            return
+        combined = cp.stdout + "\n" + cp.stderr
+        session_id, usage, result = parse_claude_output(cp.stdout)
+        limited, retry_at = rate_limit_info(
+            combined, int(self.cfg["default_rate_limit_retry_seconds"])
+        )
+        if limited:
+            self.ledger.update(task["id"], status="WAITING_RATE_LIMIT", retry_at=retry_at,
+                               session_id=session_id, attempt=max(0, int(task["attempt"]) - 1),
+                               last_error="Claude rate/usage limit")
+            return
+        if cp.returncode or not result:
+            self.retry_or_block(
+                task, f"Opus research failed rc={cp.returncode}", session_id=session_id
+            )
+            return
+        result_id = hashlib.sha256(result.encode()).hexdigest()
+        evidence = {"research_result_id": result_id, "artifact": result}
+        self.ledger.update(task["id"], status="DONE", session_id=session_id,
+                           blockers_json=canonical_json(evidence), last_error=None)
+        if not self.ledger.child(str(task["id"]), "BUILD"):
+            self.ledger.create_task(
+                issue_number=int(task["issue_number"]), task_type="BUILD",
+                agent="CODEX_CHATGPT", model_class="CODEX_DEFAULT",
+                task_class=str(task["task_class"]), blockers=[evidence],
+                parent_id=str(task["id"]),
+            )
+        self.ledger.close_run(run_id, exit_code=0, session_id=session_id, usage=usage,
+                              result=result, error=None)
 
     def handle_review(self, task: sqlite3.Row) -> None:
         if not task["pr_number"] or not task["target_sha"]:
@@ -2184,7 +2531,8 @@ not run on re-review because previous_sha is then populated.
                 last_error="review FAIL",
                 systemd_unit=None,
             )
-            self.enqueue_repair(task, blockers)
+            self.dispatch_remediations(task, blockers, source_kind="REVIEW",
+                                       source_id=str(task["id"]))
             self.finish_runtime_run(
                 run_id,
                 str(task["id"]),
@@ -2268,6 +2616,9 @@ not run on re-review because previous_sha is then populated.
         blockers: list[str],
     ) -> str:
         target = str(task["target_sha"])
+        blocker_text = "\n".join(
+            "- " + (canonical_json(x) if isinstance(x, dict) else str(x)) for x in blockers
+        ) if blockers else "(none)"
         delta = ""
         if task["previous_sha"]:
             delta = (
@@ -2303,7 +2654,7 @@ CHANGED FILES:
 {chr(10).join("- " + x for x in changed)}
 
 PREVIOUS BLOCKERS (if any):
-{chr(10).join("- " + x for x in blockers) if blockers else "(none)"}
+{blocker_text}
 
 LATEST TRUSTED PR COMMENTS:
 {chr(10).join(comments[-6:]) if comments else "(none)"}
@@ -2316,14 +2667,129 @@ BLOCKERS_JSON=[]
 If any merge-blocking defect exists, instead emit:
 REVIEWED_SHA={target}
 VERDICT=FAIL
-BLOCKERS_JSON=["concise blocker 1","concise blocker 2"]
+BLOCKERS_JSON=[{{"protocol_version":1,"class":"CODE_CHANGE",\
+"source_kind":"REVIEW","source_id":"{task['id']}","subject_sha":"{target}",\
+"rule_id":"stable_rule_id","observed":{{"paths":["path"],"reproducer":"command"}},\
+"requested_action":{{"paths":["path"],"reproducer":"command"}}}}]
 
 The reviewed SHA must be exactly the target SHA.
+Each blocker must be exactly one BLOCKER_V1 object. Use PR_METADATA, PROTECTED_ACTION,
+CI_RETRY, REVIEW_RERUN, POLICY_RECONCILIATION, or TERMINAL when appropriate. Never infer
+that non-code work needs a CODE_CHANGE. Unknown or contradictory evidence is TERMINAL.
 """
 
-    def enqueue_repair(self, review: sqlite3.Row, blockers: list[str]) -> None:
+    def dispatch_remediations(self, parent: sqlite3.Row, blockers: list[Any], *,
+                              source_kind: str, source_id: str) -> None:
+        """Persist then execute typed, idempotent manager/model actions."""
+        for raw in blockers:
+            effective_source = str(raw.get("source_id")) if isinstance(raw, dict) else source_id
+            blocker = normalize_blocker(raw, subject_sha=str(parent["target_sha"] or ""),
+                                        source_kind=source_kind, source_id=effective_source)
+            klass = blocker["class"]
+            actor = self.cfg["remediation"]["actors"][klass]
+            row = self.ledger.observe_remediation(
+                blocker, issue_number=int(parent["issue_number"]),
+                pr_number=int(parent["pr_number"]) if parent["pr_number"] else None,
+                actor=actor, parent_assignment_id=str(parent["id"]),
+            )
+            # An existing action is an observation only: never spend or duplicate.
+            if row["status"] != "OBSERVED" or int(row["occurrence_count"]) > 1:
+                continue
+            action = json.loads(row["requested_action_json"] or "{}")
+            rid = str(row["remediation_id"])
+            if klass == "CODE_CHANGE":
+                self.enqueue_repair(parent, [blocker], action_key=str(row["action_key"]))
+                self.ledger.update_remediation(rid, status="ACTION_STARTED", action_attempts=1,
+                                               last_action_at=utcnow())
+            elif klass == "PR_METADATA":
+                allowed = {"title", "body", "base", "draft"}
+                fields = action.get("fields")
+                if not isinstance(fields, dict) or not fields or not set(fields) <= allowed:
+                    self.ledger.update_remediation(rid, status="TERMINAL",
+                                                   completion_evidence="invalid metadata action")
+                    continue
+                result = self.gh.patch_pr(int(parent["pr_number"]), fields)
+                complete = all(result.get(k) == v for k, v in fields.items())
+                self.ledger.update_remediation(rid, status="COMPLETED" if complete else "TERMINAL",
+                                               action_attempts=1, last_action_at=utcnow(),
+                                               completion_evidence=canonical_json(result))
+                if complete:
+                    self.ledger.update(parent["id"], status="WAITING_CI", retry_at=utcnow(),
+                                       last_error=None)
+            elif klass == "CI_RETRY":
+                check_run = action.get("check_run_id")
+                if not isinstance(check_run, int):
+                    self.ledger.update_remediation(rid, status="TERMINAL",
+                                                   completion_evidence="missing check_run_id")
+                    continue
+                self.gh.rerun_check(check_run)
+                self.ledger.update_remediation(rid, status="COMPLETED", action_attempts=1,
+                                               last_action_at=utcnow(),
+                                               completion_evidence=canonical_json(
+                                                   {"check_run_id": check_run}
+                                               ))
+                self.ledger.update(parent["id"], status="WAITING_CI", retry_at=utcnow())
+            elif klass == "REVIEW_RERUN":
+                self.enqueue_replacement_review(parent, str(parent["target_sha"]))
+                self.ledger.update_remediation(rid, status="COMPLETED", action_attempts=0,
+                                               completion_evidence="exact-SHA review requested")
+            elif klass == "POLICY_RECONCILIATION":
+                self.ledger.update_remediation(rid, status="COMPLETED", action_attempts=1,
+                                               last_action_at=utcnow(),
+                                               completion_evidence=(
+                                                   "authoritative projection reconciled"
+                                               ))
+            elif klass == "PROTECTED_ACTION":
+                auth = blocker["observed"].get("authorization")
+                name = action.get("name")
+                expiry = parse_utc(auth.get("expires_at")) if isinstance(auth, dict) else None
+                valid = (
+                    isinstance(auth, dict) and auth.get("valid") is True and auth.get("id")
+                    and auth.get("subject_sha") == parent["target_sha"]
+                    and isinstance(auth.get("max_actions"), int) and auth["max_actions"] >= 1
+                    and expiry is not None and expiry > dt.datetime.now(dt.timezone.utc)
+                )
+                if not valid or name not in self.cfg["remediation"]["protected_action_allowlist"]:
+                    self.ledger.update_remediation(rid, status="TERMINAL",
+                                                   completion_evidence=(
+                                                       "missing/invalid authorization"
+                                                   ))
+                else:
+                    workflow = action.get("workflow_id")
+                    ref = action.get("ref")
+                    if not isinstance(workflow, str) or not isinstance(ref, str):
+                        self.ledger.update_remediation(
+                            rid, status="TERMINAL",
+                            completion_evidence="authorized action missing workflow/ref",
+                        )
+                        continue
+                    self.gh.dispatch_workflow(
+                        workflow, ref,
+                        {"authorization_id": str(auth["id"]),
+                         "action_key": str(row["action_key"])},
+                    )
+                    self.ledger.update_remediation(
+                        rid, status="COMPLETED", action_attempts=1,
+                        last_action_at=utcnow(), completion_evidence=canonical_json(
+                            {"authorization_id": auth["id"], "workflow": workflow,
+                             "ref": ref}
+                        ),
+                    )
+            else:
+                self.ledger.update_remediation(rid, status="TERMINAL",
+                                               completion_evidence=blocker["rule_id"])
+                self.block(parent, blocker["rule_id"])
+
+    def enqueue_repair(self, review: sqlite3.Row, blockers: list[Any],
+                       action_key: str | None = None) -> None:
+        if action_key and self.ledger.db.execute(
+            "SELECT 1 FROM tasks WHERE parent_id=? AND blockers_json LIKE ? LIMIT 1",
+            (str(review["id"]), f"%{action_key}%"),
+        ).fetchone():
+            return
         if self.ledger.child(str(review["id"]), "REPAIR"):
             return
+        payload: list[Any] = blockers + ([{"action_key": action_key}] if action_key else [])
         task_id = self.ledger.create_task(
             issue_number=int(review["issue_number"]),
             pr_number=int(review["pr_number"]),
@@ -2333,7 +2799,7 @@ The reviewed SHA must be exactly the target SHA.
             task_class=str(review["task_class"]),
             branch=None,
             previous_sha=str(review["target_sha"]),
-            blockers=blockers,
+            blockers=payload,
             parent_id=str(review["id"]),
         )
         try:
@@ -2421,7 +2887,15 @@ The reviewed SHA must be exactly the target SHA.
             return
         if state == "FAIL":
             # CI failures are repairable code/test defects, not owner blockers.
-            blockers = [f"CI failed at {target}: {detail}"]
+            blockers = (
+                self.gh.failed_check_blockers(target)
+                if hasattr(self.gh, "failed_check_blockers") else []
+            )
+            if not blockers:
+                blockers = [{"protocol_version": 1, "class": "TERMINAL", "source_kind": "CI",
+                             "source_id": f"{target}:{detail}", "subject_sha": target,
+                             "rule_id": "UNCLASSIFIED_CI_FAILURE", "observed": {"detail": detail},
+                             "requested_action": {}}]
             self.ledger.update(
                 task["id"],
                 status="DONE",
@@ -2437,7 +2911,8 @@ The reviewed SHA must be exactly the target SHA.
                 target_sha=target,
                 detail=detail,
             )
-            self.enqueue_repair(task, blockers)
+            self.dispatch_remediations(task, blockers, source_kind="CI",
+                                       source_id=f"{target}:{detail}")
             return
         files = self.gh.changed_files(int(task["pr_number"]))
         issue = self.gh.issue(int(task["issue_number"]))
