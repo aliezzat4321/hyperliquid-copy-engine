@@ -6,6 +6,9 @@ on:
       - "src/hlcopy/research/pdh_pdl_sweep.py"
       - "tests/test_pdh_pdl_sweep.py"
       - ".github/workflows/pdh-pdl-sweep-experiment.yml"
+      - "docs/ai-team/experiments/registry.json"
+      - "docs/ai-team/experiments/INDEX.md"
+      - "docs/ai-team/experiments/EXP-002.md"
   workflow_dispatch:
 
 permissions:
@@ -28,6 +31,7 @@ jobs:
         run: ruff check src/hlcopy/research/pdh_pdl_sweep.py tests/test_pdh_pdl_sweep.py
       - name: Run frozen historical experiment
         run: |
+          mkdir -p artifacts
           python -m hlcopy.research.pdh_pdl_sweep \
             --start 2021-01-01 \
             --end 2026-08-31 \
