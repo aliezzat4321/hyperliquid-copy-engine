@@ -58,7 +58,7 @@ def evaluate(
         ),
         "filesystem_reclaimed": int(apply.get("after_available_bytes", 0))
         > int(apply.get("before_available_bytes", 0)),
-        "lossless_lifecycle": lifecycle is None or (
+        "lossless_lifecycle": lifecycle is not None and (
             int(lifecycle.get("rows_lost", -1)) == 0
             and lifecycle.get("reader_column_registry_satisfied") is True
             and int(lifecycle.get("compress_candidates_deleted", -1)) == 0
@@ -94,8 +94,8 @@ def evaluate(
             "reviewed_commit_sha", "postgres_manifest_sha256", "reviewer",
         )) and review.get("postgres_manifest_sha256") == apply.get("manifest_sha256")
         and (
-            lifecycle is None
-            or review.get("lifecycle_manifest_sha256")
+            lifecycle is not None
+            and review.get("lifecycle_manifest_sha256")
             == lifecycle.get("manifest_sha256")
         ),
         "safety_boundaries": apply.get("real_trading_change") is False
@@ -126,7 +126,7 @@ def main() -> None:
     parser.add_argument("--controller-history", type=Path, required=True)
     parser.add_argument("--policy", type=Path, default=Path("config/storage_policy.json"))
     parser.add_argument("--review-provenance", type=Path, required=True)
-    parser.add_argument("--lifecycle-audit", type=Path)
+    parser.add_argument("--lifecycle-audit", type=Path, required=True)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     result = evaluate(

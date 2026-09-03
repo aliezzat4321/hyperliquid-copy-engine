@@ -57,7 +57,8 @@ def test_exit_gate_requires_uncontaminated_24_hour_allow_window() -> None:
         apply=apply, controller_history={"observations": observations},
         policy=policy, review=review,
     )
-    assert result["exit_ready"] is True
+    assert result["exit_ready"] is False
+    assert result["checks"]["lossless_lifecycle"] is False
 
     lifecycle_without_review = dict(review)
     del lifecycle_without_review["lifecycle_manifest_sha256"]
