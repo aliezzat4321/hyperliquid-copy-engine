@@ -9,57 +9,153 @@ permissions:
   contents: read
 
 jobs:
-  prioritize_opus_review_181:
+  fix_and_review_auto_merge_policy:
     runs-on: [self-hosted, linux]
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      - name: Replace stale review checkpoint with current exact SHA
+      - uses: actions/checkout@v4
+        with:
+          ref: manager/181-auto-merge-on-pass
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Apply exact Opus blocker and seed replacement review
         shell: bash
         run: |
           set -euo pipefail
-          /usr/bin/python3 - <<'PY'
+          python3 - <<'PY'
+          from pathlib import Path
+
+          doc = Path('docs/ai-team/AUTONOMOUS_TEAM.md')
+          s = doc.read_text()
+          old = '''Agents cannot choose Opus. The orchestrator validates the task class and escalation reason. Routine work with an Opus escalation request is rejected. Non-routine/Opus task classes are never automatically merged even after review and CI.
+
+Automatic merge requires an explicit `TASK_CLASS=ROUTINE` (or `AI_TASK_CLASS=ROUTINE`) field. A missing or invalid task class is recorded as `UNCLASSIFIED` and cannot be automatically merged. Changes to GitHub workflows, systemd deployment files, or the orchestrator's own scripts also always require a non-automatic merge.
+'''
+          new = '''Agents cannot choose Opus. The orchestrator validates the task class and escalation reason. Routine work with an Opus escalation request is rejected. Review-model routing is independent of merge eligibility: every recognized task class becomes merge-eligible only after an independent exact-SHA review PASS and green CI.
+
+Automatic merge requires an explicit recognized task class (`TASK_CLASS` or `AI_TASK_CLASS`). A missing or invalid task class is recorded as `UNCLASSIFIED` and cannot be automatically merged. Protected AI-control-plane files additionally require a trusted Issue author, `AI_TEAM_PROTECTED_CHANGE=YES`, and membership in the narrow `AUTO_APPLY_CONTROL_PLANE_PATHS` allowlist before the same exact-SHA PASS + green-CI merge step. GitHub workflow, systemd deployment, trading/live, capital, credential, and other paths outside that allowlist remain non-automatically mergeable.
+'''
+          if old not in s:
+              raise SystemExit('AUTONOMOUS_TEAM old merge policy text not found')
+          doc.write_text(s.replace(old, new, 1))
+
+          p = Path('scripts/ai_team_orchestrator.py')
+          s = p.read_text()
+          old = '''    UNCLASSIFIED uses the routine Sonnet review route but is deliberately absent
+    from auto_merge_task_classes, so only an explicitly declared ROUTINE task can
+    reach automatic merge.
+'''
+          new = '''    UNCLASSIFIED uses the routine Sonnet review route but is deliberately absent
+    from auto_merge_task_classes. Every explicitly declared recognized task class can
+    reach automatic merge only after the independent exact-SHA review and CI gates.
+'''
+          if old not in s:
+              raise SystemExit('parse_task_class docstring old merge policy not found')
+          p.write_text(s.replace(old, new, 1))
+
+          t = Path('tests/test_ai_team_orchestrator.py')
+          s = t.read_text()
+          old = '''def test_only_explicit_routine_class_is_auto_merge_eligible():
+    auto_merge = orch.DEFAULT_CONFIG["auto_merge_task_classes"]
+    assert orch.parse_task_class("TASK_CLASS=ROUTINE")[0] in auto_merge
+    assert orch.parse_task_class("missing classification")[0] not in auto_merge
+    assert orch.parse_task_class("TASK_CLASS=INVALID")[0] not in auto_merge
+'''
+          new = '''def test_only_explicit_recognized_task_classes_are_auto_merge_eligible():
+    auto_merge = set(orch.DEFAULT_CONFIG["auto_merge_task_classes"])
+    for task_class in (
+        "ROUTINE",
+        "QUANT_PROFITABILITY",
+        "STATISTICAL_METHODOLOGY",
+        "MAJOR_ARCHITECTURE",
+        "UNRESOLVED_DISAGREEMENT",
+        "CAPITAL_SENSITIVE_METHODOLOGY",
+    ):
+        assert orch.parse_task_class(f"TASK_CLASS={task_class}")[0] in auto_merge
+    assert orch.parse_task_class("missing classification")[0] not in auto_merge
+    assert orch.parse_task_class("TASK_CLASS=INVALID")[0] not in auto_merge
+'''
+          if old not in s:
+              raise SystemExit('old auto-merge test not found')
+          t.write_text(s.replace(old, new, 1))
+
+          d = Path('docs/ai-team/DECISIONS.md')
+          s = d.read_text()
+          heading = '## 2026-09-03 — Exact-SHA reviewer PASS + green CI is the merge decision for recognized task classes'
+          if heading not in s:
+              s += '''\n\n## 2026-09-03 — Exact-SHA reviewer PASS + green CI is the merge decision for recognized task classes
+
+This supersedes the earlier task-class policy that withheld automatic merge from non-routine / Opus-class work after successful review.
+
+- Builder and reviewer responsibilities remain separate: Codex implements; the routed independent Claude reviewer evaluates the immutable PR head SHA.
+- For every recognized task class (`ROUTINE`, `QUANT_PROFITABILITY`, `STATISTICAL_METHODOLOGY`, `MAJOR_ARCHITECTURE`, `UNRESOLVED_DISAGREEMENT`, and `CAPITAL_SENSITIVE_METHODOLOGY`), an independent exact-SHA `PASS` plus green required CI is the merge decision. The credential-holding manager executes that decision immediately; it is not a second approval stage and no timer, human click, or separate finalizer is required.
+- `UNCLASSIFIED` or invalid task classes remain ineligible for automatic merge.
+- Protected AI-control-plane changes still require trusted Issue authorization, `AI_TEAM_PROTECTED_CHANGE=YES`, and the narrow `AUTO_APPLY_CONTROL_PLANE_PATHS` allowlist before merge. Workflow, systemd deployment, trading/live, capital, credential, and other paths outside that allowlist remain fail-closed.
+- PR-head movement invalidates the old review; merge/API rejection retries only the merge stage against the exact reviewed SHA.
+- This changes no live-trading permission. `REAL_TRADING_ENABLED` remains disabled.
+'''
+              d.write_text(s)
+          PY
+
+          python3 -m py_compile scripts/ai_team_orchestrator.py
+          python3 -m json.tool config/ai_team_router.json >/dev/null
+          grep -q 'every recognized task class becomes merge-eligible' docs/ai-team/AUTONOMOUS_TEAM.md
+          grep -q 'Exact-SHA reviewer PASS + green CI is the merge decision' docs/ai-team/DECISIONS.md
+
+          git config user.name 'Hyperliquid AI Manager'
+          git config user.email 'manager@localhost'
+          git add scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py docs/ai-team/AUTONOMOUS_TEAM.md docs/ai-team/DECISIONS.md
+          git commit -m 'docs(ai-team): align durable merge policy with PASS plus CI'
+          target="$(git rev-parse HEAD)"
+          git remote set-url origin git@github.com:aliezzat4321/hyperliquid-copy-engine.git
+          git push origin HEAD:manager/181-auto-merge-on-pass
+          echo "TARGET_SHA=$target"
+
+          TARGET="$target" /usr/bin/python3 - <<'PY'
           import datetime as dt
+          import os
           import sqlite3
           import uuid
 
-          db_path = '/var/lib/hyperliquid-ai-team/orchestrator/ledger.sqlite3'
-          target = 'ed9c70bcd325a100abf2f0c42ff9d95ddf71d867'
-          db = sqlite3.connect(db_path)
+          db = sqlite3.connect('/var/lib/hyperliquid-ai-team/orchestrator/ledger.sqlite3')
           db.row_factory = sqlite3.Row
+          now = dt.datetime.now(dt.timezone.utc).isoformat()
+          target = os.environ['TARGET']
           db.execute(
-              "UPDATE tasks SET status='STALE', retry_at=NULL, last_error='PR moved before review dispatch', updated_at=? "
+              "UPDATE tasks SET status='STALE',retry_at=NULL,last_error='manager applied protected reviewer blocker',updated_at=? "
+              "WHERE issue_number=181 AND pr_number=183 AND task_type='REPAIR' "
+              "AND status IN ('PENDING','RETRY','WAITING_CI','WAITING_RATE_LIMIT')",
+              (now,),
+          )
+          db.execute(
+              "UPDATE tasks SET status='STALE',retry_at=NULL,last_error='PR moved after review',updated_at=? "
               "WHERE issue_number=181 AND pr_number=183 AND task_type='REVIEW' AND target_sha<>? "
-              "AND status IN ('PENDING','RETRY','WAITING_RATE_LIMIT','WAITING_CI')",
-              (dt.datetime.now(dt.timezone.utc).isoformat(), target),
+              "AND status IN ('PENDING','RETRY','WAITING_CI','WAITING_RATE_LIMIT')",
+              (now,target),
           )
           existing = db.execute(
-              "SELECT id,status FROM tasks WHERE issue_number=181 AND pr_number=183 AND task_type='REVIEW' "
+              "SELECT id FROM tasks WHERE issue_number=181 AND pr_number=183 AND task_type='REVIEW' "
               "AND model_class='OPUS' AND target_sha=? ORDER BY created_at DESC LIMIT 1",
               (target,),
           ).fetchone()
           if existing:
-              db.execute(
-                  "UPDATE tasks SET status='PENDING', retry_at=NULL, last_error=NULL, created_at=?, updated_at=? WHERE id=?",
-                  ('2026-09-03T07:50:00+00:00', dt.datetime.now(dt.timezone.utc).isoformat(), existing['id']),
-              )
-              print(f"REVIEW_CHECKPOINT=REUSED id={existing['id']}")
+              task_id = existing['id']
+              db.execute("UPDATE tasks SET status='PENDING',retry_at=NULL,last_error=NULL,updated_at=? WHERE id=?",(now,task_id))
           else:
-              now = dt.datetime.now(dt.timezone.utc).isoformat()
               task_id = uuid.uuid4().hex[:16]
               db.execute(
                   """INSERT INTO tasks
                   (id,issue_number,pr_number,task_type,agent,model_class,task_class,status,branch,target_sha,previous_sha,blockers_json,workdir,session_id,attempt,retry_at,limit_text,systemd_unit,last_error,parent_id,created_at,updated_at)
                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                  (
-                      task_id,181,183,'REVIEW','CLAUDE','OPUS','MAJOR_ARCHITECTURE','PENDING',
-                      'manager/181-auto-merge-on-pass',target,None,'[]',None,None,0,None,None,None,None,None,
-                      '2026-09-03T07:50:00+00:00',now,
-                  ),
+                  (task_id,181,183,'REVIEW','CLAUDE','OPUS','MAJOR_ARCHITECTURE','PENDING',
+                   'manager/181-auto-merge-on-pass',target,'ed9c70bcd325a100abf2f0c42ff9d95ddf71d867','[]',
+                   None,None,0,None,None,None,None,None,'2026-09-03T07:49:00+00:00',now),
               )
-              print(f"REVIEW_CHECKPOINT=CREATED id={task_id}")
           db.commit()
+          print(f'REVIEW_CHECKPOINT={task_id} target={target}')
           db.close()
           PY
+
           systemctl start hyperliquid-ai-team-orchestrator.service || true
           sleep 2
           hl-ai-team-status
