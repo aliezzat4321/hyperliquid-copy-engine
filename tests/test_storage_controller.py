@@ -6,8 +6,9 @@ import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from hlcopy.storage.metrics import DiskUsage
 import pytest
+
+from hlcopy.storage.metrics import DiskUsage
 
 PATH = Path(__file__).parents[1] / "scripts" / "storage_controller.py"
 SPEC = importlib.util.spec_from_file_location("storage_controller_test", PATH)
