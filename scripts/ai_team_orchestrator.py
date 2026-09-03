@@ -940,7 +940,7 @@ def normalize_worktree_ownership(workdir: Path, user: str) -> tuple[int, int]:
 
 
 def prepare_checkout(
-    *, user: str, home: Path, base_dir: Path, task_id: str, ref: str, branch: str | None
+    *, user: str, home: Path, base_dir: Path, task_id: str, ref: str, branch: str | None = None
 ) -> Path:
     workdir = base_dir / task_id
     if not workdir.exists():
