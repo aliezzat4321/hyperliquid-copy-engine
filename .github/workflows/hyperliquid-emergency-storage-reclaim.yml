@@ -3,7 +3,7 @@ name: hyperliquid-emergency-storage-reclaim
 on:
   push:
     branches:
-      - codex/109-emergency-storage-reclaim
+      - manager/120-storage-reclaim-workflow
     paths:
       - "scripts/storage_retention_apply.py"
       - "scripts/storage_retention_audit.py"
@@ -72,7 +72,7 @@ jobs:
           mkdir -p /root/hyperliquid-audit/storage-retention "$REVIEW_ROOT"
           python3 scripts/storage_retention_audit.py \
             --recent-days 3 \
-            --max-delete-candidate-gib 6.0
+            --max-delete-candidate-gib 24.0
           MANIFEST=/root/hyperliquid-audit/storage-retention/storage_retention_manifest.json
           HASH="$(sha256sum "$MANIFEST" | awk '{print $1}')"
           REVIEWED="$REVIEW_ROOT/$GITHUB_SHA.json"
@@ -116,7 +116,7 @@ jobs:
           python3 scripts/storage_retention_apply.py \
             --manifest "$MANIFEST" \
             --expected-manifest-sha256 "$HASH" \
-            --target-used-pct 92
+            --target-used-pct 79
           echo 'BRANCH_REVIEW_MODE=DRY_RUN_ONLY'
           echo 'DELETION_PERFORMED=NO'
           echo 'RUNTIME_SERVICE_MUTATION=NO'
@@ -176,7 +176,7 @@ jobs:
             --expected-manifest-sha256 "$REVIEWED_MANIFEST_SHA256" \
             --max-manifest-age-minutes 360 \
             --apply \
-            --target-used-pct 92
+            --target-used-pct 79
           echo 'RECOVERY_MODE=APPLY_EXACT_REVIEWED_MANIFEST'
 
       - name: Keep capture paused and report bounded recovery headroom
