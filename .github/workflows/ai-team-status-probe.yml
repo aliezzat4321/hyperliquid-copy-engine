@@ -51,7 +51,6 @@ jobs:
               def event(self, *args, **kwargs):
                   return None
 
-          # Exact real-world provider wording seen on this VM must classify as a limit.
           limited, retry_at = orch.rate_limit_info(
               "api_error_status=429 You've hit your session limit · resets 11:10pm (UTC)", 300
           )
@@ -163,6 +162,6 @@ jobs:
 
           echo '=== AI TEAM SERVICE JOURNAL ==='
           journalctl -u hyperliquid-ai-team-orchestrator.service -n 25 --no-pager -l || true
-          echo 'PROBE_REVISION=6'
+          echo 'PROBE_REVISION=7'
           echo 'POLYMARKET_TOUCHED=NO'
           echo 'REAL_TRADING_TOUCHED=NO'
