@@ -6,9 +6,15 @@ import json
 import math
 import os
 import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from hlcopy.storage.metrics import disk_usage  # noqa: E402
 
 PG_PORT = "5433"
 PG_DB = "hlcopy"
@@ -69,8 +75,7 @@ def _float(sql: str) -> float:
 
 
 def _available_bytes() -> int:
-    stat = os.statvfs(DATA_MOUNT)
-    return stat.f_bavail * stat.f_frsize
+    return disk_usage(DATA_MOUNT).available
 
 
 def _relation_bytes(name: str) -> int:

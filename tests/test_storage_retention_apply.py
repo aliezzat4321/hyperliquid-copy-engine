@@ -4,6 +4,7 @@ import importlib.util
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -275,9 +276,9 @@ def test_apply_refuses_unreachable_target_before_deletion(tmp_path, monkeypatch)
         inode=candidate_path.lstat().st_ino,
     )
     monkeypatch.setattr(
-        MODULE.shutil,
+        MODULE,
         "disk_usage",
-        lambda _: MODULE.shutil._ntuple_diskusage(1000, 900, 100),
+        lambda _: SimpleNamespace(capacity_df=1000, used=900, available=100, used_pct=90),
     )
     deleted = []
     monkeypatch.setattr(MODULE.shutil, "rmtree", lambda path: deleted.append(path))
