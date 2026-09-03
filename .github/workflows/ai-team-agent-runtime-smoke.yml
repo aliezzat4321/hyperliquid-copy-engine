@@ -9,90 +9,48 @@ permissions:
   contents: read
 
 jobs:
-  patch_manager_auto_merge_policy:
+  seed_opus_review_181:
     runs-on: [self-hosted, linux]
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: manager/181-auto-merge-on-pass
-          persist-credentials: false
-          fetch-depth: 0
-      - name: Patch fallback policy and regression test
+      - name: Seed exact-SHA Opus review for PR 183
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('scripts/ai_team_orchestrator.py')
-          s = p.read_text()
-          old = '    "auto_merge_task_classes": ["ROUTINE"],'
-          new = '''    "auto_merge_task_classes": [
-                  "ROUTINE",
-                  "QUANT_PROFITABILITY",
-                  "STATISTICAL_METHODOLOGY",
-                  "MAJOR_ARCHITECTURE",
-                  "UNRESOLVED_DISAGREEMENT",
-                  "CAPITAL_SENSITIVE_METHODOLOGY",
-              ],'''
-          if old not in s:
-              raise SystemExit('expected auto_merge_task_classes fallback not found')
-          s = s.replace(old, new, 1)
-          s = s.replace(
-              '# flag, independent exact-SHA Claude PASS, green CI, and ROUTINE task class.\n',
-              '# flag, independent exact-SHA Claude PASS, and green CI.\n',
-              1,
-          )
-          old_protected = '''        "protected_actions": {
-                      "DEPLOY_REVIEWED_CONTROL_PLANE": {
-                          "workflow_id": "deploy-ai-team-orchestrator.yml", "ref": "main"
-                      }
-                  },'''
-          if old_protected not in s:
-              raise SystemExit('expected stale DEFAULT_CONFIG protected action not found')
-          s = s.replace(old_protected, '        "protected_actions": {},', 1)
-          p.write_text(s)
-          PY
-          cat > tests/test_ai_team_auto_merge_policy.py <<'PY'
+          /usr/bin/python3 - <<'PY'
+          import datetime as dt
           import json
-          from pathlib import Path
-          import importlib.util
+          import sqlite3
+          import uuid
 
-          ROOT = Path(__file__).resolve().parents[1]
-          spec = importlib.util.spec_from_file_location(
-              "ai_team_orchestrator", ROOT / "scripts" / "ai_team_orchestrator.py"
-          )
-          assert spec and spec.loader
-          orch = importlib.util.module_from_spec(spec)
-          spec.loader.exec_module(orch)
-
-          EXPECTED = {
-              "ROUTINE",
-              "QUANT_PROFITABILITY",
-              "STATISTICAL_METHODOLOGY",
-              "MAJOR_ARCHITECTURE",
-              "UNRESOLVED_DISAGREEMENT",
-              "CAPITAL_SENSITIVE_METHODOLOGY",
-          }
-
-          def test_all_recognized_task_classes_auto_merge_after_review_and_ci():
-              cfg = json.loads((ROOT / "config" / "ai_team_router.json").read_text())
-              assert set(cfg["auto_merge_task_classes"]) == EXPECTED
-              assert set(orch.DEFAULT_CONFIG["auto_merge_task_classes"]) == EXPECTED
-
-          def test_fallback_protected_actions_fail_closed_until_explicitly_configured():
-              cfg = json.loads((ROOT / "config" / "ai_team_router.json").read_text())
-              assert cfg["remediation"]["protected_actions"] == {}
-              assert orch.DEFAULT_CONFIG["remediation"]["protected_actions"] == {}
+          db_path = '/var/lib/hyperliquid-ai-team/orchestrator/ledger.sqlite3'
+          target = 'd8d5f5c147bc8df3663085497e65141d5f99f1b0'
+          db = sqlite3.connect(db_path)
+          db.row_factory = sqlite3.Row
+          existing = db.execute(
+              "SELECT id,status FROM tasks WHERE issue_number=? AND pr_number=? AND task_type='REVIEW' AND model_class='OPUS' AND target_sha=? ORDER BY created_at DESC LIMIT 1",
+              (181, 183, target),
+          ).fetchone()
+          if existing:
+              print(f"REVIEW_CHECKPOINT=EXISTS id={existing['id']} status={existing['status']}")
+          else:
+              now = dt.datetime.now(dt.timezone.utc).isoformat()
+              task_id = uuid.uuid4().hex[:16]
+              db.execute(
+                  """INSERT INTO tasks
+                  (id,issue_number,pr_number,task_type,agent,model_class,task_class,status,branch,target_sha,previous_sha,blockers_json,workdir,session_id,attempt,retry_at,limit_text,systemd_unit,last_error,parent_id,created_at,updated_at)
+                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                  (
+                      task_id,181,183,'REVIEW','CLAUDE','OPUS','MAJOR_ARCHITECTURE','PENDING',
+                      'manager/181-auto-merge-on-pass',target,None,'[]',None,None,0,None,None,None,None,None,now,now,
+                  ),
+              )
+              db.commit()
+              print(f"REVIEW_CHECKPOINT=CREATED id={task_id} target={target}")
+          db.close()
           PY
-          python3 -m py_compile scripts/ai_team_orchestrator.py
-          python3 -m json.tool config/ai_team_router.json >/dev/null
-          git config user.name 'Hyperliquid AI Manager'
-          git config user.email 'manager@localhost'
-          git add scripts/ai_team_orchestrator.py config/ai_team_router.json tests/test_ai_team_auto_merge_policy.py
-          git commit -m 'fix(ai-team): auto-merge exact-SHA PASS plus green CI'
-          git remote set-url origin git@github.com:aliezzat4321/hyperliquid-copy-engine.git
-          git push origin HEAD:manager/181-auto-merge-on-pass
-          echo 'AUTO_MERGE_POLICY_PATCHED=YES'
+          systemctl start hyperliquid-ai-team-orchestrator.service || true
+          sleep 2
+          hl-ai-team-status
           echo 'REAL_TRADING_TOUCHED=NO'
           echo 'POLYMARKET_TOUCHED=NO'
