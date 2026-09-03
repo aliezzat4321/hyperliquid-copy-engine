@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from decimal import Decimal
 from pathlib import Path
 
@@ -594,6 +595,7 @@ async def identify_wallet_from_csv_size_aware(
     client: SqdHyperliquidFillsClient | None = None,
     snapshot: EvidenceSnapshot | None = None,
     expected_source_identity: str | None = None,
+    telemetry: dict[str, float | int] | None = None,
 ) -> WalletIdentificationResult:
     """Use strict absolute-size matching when possible, otherwise strong sequence proof.
 
@@ -604,6 +606,7 @@ async def identify_wallet_from_csv_size_aware(
     """
 
     del cache_dir
+    started = time.perf_counter()
     effective_config = config or DEFAULT_PUBLIC_TRADE_CONFIG
     snapshot = snapshot or EvidenceSnapshot.from_path(evidence_path)
     imported = _load_source_evidence(snapshot, effective_config)
@@ -653,6 +656,11 @@ async def identify_wallet_from_csv_size_aware(
                 client=sqd,
                 config=effective_config,
             )
+            if telemetry is not None:
+                telemetry["candidate_generation_ms"] = (
+                    time.perf_counter() - started
+                ) * 1000
+                telemetry["candidate_fanout"] = len(discovered.ranked)
             verified = await _verify_shortlist_without_size(
                 ranked=discovered.ranked,
                 signals=signals,
@@ -661,6 +669,12 @@ async def identify_wallet_from_csv_size_aware(
                 client=sqd,
                 config=effective_config,
             )
+            if telemetry is not None:
+                telemetry["verification_ms"] = (
+                    (time.perf_counter() - started) * 1000
+                    - float(telemetry["candidate_generation_ms"])
+                )
+                telemetry["verification_candidates"] = len(verified)
             selected = select_historical_winner(
                 verified,
                 min_matches=SIZE_AGNOSTIC_MIN_HISTORICAL_MATCHES,

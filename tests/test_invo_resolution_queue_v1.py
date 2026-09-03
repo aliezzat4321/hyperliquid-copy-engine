@@ -61,7 +61,9 @@ def test_resolution_queue_requires_independent_trades_and_deduplicates_trade_id(
     )
 
     assert result["ready_count"] == 1
+    assert result["generated_at"]
     item = result["queue"][0]
+    assert item["resolution_ready_at"] == result["generated_at"]
     assert item["username"] == "carmine"
     assert item["evidence_count"] == 12
     assert item["distinct_coin_count"] == 2
@@ -75,6 +77,22 @@ def test_resolution_queue_requires_independent_trades_and_deduplicates_trade_id(
     generic = load_generic_closed_trades(csv_path)
     assert len(generic.signals) == 12
     assert generic.rejected_rows == ()
+
+    queue_path = tmp_path / "queue" / "resolution_queue.json"
+    persisted = json.loads(queue_path.read_text(encoding="utf-8"))
+    persisted["queue"][0]["resolution_ready_at"] = "2026-08-01T00:00:00+00:00"
+    queue_path.write_text(json.dumps(persisted), encoding="utf-8")
+
+    rematerialized = materialize_resolution_queue(
+        evidence_path=evidence_path,
+        output_dir=tmp_path / "queue",
+        portfolios=[],
+        min_trades=12,
+    )
+
+    assert rematerialized["queue"][0]["resolution_ready_at"] == (
+        "2026-08-01T00:00:00+00:00"
+    )
 
 
 def test_resolution_queue_waits_for_minimum_evidence(tmp_path: Path) -> None:
