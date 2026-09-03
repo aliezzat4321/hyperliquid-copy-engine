@@ -245,3 +245,48 @@ def test_rejects_delete_pool_over_reviewed_budget(tmp_path: Path) -> None:
     manifest["deletion_budget_bytes"] = 1000
     with pytest.raises(ValueError, match="exceeds reviewed budget"):
         _validate(manifest, market, tmp_path)
+
+
+def test_accepts_reviewed_budget_larger_than_six_gib(tmp_path: Path) -> None:
+    market, candidate = _layout(tmp_path)
+    manifest = _manifest(candidate)
+    manifest["deletion_budget_bytes"] = 12 * 1024**3
+    rows = _validate(manifest, market, tmp_path)
+    assert len(rows) == 1
+
+
+def test_rejects_reviewed_budget_larger_than_twenty_four_gib(tmp_path: Path) -> None:
+    market, candidate = _layout(tmp_path)
+    manifest = _manifest(candidate)
+    manifest["deletion_budget_bytes"] = 25 * 1024**3
+    with pytest.raises(ValueError, match="<=24 GiB"):
+        _validate(manifest, market, tmp_path)
+
+
+def test_apply_refuses_unreachable_target_before_deletion(tmp_path, monkeypatch):
+    market, candidate_path = _layout(tmp_path)
+    candidate = MODULE.Candidate(
+        path=candidate_path,
+        day="2026-08-27",
+        coin="DOGE",
+        canonical_coin="DOGE",
+        bytes_planned=100,
+        device=candidate_path.lstat().st_dev,
+        inode=candidate_path.lstat().st_ino,
+    )
+    monkeypatch.setattr(
+        MODULE.shutil,
+        "disk_usage",
+        lambda _: MODULE.shutil._ntuple_diskusage(1000, 900, 100),
+    )
+    deleted = []
+    monkeypatch.setattr(MODULE.shutil, "rmtree", lambda path: deleted.append(path))
+    MODULE.shutil.rmtree.avoids_symlink_attacks = True
+
+    with pytest.raises(ValueError, match="refusing before deletion"):
+        MODULE.apply_candidates(
+            [candidate], mount=tmp_path, market_root=market,
+            target_used_pct=75, apply=True,
+        )
+    assert deleted == []
+    assert candidate_path.exists()
