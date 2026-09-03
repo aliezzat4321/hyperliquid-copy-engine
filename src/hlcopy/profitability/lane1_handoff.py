@@ -91,7 +91,13 @@ def build_challenger_queue(
             reason = "WALLET_NOT_IN_CURRENT_LEADERBOARD"
         seen.add(key)
         if reason:
-            rejections.append({"candidate_key": key, "reason": reason, "rejected_at": observed_at.isoformat()})
+            rejections.append(
+                {
+                    "candidate_key": key,
+                    "reason": reason,
+                    "rejected_at": observed_at.isoformat(),
+                }
+            )
             continue
         old = previous.get(key, {})
         candidates.append(

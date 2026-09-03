@@ -12,18 +12,41 @@ SPEC.loader.exec_module(MODULE)
 
 def test_load_frozen_targets_uses_only_selective_challengers(tmp_path: Path) -> None:
     queue = tmp_path / "queue.json"
-    queue.write_text(json.dumps({"candidates": [
-        {"status": "challenger", "wallet_address": "0x" + "A" * 40, "coin": "SOL", "notional_usd": "1000", "prospective_start_ns": 42, "candidate_key": "key-a"},
-        {"status": "demoted", "wallet_address": "0x" + "b" * 40, "coin": "BTC", "notional_usd": "5000", "prospective_start_ns": 9, "candidate_key": "key-b"},
-    ]}), encoding="utf-8")
+    queue.write_text(
+        json.dumps(
+            {
+                "candidates": [
+                    {
+                        "status": "challenger",
+                        "wallet_address": "0x" + "A" * 40,
+                        "coin": "SOL",
+                        "notional_usd": "1000",
+                        "prospective_start_ns": 42,
+                        "candidate_key": "key-a",
+                    },
+                    {
+                        "status": "demoted",
+                        "wallet_address": "0x" + "b" * 40,
+                        "coin": "BTC",
+                        "notional_usd": "5000",
+                        "prospective_start_ns": 9,
+                        "candidate_key": "key-b",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
 
-    assert MODULE.load_frozen_targets(queue) == [{
-        "wallet": "0x" + "a" * 40,
-        "coin": "SOL",
-        "primary_notional": "1000",
-        "prospective_start_ns": 42,
-        "candidate_key": "key-a",
-    }]
+    assert MODULE.load_frozen_targets(queue) == [
+        {
+            "wallet": "0x" + "a" * 40,
+            "coin": "SOL",
+            "primary_notional": "1000",
+            "prospective_start_ns": 42,
+            "candidate_key": "key-a",
+        }
+    ]
 
 
 def test_prospective_script_has_no_hard_coded_wallet_targets() -> None:

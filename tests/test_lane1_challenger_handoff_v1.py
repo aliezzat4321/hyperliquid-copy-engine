@@ -64,8 +64,12 @@ def test_stale_universe_fails_closed_and_dead_challenger_is_demoted(tmp_path: Pa
     queue = tmp_path / "challengers.json"
     _universe(universe, now, WALLET_A)
     build_challenger_queue(
-        [_robust(WALLET_A)], output_path=queue, universe_state_path=universe,
-        max_universe_age_hours=6, now=now, clock_ns=lambda: 1,
+        [_robust(WALLET_A)],
+        output_path=queue,
+        universe_state_path=universe,
+        max_universe_age_hours=6,
+        now=now,
+        clock_ns=lambda: 1,
     )
     _universe(universe, now - timedelta(hours=7), WALLET_A, WALLET_B)
 
@@ -89,12 +93,16 @@ def test_wallet_coin_selectivity_and_dedupe_are_preserved(tmp_path: Path) -> Non
     _universe(universe, now, WALLET_A)
     row = _robust(WALLET_A, "SOL")
     result = build_challenger_queue(
-        [row, row, _robust(WALLET_B)], output_path=tmp_path / "queue.json",
-        universe_state_path=universe, max_universe_age_hours=6, now=now,
+        [row, row, _robust(WALLET_B)],
+        output_path=tmp_path / "queue.json",
+        universe_state_path=universe,
+        max_universe_age_hours=6,
+        now=now,
         clock_ns=lambda: 5,
     )
 
     assert [(r["wallet_address"], r["coin"]) for r in result["candidates"]] == [(WALLET_A, "SOL")]
     assert {r["reason"] for r in result["rejections"]} == {
-        "DUPLICATE_WALLET_COIN_NOTIONAL", "WALLET_NOT_IN_CURRENT_LEADERBOARD"
+        "DUPLICATE_WALLET_COIN_NOTIONAL",
+        "WALLET_NOT_IN_CURRENT_LEADERBOARD",
     }
