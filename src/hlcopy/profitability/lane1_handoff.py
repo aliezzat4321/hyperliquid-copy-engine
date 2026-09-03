@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable
 
 
 def _parse_time(value: object) -> datetime | None:
