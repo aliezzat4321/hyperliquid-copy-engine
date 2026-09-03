@@ -45,6 +45,7 @@ CLAUDE_USER = "hl-claude-agent"
 CODEX_HOME = STATE_ROOT / "agents" / "codex" / "home"
 CLAUDE_HOME = STATE_ROOT / "agents" / "claude" / "home"
 CODEX_WORK = STATE_ROOT / "agents" / "codex" / "worktrees"
+CODEX_REVIEW_WORK = STATE_ROOT / "agents" / "codex-reviewer" / "worktrees"
 CLAUDE_WORK = STATE_ROOT / "agents" / "claude" / "worktrees"
 CODEX_LOG = STATE_ROOT / "agents" / "codex" / "logs"
 CLAUDE_LOG = STATE_ROOT / "agents" / "claude" / "logs"
@@ -60,7 +61,7 @@ TRELLO_BRIDGE = Path("/opt/hyperliquid-ai-team/scripts/trello_team_bridge.py")
 
 # Protected AI-control-plane files that Codex may propose, but never merge merely
 # because it changed them. Automatic apply additionally requires a trusted Issue
-# flag, independent exact-SHA Claude PASS, and green CI.
+# flag, independent exact-SHA reviewer PASS, and green CI.
 # Trading/live/capital/deployment paths are intentionally excluded.
 AUTO_APPLY_CONTROL_PLANE_PATHS = {
     "config/ai_team_router.json",
@@ -69,16 +70,31 @@ AUTO_APPLY_CONTROL_PLANE_PATHS = {
 }
 
 DEFAULT_CONFIG: dict[str, Any] = {
-    "protocol_version": 1,
+    "protocol_version": 2,
     "repository": REPO,
     "routing": {
         "BUILD": {"agent": "CODEX_CHATGPT", "model_class": "CODEX_DEFAULT"},
         "REPAIR": {"agent": "CODEX_CHATGPT", "model_class": "CODEX_DEFAULT"},
-        "REVIEW": {"agent": "CLAUDE", "model_class": "SONNET"},
+        "REVIEW": {"agent": "CODEX_REVIEWER", "model_class": "CODEX_DEFAULT"},
+        "CHALLENGE": {"agent": "CLAUDE", "model_class": "SONNET"},
         "RESEARCH": {"agent": "CLAUDE", "model_class": "OPUS"},
+    },
+    "review_profiles": {
+        "ROUTINE": ["DETERMINISTIC_PREFLIGHT", "CODEX_REVIEW", "CI"],
+        "ENGINE_CRITICAL": ["DETERMINISTIC_PREFLIGHT", "CODEX_REVIEW", "SONNET_CHALLENGE", "CI"],
+        "QUANT": ["OPUS_DESIGN", "FROZEN_CONTRACT", "DETERMINISTIC_PREFLIGHT",
+                  "CODEX_REVIEW", "SONNET_CHALLENGE", "PROSPECTIVE_EVIDENCE", "OPUS_FINAL"],
+        "DESTRUCTIVE": ["DETERMINISTIC_PREFLIGHT", "CODEX_REVIEW", "OPUS_FINAL"],
     },
     "initial_routes": {
         "ROUTINE": {"task_type": "BUILD", "agent": "CODEX_CHATGPT", "model_class": "CODEX_DEFAULT"},
+        "ENGINE_CRITICAL": {
+            "task_type": "BUILD", "agent": "CODEX_CHATGPT", "model_class": "CODEX_DEFAULT"
+        },
+        "QUANT": {"task_type": "RESEARCH", "agent": "CLAUDE", "model_class": "OPUS"},
+        "DESTRUCTIVE": {
+            "task_type": "BUILD", "agent": "CODEX_CHATGPT", "model_class": "CODEX_DEFAULT"
+        },
         **{name: {"task_type": "RESEARCH", "agent": "CLAUDE", "model_class": "OPUS"}
            for name in ("QUANT_PROFITABILITY", "STATISTICAL_METHODOLOGY", "MAJOR_ARCHITECTURE",
                         "UNRESOLVED_DISAGREEMENT", "CAPITAL_SENSITIVE_METHODOLOGY")},
@@ -90,7 +106,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
                    "PROTECTED_ACTION": "TRUSTED_MANAGER", "CI_RETRY": "MANAGER",
                    "REVIEW_RERUN": "MANAGER", "POLICY_RECONCILIATION": "MANAGER",
                    "TERMINAL": "MANAGER"},
-        "budgets": {"CODE_CHANGE": 1, "PR_METADATA": 3, "PROTECTED_ACTION": 1,
+        "budgets": {"CODE_CHANGE": 3, "PR_METADATA": 3, "PROTECTED_ACTION": 1,
                     "CI_RETRY": 3, "REVIEW_RERUN": 0, "POLICY_RECONCILIATION": 3,
                     "TERMINAL": 0},
         "protected_actions": {},
@@ -112,6 +128,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     ],
     "auto_merge_task_classes": [
         "ROUTINE",
+        "ENGINE_CRITICAL",
+        "QUANT",
+        "DESTRUCTIVE",
         "QUANT_PROFITABILITY",
         "STATISTICAL_METHODOLOGY",
         "MAJOR_ARCHITECTURE",
@@ -805,12 +824,15 @@ def parse_protected_action_authorization(body: str) -> dict[str, Any] | None:
 def parse_task_class(body: str) -> tuple[str, str | None]:
     """Parse an explicit task class, failing closed when absent or invalid.
 
-    UNCLASSIFIED uses the routine Sonnet review route but is deliberately absent
+    UNCLASSIFIED uses the routine Codex review route but is deliberately absent
     from auto_merge_task_classes. Every explicitly declared recognized task class can
     reach automatic merge only after the independent exact-SHA review and CI gates.
     """
     allowed = {
         "ROUTINE",
+        "ENGINE_CRITICAL",
+        "QUANT",
+        "DESTRUCTIVE",
         "QUANT_PROFITABILITY",
         "STATISTICAL_METHODOLOGY",
         "MAJOR_ARCHITECTURE",
@@ -848,19 +870,63 @@ def normalize_blocker(blocker: Any, *, subject_sha: str, source_kind: str,
 
 
 def route_review(cfg: dict[str, Any], task_class: str, escalation_reason: str | None) -> str:
-    if task_class in cfg["opus_allowed_task_classes"]:
-        if escalation_reason and escalation_reason not in cfg["opus_allowed_reasons"]:
-            raise RuntimeError(f"invalid Opus escalation reason: {escalation_reason}")
-        return "OPUS"
-    if task_class == "MAJOR_ARCHITECTURE":
-        if escalation_reason is None:
-            return "SONNET"
-        if escalation_reason == "MAJOR_ARCHITECTURE":
-            return "OPUS"
+    """Return the first independent review model; specialist stages are chained later."""
+    if escalation_reason and escalation_reason not in cfg["opus_allowed_reasons"]:
         raise RuntimeError(f"invalid Opus escalation reason: {escalation_reason}")
-    if escalation_reason:
-        raise RuntimeError("Opus escalation reason supplied for non-Opus task class")
-    return "SONNET"
+    if escalation_reason and "OPUS_FINAL" not in review_profile(cfg, task_class):
+        raise RuntimeError("Opus escalation reason supplied for non-Opus profile")
+    return "CODEX_DEFAULT"
+
+
+def review_profile(cfg: dict[str, Any], task_class: str) -> list[str]:
+    aliases = {
+        "QUANT_PROFITABILITY": "QUANT",
+        "STATISTICAL_METHODOLOGY": "QUANT",
+        "CAPITAL_SENSITIVE_METHODOLOGY": "QUANT",
+        "MAJOR_ARCHITECTURE": "ENGINE_CRITICAL",
+        "UNRESOLVED_DISAGREEMENT": "QUANT",
+    }
+    return list(cfg["review_profiles"].get(aliases.get(task_class, task_class), ()))
+
+
+def deterministic_failure_blocker(
+    *, sha: str, command: str, detail: str, changed: list[str]
+) -> dict[str, Any]:
+    """Produce a progress-sensitive preflight fingerprint without involving Claude."""
+    bounded = detail[-2000:]
+    rule = hashlib.sha256((command + "\0" + bounded).encode()).hexdigest()[:16]
+    return {
+        "protocol_version": 1, "class": "CODE_CHANGE", "source_kind": "PREFLIGHT",
+        "source_id": f"{sha}:{command}", "subject_sha": sha,
+        "rule_id": f"DETERMINISTIC_{rule}",
+        "observed": {"command": command, "detail": bounded, "paths": changed[:50]},
+        "requested_action": {"paths": changed[:50], "reproducer": command},
+    }
+
+
+def deterministic_preflight(workdir: Path, sha: str, changed: list[str]) -> list[dict[str, Any]]:
+    """Run cheap repository checks before any AI review and return bounded blockers."""
+    python_files = [p for p in changed if p.endswith(".py")]
+    commands: list[list[str]] = []
+    if python_files:
+        commands.extend([
+            [sys.executable, "-m", "ruff", "check", *python_files],
+            [sys.executable, "-m", "ruff", "format", "--check", *python_files],
+        ])
+    if any(p.startswith(("scripts/ai_team_", "config/ai_team_router"))
+           or p.startswith("tests/test_ai_team_") for p in changed):
+        commands.append([sys.executable, "-m", "pytest", "-q",
+                         "tests/test_ai_team_orchestrator.py",
+                         "tests/test_ai_team_runtime_ledger.py"])
+    for command in commands:
+        cp = run(command, timeout=900, cwd=workdir)
+        if cp.returncode:
+            rendered = shlex.join(command)
+            return [deterministic_failure_blocker(
+                sha=sha, command=rendered, detail=cp.stdout + "\n" + cp.stderr,
+                changed=changed,
+            )]
+    return []
 
 
 def assignment_marker(
@@ -1003,6 +1069,7 @@ def model_sandbox_command(
     workdir: Path,
     command: list[str],
     env_file: Path | None = None,
+    read_only_worktree: bool = False,
 ) -> list[str]:
     args = [
         "systemd-run",
@@ -1020,7 +1087,8 @@ def model_sandbox_command(
         "--property=ProtectSystem=strict",
         "--property=RestrictSUIDSGID=yes",
         "--property=InaccessiblePaths=/mnt",
-        f"--property=ReadWritePaths={workdir} {home}",
+        (f"--property=ReadWritePaths={home}" if read_only_worktree
+         else f"--property=ReadWritePaths={workdir} {home}"),
         f"--setenv=HOME={home}",
     ]
     if user == CODEX_USER:
@@ -1717,7 +1785,7 @@ class Orchestrator:
                 self.handle_claude_probe(task)
             elif task["task_type"] in {"BUILD", "REPAIR"}:
                 self.handle_codex(task)
-            elif task["task_type"] == "REVIEW":
+            elif task["task_type"] in {"REVIEW", "CHALLENGE", "FINAL_REVIEW"}:
                 self.handle_review(task)
             elif task["task_type"] == "RESEARCH":
                 self.handle_research(task)
@@ -2002,7 +2070,15 @@ class Orchestrator:
                     str(remediation["remediation_id"]), status="COMPLETED",
                     completion_evidence=canonical_json({"new_sha": new_sha}),
                 )
-            self.enqueue_review(task, pr_number, new_sha)
+            preflight_blockers = deterministic_preflight(workdir, new_sha, files)
+            if preflight_blockers:
+                self.ledger.update(task["id"], last_error="deterministic preflight failed",
+                                   blockers_json=json.dumps(preflight_blockers))
+                self.dispatch_remediations(self.ledger.get(task["id"]), preflight_blockers,
+                                           source_kind="PREFLIGHT",
+                                           source_id=str(preflight_blockers[0]["source_id"]))
+            else:
+                self.enqueue_review(task, pr_number, new_sha)
             self.finish_runtime_run(
                 run_id,
                 str(task["id"]),
@@ -2018,6 +2094,18 @@ class Orchestrator:
             error = str(exc)
             current = self.ledger.get(task["id"])
             if task["task_type"] == "REPAIR" and error == "agent produced no file changes":
+                budget = max(3, int(self.cfg["remediation"]["budgets"]["CODE_CHANGE"]))
+                if int(current["attempt"]) < budget:
+                    self.ledger.update(current["id"], status="RETRY", retry_at=utcnow(),
+                                       last_error=("CODE_CHANGE made no progress; bounded "
+                                                   f"repair {current['attempt']}/{budget}"),
+                                       session_id=None, systemd_unit=None)
+                    self.finish_runtime_run(
+                        run_id, str(task["id"]), stdout=cp.stdout, stderr=cp.stderr,
+                        exit_code=1, session_id=None, usage=usage, result=result,
+                        error=error, status="RETRY",
+                    )
+                    return
                 remediation = self.ledger.db.execute(
                     "SELECT remediation_id FROM remediations WHERE parent_assignment_id=? "
                     "AND class='CODE_CHANGE' ORDER BY created_at DESC LIMIT 1",
@@ -2028,7 +2116,7 @@ class Orchestrator:
                         str(remediation["remediation_id"]), status="TERMINAL",
                         completion_evidence="completed code action produced no progress",
                     )
-                self.block(current, "unchanged CODE_CHANGE fingerprint after one completed action")
+                self.block(current, f"unchanged CODE_CHANGE detail after {budget} repairs")
                 self.finish_runtime_run(
                     run_id, str(task["id"]), stdout=cp.stdout, stderr=cp.stderr,
                     exit_code=1, session_id=session_id, usage=usage, result=result,
@@ -2229,7 +2317,7 @@ independently reviewed evidence.
 See Codex task evidence and CI.
 
 ## Production impact / rollback
-Routine changes remain gated by exact-SHA Claude review and CI before merge.
+Routine changes remain gated by exact-SHA independent Codex review and CI before merge.
 
 ## Durable-state impact
 - [x] no durable-state change required unless the scoped Issue requires it
@@ -2260,11 +2348,12 @@ TASK_CLASS={task["task_class"]}
         issue = self.gh.issue(int(parent["issue_number"]))
         _, escalation_reason = parse_task_class(str(issue.get("body") or ""))
         model = route_review(self.cfg, str(parent["task_class"]), escalation_reason)
+        agent = "CODEX_REVIEWER"
         task_id = self.ledger.create_task(
             issue_number=int(parent["issue_number"]),
             pr_number=pr_number,
             task_type="REVIEW",
-            agent="CLAUDE",
+            agent=agent,
             model_class=model,
             task_class=str(parent["task_class"]),
             target_sha=sha,
@@ -2277,7 +2366,7 @@ TASK_CLASS={task["task_class"]}
                 pr_number,
                 assignment_marker(
                     task_id=task_id,
-                    agent="CLAUDE",
+                    agent=agent,
                     task_type="REVIEW",
                     model_class=model,
                     task_class=str(parent["task_class"]),
@@ -2310,7 +2399,9 @@ TASK_CLASS={task["task_class"]}
         task = self.ledger.get(str(task["id"]))
         prompt = (
             f"Research GitHub Issue #{task['issue_number']} as CLAUDE OPUS. Produce an "
-            "implementation-ready architecture artifact; do not edit files or use GitHub. "
+            "implementation-ready architecture artifact; for QUANT, explicitly emit a "
+            "frozen methodology/evaluation contract before implementation or data "
+            "interpretation. Do not edit files or use GitHub. "
             "Use only the Issue-linked files and the minimum necessary adjacent context. "
             "Do not recursively inspect or reread the repository. REAL TRADING remains "
             "disabled. Issue body:\n" + str(issue.get("body") or "")
@@ -2340,7 +2431,9 @@ TASK_CLASS={task["task_class"]}
             )
             return
         result_id = hashlib.sha256(result.encode()).hexdigest()
-        evidence = {"research_result_id": result_id, "artifact": result}
+        evidence = {"research_result_id": result_id, "artifact": result,
+                    "contract_state": ("FROZEN" if "OPUS_DESIGN" in review_profile(
+                        self.cfg, str(task["task_class"])) else "NOT_REQUIRED")}
         self.ledger.update(task["id"], status="DONE", session_id=session_id,
                            blockers_json=canonical_json(evidence), last_error=None)
         if not self.ledger.child(str(task["id"]), "BUILD"):
@@ -2377,8 +2470,9 @@ TASK_CLASS={task["task_class"]}
         if model == "OPUS":
             _, reason = parse_task_class(str(issue.get("body") or ""))
             route_review(self.cfg, str(task["task_class"]), reason)
+        is_codex_reviewer = str(task["agent"]) == "CODEX_REVIEWER"
         try:
-            claude_runtime_preflight()
+            codex_runtime_preflight() if is_codex_reviewer else claude_runtime_preflight()
         except RuntimeError as exc:
             self.block(task, f"CLAUDE_AUTH_REQUIRED: {exc}")
             return
@@ -2386,9 +2480,9 @@ TASK_CLASS={task["task_class"]}
             Path(task["workdir"])
             if task["workdir"]
             else prepare_checkout(
-                user=CLAUDE_USER,
-                home=CLAUDE_HOME,
-                base_dir=CLAUDE_WORK,
+                user=CODEX_USER if is_codex_reviewer else CLAUDE_USER,
+                home=CODEX_HOME if is_codex_reviewer else CLAUDE_HOME,
+                base_dir=CODEX_REVIEW_WORK if is_codex_reviewer else CLAUDE_WORK,
                 task_id=str(task["id"]),
                 ref=target_sha,
                 branch=None,
@@ -2415,19 +2509,23 @@ implementation is otherwise correct, return VERDICT=FAIL with exactly one blocke
 REPAIR_STAGE=REPAIRED.` Do not invent any other blocker. This fault injection must
 not run on re-review because previous_sha is then populated.
 """
-        log_path = CLAUDE_LOG / f"{task['id']}-attempt-{task['attempt']}.json"
+        log_root = CODEX_LOG if is_codex_reviewer else CLAUDE_LOG
+        log_path = log_root / f"{task['id']}-attempt-{task['attempt']}.json"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         run_id = self.ledger.open_run(task, log_path)
-        unit = f"hl-ai-claude-{task['id'][:10]}-{int(time.time())}"
+        worker = "codex-review" if is_codex_reviewer else "claude"
+        unit = f"hl-ai-{worker}-{task['id'][:10]}-{int(time.time())}"
         self.ledger.update(task["id"], systemd_unit=unit)
         self.runtime.run_started(run_id, task, prompt=prompt, systemd_unit=unit)
         self.sync_runtime_checkpoint()
         try:
-            cp = self.invoke_claude(task, workdir, prompt, unit)
+            cp = (self.invoke_codex_review(task, workdir, prompt, unit)
+                  if is_codex_reviewer else self.invoke_claude(task, workdir, prompt, unit))
         except subprocess.TimeoutExpired as exc:
             self.reap_stale_child({"systemd_unit": unit})
             text = (exc.stdout or "") + "\n" + (exc.stderr or "")
-            session_id, usage, result = parse_claude_output(text)
+            session_id, usage, result = (parse_codex_stream(text) if is_codex_reviewer
+                                         else parse_claude_output(text))
             log_path.write_text(bounded_redacted(text))
             self.ledger.close_run(
                 run_id,
@@ -2452,7 +2550,8 @@ not run on re-review because previous_sha is then populated.
             return
         combined = cp.stdout + ("\n" + cp.stderr if cp.stderr else "")
         log_path.write_text(bounded_redacted(combined))
-        session_id, usage, result = parse_claude_output(cp.stdout)
+        session_id, usage, result = (parse_codex_stream(cp.stdout) if is_codex_reviewer
+                                     else parse_claude_output(cp.stdout))
         resume_session = session_id or task["session_id"]
         limited, retry_at = rate_limit_info(
             combined, int(self.cfg["claude_readiness_probe_seconds"])
@@ -2575,7 +2674,7 @@ not run on re-review because previous_sha is then populated.
                 task_id=str(task["id"]),
                 reviewed_sha=target_sha,
                 verdict=verdict,
-                reviewer="CLAUDE",
+                reviewer=str(task["agent"]),
                 model_class=str(task["model_class"]),
                 blockers=blockers,
                 summary=summary,
@@ -2607,6 +2706,38 @@ not run on re-review because previous_sha is then populated.
                 blockers=blockers,
             )
         else:
+            profile = review_profile(self.cfg, str(task["task_class"]))
+            if is_codex_reviewer and "SONNET_CHALLENGE" in profile:
+                self.ledger.update(task["id"], status="DONE", blockers_json="[]",
+                                   session_id=session_id, last_error=None, systemd_unit=None)
+                self.enqueue_specialist_review(task, "SONNET", "CHALLENGE")
+                self.finish_runtime_run(
+                    run_id, str(task["id"]), stdout=cp.stdout, stderr=cp.stderr,
+                    exit_code=0, session_id=session_id, usage=usage, result=result,
+                    status="PASS", blockers=[],
+                )
+                return
+            if is_codex_reviewer and "OPUS_FINAL" in profile:
+                self.ledger.update(task["id"], status="DONE", blockers_json="[]",
+                                   session_id=session_id, last_error=None, systemd_unit=None)
+                self.enqueue_specialist_review(task, "OPUS", "FINAL_REVIEW")
+                self.finish_runtime_run(
+                    run_id, str(task["id"]), stdout=cp.stdout, stderr=cp.stderr,
+                    exit_code=0, session_id=session_id, usage=usage, result=result,
+                    status="PASS", blockers=[],
+                )
+                return
+            if (not is_codex_reviewer and model == "SONNET"
+                    and "OPUS_FINAL" in profile):
+                self.ledger.update(task["id"], status="DONE", blockers_json="[]",
+                                   session_id=session_id, last_error=None, systemd_unit=None)
+                self.enqueue_specialist_review(task, "OPUS", "FINAL_REVIEW")
+                self.finish_runtime_run(
+                    run_id, str(task["id"]), stdout=cp.stdout, stderr=cp.stderr,
+                    exit_code=0, session_id=session_id, usage=usage, result=result,
+                    status="PASS", blockers=[],
+                )
+                return
             self.ledger.update(
                 task["id"],
                 status="WAITING_CI",
@@ -2628,6 +2759,39 @@ not run on re-review because previous_sha is then populated.
                 status="PASS",
                 blockers=[],
             )
+
+    def enqueue_specialist_review(
+        self, parent: sqlite3.Row, model: str, task_type: str
+    ) -> None:
+        """Chain a selective Claude stage after deterministic and Codex gates pass."""
+        if self.ledger.child(str(parent["id"]), task_type, str(parent["target_sha"])):
+            return
+        task_id = self.ledger.create_task(
+            issue_number=int(parent["issue_number"]), pr_number=int(parent["pr_number"]),
+            task_type=task_type, agent="CLAUDE", model_class=model,
+            task_class=str(parent["task_class"]), target_sha=str(parent["target_sha"]),
+            previous_sha=parent["previous_sha"], blockers=[], parent_id=str(parent["id"]),
+        )
+        self.gh.comment(int(parent["pr_number"]), assignment_marker(
+            task_id=task_id, agent="CLAUDE", task_type=task_type, model_class=model,
+            task_class=str(parent["task_class"]), issue_number=int(parent["issue_number"]),
+            pr_number=int(parent["pr_number"]), target_sha=str(parent["target_sha"]),
+            parent_id=str(parent["id"]), previous_sha=parent["previous_sha"],
+        ))
+
+    def invoke_codex_review(
+        self, task: sqlite3.Row, workdir: Path, prompt: str, unit: str
+    ) -> subprocess.CompletedProcess[str]:
+        """Launch a transcript-free Codex reviewer process in a read-only checkout."""
+        command = [
+            "/usr/local/bin/codex", "exec", "--json", "--sandbox", "read-only",
+            "--skip-git-repo-check", "-",
+        ]
+        full = model_sandbox_command(
+            unit=unit, user=CODEX_USER, home=CODEX_HOME, workdir=workdir,
+            command=command, read_only_worktree=True,
+        )
+        return run(full, input_text=prompt, timeout=int(self.cfg["review_timeout_seconds"]))
 
     def invoke_claude(
         self, task: sqlite3.Row, workdir: Path, prompt: str, unit: str
@@ -2660,7 +2824,9 @@ not run on re-review because previous_sha is then populated.
                 "Read,Glob,Grep,Bash",
             ]
         task_type = str(task["task_type"])
-        turn_budget = int(self.cfg["claude_turn_budgets"][task_type])
+        turn_budget = int(self.cfg["claude_turn_budgets"].get(
+            task_type, self.cfg["claude_turn_budgets"]["REVIEW"]
+        ))
         command.extend(["--max-turns", str(turn_budget)])
         full = model_sandbox_command(
             unit=unit,
@@ -2702,7 +2868,9 @@ not run on re-review because previous_sha is then populated.
                 "necessary adjacent context. Never perform or restart a recursive/"
                 "repository-wide audit.\n"
             )
-        return f"""You are CLAUDE, the independent adversarial reviewer for the Hyperliquid project.
+        reviewer_name = "CODEX REVIEWER" if task["agent"] == "CODEX_REVIEWER" else "CLAUDE"
+        return f"""You are {reviewer_name}, the independent adversarial reviewer for the
+Hyperliquid project.
 Review exactly PR #{task["pr_number"]} at exact SHA {target}.
 Model routing for this assignment is fixed by the orchestrator: {task["model_class"]}.
 
@@ -2926,8 +3094,8 @@ that non-code work needs a CODE_CHANGE. Unknown or contradictory evidence is TER
             issue_number=int(old["issue_number"]),
             pr_number=int(old["pr_number"]),
             task_type="REVIEW",
-            agent="CLAUDE",
-            model_class=str(old["model_class"]),
+            agent="CODEX_REVIEWER",
+            model_class="CODEX_DEFAULT",
             task_class=str(old["task_class"]),
             target_sha=current_sha,
             previous_sha=str(old["target_sha"]),
@@ -2939,9 +3107,9 @@ that non-code work needs a CODE_CHANGE. Unknown or contradictory evidence is TER
                 int(old["pr_number"]),
                 assignment_marker(
                     task_id=task_id,
-                    agent="CLAUDE",
+                    agent="CODEX_REVIEWER",
                     task_type="REVIEW",
-                    model_class=str(old["model_class"]),
+                    model_class="CODEX_DEFAULT",
                     task_class=str(old["task_class"]),
                     issue_number=int(old["issue_number"]),
                     pr_number=int(old["pr_number"]),
@@ -3043,7 +3211,7 @@ that non-code work needs a CODE_CHANGE. Unknown or contradictory evidence is TER
             self.gh.comment(
                 int(task["pr_number"]),
                 "AI_TEAM_PROTECTED_GATE=PASS\n"
-                "Trusted Issue authorization + independent exact-SHA Claude PASS + CI green; "
+                "Trusted Issue authorization + independent exact-SHA reviewer PASS + CI green; "
                 + "all protected files are inside the narrow AI control-plane allowlist.",
             )
         if str(task["task_class"]) not in self.cfg["auto_merge_task_classes"]:

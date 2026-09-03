@@ -125,3 +125,18 @@ This supersedes the earlier task-class policy that withheld automatic merge from
 - Durable fills capture is `NEVER_STOP`; pressure responses are emitted per writer.
 - Dataset budgets plus unallocated reserve must fit below each mount's target-used band.
   Unaccounted filesystem bytes are explicitly measured so unnamed growth fails closed.
+
+## 2026-09-03 — Dual-Codex review pipeline and selective Claude gates
+
+- Routine work is Codex build, deterministic preflight, independent exact-SHA Codex
+  review, then CI. It has no Claude dependency.
+- The reviewer uses a fresh process and separate clean, read-only worktree, receiving the
+  bounded review packet but never the builder transcript.
+- ENGINE_CRITICAL adds Sonnet after Codex. QUANT freezes an Opus pre-build contract and
+  retains Sonnet plus a separate final Opus decision. DESTRUCTIVE retains final Opus.
+- Runtime status exposes codex_builder, codex_reviewer, sonnet and opus while retaining
+  legacy codex/claude fields for #130. A Claude rate limit parks only its task.
+- Deterministic failures route directly to Codex with SHA/check/detail fingerprints;
+  CODE_CHANGE permits at least three attempts before genuine no-progress termination.
+- Protected-path, storage, exact-SHA, CI and live-sensitive gates remain fail closed;
+  real trading remains disabled.

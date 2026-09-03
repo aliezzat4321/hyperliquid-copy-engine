@@ -15,34 +15,38 @@ orch = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(orch)
 
 
-def test_routine_review_routes_to_sonnet():
-    assert orch.route_review(orch.DEFAULT_CONFIG, "ROUTINE", None) == "SONNET"
+def test_routine_review_routes_to_independent_codex():
+    assert orch.route_review(orch.DEFAULT_CONFIG, "ROUTINE", None) == "CODEX_DEFAULT"
+    assert orch.review_profile(orch.DEFAULT_CONFIG, "ROUTINE") == [
+        "DETERMINISTIC_PREFLIGHT", "CODEX_REVIEW", "CI"
+    ]
 
 
-def test_quant_review_routes_to_opus_only_under_explicit_class():
+def test_quant_review_keeps_specialists_after_codex():
     assert (
         orch.route_review(
             orch.DEFAULT_CONFIG,
             "QUANT_PROFITABILITY",
             "QUANT_PROFITABILITY",
         )
-        == "OPUS"
+        == "CODEX_DEFAULT"
     )
+    profile = orch.review_profile(orch.DEFAULT_CONFIG, "QUANT_PROFITABILITY")
+    assert "SONNET_CHALLENGE" in profile
+    assert "OPUS_FINAL" in profile
 
 
 @pytest.mark.parametrize("task_class", [
     "QUANT_PROFITABILITY", "STATISTICAL_METHODOLOGY",
     "CAPITAL_SENSITIVE_METHODOLOGY", "UNRESOLVED_DISAGREEMENT",
 ])
-def test_high_stakes_final_reviews_always_route_to_opus(task_class):
-    assert orch.route_review(orch.DEFAULT_CONFIG, task_class, None) == "OPUS"
+def test_high_stakes_profiles_retain_final_opus(task_class):
+    assert "OPUS_FINAL" in orch.review_profile(orch.DEFAULT_CONFIG, task_class)
 
 
-def test_major_architecture_review_uses_sonnet_unless_explicitly_escalated():
-    assert orch.route_review(orch.DEFAULT_CONFIG, "MAJOR_ARCHITECTURE", None) == "SONNET"
-    assert orch.route_review(
-        orch.DEFAULT_CONFIG, "MAJOR_ARCHITECTURE", "MAJOR_ARCHITECTURE"
-    ) == "OPUS"
+def test_major_architecture_uses_codex_then_sonnet():
+    assert orch.route_review(orch.DEFAULT_CONFIG, "MAJOR_ARCHITECTURE", None) == "CODEX_DEFAULT"
+    assert "SONNET_CHALLENGE" in orch.review_profile(orch.DEFAULT_CONFIG, "MAJOR_ARCHITECTURE")
 
 
 def test_opus_escalation_is_rejected_for_routine_work():
@@ -125,6 +129,38 @@ def test_remediation_fingerprint_is_idempotent(tmp_path):
     assert first["fingerprint"] == second["fingerprint"]
     assert second["occurrence_count"] == 2
     assert second["action_attempts"] == 0
+
+
+def test_preflight_fingerprint_tracks_sha_check_and_failure_detail():
+    first = orch.deterministic_failure_blocker(
+        sha="a" * 40, command="ruff check x.py", detail="F401 line 1", changed=["x.py"]
+    )
+    progressed = orch.deterministic_failure_blocker(
+        sha="b" * 40, command="ruff check x.py", detail="E501 line 2", changed=["x.py"]
+    )
+    assert first["source_kind"] == "PREFLIGHT"
+    assert first["source_id"].startswith("a" * 40)
+    assert first["rule_id"] != progressed["rule_id"]
+
+
+def test_codex_reviewer_sandbox_is_read_only_and_transcript_free(tmp_path, monkeypatch):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    task_id = ledger.create_task(
+        issue_number=195, pr_number=196, task_type="REVIEW", agent="CODEX_REVIEWER",
+        model_class="CODEX_DEFAULT", task_class="ROUTINE", target_sha="a" * 40,
+    )
+    captured = {}
+    monkeypatch.setattr(
+        orch, "model_sandbox_command", lambda **kw: captured.update(kw) or kw["command"]
+    )
+    monkeypatch.setattr(
+        orch, "run", lambda command, **kw: subprocess.CompletedProcess(command, 0, "", "")
+    )
+    team = object.__new__(orch.Orchestrator)
+    team.cfg = orch.DEFAULT_CONFIG
+    team.invoke_codex_review(ledger.get(task_id), tmp_path, "review", "unit")
+    assert captured["read_only_worktree"] is True
+    assert "resume" not in captured["command"]
 
 
 def test_machine_assignment_contains_exact_sha_and_model():
