@@ -17,7 +17,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$GITHUB_REPOSITORY" = "aliezzat4321/hyperliquid-copy-engine"
           target=1db0ed66e682fde17a2c0a026008e97e62765426
           review=/var/lib/hyperliquid-ai-team/agents/claude/worktrees/manager-review-180-$GITHUB_RUN_ID
           a_home=/var/lib/hyperliquid-ai-team/agents/claude/home
@@ -26,32 +25,8 @@ jobs:
           git -C "$review" checkout --quiet "$target"
           test "$(git -C "$review" rev-parse HEAD)" = "$target"
           chown -R hl-claude-agent:hl-claude-agent "$review"
-          prompt="$review/.manager-opus-review-prompt.txt"
-          cat > "$prompt" <<'EOF'
-          You are CLAUDE OPUS, the independent final adversarial reviewer for Hyperliquid Issue #178 / PR #180.
-          Review exactly SHA 1db0ed66e682fde17a2c0a026008e97e62765426 against main. Do not edit files, do not use GitHub credentials, and do not inspect or discuss Polymarket. REAL_TRADING_ENABLED must remain NO.
-
-          Read only: AGENTS.md, docs/ai-team/OPUS_REPAIR_LOOP_DIAGNOSIS.md, docs/ai-team/DECISIONS.md, the PR-changed files, and necessary adjacent code/tests. Run narrow relevant tests if useful.
-
-          The prior Opus review at 585d7bcb49e72dcdbaa7a07df22fd5f438fd60e2 had exactly two remaining blockers:
-          1) config/ai_team_router.json mapped DEPLOY_REVIEWED_CONTROL_PLANE to deploy-ai-team-orchestrator.yml even though that workflow had no workflow_dispatch; an authorized protected action would 422 and escape the remediation loop.
-          2) security-critical routing lacked behavioral tests for repository-issued protected authorization/config-sourced target, CI failure classification, and immutable Opus research input reaching Codex BUILD.
-
-          The new delta intentionally does NOT edit .github/workflows/**. It removes the invalid production protected-action mapping and adds behavioral tests. The actual deploy workflow change remains Issue #166 after this router is live.
-
-          Falsify the fix. Verify prior blockers are truly closed and no new merge-blocking regression/security issue is introduced. Do not demand implementation of #166 inside #178.
-
-          End with exactly:
-          REVIEWED_SHA=1db0ed66e682fde17a2c0a026008e97e62765426
-          VERDICT=PASS
-          BLOCKERS_JSON=[]
-
-          Or, if a true merge blocker remains:
-          REVIEWED_SHA=1db0ed66e682fde17a2c0a026008e97e62765426
-          VERDICT=FAIL
-          BLOCKERS_JSON=["concise actionable blocker"]
-          EOF
-          chown hl-claude-agent:hl-claude-agent "$prompt"
+          prompt='You are CLAUDE OPUS, independent final adversarial reviewer for Hyperliquid Issue #178 / PR #180. Review exactly SHA 1db0ed66e682fde17a2c0a026008e97e62765426 against main. Do not edit files or use GitHub credentials. Do not inspect or discuss Polymarket. REAL_TRADING_ENABLED remains NO. Read AGENTS.md, docs/ai-team/OPUS_REPAIR_LOOP_DIAGNOSIS.md, docs/ai-team/DECISIONS.md, PR-changed files and necessary adjacent tests only. Prior remaining blockers at 585d7bcb were: (1) invalid production protected-action mapping to deploy-ai-team-orchestrator.yml without workflow_dispatch; (2) missing behavioral tests for repository-issued protected authorization/config-sourced target, CI failure classification, and immutable Opus research input reaching Codex BUILD. New delta removes that production mapping, adds behavioral tests, and intentionally does not edit workflows; #166 owns later deploy-workflow changes. Falsify the fix and do not demand #166 in #178. End with REVIEWED_SHA=1db0ed66e682fde17a2c0a026008e97e62765426 then VERDICT=PASS and BLOCKERS_JSON=[]; or VERDICT=FAIL with concise actionable blockers.'
+          set +e
           output="$(systemd-run --pipe --wait --collect --quiet \
             --unit="hl-ai-claude-manager-review-180-$GITHUB_RUN_ID" \
             --uid=hl-claude-agent --gid=hl-claude-agent \
@@ -65,8 +40,12 @@ jobs:
             --property="ReadWritePaths=$review $a_home" \
             --setenv="HOME=$a_home" --setenv="CLAUDE_CONFIG_DIR=$a_home/.claude" \
             /usr/bin/claude -p --model opus --output-format text --permission-mode dontAsk \
-            --allowedTools Read,Glob,Grep,Bash "$(cat "$prompt")" 2>&1)"
+            --allowedTools Read,Glob,Grep,Bash "$prompt" 2>&1)"
+          rc=$?
+          set -e
           printf '%s\n' "$output"
+          echo "CLAUDE_RC=$rc"
+          test "$rc" -eq 0
           grep -q '^REVIEWED_SHA=1db0ed66e682fde17a2c0a026008e97e62765426$' <<<"$output"
           grep -Eq '^VERDICT=(PASS|FAIL)$' <<<"$output"
           echo 'POLYMARKET_TOUCHED=NO'
