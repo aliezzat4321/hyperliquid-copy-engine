@@ -1,5 +1,11 @@
 # Claude Opus Repair-Loop Diagnosis Request
 
+`LIVE-SENSITIVE: NO`
+
+This transport-only documentation change does not alter live permissions,
+trading code, order routing, signing or key handling, systemd configuration, or
+safety thresholds.
+
 ## Purpose and execution instruction
 
 This document is the transport artifact for GitHub Issue #172. The ensuing
