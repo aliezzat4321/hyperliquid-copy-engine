@@ -9,44 +9,53 @@ permissions:
   contents: read
 
 jobs:
-  opus_exact_sha_review:
+  seed_exact_sha_opus_review:
     runs-on: [self-hosted, linux]
-    timeout-minutes: 20
+    timeout-minutes: 5
     steps:
-      - name: Exact-SHA isolated Opus review for PR 180
+      - name: Seed one idempotent Opus review checkpoint in VM ledger
         shell: bash
         run: |
           set -euo pipefail
-          target=1db0ed66e682fde17a2c0a026008e97e62765426
-          review=/var/lib/hyperliquid-ai-team/agents/claude/worktrees/manager-review-180-$GITHUB_RUN_ID
-          a_home=/var/lib/hyperliquid-ai-team/agents/claude/home
-          rm -rf "$review"
-          git clone --quiet https://github.com/aliezzat4321/hyperliquid-copy-engine.git "$review"
-          git -C "$review" checkout --quiet "$target"
-          test "$(git -C "$review" rev-parse HEAD)" = "$target"
-          chown -R hl-claude-agent:hl-claude-agent "$review"
-          prompt='You are CLAUDE OPUS, independent final adversarial reviewer for Hyperliquid Issue #178 / PR #180. Review exactly SHA 1db0ed66e682fde17a2c0a026008e97e62765426 against main. Do not edit files or use GitHub credentials. Do not inspect or discuss Polymarket. REAL_TRADING_ENABLED remains NO. Read AGENTS.md, docs/ai-team/OPUS_REPAIR_LOOP_DIAGNOSIS.md, docs/ai-team/DECISIONS.md, PR-changed files and necessary adjacent tests only. Prior remaining blockers at 585d7bcb were: (1) invalid production protected-action mapping to deploy-ai-team-orchestrator.yml without workflow_dispatch; (2) missing behavioral tests for repository-issued protected authorization/config-sourced target, CI failure classification, and immutable Opus research input reaching Codex BUILD. New delta removes that production mapping, adds behavioral tests, and intentionally does not edit workflows; #166 owns later deploy-workflow changes. Falsify the fix and do not demand #166 in #178. End with REVIEWED_SHA=1db0ed66e682fde17a2c0a026008e97e62765426 then VERDICT=PASS and BLOCKERS_JSON=[]; or VERDICT=FAIL with concise actionable blockers.'
-          set +e
-          output="$(printf '%s\n' "$prompt" | systemd-run --pipe --wait --collect --quiet \
-            --unit="hl-ai-claude-manager-review-180-$GITHUB_RUN_ID" \
-            --uid=hl-claude-agent --gid=hl-claude-agent \
-            --working-directory="$review" \
-            --property=NoNewPrivileges=yes \
-            --property=PrivateTmp=yes \
-            --property=ProtectHome=yes \
-            --property=ProtectSystem=strict \
-            --property=RestrictSUIDSGID=yes \
-            --property=InaccessiblePaths=/mnt \
-            --property="ReadWritePaths=$review $a_home" \
-            --setenv="HOME=$a_home" --setenv="CLAUDE_CONFIG_DIR=$a_home/.claude" \
-            /usr/bin/claude -p --model opus --output-format text --permission-mode dontAsk \
-            --allowedTools Read,Glob,Grep,Bash 2>&1)"
-          rc=$?
-          set -e
-          printf '%s\n' "$output"
-          echo "CLAUDE_RC=$rc"
-          test "$rc" -eq 0
-          grep -q '^REVIEWED_SHA=1db0ed66e682fde17a2c0a026008e97e62765426$' <<<"$output"
-          grep -Eq '^VERDICT=(PASS|FAIL)$' <<<"$output"
+          echo 'TARGET_PROJECT=HYPERLIQUID_AI_TEAM_ONLY'
+          echo 'POLYMARKET_INSPECTION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+          /usr/bin/python3 - <<'PY'
+          import datetime as dt
+          import json
+          import sqlite3
+          import uuid
+
+          db_path = '/var/lib/hyperliquid-ai-team/orchestrator/ledger.sqlite3'
+          target = '1db0ed66e682fde17a2c0a026008e97e62765426'
+          previous = '585d7bcb49e72dcdbaa7a07df22fd5f438fd60e2'
+          db = sqlite3.connect(db_path)
+          db.row_factory = sqlite3.Row
+          existing = db.execute(
+              "SELECT id,status FROM tasks WHERE issue_number=? AND pr_number=? AND task_type='REVIEW' AND model_class='OPUS' AND target_sha=? ORDER BY created_at DESC LIMIT 1",
+              (178, 180, target),
+          ).fetchone()
+          if existing:
+              print(f"REVIEW_CHECKPOINT=EXISTS id={existing['id']} status={existing['status']}")
+          else:
+              now = dt.datetime.now(dt.timezone.utc).isoformat()
+              task_id = uuid.uuid4().hex[:16]
+              db.execute(
+                  """INSERT INTO tasks
+                  (id,issue_number,pr_number,task_type,agent,model_class,task_class,status,branch,target_sha,previous_sha,blockers_json,workdir,session_id,attempt,retry_at,limit_text,systemd_unit,last_error,parent_id,created_at,updated_at)
+                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                  (
+                      task_id,178,180,'REVIEW','CLAUDE','OPUS','MAJOR_ARCHITECTURE','PENDING',
+                      'codex/auto-178-5b387161',target,previous,'[]',None,None,0,None,None,None,None,None,now,now,
+                  ),
+              )
+              db.commit()
+              print(f"REVIEW_CHECKPOINT=CREATED id={task_id} target={target}")
+          db.close()
+          PY
+          systemctl start hyperliquid-ai-team-orchestrator.service || true
+          sleep 2
+          hl-ai-team-status
           echo 'POLYMARKET_TOUCHED=NO'
           echo 'REAL_TRADING_TOUCHED=NO'
