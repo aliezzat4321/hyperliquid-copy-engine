@@ -20,7 +20,15 @@ The contract must include the hypothesis/rationale, lane and strategy, universe 
 entry-time rule/features, parameters/grid, discovery and untouched prospective
 windows, measured-vs-assumed costs, notional/capacity, evidence floors, metrics and
 statistics/multiple-testing method, pass/fail/abandonment rules, and exact code/data
-provenance. The first evaluation locks that fingerprint.
+provenance.
+
+Before the first evaluation, persist that exact contract in
+`docs/ai-team/experiments/registry.json` using the controller's immutable registry-lock
+shape (`locked_contract_fingerprint` + `frozen_contract`). A report's own fingerprint is
+not proof that it was frozen ex ante. Evaluation without the independent registry lock
+fails closed. Reusing an already locked experiment ID with changed parameters, windows,
+cost model, hypothesis or acceptance criteria is invalid even if the report recomputes
+its own fingerprint.
 
 Changing a locked decision requires a new experiment ID/version and a new untouched
 window. An implementation repair may retain the fingerprint only when recorded as
@@ -47,6 +55,7 @@ State exactly what new evidence or changed assumption would justify rerunning a 
 
 ## Legacy registry migration
 Schema-v1 registry summaries remain readable and are classified as legacy exploratory
-records. They are not evidence of a frozen contract. Before prospective evaluation or
-promotion, create a new version with the machine-readable contract above; never infer
-missing freeze timestamps or holdout boundaries from an old result.
+records. They are not evidence of a frozen contract and cannot be retroactively upgraded
+under the same experiment ID. Before prospective evaluation or promotion, create a new
+experiment/version and persist its machine-readable lock; never infer missing freeze
+timestamps or holdout boundaries from an old result.
