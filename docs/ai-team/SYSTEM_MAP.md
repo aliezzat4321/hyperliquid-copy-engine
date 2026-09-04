@@ -16,6 +16,7 @@ Update this file only when a component moves, is added, or is retired.
 | Symbols | `src/hlcopy/market/symbols.py` | `canonical_coin` / `wire_coin` |
 | Position reconstruction | `src/hlcopy/positions/state_machine.py`, `reconstruction.py` | `startPosition` invariant; incomplete-start episodes excluded from scoring |
 | Executable fill model | `src/hlcopy/copyability/slippage.py` | Book-walk VWAP with a slippage cap; refuses to invent liquidity |
+| Profitability evidence auditor | `src/hlcopy/profitability/evidence_auditor.py`, `evidence_audit_cli.py` | Reusable fail-closed ledger/provenance/economics contract; Lane 3 JSONL adapter |
 | Latency scenarios | `src/hlcopy/copyability/latency.py`, `src/hlcopy/shadow/latency.py` | Feed vs order latency kept separate |
 | Wallet registry | `src/hlcopy/shadow/registry.py` | `research → validation → approved`; enforces the 10-user-per-IP cap |
 | Trading permission boundary | `src/hlcopy/trading/permissions.py` | `REAL_TRADING_ENABLED`; **live-sensitive** |
