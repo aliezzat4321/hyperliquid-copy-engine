@@ -107,6 +107,19 @@ Agents cannot choose Opus. The orchestrator validates the task class and escalat
 
 Automatic merge requires an explicit recognized task class (`TASK_CLASS` or `AI_TASK_CLASS`). A missing or invalid task class is recorded as `UNCLASSIFIED` and cannot be automatically merged. Protected AI-control-plane files additionally require a trusted Issue author, `AI_TEAM_PROTECTED_CHANGE=YES`, and membership in the narrow `AUTO_APPLY_CONTROL_PLANE_PATHS` allowlist before the same exact-SHA PASS + green-CI merge step. GitHub workflow, systemd deployment, trading/live, capital, credential, and other paths outside that allowlist remain non-automatically mergeable.
 
+Merge and issue completion are separate transitions. Generated PRs use `Refs #N`,
+never a GitHub auto-closing keyword. Issue closure fails closed unless the trusted Issue
+contains exactly one `AI_TEAM_CLOSE_ON_MERGE=YES` and the task is pure implementation.
+`AI_TEAM_COMPLETION_REQUIRES` may declare comma-separated evidence classes; destructive
+apply, production deployment/runtime proof, storage reclaim, prospective/shadow evidence,
+profitability verdicts, backfills/migrations, external convergence, measured operational
+outcomes, and owner-authorized actions always remain open after merge. The orchestrator
+records the exact reviewed SHA, CI result, predicate, and decision before closing.
+Otherwise runtime Issue #130 and Trello show `code_merged_but_not_complete`
+(`CODE_MERGED_BUT_NOT_COMPLETE` in the ledger) in Review / CI,
+distinct from Done / Proven. A child with `AI_TEAM_FINALIZES_PARENT` cannot close its
+parent unless the parent's own explicit completion predicate passes.
+
 For an Issue that truly requires Opus, use an explicit trusted Issue field, for example:
 
 ```text

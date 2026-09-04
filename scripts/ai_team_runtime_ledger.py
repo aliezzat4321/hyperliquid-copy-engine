@@ -128,6 +128,7 @@ def _current_step(task: dict[str, Any]) -> str:
         "WAITING_CI": "exact-SHA review passed; waiting for CI/merge gate",
         "BLOCKED": f"{task_type} blocked",
         "DONE": f"{task_type} complete",
+        "CODE_MERGED_BUT_NOT_COMPLETE": "code merged; closure evidence pending",
         "STALE": f"{task_type} stale; replacement assignment required",
     }.get(status, f"{task_type} status {status.lower()}")
 
@@ -145,6 +146,8 @@ def _next_step(task: dict[str, Any]) -> str:
         return "persist result/checkpoint before any subsequent assignment"
     if status == "BLOCKED":
         return "repair blocker or explicitly re-queue as a new assignment"
+    if status == "CODE_MERGED_BUT_NOT_COMPLETE":
+        return "collect and deterministically evaluate required closure evidence"
     if status == "DONE" and task_type in {"BUILD", "REPAIR"}:
         return "independent exact-SHA Claude review"
     if status == "DONE" and task_type == "REVIEW":

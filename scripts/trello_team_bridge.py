@@ -44,6 +44,7 @@ NOTIFY = {
     "REVIEW_PASS",
     "CI_FAIL",
     "MERGED",
+    "CODE_MERGED_BUT_NOT_COMPLETE",
     "COMPLETED",
     "SIGNIFICANT_RESULT",
 }
@@ -100,6 +101,8 @@ def phase(event: dict[str, Any]) -> str:
     # the canonical GitHub close + ai-team:done transition may project terminal.
     if kind in {"COMPLETED", "ISSUE_COMPLETED", "PARENT_FINALIZED"}:
         return "DONE"
+    if kind == "CODE_MERGED_BUT_NOT_COMPLETE" or status == "CODE_MERGED_BUT_NOT_COMPLETE":
+        return "REVIEW_CI"
     if kind in {"BLOCKED", "OWNER_ACTION", "AUTH_FAILURE"} or status == "BLOCKED":
         return "BLOCKED"
     review_events = {
@@ -387,6 +390,10 @@ def reconcile_ledger(
         )
         if terminal:
             kind, result, next_action = "COMPLETED", "merged and proven", "Done / Proven"
+        elif status == "CODE_MERGED_BUT_NOT_COMPLETE":
+            kind = "CODE_MERGED_BUT_NOT_COMPLETE"
+            result = "code merged; objective evidence remains"
+            next_action = "collect deterministic closure evidence"
         elif task_type == "REVIEW" or status == "WAITING_CI":
             kind, result, next_action = "REVIEW_STARTED", status, "continue review / CI"
         elif status in {"BLOCKED", "FAILED"}:

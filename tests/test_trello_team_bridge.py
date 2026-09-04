@@ -233,6 +233,9 @@ def test_worker_done_is_nonterminal_while_issue_remains_open() -> None:
     ) == "IN_PROGRESS"
     assert bridge.phase(event("REVIEW_PASS", status="DONE", task_type="REVIEW")) == "REVIEW_CI"
     assert bridge.phase(event("COMPLETED", status="DONE")) == "DONE"
+    assert bridge.phase(event(
+        "CODE_MERGED_BUT_NOT_COMPLETE", status="CODE_MERGED_BUT_NOT_COMPLETE"
+    )) == "REVIEW_CI"
 
 
 def test_reconcile_continues_after_one_failed_event(tmp_path: Path) -> None:

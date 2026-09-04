@@ -12,7 +12,7 @@ Trello is a durable observability projection of the existing GitHub issue/PR and
 - Done / Proven: `6a97140a2df53d4869073c91`
 - Owner notification mention: `@aliezzat2`
 
-The bridge maps `aliezzat4321/hyperliquid-copy-engine#<issue>` to exactly one card ID in its root-owned state file. Assignment and run start select In Progress; a PR, review, or CI event selects Review / CI; a blocker selects Blocked; merge/completion selects Done. An external GitHub issue/comment/PR/review/check event is normalized to the same event schema and therefore updates the same card immediately.
+The bridge maps `aliezzat4321/hyperliquid-copy-engine#<issue>` to exactly one card ID in its root-owned state file. Assignment and run start select In Progress; a PR, review, or CI event selects Review / CI; a blocker selects Blocked; only proven issue completion selects Done. A merge with outstanding acceptance evidence remains in Review / CI with status `CODE_MERGED_BUT_NOT_COMPLETE`. An external GitHub issue/comment/PR/review/check event is normalized to the same event schema and therefore updates the same card immediately.
 
 Every card description is replaced as one projection and shows priority, issue, PR/SHA, owner, reviewer/model, status, latest result, blocker, next action, elapsed time, ETA band, expected next checkpoint, and last update. Material results update the description rather than building an unbounded history.
 
