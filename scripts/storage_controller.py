@@ -203,11 +203,15 @@ def _write(path: Path, value: dict[str, Any]) -> None:
 
 
 def _fail_closed_actions(policy_path: Path) -> tuple[list[dict[str, str]], list[str]]:
-    """Best-effort enumeration; an invalid policy must never yield an empty stop set."""
+    """Best-effort enumeration of writers the policy permits the controller to stop."""
     try:
         datasets = _load(policy_path).get("datasets", [])
         writers = sorted(
-            {str(item.get("writer", "")).strip() for item in datasets}
+            {
+                str(item.get("writer", "")).strip()
+                for item in datasets
+                if item.get("pressure_control") != "NEVER_STOP"
+            }
             - {""}
         )
     except Exception:

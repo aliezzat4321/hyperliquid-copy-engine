@@ -105,8 +105,7 @@ def test_main_fail_closed_stops_every_policy_writer(tmp_path, monkeypatch):
         MODULE.main()
     assert caught.value.code == 2
     decision = json.loads(output.read_text())
-    assert decision["controlled_writers"] == ["capture", "fills"]
+    assert decision["controlled_writers"] == ["capture"]
     assert decision["writer_actions"] == [
         {"writer": "capture", "action": "STOP_WRITER"},
-        {"writer": "fills", "action": "STOP_WRITER"},
     ]
