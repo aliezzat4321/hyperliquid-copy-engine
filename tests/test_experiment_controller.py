@@ -68,6 +68,7 @@ def report(with_result=True):
                     },
                     "evaluated_at": "2026-03-02T00:00:00Z",
                     "code_sha": SHA1,
+                    "data_sha256": "b" * 64,
                 }
             ]
             if with_result
@@ -81,7 +82,7 @@ def test_unfrozen_and_persisted_frozen_without_results_are_not_promotable():
     candidate = report(False)
     audit = validate_evidence(candidate, registry=registry_for(candidate["frozen_contract"]))
     assert audit.verdict == "FROZEN_NOT_YET_PROSPECTIVE"
-    assert audit.promotion_eligible is False
+    assert audit.prospective_contract_valid is False
 
 
 def test_embedded_fingerprint_without_independent_registry_lock_fails_closed():
@@ -139,7 +140,8 @@ def test_implementation_only_repair_preserves_lock_and_requires_rerun_sha():
     ]
     candidate["evaluations"][0]["code_sha"] = SHA2
     audit = validate_evidence(candidate, registry=registry)
-    assert audit.verdict == "PROSPECTIVE_SHADOW_VALID"
+    assert audit.verdict == "PROSPECTIVE_CONTRACT_VALID"
+    assert audit.prospective_contract_valid is True
     assert audit.fingerprint == candidate["contract_fingerprint"]
 
     stale = report()
@@ -181,13 +183,78 @@ def test_evaluation_timestamp_must_follow_window_end():
     assert "EVALUATED_BEFORE_WINDOW_ENDED" in audit.blockers
 
 
-def test_promotion_report_integration_fails_closed_without_registry_lock():
+def economic_audit(candidate):
+    evaluation = candidate["evaluations"][-1]
+    return {
+        "status": "PASS",
+        "promotion_eligible": True,
+        "policy_version": "quant-promotion-policy-v2",
+        "contract_fingerprint": candidate["contract_fingerprint"],
+        "evidence_sha256": "c" * 64,
+        "code_sha": evaluation["code_sha"],
+        "data_sha256": evaluation["data_sha256"],
+        "checks": {
+            "minimum_evidence": True,
+            "primary_metrics": True,
+            "success_criteria": True,
+            "uncertainty_method": True,
+            "multiple_testing_treatment": True,
+            "execution_costs": True,
+            "unresolved_exposure": True,
+            "capacity": True,
+        },
+    }
+
+
+def test_clean_prospective_window_without_economic_results_is_non_promotable():
+    candidate = report()
+    registry = registry_for(candidate["frozen_contract"])
+    result = audit_promotion_report(
+        {**candidate, "promotion_eligible": True}, registry=registry
+    )
+    assert result["experiment_audit"]["prospective_contract_valid"] is True
+    assert result["promotion_eligible"] is False
+    assert "DOWNSTREAM_ECONOMIC_AUDIT_MISSING" in result["promotion_gate"]["blockers"]
+
+
+@pytest.mark.parametrize(
+    "failed_check",
+    [
+        "minimum_evidence",
+        "primary_metrics",
+        "success_criteria",
+        "uncertainty_method",
+        "multiple_testing_treatment",
+        "execution_costs",
+        "unresolved_exposure",
+        "capacity",
+    ],
+)
+def test_failed_frozen_economic_criteria_remain_non_promotable(failed_check):
+    candidate = report()
+    gate = economic_audit(candidate)
+    gate["status"] = "FAIL"
+    gate["promotion_eligible"] = False
+    gate["checks"][failed_check] = False
+    result = audit_promotion_report(
+        candidate,
+        registry=registry_for(candidate["frozen_contract"]),
+        economic_evidence_audit=gate,
+    )
+    assert result["experiment_audit"]["prospective_contract_valid"] is True
+    assert result["promotion_eligible"] is False
+    expected = f"ECONOMIC_AUDIT_{failed_check.upper()}_NOT_SATISFIED"
+    assert expected in result["promotion_gate"]["blockers"]
+
+
+def test_promotion_requires_integrated_downstream_auditor_pass():
     candidate = report()
     registry = registry_for(candidate["frozen_contract"])
     promoted = audit_promotion_report(
-        {**candidate, "promotion_eligible": True}, registry=registry
+        candidate, registry=registry, economic_evidence_audit=economic_audit(candidate)
     )
-    assert promoted["experiment_audit"]["promotion_eligible"] is True
+    assert promoted["promotion_eligible"] is True
+    assert promoted["promotion_gate"]["blockers"] == []
 
     unlocked = audit_promotion_report({**candidate, "promotion_eligible": True})
     assert unlocked["promotion_eligible"] is False
@@ -195,6 +262,20 @@ def test_promotion_report_integration_fails_closed_without_registry_lock():
 
     unfrozen = audit_promotion_report({"promotion_eligible": True}, registry=registry)
     assert unfrozen["promotion_eligible"] is False
+
+
+def test_implementation_repair_requires_fresh_evaluation_data_provenance():
+    candidate = report()
+    registry = registry_for(candidate["frozen_contract"])
+    candidate["implementation_revisions"] = [
+        {"commit_sha": SHA2, "change_type": "IMPLEMENTATION_REPAIR", "reason": "repair"}
+    ]
+    candidate["evaluations"][0]["code_sha"] = SHA2
+    del candidate["evaluations"][0]["data_sha256"]
+    audit = validate_evidence(candidate, registry=registry)
+    assert audit.prospective_contract_valid is False
+    assert "EVALUATION_DATA_PROVENANCE_MISSING" in audit.blockers
+    assert candidate["frozen_contract"] == contract()
 
 
 def test_new_version_gets_new_fingerprint():

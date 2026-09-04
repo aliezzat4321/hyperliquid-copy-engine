@@ -19,9 +19,20 @@ from typing import Any, Literal
 Verdict = Literal[
     "EXPLORATORY_UNFROZEN",
     "FROZEN_NOT_YET_PROSPECTIVE",
-    "PROSPECTIVE_SHADOW_VALID",
+    "PROSPECTIVE_CONTRACT_VALID",
     "INVALID_CONTRACT_DRIFT_OR_EVIDENCE_LEAKAGE",
 ]
+
+ECONOMIC_GATE_CHECKS = (
+    "minimum_evidence",
+    "primary_metrics",
+    "success_criteria",
+    "uncertainty_method",
+    "multiple_testing_treatment",
+    "execution_costs",
+    "unresolved_exposure",
+    "capacity",
+)
 
 CONTRACT_FIELDS = (
     "contract_version", "experiment_id", "hypothesis", "causal_rationale",
@@ -79,14 +90,14 @@ def _validate_contract_content(contract: Mapping[str, Any]) -> None:
 @dataclass(frozen=True)
 class ExperimentAudit:
     verdict: Verdict
-    promotion_eligible: bool
+    prospective_contract_valid: bool
     fingerprint: str | None
     blockers: tuple[str, ...]
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "verdict": self.verdict,
-            "promotion_eligible": self.promotion_eligible,
+            "prospective_contract_valid": self.prospective_contract_valid,
             "fingerprint": self.fingerprint,
             "blockers": list(self.blockers),
         }
@@ -292,6 +303,9 @@ def validate_evidence(
                 blockers.append("EVALUATION_BEFORE_FREEZE")
             if evaluation.get("code_sha") not in repair_shas:
                 blockers.append("UNRECORDED_CODE_PROVENANCE")
+            data_sha = evaluation.get("data_sha256")
+            if not isinstance(data_sha, str) or not SHA256_RE.fullmatch(data_sha):
+                blockers.append("EVALUATION_DATA_PROVENANCE_MISSING")
             if latest_code_sha is not None and evaluation.get("code_sha") != latest_code_sha:
                 blockers.append("EVIDENCE_NOT_RERUN_AFTER_REPAIR")
             if evaluated_at < end:
@@ -309,16 +323,96 @@ def validate_evidence(
         )
     if not evaluations:
         return ExperimentAudit("FROZEN_NOT_YET_PROSPECTIVE", False, actual, ())
-    return ExperimentAudit("PROSPECTIVE_SHADOW_VALID", True, actual, ())
+    return ExperimentAudit("PROSPECTIVE_CONTRACT_VALID", True, actual, ())
+
+
+def _economic_gate_blockers(
+    audit: object,
+    *,
+    contract_fingerprint: str | None,
+    evaluation: Mapping[str, Any] | None,
+) -> tuple[str, ...]:
+    """Validate a downstream economic/statistical verdict and its evidence binding."""
+    if not isinstance(audit, Mapping):
+        return ("DOWNSTREAM_ECONOMIC_AUDIT_MISSING",)
+
+    blockers: list[str] = []
+    if audit.get("status") != "PASS" or audit.get("promotion_eligible") is not True:
+        blockers.append("DOWNSTREAM_ECONOMIC_AUDIT_NOT_PASSING")
+    if audit.get("contract_fingerprint") != contract_fingerprint:
+        blockers.append("ECONOMIC_AUDIT_CONTRACT_MISMATCH")
+
+    evidence_sha = audit.get("evidence_sha256")
+    if not isinstance(evidence_sha, str) or not SHA256_RE.fullmatch(evidence_sha):
+        blockers.append("ECONOMIC_AUDIT_PROVENANCE_MISSING")
+
+    if evaluation is None:
+        blockers.append("ECONOMIC_AUDIT_EVALUATION_MISSING")
+    else:
+        if audit.get("code_sha") != evaluation.get("code_sha"):
+            blockers.append("ECONOMIC_AUDIT_CODE_PROVENANCE_MISMATCH")
+        if audit.get("data_sha256") != evaluation.get("data_sha256"):
+            blockers.append("ECONOMIC_AUDIT_DATA_PROVENANCE_MISMATCH")
+
+    policy_version = audit.get("policy_version")
+    if not isinstance(policy_version, str) or not policy_version.strip():
+        blockers.append("ECONOMIC_AUDIT_POLICY_VERSION_MISSING")
+
+    checks = audit.get("checks")
+    if not isinstance(checks, Mapping):
+        blockers.append("ECONOMIC_AUDIT_CHECKS_MISSING")
+    else:
+        blockers.extend(
+            f"ECONOMIC_AUDIT_{name.upper()}_NOT_SATISFIED"
+            for name in ECONOMIC_GATE_CHECKS
+            if checks.get(name) is not True
+        )
+    return tuple(dict.fromkeys(blockers))
 
 
 def audit_promotion_report(
-    report: Mapping[str, Any], *, registry: Mapping[str, Any] | None = None
+    report: Mapping[str, Any],
+    *,
+    registry: Mapping[str, Any] | None = None,
+    economic_evidence_audit: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Attach the experiment verdict to promotion output; absent lock fails closed."""
+    """Integrate structural and downstream economic gates; either may fail closed.
+
+    The experiment controller never judges economics. Promotion requires a distinct
+    auditor result bound to the frozen contract and latest evaluation provenance.
+    """
     output = dict(report)
     audit = validate_evidence(report, registry=registry)
     output["experiment_audit"] = audit.to_dict()
-    if not audit.promotion_eligible:
-        output["promotion_eligible"] = False
+    supplied_economic_audit = (
+        economic_evidence_audit
+        if economic_evidence_audit is not None
+        else report.get("economic_evidence_audit")
+    )
+    evaluations = report.get("evaluations")
+    latest_evaluation = (
+        evaluations[-1]
+        if isinstance(evaluations, list)
+        and evaluations
+        and isinstance(evaluations[-1], Mapping)
+        else None
+    )
+    gate_blockers = _economic_gate_blockers(
+        supplied_economic_audit,
+        contract_fingerprint=audit.fingerprint,
+        evaluation=latest_evaluation,
+    )
+    if not audit.prospective_contract_valid:
+        gate_blockers = ("PROSPECTIVE_CONTRACT_INVALID", *gate_blockers)
+    promotion_ready = audit.prospective_contract_valid and not gate_blockers
+    output["promotion_eligible"] = promotion_ready
+    output["promotion_gate"] = {
+        "promotion_eligible": promotion_ready,
+        "blockers": list(gate_blockers),
+        "economic_evidence_audit": (
+            dict(supplied_economic_audit)
+            if isinstance(supplied_economic_audit, Mapping)
+            else None
+        ),
+    }
     return output
