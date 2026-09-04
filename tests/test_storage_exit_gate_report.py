@@ -5,7 +5,6 @@ import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-
 PATH = Path(__file__).parents[1] / "scripts" / "storage_exit_gate_report.py"
 SPEC = importlib.util.spec_from_file_location("storage_exit_gate_report_test", PATH)
 assert SPEC and SPEC.loader
