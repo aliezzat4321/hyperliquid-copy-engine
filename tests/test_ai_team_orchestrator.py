@@ -199,9 +199,9 @@ def test_preflight_runs_repo_lint_format_full_pytest_and_contract_guard(tmp_path
     ) == []
     assert commands[0][-2:] == ["check", "."]
     assert commands[1][-3:] == ["format", "--check", "."]
-    assert commands[2][-3:] == ["pytest", "-q"]
+    assert commands[2][-3:] == ["-m", "pytest", "-q"]
     assert commands[3][-1] == "scripts/validate_ai_team_contract.py"
-    assert commands[4][-3:] == ["--base", "origin/main"]
+    assert commands[4][-2:] == ["--base", "origin/main"]
 
 
 def test_new_sha_invalidates_all_old_review_stages(tmp_path):
