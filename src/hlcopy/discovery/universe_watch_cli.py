@@ -235,6 +235,20 @@ async def _run(args: argparse.Namespace) -> None:
             row.to_dict() | {"signals": list(signals.get(row.address, ()))}
             for row in universe[:100]
         ],
+        "boundary_counts": {
+            "fetched": len(candidates),
+            "new_or_changed": len(added) + len(refreshed),
+            "profiled": 0,
+            "screened": 0,
+            "robust": 0,
+            "challenger": 0,
+            "prospective_shadow": 0,
+        },
+        "rejection_counts": {
+            "leaderboard_ineligible": len(candidates) - len(universe),
+            "registration_capacity": len(skipped_capacity),
+            "stale_demoted": len(removed),
+        },
     }
     args.state.parent.mkdir(parents=True, exist_ok=True)
     tmp = args.state.with_suffix(args.state.suffix + ".tmp")

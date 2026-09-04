@@ -4,10 +4,12 @@ import argparse
 import json
 import os
 from collections import defaultdict
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
 from hlcopy.profitability.causal_book import CausalParquetL2BookProvider
+from hlcopy.profitability.lane1_handoff import build_challenger_queue
 from hlcopy.profitability.portfolio_position_copy import simulate_copy_with_portfolio_capital
 from hlcopy.profitability.position_copy import CopyFillEvent, load_wide_events
 from hlcopy.profitability.position_live_cli import NOTIONALS, SCENARIOS, _summary
@@ -16,6 +18,9 @@ D = Decimal
 ZERO = D("0")
 SCREEN_SCENARIO = SCENARIOS[2]  # LIVE_500MS
 SCREEN_NOTIONAL = D("5000")
+DEFAULT_UNIVERSE_STATE = Path(
+    "/mnt/HC_Volume_106576526/hyperliquid/discovery/universe_state.json"
+)
 
 
 def _append_jsonl(path: Path, row: dict[str, object]) -> None:
@@ -101,6 +106,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--taker-fee-bps", type=Decimal, default=D("4.5"))
     parser.add_argument("--max-slippage-bps", type=Decimal, default=D("20"))
     parser.add_argument("--max-book-forward-ms", type=int, default=750)
+    parser.add_argument("--universe-state", type=Path, default=DEFAULT_UNIVERSE_STATE)
+    parser.add_argument("--max-universe-age-hours", type=float, default=6.0)
     return parser
 
 
@@ -111,6 +118,10 @@ def main() -> None:
     args = build_parser().parse_args()
     cutoff_ns = int(args.wide_cutoff_ns_file.read_text(encoding="utf-8").strip())
     events = load_wide_events(args.wide_enriched_dir, cutoff_ns=cutoff_ns)
+
+    universe_payload: dict[str, object] = {}
+    if args.universe_state is not None and args.universe_state.exists():
+        universe_payload = json.loads(args.universe_state.read_text(encoding="utf-8"))
 
     grouped: dict[tuple[str, str], list[CopyFillEvent]] = defaultdict(list)
     for event in events:
@@ -277,6 +288,21 @@ def main() -> None:
         "confirmed_row_count": len(confirmed),
         "robust_candidate_count": len(robust),
         "robust_candidates": robust[:100],
+        "run_at": datetime.now(UTC).isoformat(),
+        "boundary_counts": {
+            "fetched": int(universe_payload.get("screened_wallets", 0)),
+            "new_or_changed": len(universe_payload.get("registered_this_run", []))
+            + len(universe_payload.get("refreshed_this_run", [])),
+            "profiled": len(grouped),
+            "screened": len(screened),
+            "robust": len(robust),
+        },
+        "rejection_counts": {
+            "insufficient_wallet_coin_events": len(grouped) - len(cohorts),
+            "screen_non_positive_or_too_few_actions": len(screened) - len(positive),
+            "confirmation_not_robust": len(finalists)
+            - len({_cohort_key(str(r['wallet_address']), str(r['coin'])) for r in robust}),
+        },
         "files": {
             "screening": str(screen_path),
             "confirmation": str(confirm_path),
@@ -284,12 +310,24 @@ def main() -> None:
         },
     }
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    queue = build_challenger_queue(
+        robust,
+        output_path=args.output_dir / "challenger_queue.json",
+        universe_state_path=args.universe_state,
+        max_universe_age_hours=max(0.0, args.max_universe_age_hours),
+    )
+    counts = queue["counts"]
+    report["boundary_counts"]["challenger"] = counts["challenger"]
+    report["boundary_counts"]["prospective_shadow"] = counts["challenger"]
     tmp = report_path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     tmp.replace(report_path)
     print(
         f"funnel_done screened={len(screened)} positive={len(positive)} "
-        f"confirmed={len(confirmed)} robust={len(robust)} report={report_path}",
+        f"confirmed={len(confirmed)} robust={len(robust)} "
+        f"challenger={counts['challenger']} prospective_shadow={counts['challenger']} "
+        f"rejected={counts['rejected']} demoted={counts['demoted']} "
+        f"timestamp={queue['generated_at']} report={report_path}",
         flush=True,
     )
 
