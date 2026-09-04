@@ -2,7 +2,6 @@ import importlib.util
 import json
 from pathlib import Path
 
-
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "prospective_champion_lane.py"
 SPEC = importlib.util.spec_from_file_location("prospective_champion_lane", SCRIPT)
 assert SPEC and SPEC.loader
