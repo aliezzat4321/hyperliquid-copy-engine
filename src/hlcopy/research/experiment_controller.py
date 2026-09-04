@@ -182,9 +182,17 @@ def _registry_lock(
     rows = registry.get("experiments")
     if not isinstance(rows, list):
         return None, None, "MALFORMED_EXPERIMENT_REGISTRY"
-    matches = [row for row in rows if isinstance(row, Mapping) and str(row.get("id")) == experiment_id]
+    matches = [
+        row
+        for row in rows
+        if isinstance(row, Mapping) and str(row.get("id")) == experiment_id
+    ]
     if len(matches) != 1:
-        return None, None, "REGISTRY_LOCK_MISSING" if not matches else "DUPLICATE_REGISTRY_RECORD"
+        return (
+            None,
+            None,
+            "REGISTRY_LOCK_MISSING" if not matches else "DUPLICATE_REGISTRY_RECORD",
+        )
     row = matches[0]
     locked = row.get("locked_contract_fingerprint")
     stored = row.get("frozen_contract")
