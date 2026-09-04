@@ -86,6 +86,41 @@ def test_stale_universe_fails_closed_and_dead_challenger_is_demoted(tmp_path: Pa
     assert result["demoted"][0]["demotion_reason"] == "NO_LONGER_ROBUST_OR_CURRENT"
 
 
+def test_future_universe_timestamp_fails_closed(tmp_path: Path) -> None:
+    now = datetime(2026, 9, 3, 12, tzinfo=UTC)
+    universe = tmp_path / "universe.json"
+    _universe(universe, now + timedelta(seconds=1), WALLET_A)
+
+    result = build_challenger_queue(
+        [_robust(WALLET_A)],
+        output_path=tmp_path / "queue.json",
+        universe_state_path=universe,
+        max_universe_age_hours=6,
+        now=now,
+        clock_ns=lambda: 3,
+    )
+
+    assert result["counts"]["challenger"] == 0
+    assert {row["reason"] for row in result["rejections"]} == {"UNIVERSE_TIMESTAMP_FUTURE"}
+
+
+def test_missing_universe_reason_is_not_masked_as_wallet_absence(tmp_path: Path) -> None:
+    now = datetime(2026, 9, 3, 12, tzinfo=UTC)
+    universe = tmp_path / "missing.json"
+
+    result = build_challenger_queue(
+        [_robust(WALLET_A)],
+        output_path=tmp_path / "queue.json",
+        universe_state_path=universe,
+        max_universe_age_hours=6,
+        now=now,
+        clock_ns=lambda: 4,
+    )
+
+    assert result["counts"]["challenger"] == 0
+    assert {row["reason"] for row in result["rejections"]} == {"UNIVERSE_STATE_MISSING"}
+
+
 def test_wallet_coin_selectivity_and_dedupe_are_preserved(tmp_path: Path) -> None:
     now = datetime(2026, 9, 3, 12, tzinfo=UTC)
     universe = tmp_path / "universe.json"
