@@ -155,6 +155,110 @@ def test_lane3_normalizer_preserves_independent_population_baseline() -> None:
     assert "POPULATION_UNRECONCILED" in _codes(report)
 
 
+def test_lane3_missing_independent_population_baseline_fails_closed() -> None:
+    rows = [
+        {
+            "type": "shadow_opened",
+            "ts": "2026-01-02T00:00:03Z",
+            "signal": {"sourceBaseId": "p1", "sourceTimeMs": 1767312000000},
+        }
+    ]
+    manifest = _valid_bundle()
+    del manifest["positions"]
+    del manifest["population"]
+    manifest["economics_totals"] = {"final_net": "0"}
+
+    normalized = lane3_bundle(rows, manifest)
+    report = audit_evidence(normalized)
+
+    assert "population" not in normalized
+    assert report["status"] == "FAIL"
+    assert report["counts"]["unresolved"] == 1
+    assert "POPULATION_BASELINE_MISSING" in _codes(report)
+    assert report["validated_profitability_allowed"] is False
+
+
+def test_positive_unresolved_mtm_with_unknown_costs_cannot_improve_net() -> None:
+    bundle = _valid_bundle()
+    bundle["positions"][0] = {
+        "position_id": "p1",
+        "status": "unresolved",
+        "timestamps": {
+            "signal": "2026-01-02T00:00:00Z",
+            "decision": "2026-01-02T00:00:01Z",
+            "shadow_or_execution": "2026-01-02T00:00:02Z",
+            "open": "2026-01-02T00:00:03Z",
+        },
+        "economics": {"unresolved_mtm": "100"},
+    }
+    bundle["economics_totals"] = {"final_net": "0"}
+
+    report = audit_evidence(bundle)
+
+    assert report["status"] == "PASS"
+    assert report["economics"]["unresolved_mtm"] == "100"
+    assert report["economics"]["final_net"] == "0"
+    assert report["economics"]["unresolved_mtm_included_in_final_net"] is False
+    assert report["promotion_eligible"] is False
+    assert report["validated_profitability_allowed"] is False
+
+
+def test_fully_costed_unresolved_exposure_is_deterministic_and_excluded() -> None:
+    bundle = _valid_bundle()
+    bundle["positions"][0] = {
+        "position_id": "p1",
+        "status": "unresolved",
+        "timestamps": {
+            "signal": "2026-01-02T00:00:00Z",
+            "decision": "2026-01-02T00:00:01Z",
+            "shadow_or_execution": "2026-01-02T00:00:02Z",
+            "open": "2026-01-02T00:00:03Z",
+        },
+        "economics": {
+            "unresolved_mtm": "100",
+            "fees": _cost("2"),
+            "spread": _cost("3"),
+            "depth": _cost("4"),
+            "slippage": _cost("5"),
+            "impact": _cost("6"),
+            "funding": {"amount": "7", "coverage": "complete"},
+        },
+    }
+    bundle["economics_totals"] = {"final_net": "0"}
+
+    first = audit_evidence(bundle)
+    second = audit_evidence(bundle)
+
+    assert first == second
+    assert first["status"] == "PASS"
+    assert first["economics"]["unresolved_mtm"] == "100"
+    assert first["economics"]["final_net"] == "0"
+    assert first["promotion_eligible"] is False
+
+
+def test_unresolved_mtm_cannot_inflate_closed_promotable_net() -> None:
+    bundle = _valid_bundle()
+    unresolved = {
+        "position_id": "p2",
+        "status": "open",
+        "timestamps": {
+            "signal": "2026-01-02T12:00:00Z",
+            "decision": "2026-01-02T12:00:01Z",
+            "shadow_or_execution": "2026-01-02T12:00:02Z",
+            "open": "2026-01-02T12:00:03Z",
+        },
+        "economics": {"unresolved_mtm": "1000"},
+    }
+    bundle["positions"].append(unresolved)
+    bundle["population"]["input_count"] = 2
+
+    report = audit_evidence(bundle)
+
+    assert report["status"] == "PASS"
+    assert report["economics"]["unresolved_mtm"] == "1000"
+    assert report["economics"]["final_net"] == "15"
+
+
 def test_missing_outcome_cannot_disappear_from_closed_and_unresolved() -> None:
     bundle = _valid_bundle()
     bundle["positions"][0]["status"] = ""

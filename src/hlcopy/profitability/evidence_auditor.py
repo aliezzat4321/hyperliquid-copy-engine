@@ -324,15 +324,19 @@ def audit_evidence(bundle: dict[str, Any]) -> dict[str, Any]:
         )
 
     expected = bundle.get("population")
-    try:
-        expected_inputs = int(expected.get("input_count", -1)) if isinstance(expected, dict) else -1
-    except (TypeError, ValueError):
-        expected_inputs = -1
-    if expected_inputs < 0:
+    expected_value = expected.get("input_count") if isinstance(expected, dict) else None
+    expected_inputs = (
+        expected_value
+        if isinstance(expected_value, int)
+        and not isinstance(expected_value, bool)
+        and expected_value >= 0
+        else None
+    )
+    if expected_inputs is None:
         block(
             "POPULATION_BASELINE_MISSING",
             "MISSING_EVIDENCE",
-            "population.input_count is required",
+            "an independent population.input_count non-negative integer is required",
         )
     elif expected_inputs != len(positions):
         block(
@@ -346,7 +350,6 @@ def audit_evidence(bundle: dict[str, Any]) -> dict[str, Any]:
         totals["gross_pnl"]
         - sum((totals[name] for name in MATERIAL_COSTS), Decimal(0))
         - totals["funding"]
-        + totals["unresolved_mtm"]
     )
     final_net = calculated_net if economics_complete else None
     if not isinstance(declared, dict) or _decimal(declared.get("final_net")) is None:
@@ -408,6 +411,7 @@ def audit_evidence(bundle: dict[str, Any]) -> dict[str, Any]:
         "economics": {
             **{key: str(value) for key, value in totals.items()},
             "final_net": str(final_net) if final_net is not None else None,
+            "unresolved_mtm_included_in_final_net": False,
         },
         "blocker_summary": dict(sorted(counts.items())),
         "blockers": bounded_blockers[:100],
@@ -494,10 +498,12 @@ def lane3_bundle(rows: list[dict[str, Any]], manifest: dict[str, Any]) -> dict[s
                 "economics": supplied,
             }
         )
-    population = manifest.get("population")
-    if not isinstance(population, dict) or "input_count" not in population:
-        population = {"input_count": len(positions)}
-    return {**manifest, "positions": positions, "population": population}
+    # Population is source evidence, not an adapter output. In particular, deriving
+    # it from ``positions`` would make a truncated stream reconcile with itself.
+    # Spreading the manifest preserves a supplied baseline verbatim and leaves an
+    # absent baseline absent so that audit_evidence can fail closed while still
+    # returning position diagnostics.
+    return {**manifest, "positions": positions}
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
