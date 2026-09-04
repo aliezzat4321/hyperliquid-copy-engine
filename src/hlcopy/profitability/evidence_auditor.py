@@ -1,7 +1,7 @@
 """Deterministic, fail-closed profitability evidence auditing.
 
 The auditor validates evidence; it does not estimate economics or decide whether a
-strategy is attractive.  Unknown values remain unknown and block validated or
+strategy is attractive. Unknown values remain unknown and block validated or
 promotion-eligible verdicts.
 """
 
@@ -65,12 +65,21 @@ def audit_evidence(bundle: dict[str, Any]) -> dict[str, Any]:
             "MISSING_EVIDENCE",
             "source, data_sha256 and code_commit are required",
         )
-    elif not re.fullmatch(r"[0-9a-f]{64}", str(provenance["data_sha256"])):
-        block(
-            "DATA_HASH_INVALID",
-            "CORRUPTED_EVIDENCE",
-            "data_sha256 must be an exact lowercase SHA-256",
-        )
+    else:
+        if not re.fullmatch(r"[0-9a-f]{64}", str(provenance["data_sha256"])):
+            block(
+                "DATA_HASH_INVALID",
+                "CORRUPTED_EVIDENCE",
+                "data_sha256 must be an exact lowercase SHA-256",
+            )
+        if not re.fullmatch(
+            r"(?:[0-9a-f]{40}|[0-9a-f]{64})", str(provenance["code_commit"])
+        ):
+            block(
+                "CODE_COMMIT_INVALID",
+                "CORRUPTED_EVIDENCE",
+                "code_commit must be an exact lowercase Git commit SHA",
+            )
 
     report_version = bundle.get("report_version")
     policy_version = bundle.get("policy_version")
@@ -85,7 +94,7 @@ def audit_evidence(bundle: dict[str, Any]) -> dict[str, Any]:
     start = _time(window.get("start")) if isinstance(window, dict) else None
     end = _time(window.get("end")) if isinstance(window, dict) else None
     audited_at = _time(bundle.get("audited_at"))
-    if start is None or end is None or start > end:
+    if start is None or end is None or start >= end:
         block(
             "EVALUATION_WINDOW_INVALID",
             "CORRUPTED_EVIDENCE",
@@ -97,8 +106,7 @@ def audit_evidence(bundle: dict[str, Any]) -> dict[str, Any]:
             "CORRUPTED_EVIDENCE",
             "audited_at must be a timezone-aware timestamp",
         )
-    max_age = bundle.get("max_data_age_seconds")
-    max_age_d = _decimal(max_age)
+    max_age_d = _decimal(bundle.get("max_data_age_seconds"))
     if max_age_d is None or max_age_d < 0:
         block(
             "FRESHNESS_LIMIT_MISSING",
@@ -118,8 +126,15 @@ def audit_evidence(bundle: dict[str, Any]) -> dict[str, Any]:
         )
 
     selection = bundle.get("selection")
+    selection_known = isinstance(selection, dict) and isinstance(selection.get("prospective"), bool)
+    if not selection_known:
+        block(
+            "SELECTION_STATE_MISSING",
+            "MISSING_EVIDENCE",
+            "selection.prospective must explicitly be true or false",
+        )
+    prospective = bool(selection_known and selection.get("prospective") is True)
     frozen_at = _time(selection.get("frozen_at")) if isinstance(selection, dict) else None
-    prospective = bool(isinstance(selection, dict) and selection.get("prospective"))
     if prospective and frozen_at is None:
         block(
             "SELECTION_FREEZE_MISSING",
@@ -147,7 +162,11 @@ def audit_evidence(bundle: dict[str, Any]) -> dict[str, Any]:
     positions = [row for row in raw_positions if isinstance(row, dict)]
     malformed = len(raw_positions) - len(positions)
     if malformed:
-        block("MALFORMED_ROWS", "CORRUPTED_EVIDENCE", f"{malformed} position rows are not objects")
+        block(
+            "MALFORMED_ROWS",
+            "CORRUPTED_EVIDENCE",
+            f"{malformed} position rows are not objects",
+        )
 
     ids = [str(row.get("position_id") or "") for row in positions]
     duplicate_ids = sorted(key for key, count in Counter(ids).items() if key and count > 1)
@@ -158,7 +177,11 @@ def audit_evidence(bundle: dict[str, Any]) -> dict[str, Any]:
             f"{len(duplicate_ids)} duplicate position IDs",
         )
     if any(not key for key in ids):
-        block("MALFORMED_POSITION_ID", "CORRUPTED_EVIDENCE", "every position requires position_id")
+        block(
+            "MALFORMED_POSITION_ID",
+            "CORRUPTED_EVIDENCE",
+            "every position requires position_id",
+        )
 
     totals = {
         "gross_pnl": Decimal(0),
@@ -170,10 +193,10 @@ def audit_evidence(bundle: dict[str, Any]) -> dict[str, Any]:
         "funding": Decimal(0),
         "unresolved_mtm": Decimal(0),
     }
+    assumed_cost_components: set[str] = set()
     economics_complete = True
     closed = unresolved = missing_outcomes = orphan_count = malformed_close_count = 0
     trading_days: set[str] = set()
-    last_event: datetime | None = None
 
     for row in positions:
         status = str(row.get("status") or "").lower()
@@ -198,44 +221,38 @@ def audit_evidence(bundle: dict[str, Any]) -> dict[str, Any]:
                 "MISSING_EVIDENCE",
                 f"position {row.get('position_id')} lacks {','.join(missing_timestamps)}",
             )
-        ordered = []
+        ordered: list[datetime] = []
         for name in ("signal", "decision", "shadow_or_execution", "open", "close"):
-            if timestamps.get(name) is not None:
-                parsed = _time(timestamps[name])
-                if parsed is None:
-                    block(
-                        "MALFORMED_TIMESTAMP",
-                        "CORRUPTED_EVIDENCE",
-                        f"position {row.get('position_id')} has invalid {name} timestamp",
-                    )
-                else:
-                    ordered.append(parsed)
-                    if start and end and (parsed < start or parsed > end):
-                        block(
-                            "EVENT_OUTSIDE_WINDOW",
-                            "CORRUPTED_EVIDENCE",
-                            f"position {row.get('position_id')} {name} lies outside window",
-                        )
-                    if audited_at and parsed > audited_at:
-                        block(
-                            "FUTURE_EVENT",
-                            "CORRUPTED_EVIDENCE",
-                            f"position {row.get('position_id')} {name} is after audited_at",
-                        )
+            if timestamps.get(name) is None:
+                continue
+            parsed = _time(timestamps[name])
+            if parsed is None:
+                block(
+                    "MALFORMED_TIMESTAMP",
+                    "CORRUPTED_EVIDENCE",
+                    f"position {row.get('position_id')} has invalid {name} timestamp",
+                )
+                continue
+            ordered.append(parsed)
+            if start and end and (parsed < start or parsed > end):
+                block(
+                    "EVENT_OUTSIDE_WINDOW",
+                    "CORRUPTED_EVIDENCE",
+                    f"position {row.get('position_id')} {name} lies outside window",
+                )
+            if audited_at and parsed > audited_at:
+                block(
+                    "FUTURE_EVENT",
+                    "CORRUPTED_EVIDENCE",
+                    f"position {row.get('position_id')} {name} is after audited_at",
+                )
         if ordered != sorted(ordered):
             block(
                 "TIMESTAMP_NON_MONOTONIC",
                 "CORRUPTED_EVIDENCE",
                 f"position {row.get('position_id')} lifecycle timestamps are non-monotonic",
             )
-        if ordered and last_event and ordered[0] < last_event:
-            block(
-                "LEDGER_NON_MONOTONIC",
-                "CORRUPTED_EVIDENCE",
-                "position rows are not in append-time order",
-            )
         if ordered:
-            last_event = ordered[-1]
             trading_days.add(ordered[0].date().isoformat())
 
         economics = row.get("economics")
@@ -268,6 +285,8 @@ def audit_evidence(bundle: dict[str, Any]) -> dict[str, Any]:
                         f"closed position {row.get('position_id')} lacks labelled {cost}",
                     )
                 else:
+                    if item["basis"] == "assumption":
+                        assumed_cost_components.add(cost)
                     totals[cost] += _decimal(item["amount"]) or Decimal(0)
             funding = economics.get("funding")
             if bundle.get("funding_applicable"):
@@ -331,7 +350,11 @@ def audit_evidence(bundle: dict[str, Any]) -> dict[str, Any]:
     )
     final_net = calculated_net if economics_complete else None
     if not isinstance(declared, dict) or _decimal(declared.get("final_net")) is None:
-        block("FINAL_NET_MISSING", "MISSING_EVIDENCE", "economics_totals.final_net is required")
+        block(
+            "FINAL_NET_MISSING",
+            "MISSING_EVIDENCE",
+            "economics_totals.final_net is required",
+        )
     elif final_net is not None and abs(
         (_decimal(declared["final_net"]) or Decimal(0)) - final_net
     ) > TOLERANCE:
@@ -350,21 +373,37 @@ def audit_evidence(bundle: dict[str, Any]) -> dict[str, Any]:
     else:
         economics_state = "RECONCILED_POSITIVE_ECONOMICS"
 
+    promotion_ready = (
+        not blockers
+        and prospective
+        and not assumed_cost_components
+        and final_net is not None
+        and final_net > 0
+    )
     bounded_blockers = sorted(blockers, key=lambda item: (item["code"], item["detail"]))
     return {
         "schema_version": SCHEMA_VERSION,
         "status": "PASS" if not blockers else "FAIL",
-        "promotion_eligible": not blockers and final_net is not None and final_net > 0,
-        "validated_profitability_allowed": not blockers and final_net is not None and final_net > 0,
+        "promotion_eligible": promotion_ready,
+        "validated_profitability_allowed": promotion_ready,
         "economics_state": economics_state,
+        "economics_basis": (
+            "SCENARIO_ASSUMPTIONS" if assumed_cost_components else "MEASURED_COMPONENTS"
+        ),
+        "assumed_cost_components": sorted(assumed_cost_components),
         "versions": {"report": report_version, "policy": policy_version},
         "provenance": provenance,
         "evaluation_window": window,
         "counts": {
-            "input": len(positions), "closed": closed, "unresolved": unresolved,
-            "missing_outcomes": missing_outcomes, "malformed_rows": malformed,
-            "malformed_closes": malformed_close_count, "duplicate_ids": len(duplicate_ids),
-            "orphans": orphan_count, "trading_days": len(trading_days),
+            "input": len(positions),
+            "closed": closed,
+            "unresolved": unresolved,
+            "missing_outcomes": missing_outcomes,
+            "malformed_rows": malformed,
+            "malformed_closes": malformed_close_count,
+            "duplicate_ids": len(duplicate_ids),
+            "orphans": orphan_count,
+            "trading_days": len(trading_days),
         },
         "economics": {
             **{key: str(value) for key, value in totals.items()},
@@ -414,19 +453,21 @@ def lane3_bundle(rows: list[dict[str, Any]], manifest: dict[str, Any]) -> dict[s
             opened = opens.pop(position_id, None)
             economics: dict[str, Any] = {"gross_pnl": row.get("grossPnlUsd")}
             economics.update(manifest.get("position_economics", {}).get(position_id, {}))
-            positions.append({
-                "position_id": position_id,
-                "status": "closed",
-                "orphan": opened is None,
-                "timestamps": {
-                    "signal": source_time(opened or {}),
-                    "decision": (opened or {}).get("ts"),
-                    "shadow_or_execution": (opened or {}).get("ts"),
-                    "open": (opened or {}).get("ts"),
-                    "close": row.get("ts"),
-                },
-                "economics": economics,
-            })
+            positions.append(
+                {
+                    "position_id": position_id,
+                    "status": "closed",
+                    "orphan": opened is None,
+                    "timestamps": {
+                        "signal": source_time(opened or {}),
+                        "decision": (opened or {}).get("ts"),
+                        "shadow_or_execution": (opened or {}).get("ts"),
+                        "open": (opened or {}).get("ts"),
+                        "close": row.get("ts"),
+                    },
+                    "economics": economics,
+                }
+            )
         elif row_type == "malformed":
             positions.append(
                 {
@@ -453,7 +494,10 @@ def lane3_bundle(rows: list[dict[str, Any]], manifest: dict[str, Any]) -> dict[s
                 "economics": supplied,
             }
         )
-    return {**manifest, "positions": positions, "population": {"input_count": len(positions)}}
+    population = manifest.get("population")
+    if not isinstance(population, dict) or "input_count" not in population:
+        population = {"input_count": len(positions)}
+    return {**manifest, "positions": positions, "population": population}
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
