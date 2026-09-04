@@ -90,3 +90,22 @@ def test_main_writes_fail_closed_decision(tmp_path, monkeypatch):
     decision = json.loads(output.read_text())
     assert decision["action"] == "STOP_ALL_MATERIAL_WRITERS"
     assert decision["fail_closed_reason"].startswith("FileNotFoundError")
+
+
+def test_main_fail_closed_stops_every_policy_writer(tmp_path, monkeypatch):
+    output = tmp_path / "decision.json"
+    policy_path = tmp_path / "policy.json"
+    value = policy(tmp_path)
+    policy_path.write_text(json.dumps(value))
+    monkeypatch.setattr(
+        sys, "argv",
+        ["storage_controller", "--policy", str(policy_path), "--output", str(output)],
+    )
+    with pytest.raises(SystemExit) as caught:
+        MODULE.main()
+    assert caught.value.code == 2
+    decision = json.loads(output.read_text())
+    assert decision["controlled_writers"] == ["capture"]
+    assert decision["writer_actions"] == [
+        {"writer": "capture", "action": "STOP_WRITER"},
+    ]

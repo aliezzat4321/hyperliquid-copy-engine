@@ -29,6 +29,15 @@ independent Claude Opus review is required before either apply step.
    has no independent resume authority.
 5. Restart capture/research/profitability loops through manager controls and collect
    successive controller observations across at least the configured 24-hour window.
+6. Run `scripts/storage_exit_gate_report.py` over the immutable apply audit, review
+   provenance, current policy and controller history. A zero exit and `exit_ready: true`
+   are required; the evaluator is read-only and does not replace human verification of
+   the evidence inputs.
+
+The capacity-safe policy uses an 11 GiB `market-shadow` byte budget and 9 GiB steady-state
+budget. This makes the lossless tape lifecycle mandatory before controller restart. If
+lossless lifecycle cannot reach 11 GiB, the gate remains open pending reviewed retention
+or a larger volume; thresholds must not be loosened.
 
 ## Required manager-owned workflow correction
 

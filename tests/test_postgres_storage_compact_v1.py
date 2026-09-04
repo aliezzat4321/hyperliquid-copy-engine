@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 import uuid
@@ -30,7 +31,14 @@ def _install_schema_psql(monkeypatch: pytest.MonkeyPatch, schema: str) -> None:
                     return ""
                 rows = cursor.fetchall()
                 return "\n".join(
-                    "|".join("" if value is None else str(value) for value in row)
+                    "|".join(
+                        ""
+                        if value is None
+                        else json.dumps(value)
+                        if isinstance(value, (dict, list))
+                        else str(value)
+                        for value in row
+                    )
                     for row in rows
                 )
 
@@ -52,6 +60,57 @@ def _drop_schema(schema: str) -> None:
 
 
 @pytest.mark.skipif("DATABASE_URL" not in os.environ, reason="PostgreSQL not configured")
+def test_leaderboard_structure_accepts_canonical_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schema = _schema()
+    _create_schema(schema)
+    try:
+        database_url = os.environ["DATABASE_URL"]
+        schema_sql = (
+            Path(__file__).resolve().parents[1] / "src" / "hlcopy" / "db" / "schema.sql"
+        ).read_text()
+        with psycopg.connect(database_url, autocommit=True) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(f'SET search_path TO "{schema}", public')
+                cursor.execute(schema_sql, prepare=False)
+
+        _install_schema_psql(monkeypatch, schema)
+        structure = MODULE._leaderboard_structure()
+
+        # pg_get_indexdef(index_oid, column_no, pretty) returns the key expression
+        # without its ordering flags. The drift guard must reconstruct DESC from
+        # pg_index.indoption instead of expecting pg_get_indexdef to include it.
+        assert structure["indexes"] == [
+            [
+                "idx_leaderboard_snapshots_address_time",
+                False,
+                False,
+                True,
+                ["address", "snapshot_at DESC"],
+            ],
+            [
+                "leaderboard_snapshots_pkey",
+                True,
+                True,
+                True,
+                ["snapshot_at", "address", "ranking_period"],
+            ],
+        ]
+        assert structure["constraints"] == MODULE.EXPECTED_LEADERBOARD_CONSTRAINTS
+        assert [
+            "leaderboard_snapshots_address_fkey",
+            "f",
+            True,
+            False,
+            False,
+            "FOREIGN KEY (address) REFERENCES wallets(address)",
+        ] in structure["constraints"]
+    finally:
+        _drop_schema(schema)
+
+
+@pytest.mark.skipif("DATABASE_URL" not in os.environ, reason="PostgreSQL not configured")
 def test_plan_rejects_missing_provenance_for_discarded_snapshot(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -61,7 +120,7 @@ def test_plan_rejects_missing_provenance_for_discarded_snapshot(
     try:
         _install_schema_psql(monkeypatch, schema)
         MODULE._psql(
-            """
+            f"""
 CREATE TABLE leaderboard_snapshots (
     snapshot_at TIMESTAMPTZ NOT NULL
 );
@@ -76,8 +135,10 @@ INSERT INTO leaderboard_snapshots(snapshot_at) VALUES
     ('2026-08-18 01:00:00+00'),
     ('2026-08-18 09:00:00+00');
 INSERT INTO raw_api_responses(endpoint,fetched_at,content_sha256,response_json) VALUES
-    ('leaderboard','2026-08-18 01:00:00+00','keep-1','{}'::jsonb),
-    ('leaderboard','2026-08-18 09:00:00+00','keep-2','{}'::jsonb);
+    ('leaderboard','2026-08-18 01:00:00+00','{MODULE.EMPTY_PAYLOAD_SHA256}',
+     '{{}}'::jsonb),
+    ('leaderboard','2026-08-18 09:00:00+00','{MODULE.EMPTY_PAYLOAD_SHA256}',
+     '{{}}'::jsonb);
 """
         )
 
@@ -135,3 +196,28 @@ INSERT INTO raw_api_responses(content_sha256,response_json,fetched_at) VALUES
         ) == 0
     finally:
         _drop_schema(schema)
+
+
+def test_raw_api_normalization_seeds_empty_payload_and_vacuums_before_full(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    statements: list[str] = []
+    row_counts = iter((2, 0))
+
+    def fake_psql(sql: str) -> str:
+        statements.append(sql)
+        if sql.startswith("SELECT count(*) FROM raw_api_responses"):
+            return str(next(row_counts))
+        return ""
+
+    monkeypatch.setattr(MODULE, "_psql", fake_psql)
+    monkeypatch.setattr(MODULE, "_available_bytes", lambda: 10 * 1024**3)
+    MODULE._normalize_raw_api_payloads({
+        "raw_api": {"observation_rows": 2, "required_peak_available_bytes": 1}
+    })
+    transaction = statements[1]
+    assert MODULE.EMPTY_PAYLOAD_SHA256 in transaction
+    assert "SELECT content_sha256,'{}'::jsonb,min(fetched_at)" in transaction
+    assert statements.index("VACUUM raw_api_responses") < statements.index(
+        "VACUUM (FULL, ANALYZE) raw_api_responses"
+    )
