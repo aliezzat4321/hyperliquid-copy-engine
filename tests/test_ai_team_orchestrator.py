@@ -19,6 +19,61 @@ def test_routine_review_routes_to_sonnet():
     assert orch.route_review(orch.DEFAULT_CONFIG, "ROUTINE", None) == "SONNET"
 
 
+def test_completion_contract_is_explicit_and_fail_closed():
+    with pytest.raises(ValueError, match="MISSING_COMPLETION_CONTRACT"):
+        orch.parse_completion_contract("acceptance is somewhere in prose")
+    assert orch.parse_completion_contract("AI_TEAM_CLOSE_ON_MERGE=YES") == {
+        "version": 1, "close_on_merge": True, "requirements": []
+    }
+    assert orch.parse_completion_contract(
+        "AI_TEAM_COMPLETION_REQUIRES=RUNTIME_PROOF,MEASUREMENT_PROOF"
+    )["requirements"] == ["RUNTIME_PROOF", "MEASUREMENT_PROOF"]
+    with pytest.raises(ValueError, match="CONFLICTS"):
+        orch.parse_completion_contract(
+            "AI_TEAM_CLOSE_ON_MERGE=YES\nAI_TEAM_COMPLETION_REQUIRES=RUNTIME_PROOF"
+        )
+
+
+def test_acceptance_evidence_requires_identity_and_exact_predicate(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    evidence = {"source": "runtime-smoke", "observed_at": "2026-09-04T00:00:00Z",
+                "code_sha": "a" * 40, "measured_result": {"healthy": True},
+                "predicate_result": True}
+    ledger.record_acceptance_evidence(issue_number=1, requirement="RUNTIME_PROOF",
+                                      phase="PRODUCTION_VALIDATION", evidence=evidence)
+    assert ledger.proven_requirements(1) == {"RUNTIME_PROOF"}
+    with pytest.raises(ValueError, match="ARTIFACT_IDENTITY"):
+        ledger.record_acceptance_evidence(
+            issue_number=2, requirement="RUNTIME_PROOF", phase="PRODUCTION_VALIDATION",
+            evidence={**evidence, "code_sha": None},
+        )
+
+
+def test_failed_measurement_enqueues_repair_not_done(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    task_id = ledger.create_task(
+        issue_number=92, task_type="MEASUREMENT", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", task_class="ROUTINE", target_sha="b" * 40,
+        lifecycle_phase="MEASUREMENT", evidence={"requirement": "MEASUREMENT_PROOF"},
+    )
+    issue = {"number": 92, "author_association": "OWNER", "state": "open",
+             "body": "AI_TEAM_COMPLETION_REQUIRES=MEASUREMENT_PROOF"}
+    class GH:
+        def issue(self, number): return issue
+    class Runtime:
+        def event(self, *args, **kwargs): pass
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.gh = orch.DEFAULT_CONFIG, ledger, GH()
+    team.runtime, team.trusted = Runtime(), {"OWNER"}
+    repair = team.complete_acceptance_phase(
+        ledger.get(task_id), {"source": "benchmark", "observed_at": "2026-09-04T00:00:00Z",
+                              "code_sha": "b" * 40, "measured_result": {"p99": 999},
+                              "predicate_result": False}
+    )
+    assert repair is not None and repair["task_type"] == "REPAIR"
+    assert not ledger.successful_issue(92)
+
+
 def test_quant_review_routes_to_opus_only_under_explicit_class():
     assert (
         orch.route_review(
