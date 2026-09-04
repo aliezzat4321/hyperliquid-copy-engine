@@ -15,7 +15,7 @@ def _parse_time(value: object) -> datetime | None:
         parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
         return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 def _atomic_json(path: Path, payload: dict[str, object]) -> None:
@@ -44,11 +44,16 @@ def build_challenger_queue(
 ) -> dict[str, object]:
     """Persist the selective robust -> frozen prospective boundary.
 
-    A wallet must still be present in a fresh official-leaderboard observation.  Each
+    A wallet must still be present in a fresh official-leaderboard observation. Each
     wallet/coin/notional is frozen with its own prospective cutoff, which is preserved
     on later runs so post-selection observations can never leak into selection.
     """
     observed_at = now or datetime.now(UTC)
+    observed_at = (
+        observed_at.astimezone(UTC)
+        if observed_at.tzinfo
+        else observed_at.replace(tzinfo=UTC)
+    )
     observed_ns = (clock_ns or __import__("time").time_ns)()
     previous: dict[str, dict[str, object]] = {}
     if output_path.exists():
@@ -73,7 +78,11 @@ def build_challenger_queue(
             )
             if universe_generated is None:
                 universe_reason = "UNIVERSE_TIMESTAMP_INVALID"
-            elif (observed_at - universe_generated).total_seconds() > max_universe_age_hours * 3600:
+            elif universe_generated > observed_at:
+                universe_reason = "UNIVERSE_TIMESTAMP_FUTURE"
+            elif (
+                observed_at - universe_generated
+            ).total_seconds() > max(0.0, max_universe_age_hours) * 3600:
                 universe_reason = "UNIVERSE_STATE_STALE"
 
     candidates: list[dict[str, object]] = []
@@ -87,7 +96,7 @@ def build_challenger_queue(
         reason = universe_reason
         if key in seen:
             reason = "DUPLICATE_WALLET_COIN_NOTIONAL"
-        elif universe_wallets is not None and wallet not in universe_wallets:
+        elif reason is None and universe_wallets is not None and wallet not in universe_wallets:
             reason = "WALLET_NOT_IN_CURRENT_LEADERBOARD"
         seen.add(key)
         if reason:
