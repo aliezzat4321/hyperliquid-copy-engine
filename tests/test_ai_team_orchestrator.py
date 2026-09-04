@@ -68,6 +68,24 @@ def test_task_class_fails_closed_and_parses_explicit_class():
     ) == ("STATISTICAL_METHODOLOGY", "STATISTICAL_METHODOLOGY")
 
 
+def test_explicit_review_profile_overrides_inferred_routine_and_fails_closed():
+    body = "AI_TASK_CLASS=ROUTINE\nAI_TEAM_REVIEW_PROFILE=ENGINE_CRITICAL"
+    assert orch.parse_task_class(body) == ("ENGINE_CRITICAL", None)
+    route = orch.parse_initial_route(body)
+    assert route["task_class"] == "ENGINE_CRITICAL"
+    assert "SONNET_CHALLENGE" in orch.review_profile(
+        orch.DEFAULT_CONFIG, route["task_class"]
+    )
+
+    for marker in (
+        "AI_TEAM_REVIEW_PROFILE=UNKNOWN",
+        "AI_TEAM_REVIEW_PROFILE=ROUTINE\nAI_TEAM_REVIEW_PROFILE=ENGINE_CRITICAL",
+    ):
+        assert orch.parse_task_class(f"AI_TASK_CLASS=ROUTINE\n{marker}")[0] == "UNCLASSIFIED"
+        with pytest.raises(ValueError, match="invalid or duplicate AI_TEAM_REVIEW_PROFILE"):
+            orch.parse_initial_route(f"AI_TASK_CLASS=ROUTINE\n{marker}")
+
+
 @pytest.mark.parametrize("task_class", ["MAJOR_ARCHITECTURE", "QUANT_PROFITABILITY"])
 def test_high_value_initial_route_is_opus_research(task_class):
     route = orch.parse_initial_route(

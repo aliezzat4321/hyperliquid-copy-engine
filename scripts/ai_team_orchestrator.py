@@ -781,6 +781,12 @@ def parse_initial_route(body: str, cfg: dict[str, Any] | None = None) -> dict[st
         task_class = "ROUTINE"
     if not task_class:
         raise ValueError("INVALID_INITIAL_ROUTE: missing AI_TASK_CLASS")
+    inferred_task_class = task_class
+    profile_values = _machine_values(body, "AI_TEAM_REVIEW_PROFILE")
+    if profile_values:
+        task_class, _ = parse_task_class(body)
+        if task_class == "UNCLASSIFIED":
+            raise ValueError("INVALID_INITIAL_ROUTE: invalid or duplicate AI_TEAM_REVIEW_PROFILE")
     expected = cfg.get("initial_routes", {}).get(task_class)
     if not expected:
         raise ValueError("INVALID_INITIAL_ROUTE: task class is not allowlisted")
@@ -791,7 +797,9 @@ def parse_initial_route(body: str, cfg: dict[str, Any] | None = None) -> dict[st
     }
     # Existing trusted queue entries predate the explicit route triple. Migrate them
     # through the reviewed class allowlist; new non-queue entries remain strict.
-    if not any(supplied.values()) and (task_class == "ROUTINE" or legacy_queue):
+    if not any(supplied.values()) and (inferred_task_class == "ROUTINE" or legacy_queue):
+        # A review-profile override is authoritative for the whole route. This also
+        # prevents a ROUTINE declaration from bypassing QUANT's Opus design stage.
         supplied = dict(expected)
     if supplied != expected:
         raise ValueError("INVALID_INITIAL_ROUTE: incomplete or contradictory route")
@@ -841,6 +849,16 @@ def parse_task_class(body: str) -> tuple[str, str | None]:
     }
     m = re.search(r"(?mi)^\s*(?:AI_)?TASK_CLASS\s*=\s*([A-Z_]+)\s*$", body or "")
     task_class = m.group(1) if m and m.group(1) in allowed else "UNCLASSIFIED"
+    profile_values = _machine_values(body, "AI_TEAM_REVIEW_PROFILE")
+    profile_names = {"ROUTINE", "ENGINE_CRITICAL", "QUANT", "DESTRUCTIVE"}
+    if profile_values:
+        # Explicit profile selection is authoritative. Ambiguous or unknown values
+        # fail closed rather than silently retaining a less stringent inferred route.
+        task_class = (
+            profile_values[0]
+            if len(profile_values) == 1 and profile_values[0] in profile_names
+            else "UNCLASSIFIED"
+        )
     e = re.search(r"(?mi)^\s*OPUS_ESCALATION_REASON\s*=\s*([A-Z_]+)\s*$", body or "")
     return task_class, e.group(1) if e else None
 
