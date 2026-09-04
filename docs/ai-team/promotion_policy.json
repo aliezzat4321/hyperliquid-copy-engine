@@ -1,11 +1,11 @@
 {
   "policy_id": "quant-promotion-policy",
-  "policy_version": "v1",
+  "policy_version": "v2",
   "status": "PROVISIONAL",
   "adopted_at": "2026-08-31T11:56:01Z",
   "adopted_by": "CLAUDE",
   "reviewer": "CODEX_CHATGPT",
-  "supersedes": null,
+  "supersedes": "v1",
   "review_trigger": "First run of the net-edge engine over a complete lane ledger, or 60 days, whichever comes first.",
   "thresholds": {
     "min_closed_trades": 30,
@@ -15,5 +15,38 @@
     "reference_round_trip_cost_bps": 15,
     "max_profit_concentration": 0.50,
     "max_unresolved_share": 0.35
+  },
+  "risk_governor": {
+    "version": "risk-governor-v1",
+    "states": ["NO_CAPITAL", "MICRO_CANDIDATE", "SMALL_CANDIDATE", "SCALE_CANDIDATE"],
+    "thresholds": {
+      "min_closed_trades": 30,
+      "min_distinct_days": 5,
+      "max_drawdown_pct": 10,
+      "max_rolling_drawdown_pct": 7.5,
+      "max_single_trade_profit_share": 0.5,
+      "max_single_trade_loss_share": 0.5,
+      "max_trader_profit_share": 0.5,
+      "max_trader_loss_share": 0.5,
+      "max_coin_profit_share": 0.5,
+      "max_coin_loss_share": 0.5,
+      "max_leverage": 3,
+      "min_liquidation_distance_pct": 20,
+      "max_margin_utilization_pct": 35,
+      "max_correlated_wallet_exposure_share": 0.5,
+      "max_correlated_trader_exposure_share": 0.5,
+      "max_correlated_coin_exposure_share": 0.5,
+      "minimum_decision_depth_usd": 1000,
+      "minimum_capacity_usd": 100,
+      "min_depth_to_notional_multiple": 10,
+      "max_latency_p95_ms": 25000,
+      "max_staleness_p95_ms": 25000,
+      "max_rejected_signal_rate": 0.5,
+      "max_tail_loss_p99_pct": 5,
+      "max_adverse_excursion_pct": 7.5,
+      "max_unresolved_share": 0.35,
+      "max_open_exposure_usd": 100,
+      "max_holding_hours": 168
+    }
   }
 }

@@ -19,6 +19,7 @@ Update this file only when a component moves, is added, or is retired.
 | Latency scenarios | `src/hlcopy/copyability/latency.py`, `src/hlcopy/shadow/latency.py` | Feed vs order latency kept separate |
 | Wallet registry | `src/hlcopy/shadow/registry.py` | `research → validation → approved`; enforces the 10-user-per-IP cap |
 | Trading permission boundary | `src/hlcopy/trading/permissions.py` | `REAL_TRADING_ENABLED`; **live-sensitive** |
+| Risk eligibility ceiling | `src/hlcopy/risk/governor.py` | Deterministic candidate state; never authorizes real trading |
 | Config | `src/hlcopy/config.py` | `HLCOPY_*` settings |
 | Storage pressure controller | `scripts/storage_controller.py`, `config/storage_policy.json` | Read-only fail-closed budgets, forecast and writer decisions |
 | Market tape lifecycle | `scripts/market_tape_lifecycle.py`, `config/market_tape_lifecycle.json` | Exact-SHA lossless historical Parquet compaction; no deletion without review |
