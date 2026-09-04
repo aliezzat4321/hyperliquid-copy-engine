@@ -6,7 +6,6 @@ from hlcopy.research.experiment_controller import (
     validate_evidence,
 )
 
-
 SHA1, SHA2 = "1" * 40, "2" * 40
 
 
