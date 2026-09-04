@@ -150,3 +150,26 @@ This supersedes the earlier task-class policy that withheld automatic merge from
   provenance, policy, safety and uncontaminated 24-observation stability conjuncts.
 - This decision changes no live-trading permission. `REAL_TRADING_ENABLED` remains
   disabled.
+
+## 2026-09-03 — Dual-Codex review pipeline and selective Claude gates
+
+- Routine work is Codex build, deterministic preflight, independent exact-SHA Codex
+  review, then CI. It has no Claude dependency.
+- The reviewer uses a fresh process and separate clean, read-only worktree, receiving the
+  bounded review packet but never the builder transcript.
+- ENGINE_CRITICAL adds Sonnet after Codex. QUANT freezes an Opus pre-build contract and
+  retains Sonnet plus a separate final Opus decision. DESTRUCTIVE retains final Opus.
+- Runtime status exposes codex_builder, codex_reviewer, sonnet and opus while retaining
+  legacy codex/claude fields for #130. A Claude rate limit parks only its task.
+- Deterministic failures route directly to Codex with SHA/check/detail fingerprints;
+  CODE_CHANGE permits at least three attempts before genuine no-progress termination.
+- Protected-path, storage, exact-SHA, CI and live-sensitive gates remain fail closed;
+  real trading remains disabled.
+
+Issue #205 implementation clarification: scheduler serialization is per execution slot,
+not global. SQLite atomically leases one task in each of `codex_builder`,
+`codex_reviewer`, `claude_specialist`, and `manager`; detached workers run after the
+short scheduler flock is released. The deterministic preflight is repository Ruff,
+format, full pytest, AI-team contract validation, and live-sensitive classification.
+Legacy `MAJOR_ARCHITECTURE` maps to `DESTRUCTIVE` so storage #120 retains exact-final
+Opus, and protected v2 bootstrap changes retain a fresh Sonnet challenge.
