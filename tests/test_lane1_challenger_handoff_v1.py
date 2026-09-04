@@ -4,7 +4,6 @@ from pathlib import Path
 
 from hlcopy.profitability.lane1_handoff import build_challenger_queue
 
-
 WALLET_A = "0x" + "a" * 40
 WALLET_B = "0x" + "b" * 40
 
