@@ -1,7 +1,9 @@
 """Deterministic, fail-closed experiment freeze and evidence validation.
 
-The controller deliberately operates on plain JSON-compatible mappings so every
-research lane can attach its verdict to an existing evidence/promotion report.
+The controller operates on JSON-compatible mappings so every research lane can reuse
+one ex-ante contract and registry-lock mechanism. A report cannot prove its own lock:
+the frozen fingerprint must exist independently in the experiment registry before any
+evaluation can be considered prospective-valid.
 """
 from __future__ import annotations
 
@@ -9,6 +11,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -30,6 +33,7 @@ CONTRACT_FIELDS = (
     "abandonment_criteria", "code_provenance", "data_provenance", "frozen_at",
 )
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _validate_contract_content(contract: Mapping[str, Any]) -> None:
@@ -59,6 +63,9 @@ def _validate_contract_content(contract: Mapping[str, Any]) -> None:
     sha = contract["code_provenance"].get("commit_sha")
     if not isinstance(sha, str) or not SHA_RE.fullmatch(sha):
         raise ValueError("code_provenance.commit_sha must be a 40-hex SHA")
+    data_sha = contract["data_provenance"].get("sha256")
+    if not isinstance(data_sha, str) or not SHA256_RE.fullmatch(data_sha):
+        raise ValueError("data_provenance.sha256 must be a 64-hex SHA-256")
     for component, specification in contract["execution_cost_model"].items():
         if (
             not isinstance(specification, Mapping)
@@ -100,7 +107,8 @@ def _instant(value: object, field: str) -> datetime:
 def _window(value: object, field: str) -> tuple[datetime, datetime]:
     if not isinstance(value, Mapping) or set(value) != {"start", "end"}:
         raise ValueError(f"{field} must contain exactly start and end")
-    start, end = _instant(value["start"], f"{field}.start"), _instant(value["end"], f"{field}.end")
+    start = _instant(value["start"], f"{field}.start")
+    end = _instant(value["end"], f"{field}.end")
     if start >= end:
         raise ValueError(f"{field} start must precede end")
     return start, end
@@ -117,28 +125,97 @@ def contract_fingerprint(contract: Mapping[str, Any]) -> str:
     return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
 
 
-def validate_evidence(report: Mapping[str, Any]) -> ExperimentAudit:
-    """Classify an evidence report against its embedded frozen contract.
+def lock_contract_in_registry(
+    registry: Mapping[str, Any], contract: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Return an updated registry with an immutable lock for a new experiment version.
 
-    ``implementation_revisions`` is an append-only evidence ledger outside the
-    contract. It may change the implementation SHA only when explicitly marked as
-    a repair to the frozen behavior; affected evidence must then name that SHA.
+    Existing legacy records remain readable but cannot be retroactively converted into
+    a frozen record. Reusing an already-locked experiment ID with a changed contract is
+    rejected; callers must create a new experiment/version and untouched window.
     """
+    fingerprint = contract_fingerprint(contract)
+    experiment_id = str(contract["experiment_id"])
+    rows = registry.get("experiments", [])
+    if not isinstance(rows, list):
+        raise ValueError("registry.experiments must be a list")
+    for row in rows:
+        if not isinstance(row, Mapping) or str(row.get("id")) != experiment_id:
+            continue
+        locked = row.get("locked_contract_fingerprint")
+        if not isinstance(locked, str):
+            raise ValueError(
+                "legacy experiment IDs cannot be retroactively frozen; create a new version"
+            )
+        if locked != fingerprint:
+            raise ValueError("experiment contract is already locked to a different fingerprint")
+        stored = row.get("frozen_contract")
+        if not isinstance(stored, Mapping) or contract_fingerprint(stored) != fingerprint:
+            raise ValueError("registry lock/frozen_contract mismatch")
+        return deepcopy(dict(registry))
+
+    updated = deepcopy(dict(registry))
+    updated["schema_version"] = max(2, int(updated.get("schema_version", 1)))
+    updated["updated_at"] = str(contract["frozen_at"])
+    updated_rows = deepcopy(rows)
+    updated_rows.append(
+        {
+            "id": experiment_id,
+            "lane": contract["lane"],
+            "strategy_id": contract["strategy_id"],
+            "status": "FROZEN",
+            "evidence_level": "FROZEN_NOT_YET_PROSPECTIVE",
+            "locked_contract_fingerprint": fingerprint,
+            "frozen_contract": deepcopy(dict(contract)),
+            "updated_at": contract["frozen_at"],
+        }
+    )
+    updated["experiments"] = updated_rows
+    return updated
+
+
+def _registry_lock(
+    registry: Mapping[str, Any] | None, experiment_id: str
+) -> tuple[str | None, Mapping[str, Any] | None, str | None]:
+    if registry is None:
+        return None, None, "REGISTRY_LOCK_MISSING"
+    rows = registry.get("experiments")
+    if not isinstance(rows, list):
+        return None, None, "MALFORMED_EXPERIMENT_REGISTRY"
+    matches = [row for row in rows if isinstance(row, Mapping) and str(row.get("id")) == experiment_id]
+    if len(matches) != 1:
+        return None, None, "REGISTRY_LOCK_MISSING" if not matches else "DUPLICATE_REGISTRY_RECORD"
+    row = matches[0]
+    locked = row.get("locked_contract_fingerprint")
+    stored = row.get("frozen_contract")
+    if not isinstance(locked, str) or not isinstance(stored, Mapping):
+        return None, row, "LEGACY_REGISTRY_RECORD_NOT_LOCKED"
+    try:
+        stored_fingerprint = contract_fingerprint(stored)
+    except (KeyError, ValueError, TypeError):
+        return None, row, "MALFORMED_REGISTRY_FROZEN_CONTRACT"
+    if stored_fingerprint != locked:
+        return None, row, "REGISTRY_LOCK_CORRUPTED"
+    return locked, row, None
+
+
+def validate_evidence(
+    report: Mapping[str, Any], *, registry: Mapping[str, Any] | None = None
+) -> ExperimentAudit:
+    """Classify evidence against both its contract and the independent registry lock."""
     contract = report.get("frozen_contract")
     if contract is None:
         return ExperimentAudit("EXPLORATORY_UNFROZEN", False, None, ("NO_FROZEN_CONTRACT",))
     if not isinstance(contract, Mapping):
         return ExperimentAudit(
-            "INVALID_CONTRACT_DRIFT_OR_EVIDENCE_LEAKAGE",
-            False,
-            None,
-            ("MALFORMED_CONTRACT",),
+            "INVALID_CONTRACT_DRIFT_OR_EVIDENCE_LEAKAGE", False, None, ("MALFORMED_CONTRACT",)
         )
     try:
         actual = contract_fingerprint(contract)
         frozen_at = _instant(contract["frozen_at"], "frozen_at")
         discovery_start, discovery_end = _window(contract["discovery_window"], "discovery_window")
         prospective_start = _instant(contract["prospective_start"], "prospective_start")
+        experiment_id = str(contract["experiment_id"])
     except (KeyError, ValueError, TypeError) as exc:
         return ExperimentAudit(
             "INVALID_CONTRACT_DRIFT_OR_EVIDENCE_LEAKAGE",
@@ -150,9 +227,14 @@ def validate_evidence(report: Mapping[str, Any]) -> ExperimentAudit:
     blockers: list[str] = []
     if report.get("contract_fingerprint") != actual:
         blockers.append("CONTRACT_FINGERPRINT_MISMATCH")
+    locked, _, registry_error = _registry_lock(registry, experiment_id)
+    if registry_error:
+        blockers.append(registry_error)
+    elif locked != actual:
+        blockers.append("LOCKED_CONTRACT_DRIFT")
     if not (discovery_start < discovery_end <= prospective_start):
         blockers.append("HOLDOUT_OVERLAPS_DISCOVERY")
-    if frozen_at > prospective_start:
+    if frozen_at >= prospective_start:
         blockers.append("PROSPECTIVE_WINDOW_BEGAN_BEFORE_FREEZE")
 
     evaluations = report.get("evaluations", [])
@@ -168,7 +250,9 @@ def validate_evidence(report: Mapping[str, Any]) -> ExperimentAudit:
         blockers.append("MALFORMED_CODE_PROVENANCE")
     if not isinstance(revisions, list):
         blockers.append("MALFORMED_IMPLEMENTATION_REVISIONS")
+        revisions = []
     else:
+        seen_revision_shas: set[str] = set()
         for revision in revisions:
             if (
                 not isinstance(revision, Mapping)
@@ -179,7 +263,10 @@ def validate_evidence(report: Mapping[str, Any]) -> ExperimentAudit:
             sha = revision.get("commit_sha")
             if not isinstance(sha, str) or not SHA_RE.fullmatch(sha):
                 blockers.append("MALFORMED_REPAIR_PROVENANCE")
+            elif sha in seen_revision_shas:
+                blockers.append("DUPLICATE_REPAIR_PROVENANCE")
             else:
+                seen_revision_shas.add(sha)
                 repair_shas.add(sha)
 
     latest_revision = revisions[-1] if revisions else None
@@ -193,14 +280,14 @@ def validate_evidence(report: Mapping[str, Any]) -> ExperimentAudit:
             evaluated_at = _instant(evaluation["evaluated_at"], "evaluation.evaluated_at")
             if start < prospective_start or start < discovery_end:
                 blockers.append("SAME_WINDOW_SELECTION_EVALUATION_LEAKAGE")
-            if frozen_at > start or frozen_at > evaluated_at:
+            if frozen_at >= start or frozen_at > evaluated_at:
                 blockers.append("EVALUATION_BEFORE_FREEZE")
             if evaluation.get("code_sha") not in repair_shas:
                 blockers.append("UNRECORDED_CODE_PROVENANCE")
             if latest_code_sha is not None and evaluation.get("code_sha") != latest_code_sha:
                 blockers.append("EVIDENCE_NOT_RERUN_AFTER_REPAIR")
-            if end <= start:
-                blockers.append("MALFORMED_EVALUATION_WINDOW")
+            if evaluated_at < end:
+                blockers.append("EVALUATED_BEFORE_WINDOW_ENDED")
         except (KeyError, ValueError, TypeError) as exc:
             blockers.append(f"MALFORMED_EVALUATION: {exc}")
 
@@ -217,10 +304,12 @@ def validate_evidence(report: Mapping[str, Any]) -> ExperimentAudit:
     return ExperimentAudit("PROSPECTIVE_SHADOW_VALID", True, actual, ())
 
 
-def audit_promotion_report(report: Mapping[str, Any]) -> dict[str, Any]:
-    """Attach the reusable experiment verdict to an existing promotion report."""
+def audit_promotion_report(
+    report: Mapping[str, Any], *, registry: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    """Attach the experiment verdict to promotion output; absent lock fails closed."""
     output = dict(report)
-    audit = validate_evidence(report)
+    audit = validate_evidence(report, registry=registry)
     output["experiment_audit"] = audit.to_dict()
     if not audit.promotion_eligible:
         output["promotion_eligible"] = False
