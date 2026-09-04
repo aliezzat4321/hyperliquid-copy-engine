@@ -11,7 +11,7 @@ import hashlib
 import json
 import re
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -39,7 +39,7 @@ def _time(value: object) -> datetime | None:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
-    return parsed.astimezone(timezone.utc) if parsed.tzinfo else None
+    return parsed.astimezone(UTC) if parsed.tzinfo else None
 
 
 def _canonical_hash(value: object) -> str:
@@ -390,7 +390,7 @@ def lane3_bundle(rows: list[dict[str, Any]], manifest: dict[str, Any]) -> dict[s
         milliseconds = _decimal(signal.get("sourceTimeMs"))
         if milliseconds is not None:
             return datetime.fromtimestamp(
-                float(milliseconds / Decimal(1000)), timezone.utc
+                float(milliseconds / Decimal(1000)), UTC
             ).isoformat()
         return None
 
