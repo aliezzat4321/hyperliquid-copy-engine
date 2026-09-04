@@ -3,6 +3,13 @@ import json
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "prospective_champion_lane.py"
+FUNNEL = (
+    Path(__file__).resolve().parents[1]
+    / "src"
+    / "hlcopy"
+    / "profitability"
+    / "incremental_funnel_cli.py"
+)
 SPEC = importlib.util.spec_from_file_location("prospective_champion_lane", SCRIPT)
 assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
@@ -52,3 +59,9 @@ def test_prospective_script_has_no_hard_coded_wallet_targets() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
     assert "TARGETS=" not in source
     assert "load_frozen_targets" in source
+
+
+def test_funnel_does_not_truncate_robust_candidates_before_challenger_handoff() -> None:
+    source = FUNNEL.read_text(encoding="utf-8")
+    assert "build_challenger_queue(\n        robust," in source
+    assert "build_challenger_queue(\n        robust[:100]," not in source
