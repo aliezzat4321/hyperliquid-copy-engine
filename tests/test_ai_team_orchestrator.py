@@ -15,34 +15,41 @@ orch = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(orch)
 
 
-def test_routine_review_routes_to_sonnet():
-    assert orch.route_review(orch.DEFAULT_CONFIG, "ROUTINE", None) == "SONNET"
+def test_routine_review_routes_to_independent_codex():
+    assert orch.route_review(orch.DEFAULT_CONFIG, "ROUTINE", None) == "CODEX_DEFAULT"
+    assert orch.review_profile(orch.DEFAULT_CONFIG, "ROUTINE") == [
+        "DETERMINISTIC_PREFLIGHT", "CODEX_REVIEW", "CI"
+    ]
 
 
-def test_quant_review_routes_to_opus_only_under_explicit_class():
+def test_quant_review_keeps_specialists_after_codex():
     assert (
         orch.route_review(
             orch.DEFAULT_CONFIG,
             "QUANT_PROFITABILITY",
             "QUANT_PROFITABILITY",
         )
-        == "OPUS"
+        == "CODEX_DEFAULT"
     )
+    profile = orch.review_profile(orch.DEFAULT_CONFIG, "QUANT_PROFITABILITY")
+    assert "SONNET_CHALLENGE" in profile
+    assert "OPUS_FINAL" in profile
 
 
 @pytest.mark.parametrize("task_class", [
     "QUANT_PROFITABILITY", "STATISTICAL_METHODOLOGY",
     "CAPITAL_SENSITIVE_METHODOLOGY", "UNRESOLVED_DISAGREEMENT",
 ])
-def test_high_stakes_final_reviews_always_route_to_opus(task_class):
-    assert orch.route_review(orch.DEFAULT_CONFIG, task_class, None) == "OPUS"
+def test_high_stakes_profiles_retain_final_opus(task_class):
+    assert "OPUS_FINAL" in orch.review_profile(orch.DEFAULT_CONFIG, task_class)
 
 
-def test_major_architecture_review_uses_sonnet_unless_explicitly_escalated():
-    assert orch.route_review(orch.DEFAULT_CONFIG, "MAJOR_ARCHITECTURE", None) == "SONNET"
-    assert orch.route_review(
-        orch.DEFAULT_CONFIG, "MAJOR_ARCHITECTURE", "MAJOR_ARCHITECTURE"
-    ) == "OPUS"
+def test_legacy_major_architecture_storage_metadata_retains_final_opus():
+    assert orch.route_review(orch.DEFAULT_CONFIG, "MAJOR_ARCHITECTURE", None) == "CODEX_DEFAULT"
+    body = "AI_TASK_CLASS=MAJOR_ARCHITECTURE\nOPUS_ESCALATION_REASON=MAJOR_ARCHITECTURE"
+    task_class, reason = orch.parse_task_class(body)
+    assert orch.route_review(orch.DEFAULT_CONFIG, task_class, reason) == "CODEX_DEFAULT"
+    assert "OPUS_FINAL" in orch.review_profile(orch.DEFAULT_CONFIG, task_class)
 
 
 def test_opus_escalation_is_rejected_for_routine_work():
@@ -62,6 +69,22 @@ def test_task_class_fails_closed_and_parses_explicit_class():
     assert orch.parse_task_class(
         "AI_TASK_CLASS=STATISTICAL_METHODOLOGY\nOPUS_ESCALATION_REASON=STATISTICAL_METHODOLOGY\n"
     ) == ("STATISTICAL_METHODOLOGY", "STATISTICAL_METHODOLOGY")
+
+
+def test_explicit_review_profile_is_authoritative_and_invalid_fails_closed():
+    body = "AI_TASK_CLASS=ROUTINE\nAI_TEAM_REVIEW_PROFILE=ENGINE_CRITICAL"
+    assert orch.parse_review_profile(body, orch.DEFAULT_CONFIG, "ROUTINE") == "ENGINE_CRITICAL"
+    with pytest.raises(ValueError, match="INVALID_REVIEW_PROFILE"):
+        orch.parse_initial_route(
+            "AI_TASK_CLASS=ROUTINE\nAI_TEAM_REVIEW_PROFILE=EXPENSIVE_GUESS"
+        )
+
+
+def test_protected_v2_bootstrap_retains_fresh_claude_challenge():
+    body = "AI_TASK_CLASS=ROUTINE\nAI_TEAM_PROTECTED_CHANGE=YES"
+    profile = orch.parse_review_profile(body, orch.DEFAULT_CONFIG, "ROUTINE")
+    assert profile == "ENGINE_CRITICAL"
+    assert "SONNET_CHALLENGE" in orch.DEFAULT_CONFIG["review_profiles"][profile]
 
 
 @pytest.mark.parametrize("task_class", ["MAJOR_ARCHITECTURE", "QUANT_PROFITABILITY"])
@@ -125,6 +148,149 @@ def test_remediation_fingerprint_is_idempotent(tmp_path):
     assert first["fingerprint"] == second["fingerprint"]
     assert second["occurrence_count"] == 2
     assert second["action_attempts"] == 0
+
+
+def test_preflight_fingerprint_tracks_sha_check_and_failure_detail():
+    first = orch.deterministic_failure_blocker(
+        sha="a" * 40, command="ruff check x.py", detail="F401 line 1", changed=["x.py"]
+    )
+    progressed = orch.deterministic_failure_blocker(
+        sha="b" * 40, command="ruff check x.py", detail="E501 line 2", changed=["x.py"]
+    )
+    assert first["source_kind"] == "PREFLIGHT"
+    assert first["source_id"].startswith("a" * 40)
+    assert first["rule_id"] != progressed["rule_id"]
+
+
+def test_codex_reviewer_sandbox_is_read_only_and_transcript_free(tmp_path, monkeypatch):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    task_id = ledger.create_task(
+        issue_number=195, pr_number=196, task_type="REVIEW", agent="CODEX_REVIEWER",
+        model_class="CODEX_DEFAULT", task_class="ROUTINE", target_sha="a" * 40,
+    )
+    captured = {}
+    monkeypatch.setattr(
+        orch, "model_sandbox_command", lambda **kw: captured.update(kw) or kw["command"]
+    )
+    monkeypatch.setattr(
+        orch, "run", lambda command, **kw: subprocess.CompletedProcess(command, 0, "", "")
+    )
+    team = object.__new__(orch.Orchestrator)
+    team.cfg = orch.DEFAULT_CONFIG
+    team.invoke_codex_review(ledger.get(task_id), tmp_path, "review", "unit")
+    assert captured["read_only_worktree"] is True
+    assert "resume" not in captured["command"]
+    assert captured["home"] == orch.CODEX_REVIEW_HOME
+    assert orch.CODEX_REVIEW_HOME != orch.CODEX_HOME
+    assert orch.CODEX_REVIEW_WORK != orch.CODEX_WORK
+
+
+def test_preflight_runs_repo_lint_format_full_pytest_and_contract_guard(tmp_path, monkeypatch):
+    (tmp_path / "tests").mkdir()
+    for name in ("test_ai_team_one.py", "test_ai_team_two.py"):
+        (tmp_path / "tests" / name).write_text("")
+    commands = []
+    monkeypatch.setattr(
+        orch, "run", lambda command, **kw: commands.append(command)
+        or subprocess.CompletedProcess(command, 0, "", "")
+    )
+    assert orch.deterministic_preflight(
+        tmp_path, "a" * 40, ["scripts/ai_team_orchestrator.py"]
+    ) == []
+    assert commands[0][-2:] == ["check", "."]
+    assert commands[1][-3:] == ["format", "--check", "."]
+    assert commands[2][-3:] == ["pytest", "-q"]
+    assert commands[3][-1] == "scripts/validate_ai_team_contract.py"
+    assert commands[4][-3:] == ["--base", "origin/main"]
+
+
+def test_new_sha_invalidates_all_old_review_stages(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    old = "a" * 40
+    ids = [ledger.create_task(
+        issue_number=1, pr_number=2, task_type=kind, agent="CLAUDE",
+        model_class="SONNET", task_class="QUANT", review_profile="QUANT",
+        target_sha=old, status=status,
+    ) for kind, status in (("REVIEW", "WAITING_CI"), ("CHALLENGE", "WAITING_RATE_LIMIT"))]
+    team = object.__new__(orch.Orchestrator)
+    team.ledger = ledger
+    team.invalidate_reviews_for_other_shas(2, "b" * 40)
+    assert {ledger.get(task_id)["status"] for task_id in ids} == {"STALE"}
+
+
+def test_quant_opus_is_behind_prospective_evidence_state(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    parent_id = ledger.create_task(
+        issue_number=1, pr_number=2, task_type="CHALLENGE", agent="CLAUDE",
+        model_class="SONNET", task_class="ROUTINE", review_profile="QUANT",
+        target_sha="a" * 40, status="DONE",
+    )
+    team = object.__new__(orch.Orchestrator)
+    team.ledger = ledger
+    team.enqueue_prospective_evidence(ledger.get(parent_id))
+    child = ledger.child(parent_id, "PROSPECTIVE_EVIDENCE", "a" * 40)
+    assert child is not None
+    assert ledger.db.execute("SELECT 1 FROM tasks WHERE model_class='OPUS'").fetchone() is None
+
+
+def test_explicit_engine_profile_on_routine_task_is_persisted_for_sonnet(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    parent_id = ledger.create_task(
+        issue_number=196, task_type="BUILD", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", task_class="ROUTINE", status="DONE",
+    )
+
+    class GH:
+        def issue(self, number):
+            return {"body": "AI_TASK_CLASS=ROUTINE\nAI_TEAM_REVIEW_PROFILE=ENGINE_CRITICAL"}
+
+        def comment(self, *args):
+            pass
+
+        def add_labels(self, *args):
+            pass
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.gh = orch.DEFAULT_CONFIG, ledger, GH()
+    team.runtime = type("Runtime", (), {"event": lambda *args, **kwargs: None})()
+    team.enqueue_review(ledger.get(parent_id), 199, "a" * 40)
+    review = ledger.child(parent_id, "REVIEW")
+    assert review["review_profile"] == "ENGINE_CRITICAL"
+    assert "SONNET_CHALLENGE" in orch.task_review_profile(team.cfg, review)
+
+
+def test_red_ci_parks_assigned_claude_and_routes_exact_sha_to_codex(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    sha = "a" * 40
+    task_id = ledger.create_task(
+        issue_number=1, pr_number=2, task_type="CHALLENGE", agent="CLAUDE",
+        model_class="SONNET", task_class="ROUTINE", review_profile="ENGINE_CRITICAL",
+        target_sha=sha,
+    )
+
+    class GH:
+        def pr(self, number):
+            return {"state": "open", "head": {"sha": sha}}
+
+        def check_state(self, target):
+            return "FAIL", "ruff failed"
+
+        def failed_check_blockers(self, target):
+            return [orch.deterministic_failure_blocker(
+                sha=target, command="ruff check .", detail="F401", changed=["x.py"]
+            )]
+
+    captured = []
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.gh = orch.DEFAULT_CONFIG, ledger, GH()
+    team.dispatch_remediations = lambda task, blockers, **kw: captured.extend(blockers)
+    team.handle_review(ledger.get(task_id))
+    assert ledger.get(task_id)["status"] == "STALE"
+    assert ledger.db.execute(
+        "SELECT 1 FROM tasks WHERE agent='CLAUDE' AND status IN ('PENDING','RETRY','RUNNING')"
+    ).fetchone() is None
+    assert captured[0]["subject_sha"] == sha
+    assert captured[0]["requested_action"]["reproducer"] == "ruff check ."
 
 
 def test_machine_assignment_contains_exact_sha_and_model():
@@ -1033,6 +1199,30 @@ def test_future_claude_rate_limit_releases_unrelated_codex_queue(tmp_path):
     )
     assert ledger.has_active_work() is True
     assert ledger.has_queue_claim_conflict() is False
+
+
+def test_running_specialist_does_not_block_codex_builder_or_reviewer_claims(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    specialist = ledger.create_task(issue_number=1, task_type="CHALLENGE", agent="CLAUDE",
+                                    model_class="SONNET", task_class="ENGINE_CRITICAL")
+    specialist_claim = ledger.claim_due("claude_specialist")
+    assert specialist_claim["id"] == specialist
+    ledger.update(specialist, status="RUNNING")
+    builder = ledger.create_task(issue_number=2, task_type="BUILD", agent="CODEX_CHATGPT",
+                                 model_class="CODEX_DEFAULT", task_class="ROUTINE")
+    reviewer = ledger.create_task(issue_number=3, task_type="REVIEW", agent="CODEX_REVIEWER",
+                                  model_class="CODEX_DEFAULT", task_class="ROUTINE")
+    assert ledger.claim_due("codex_builder")["id"] == builder
+    assert ledger.claim_due("codex_reviewer")["id"] == reviewer
+
+
+def test_atomic_slot_lease_prevents_double_claim(tmp_path):
+    path = tmp_path / "ledger.sqlite3"
+    ledger = orch.Ledger(path)
+    task_id = ledger.create_task(issue_number=2, task_type="BUILD", agent="CODEX_CHATGPT",
+                                 model_class="CODEX_DEFAULT", task_class="ROUTINE")
+    assert ledger.claim_due("codex_builder")["id"] == task_id
+    assert orch.Ledger(path).claim_due("codex_builder") is None
 
 
 def test_newly_blocked_task_clears_queue_state_and_is_not_reclaimed(tmp_path):

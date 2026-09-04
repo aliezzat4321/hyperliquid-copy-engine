@@ -12,6 +12,9 @@ spec.loader.exec_module(orch)
 
 EXPECTED = {
     "ROUTINE",
+    "ENGINE_CRITICAL",
+    "QUANT",
+    "DESTRUCTIVE",
     "QUANT_PROFITABILITY",
     "STATISTICAL_METHODOLOGY",
     "MAJOR_ARCHITECTURE",

@@ -1,14 +1,24 @@
 {
-  "protocol_version": 1,
+  "protocol_version": 2,
   "repository": "aliezzat4321/hyperliquid-copy-engine",
   "routing": {
     "BUILD": {"agent": "CODEX_CHATGPT", "model_class": "CODEX_DEFAULT"},
     "REPAIR": {"agent": "CODEX_CHATGPT", "model_class": "CODEX_DEFAULT"},
-    "REVIEW": {"agent": "CLAUDE", "model_class": "SONNET"},
+    "REVIEW": {"agent": "CODEX_REVIEWER", "model_class": "CODEX_DEFAULT"},
+    "CHALLENGE": {"agent": "CLAUDE", "model_class": "SONNET"},
     "RESEARCH": {"agent": "CLAUDE", "model_class": "OPUS"}
+  },
+  "review_profiles": {
+    "ROUTINE": ["DETERMINISTIC_PREFLIGHT", "CODEX_REVIEW", "CI"],
+    "ENGINE_CRITICAL": ["DETERMINISTIC_PREFLIGHT", "CODEX_REVIEW", "SONNET_CHALLENGE", "CI"],
+    "QUANT": ["OPUS_DESIGN", "FROZEN_CONTRACT", "DETERMINISTIC_PREFLIGHT", "CODEX_REVIEW", "SONNET_CHALLENGE", "PROSPECTIVE_EVIDENCE", "OPUS_FINAL"],
+    "DESTRUCTIVE": ["DETERMINISTIC_PREFLIGHT", "CODEX_REVIEW", "OPUS_FINAL"]
   },
   "initial_routes": {
     "ROUTINE": {"task_type": "BUILD", "agent": "CODEX_CHATGPT", "model_class": "CODEX_DEFAULT"},
+    "ENGINE_CRITICAL": {"task_type": "BUILD", "agent": "CODEX_CHATGPT", "model_class": "CODEX_DEFAULT"},
+    "QUANT": {"task_type": "RESEARCH", "agent": "CLAUDE", "model_class": "OPUS"},
+    "DESTRUCTIVE": {"task_type": "BUILD", "agent": "CODEX_CHATGPT", "model_class": "CODEX_DEFAULT"},
     "QUANT_PROFITABILITY": {"task_type": "RESEARCH", "agent": "CLAUDE", "model_class": "OPUS"},
     "STATISTICAL_METHODOLOGY": {"task_type": "RESEARCH", "agent": "CLAUDE", "model_class": "OPUS"},
     "MAJOR_ARCHITECTURE": {"task_type": "RESEARCH", "agent": "CLAUDE", "model_class": "OPUS"},
@@ -21,7 +31,7 @@
       "CODE_CHANGE": "CODEX_CHATGPT", "PR_METADATA": "MANAGER", "PROTECTED_ACTION": "TRUSTED_MANAGER",
       "CI_RETRY": "MANAGER", "REVIEW_RERUN": "MANAGER", "POLICY_RECONCILIATION": "MANAGER", "TERMINAL": "MANAGER"
     },
-    "budgets": {"CODE_CHANGE": 1, "PR_METADATA": 3, "PROTECTED_ACTION": 1, "CI_RETRY": 3, "REVIEW_RERUN": 0, "POLICY_RECONCILIATION": 3, "TERMINAL": 0},
+    "budgets": {"CODE_CHANGE": 3, "PR_METADATA": 3, "PROTECTED_ACTION": 1, "CI_RETRY": 3, "REVIEW_RERUN": 0, "POLICY_RECONCILIATION": 3, "TERMINAL": 0},
     "protected_actions": {}
   },
   "legacy_remediation_migration": {"version": 1, "issues": [166, 168, 170], "supersede_issue": 170, "release_issue": 120},
@@ -40,6 +50,9 @@
   ],
   "auto_merge_task_classes": [
     "ROUTINE",
+    "ENGINE_CRITICAL",
+    "QUANT",
+    "DESTRUCTIVE",
     "QUANT_PROFITABILITY",
     "STATISTICAL_METHODOLOGY",
     "MAJOR_ARCHITECTURE",
