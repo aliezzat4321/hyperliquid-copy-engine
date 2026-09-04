@@ -20,7 +20,7 @@ def _valid_bundle() -> dict[str, object]:
         "provenance": {
             "source": "synthetic:test-ledger",
             "data_sha256": "a" * 64,
-            "code_commit": "0123456789abcdef",
+            "code_commit": "0" * 40,
         },
         "evaluation_window": {
             "start": "2026-01-02T00:00:00Z",
@@ -66,7 +66,9 @@ def test_complete_valid_ledger_reconciles_and_passes() -> None:
     report = audit_evidence(_valid_bundle())
     assert report["status"] == "PASS"
     assert report["promotion_eligible"] is True
+    assert report["validated_profitability_allowed"] is True
     assert report["economics_state"] == "RECONCILED_POSITIVE_ECONOMICS"
+    assert report["economics_basis"] == "MEASURED_COMPONENTS"
     assert report["economics"]["final_net"] == "15"
 
 
@@ -82,6 +84,7 @@ def test_complete_valid_ledger_reconciles_and_passes() -> None:
         (lambda b: b.update(audited_at="2026-01-10T00:00:00Z"), "STALE_DATA"),
         (lambda b: b["selection"].update(frozen_at="2026-01-02T00:00:00Z"), "SAME_WINDOW_LEAKAGE"),
         (lambda b: b["economics_totals"].update(final_net="16"), "PNL_UNRECONCILED"),
+        (lambda b: b["provenance"].update(code_commit="0123456789abcdef"), "CODE_COMMIT_INVALID"),
     ],
 )
 def test_required_integrity_failures_are_precise(mutation, blocker: str) -> None:
@@ -93,6 +96,63 @@ def test_required_integrity_failures_are_precise(mutation, blocker: str) -> None
     assert report["status"] == "FAIL"
     assert report["promotion_eligible"] is False
     assert blocker in _codes(report)
+
+
+def test_non_prospective_evidence_can_be_diagnostic_but_not_promotable() -> None:
+    bundle = _valid_bundle()
+    bundle["selection"] = {"prospective": False}
+    report = audit_evidence(bundle)
+    assert report["status"] == "PASS"
+    assert report["economics_state"] == "RECONCILED_POSITIVE_ECONOMICS"
+    assert report["promotion_eligible"] is False
+    assert report["validated_profitability_allowed"] is False
+
+
+def test_assumed_material_costs_never_emit_validated_or_promotion_verdict() -> None:
+    bundle = _valid_bundle()
+    bundle["positions"][0]["economics"]["slippage"] = _cost("1", basis="assumption")
+    report = audit_evidence(bundle)
+    assert report["status"] == "PASS"
+    assert report["economics_basis"] == "SCENARIO_ASSUMPTIONS"
+    assert report["assumed_cost_components"] == ["slippage"]
+    assert report["promotion_eligible"] is False
+    assert report["validated_profitability_allowed"] is False
+
+
+def test_overlapping_positions_do_not_create_false_global_monotonicity_failure() -> None:
+    bundle = _valid_bundle()
+    second = deepcopy(bundle["positions"][0])
+    second["position_id"] = "p2"
+    second["timestamps"] = {
+        "signal": "2026-01-02T12:00:00Z",
+        "decision": "2026-01-02T12:00:01Z",
+        "shadow_or_execution": "2026-01-02T12:00:02Z",
+        "open": "2026-01-02T12:00:03Z",
+        "close": "2026-01-02T18:00:00Z",
+    }
+    bundle["positions"].append(second)
+    bundle["population"]["input_count"] = 2
+    bundle["economics_totals"]["final_net"] = "30"
+    report = audit_evidence(bundle)
+    assert report["status"] == "PASS"
+    assert "LEDGER_NON_MONOTONIC" not in _codes(report)
+    assert report["counts"]["closed"] == 2
+
+
+def test_lane3_normalizer_preserves_independent_population_baseline() -> None:
+    rows = [
+        {
+            "type": "shadow_opened",
+            "ts": "2026-01-02T00:00:03Z",
+            "signal": {"sourceBaseId": "p1", "sourceTimeMs": 1767312000000},
+        }
+    ]
+    manifest = _valid_bundle()
+    del manifest["positions"]
+    manifest["population"] = {"input_count": 2}
+    manifest["economics_totals"] = {"final_net": "0"}
+    report = audit_evidence(lane3_bundle(rows, manifest))
+    assert "POPULATION_UNRECONCILED" in _codes(report)
 
 
 def test_missing_outcome_cannot_disappear_from_closed_and_unresolved() -> None:
