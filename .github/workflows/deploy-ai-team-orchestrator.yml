@@ -67,6 +67,47 @@ jobs:
           test -x /usr/local/bin/codex-code-mode-host
           test -x /usr/local/bin/bwrap
           test -x /usr/local/sbin/hl-ai-team-auth-codex
+
+          # P0 bootstrap: stale/non-mergeable PRs are task-local state, never a
+          # process-wide fatal. Patch only the installed runtime copy; #233 owns
+          # the durable tested source-level fix. Fail closed if source shape moves.
+          python3 - /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py <<'PY'
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1])
+          text = path.read_text()
+          old = '        merged = self.gh.merge(int(task["pr_number"]), target)\n'
+          new = '''        try:
+              merged = self.gh.merge(int(task["pr_number"]), target)
+          except RuntimeError as exc:
+              error = str(exc)
+              if "HTTP 405" not in error and "not mergeable" not in error and "merge conflicts" not in error:
+                  raise
+              self.ledger.update(
+                  task["id"],
+                  status="STALE",
+                  retry_at=None,
+                  last_error=f"merge no longer applicable: {error[-500:]}",
+              )
+              self.runtime.event(
+                  "MERGE_TASK_STALE",
+                  assignment_id=task["id"],
+                  issue=task["issue_number"],
+                  pr=task["pr_number"],
+                  target_sha=target,
+                  error=error[-500:],
+              )
+              return
+          '''
+          count = text.count(old)
+          if count != 1:
+              raise SystemExit(f"expected exactly one merge call, found {count}")
+          path.write_text(text.replace(old, new))
+          print("AI_TEAM_MERGE_405_ISOLATION_HOTFIX=APPLIED")
+          PY
+          python3 -m py_compile /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py
+
           if ! systemctl start hyperliquid-ai-team-orchestrator.service; then
             echo '=== AI TEAM SERVICE STATUS ==='
             systemctl status hyperliquid-ai-team-orchestrator.service --no-pager -l || true
