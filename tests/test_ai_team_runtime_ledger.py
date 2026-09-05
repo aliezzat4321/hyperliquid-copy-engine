@@ -131,6 +131,10 @@ def test_projection_without_ledger_is_fail_closed_and_watchdog_complete(tmp_path
 
     current = files.project_current()
 
+    assert current["latest_review"] is None
+    assert current["latest_run"] is None
+    assert current["last_successful_run"] is None
+    assert current["last_material_events"] == []
     assert current["last_scheduler_heartbeat"] is None
     assert current["last_productive_progress_at"] is None
     assert current["stale_assignments"] == []
