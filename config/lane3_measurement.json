@@ -1,0 +1,17 @@
+{
+  "contract_id": "LANE3-NET-EDGE-CONTRACT-v1",
+  "taker_rate": "0.00045",
+  "tape_root": "/mnt/HC_Volume_106576526/hyperliquid/market-shadow",
+  "funding_cache_path": "/var/lib/hyperliquid-copy-engine/invo-notification-executor/funding_history.jsonl",
+  "promotion_policy_path": "docs/ai-team/promotion_policy.json",
+  "max_book_age_ms": 5000,
+  "follower_submit_latency_ms": 0,
+  "transport_latency_ms": 0,
+  "max_slippage_bps": "40",
+  "scenario_round_trip_bps": [9, 15, 25, 40],
+  "reference_round_trip_cost_bps": 15,
+  "bootstrap_seed": 193,
+  "min_day_clusters": 10,
+  "min_capacity_complete_share": 0.95,
+  "max_true_orphan_share": 0.05
+}

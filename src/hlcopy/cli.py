@@ -10,6 +10,7 @@ from pathlib import Path
 from hlcopy.config import Settings
 from hlcopy.copyability.archive_plan import required_l2_objects, write_fetch_script
 from hlcopy.copyability.runner import run_matrix
+from hlcopy.lane3 import cli as lane3_cli
 from hlcopy.market.capture import capture_market
 from hlcopy.pipeline import run
 from hlcopy.profiling import run as run_profiles
@@ -58,6 +59,8 @@ def _since_ms(value: str | None) -> int | None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="hlcopy")
     sub = parser.add_subparsers(dest="command", required=True)
+    lane3 = sub.add_parser("lane3-net-edge", help="fail-closed Lane 3 net edge ledger")
+    lane3_cli.add_arguments(lane3)
     sub.add_parser("pipeline", help="discover, ingest, reconstruct, analyze and rank wallets")
     profile = sub.add_parser(
         "profile-traders",
@@ -224,6 +227,8 @@ def main() -> None:
     settings = Settings.from_env()
     if args.command == "pipeline":
         run(settings)
+    elif args.command == "lane3-net-edge":
+        lane3_cli.run(args)
     elif args.command == "profile-traders":
         run_profiles(
             settings,
