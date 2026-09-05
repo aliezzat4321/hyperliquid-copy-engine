@@ -12,7 +12,13 @@ from typing import Any
 
 from . import CONTRACT_ID
 from .book import Lane3ForwardBookProvider
-from .costs import CostCompleteness, measure_leg, position_economics, scenario_net
+from .costs import (
+    CostCompleteness,
+    PositionEconomics,
+    measure_leg,
+    position_economics,
+    scenario_net,
+)
 from .funding import attribute_funding, load_cached_funding
 from .ledger import load_audit_jsonl, reconstruct_ledger
 from .promotion import evaluate_promotion
@@ -71,6 +77,22 @@ def _percentile(values: list[float], q: float) -> float | None:
     return ordered[min(len(ordered) - 1, int(q * len(ordered)))]
 
 
+def _net_return_observations(
+    closed: list[ReconstructedPosition], economics: list[PositionEconomics]
+) -> list[tuple[str, float]]:
+    """Keep each measured return attached to its position's exit-day cluster."""
+    return [
+        (
+            datetime.fromtimestamp(position.exit_leg.timestamp_ms / 1000, UTC)
+            .date()
+            .isoformat(),
+            float(economy.net_return_bps),
+        )
+        for position, economy in zip(closed, economics, strict=True)
+        if position.exit_leg is not None and economy.net_return_bps is not None
+    ]
+
+
 def _slice(
     slice_id: str, positions: list[ReconstructedPosition], cfg: dict[str, Any],
     provider: Lane3ForwardBookProvider, policy: dict[str, Any], report_ms: int,
@@ -99,14 +121,7 @@ def _slice(
         e.cost_completeness == CostCompleteness.MEASURED for e in economics
     )
     nets = [float(e.net_pnl_usd) for e in economics if e.net_pnl_usd is not None]
-    observations = [
-        (
-            datetime.fromtimestamp(p.exit_leg.timestamp_ms / 1000, UTC).date().isoformat(),
-            float(e.net_return_bps),
-        )
-        for p, e in zip(closed, economics, strict=True)
-        if e.net_return_bps is not None
-    ]
+    observations = _net_return_observations(closed, economics)
     returns = [value for _, value in observations]
     boot = day_block_bootstrap(observations, seed=int(cfg["bootstrap_seed"]),
                                confidence_level=float(policy["thresholds"]["confidence_level"]))

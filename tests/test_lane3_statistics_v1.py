@@ -1,9 +1,8 @@
-from dataclasses import asdict
 from datetime import UTC, datetime
 from decimal import Decimal as D
 
 import hlcopy.lane3.cli as cli
-from hlcopy.lane3.costs import CostCompleteness, LegCost, PositionEconomics
+from hlcopy.lane3.costs import CostCompleteness, PositionEconomics
 from hlcopy.lane3.reconstruction import Disposition, ExecutionLeg, ReconstructedPosition
 from hlcopy.lane3.statistics import day_block_bootstrap, romano_wolf_stepdown
 
@@ -21,7 +20,7 @@ def test_romano_wolf_is_monotone_in_stepdown_order():
     assert adjusted[0] <= adjusted[1] <= adjusted[2]
 
 
-def test_slice_keeps_exit_day_aligned_when_some_costs_are_unmeasured(monkeypatch):
+def test_net_returns_keep_exit_day_aligned_when_some_costs_are_unmeasured():
     day_one = int(datetime(2026, 1, 1, tzinfo=UTC).timestamp() * 1000)
     day_two = int(datetime(2026, 1, 2, tzinfo=UTC).timestamp() * 1000)
 
@@ -44,32 +43,8 @@ def test_slice_keeps_exit_day_aligned_when_some_costs_are_unmeasured(monkeypatch
                                          D("0"), D("2"), D("200"),
                                          CostCompleteness.MEASURED),
     }
-    monkeypatch.setattr(cli, "load_cached_funding", lambda *_: [])
-    monkeypatch.setattr(
-        cli, "attribute_funding",
-        lambda *_args, **_kwargs: type("Funding", (), {"funding_usd": D("0"),
-                                                        "measured": True})(),
-    )
-    monkeypatch.setattr(
-        cli, "measure_leg",
-        lambda _position, leg, *_args, **_kwargs: LegCost(
-            leg, D("0"), D("0"), D("0"), D("0"), D("0"), CostCompleteness.MEASURED
-        ),
-    )
-    monkeypatch.setattr(
-        cli, "position_economics",
-        lambda position, *_args, **_kwargs: economics[position.source_base_id],
-    )
-    cfg = {"funding_cache_path": "unused", "taker_rate": "0",
-           "max_slippage_bps": "100", "bootstrap_seed": 193,
-           "scenario_round_trip_bps": [5]}
-    policy = {"policy_version": "test", "thresholds": {"confidence_level": 0.9}}
-
-    result = cli._slice("alice:ETH", positions, cfg, object(), policy, day_two)
-    expected = day_block_bootstrap(
-        [("2026-01-01", 100.0), ("2026-01-01", 200.0)], seed=193,
-        confidence_level=0.9,
+    observations = cli._net_return_observations(
+        positions, [economics[position.source_base_id] for position in positions]
     )
 
-    assert result.day_clusters == 1
-    assert result.ci == asdict(expected)
+    assert observations == [("2026-01-01", 100.0), ("2026-01-01", 200.0)]
