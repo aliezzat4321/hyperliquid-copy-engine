@@ -2,6 +2,10 @@ from copy import deepcopy
 
 import pytest
 
+from hlcopy.profitability.evidence_auditor import (
+    EconomicEvidenceArtifact,
+    build_economic_evidence_artifact,
+)
 from hlcopy.research.experiment_controller import (
     audit_promotion_report,
     contract_fingerprint,
@@ -68,6 +72,7 @@ def report(with_result=True):
                     },
                     "evaluated_at": "2026-03-02T00:00:00Z",
                     "code_sha": SHA1,
+                    "data_sha256": "b" * 64,
                 }
             ]
             if with_result
@@ -81,7 +86,7 @@ def test_unfrozen_and_persisted_frozen_without_results_are_not_promotable():
     candidate = report(False)
     audit = validate_evidence(candidate, registry=registry_for(candidate["frozen_contract"]))
     assert audit.verdict == "FROZEN_NOT_YET_PROSPECTIVE"
-    assert audit.promotion_eligible is False
+    assert audit.prospective_contract_valid is False
 
 
 def test_embedded_fingerprint_without_independent_registry_lock_fails_closed():
@@ -139,7 +144,7 @@ def test_implementation_only_repair_preserves_lock_and_requires_rerun_sha():
     ]
     candidate["evaluations"][0]["code_sha"] = SHA2
     audit = validate_evidence(candidate, registry=registry)
-    assert audit.verdict == "PROSPECTIVE_SHADOW_VALID"
+    assert audit.verdict == "PROSPECTIVE_CONTRACT_VALID"
     assert audit.fingerprint == candidate["contract_fingerprint"]
 
     stale = report()
@@ -181,13 +186,80 @@ def test_evaluation_timestamp_must_follow_window_end():
     assert "EVALUATED_BEFORE_WINDOW_ENDED" in audit.blockers
 
 
-def test_promotion_report_integration_fails_closed_without_registry_lock():
+def economic_bundle(candidate):
+    evaluation = candidate["evaluations"][-1]
+    costs = {
+        name: {"amount": "1", "basis": "measured"}
+        for name in ("fees", "spread", "depth", "slippage", "impact")
+    }
+    return {
+        "report_version": "test-economic-report-v1",
+        "policy_version": "quant-promotion-policy-v2",
+        "audited_at": "2026-03-02T00:00:00Z",
+        "max_data_age_seconds": 86400,
+        "provenance": {
+            "source": "immutable:test-evidence",
+            "data_sha256": evaluation["data_sha256"],
+            "code_commit": evaluation["code_sha"],
+        },
+        "evaluation_window": evaluation["window"],
+        "selection": {"prospective": True, "frozen_at": "2026-02-01T12:00:00Z"},
+        "funding_applicable": True,
+        "population": {"input_count": 1},
+        "positions": [
+            {
+                "position_id": "p1",
+                "status": "closed",
+                "timestamps": {
+                    "signal": "2026-02-02T00:00:00Z",
+                    "decision": "2026-02-02T00:00:01Z",
+                    "shadow_or_execution": "2026-02-02T00:00:02Z",
+                    "open": "2026-02-02T00:00:03Z",
+                    "close": "2026-03-01T00:00:00Z",
+                },
+                "economics": {
+                    "gross_pnl": "11",
+                    **costs,
+                    "funding": {"amount": "1", "coverage": "complete"},
+                },
+            },
+        ],
+        "economics_totals": {"final_net": "5"},
+    }
+
+
+def economic_artifact(candidate, **predicate_overrides):
+    predicates = {
+        name: True
+        for name in (
+            "minimum_evidence",
+            "primary_metrics",
+            "success_criteria",
+            "uncertainty_method",
+            "multiple_testing_treatment",
+            "execution_costs",
+            "unresolved_exposure",
+            "capacity",
+        )
+    }
+    predicates.update(predicate_overrides)
+    return build_economic_evidence_artifact(
+        economic_bundle(candidate),
+        contract_fingerprint=candidate["contract_fingerprint"],
+        predicates=predicates,
+    )
+
+
+def test_promotion_report_integration_requires_bound_economic_artifact():
     candidate = report()
     registry = registry_for(candidate["frozen_contract"])
     promoted = audit_promotion_report(
-        {**candidate, "promotion_eligible": True}, registry=registry
+        {**candidate, "promotion_eligible": True},
+        registry=registry,
+        economic_evidence_artifact=economic_artifact(candidate),
     )
-    assert promoted["experiment_audit"]["promotion_eligible"] is True
+    assert promoted["experiment_audit"]["prospective_contract_valid"] is True
+    assert promoted["promotion_eligible"] is True
 
     unlocked = audit_promotion_report({**candidate, "promotion_eligible": True})
     assert unlocked["promotion_eligible"] is False
@@ -195,6 +267,76 @@ def test_promotion_report_integration_fails_closed_without_registry_lock():
 
     unfrozen = audit_promotion_report({"promotion_eligible": True}, registry=registry)
     assert unfrozen["promotion_eligible"] is False
+
+
+def test_fabricated_hash_and_all_true_mapping_fails_closed():
+    candidate = report()
+    fabricated = {
+        "status": "PASS",
+        "promotion_eligible": True,
+        "evidence_sha256": "c" * 64,
+        "checks": {
+            name: True
+            for name in (
+                "minimum_evidence",
+                "primary_metrics",
+                "success_criteria",
+                "uncertainty_method",
+                "multiple_testing_treatment",
+                "execution_costs",
+                "unresolved_exposure",
+                "capacity",
+            )
+        },
+    }
+    result = audit_promotion_report(
+        candidate,
+        registry=registry_for(candidate["frozen_contract"]),
+        economic_evidence_artifact=fabricated,
+    )
+    assert result["promotion_eligible"] is False
+    assert "DOWNSTREAM_ECONOMIC_ARTIFACT_REQUIRED" in result["promotion_gate"]["blockers"]
+
+
+@pytest.mark.parametrize(
+    "failed_predicate",
+    [
+        "minimum_evidence",
+        "primary_metrics",
+        "success_criteria",
+        "uncertainty_method",
+        "multiple_testing_treatment",
+        "execution_costs",
+        "unresolved_exposure",
+        "capacity",
+    ],
+)
+def test_bound_artifact_requires_every_predicate(failed_predicate):
+    candidate = report()
+    result = audit_promotion_report(
+        candidate,
+        registry=registry_for(candidate["frozen_contract"]),
+        economic_evidence_artifact=economic_artifact(candidate, **{failed_predicate: False}),
+    )
+    assert result["promotion_eligible"] is False
+    expected = f"ECONOMIC_AUDIT_{failed_predicate.upper()}_NOT_SATISFIED"
+    assert expected in result["promotion_gate"]["blockers"]
+
+
+def test_artifact_payload_tampering_breaks_cryptographic_binding():
+    candidate = report()
+    artifact = economic_artifact(candidate)
+    tampered = EconomicEvidenceArtifact(
+        artifact.canonical_payload.replace(b'"final_net":"5"', b'"final_net":"6"'),
+        artifact.evidence_sha256,
+    )
+    result = audit_promotion_report(
+        candidate,
+        registry=registry_for(candidate["frozen_contract"]),
+        economic_evidence_artifact=tampered,
+    )
+    assert result["promotion_eligible"] is False
+    assert "ECONOMIC_ARTIFACT_HASH_MISMATCH" in result["promotion_gate"]["blockers"]
 
 
 def test_new_version_gets_new_fingerprint():

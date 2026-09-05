@@ -11,12 +11,17 @@ import hashlib
 import json
 import re
 from collections import Counter
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = "profitability-evidence-audit-v1"
+PROMOTION_ARTIFACT_VERSION = "profitability-promotion-artifact-v1"
+AUDITOR_IDENTITY = "hlcopy.profitability.evidence_auditor"
+POLICY_IDENTITY = "docs/ai-team/PROMOTION_POLICY.md"
 VALID_STATUSES = {"closed", "open", "unresolved", "quarantined"}
 MATERIAL_COSTS = ("fees", "spread", "depth", "slippage", "impact")
 TOLERANCE = Decimal("0.00000001")
@@ -45,6 +50,130 @@ def _time(value: object) -> datetime | None:
 def _canonical_hash(value: object) -> str:
     raw = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(raw).hexdigest()
+
+
+def _canonical_bytes(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+
+
+@dataclass(frozen=True)
+class EconomicEvidenceArtifact:
+    """Immutable canonical output of the economic evidence engine."""
+
+    canonical_payload: bytes
+    evidence_sha256: str
+
+
+def build_economic_evidence_artifact(
+    bundle: dict[str, Any],
+    *,
+    contract_fingerprint: str,
+    predicates: Mapping[str, bool],
+) -> EconomicEvidenceArtifact:
+    """Audit evidence and seal the result and promotion bindings as canonical bytes."""
+    audit_report = audit_evidence(bundle)
+    provenance = bundle.get("provenance")
+    payload = {
+        "artifact_version": PROMOTION_ARTIFACT_VERSION,
+        "auditor": {"identity": AUDITOR_IDENTITY, "version": SCHEMA_VERSION},
+        "policy": {
+            "identity": POLICY_IDENTITY,
+            "version": bundle.get("policy_version"),
+        },
+        "contract_fingerprint": contract_fingerprint,
+        "code_sha": provenance.get("code_commit") if isinstance(provenance, dict) else None,
+        "data_sha256": (
+            provenance.get("data_sha256") if isinstance(provenance, dict) else None
+        ),
+        "evaluation_window": bundle.get("evaluation_window"),
+        "predicates": dict(predicates),
+        "evidence_bundle": bundle,
+        "audit_report": audit_report,
+    }
+    canonical = _canonical_bytes(payload)
+    return EconomicEvidenceArtifact(canonical, hashlib.sha256(canonical).hexdigest())
+
+
+def verify_economic_evidence_artifact(
+    artifact: object,
+    *,
+    contract_fingerprint: str | None,
+    code_sha: object,
+    data_sha256: object,
+    evaluation_window: object,
+    required_predicates: tuple[str, ...],
+) -> tuple[dict[str, Any] | None, tuple[str, ...]]:
+    """Re-hash and re-audit an immutable artifact against exact promotion inputs."""
+    if not isinstance(artifact, EconomicEvidenceArtifact):
+        return None, ("DOWNSTREAM_ECONOMIC_ARTIFACT_REQUIRED",)
+    blockers: list[str] = []
+    actual_hash = hashlib.sha256(artifact.canonical_payload).hexdigest()
+    if not re.fullmatch(r"[0-9a-f]{64}", artifact.evidence_sha256):
+        blockers.append("ECONOMIC_ARTIFACT_HASH_INVALID")
+    elif actual_hash != artifact.evidence_sha256:
+        blockers.append("ECONOMIC_ARTIFACT_HASH_MISMATCH")
+    try:
+        payload = json.loads(artifact.canonical_payload)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None, tuple((*blockers, "ECONOMIC_ARTIFACT_PAYLOAD_INVALID"))
+    if not isinstance(payload, dict):
+        return None, tuple((*blockers, "ECONOMIC_ARTIFACT_PAYLOAD_INVALID"))
+    expected_fields = {
+        "artifact_version",
+        "auditor",
+        "policy",
+        "contract_fingerprint",
+        "code_sha",
+        "data_sha256",
+        "evaluation_window",
+        "predicates",
+        "evidence_bundle",
+        "audit_report",
+    }
+    if set(payload) != expected_fields:
+        blockers.append("ECONOMIC_ARTIFACT_SCHEMA_INVALID")
+    if payload.get("artifact_version") != PROMOTION_ARTIFACT_VERSION:
+        blockers.append("ECONOMIC_ARTIFACT_VERSION_MISMATCH")
+    if payload.get("auditor") != {"identity": AUDITOR_IDENTITY, "version": SCHEMA_VERSION}:
+        blockers.append("ECONOMIC_AUDITOR_IDENTITY_MISMATCH")
+    bundle = payload.get("evidence_bundle")
+    recorded_report = payload.get("audit_report")
+    if not isinstance(bundle, dict) or not isinstance(recorded_report, dict):
+        blockers.append("ECONOMIC_ARTIFACT_EVIDENCE_INVALID")
+        recomputed_report = None
+    else:
+        recomputed_report = audit_evidence(bundle)
+        if recomputed_report != recorded_report:
+            blockers.append("ECONOMIC_AUDIT_RECOMPUTATION_MISMATCH")
+    expected_policy = {
+        "identity": POLICY_IDENTITY,
+        "version": bundle.get("policy_version") if isinstance(bundle, dict) else None,
+    }
+    if payload.get("policy") != expected_policy or not expected_policy["version"]:
+        blockers.append("ECONOMIC_POLICY_IDENTITY_MISMATCH")
+    exact_bindings = (
+        ("contract_fingerprint", contract_fingerprint),
+        ("code_sha", code_sha),
+        ("data_sha256", data_sha256),
+        ("evaluation_window", evaluation_window),
+    )
+    for name, expected in exact_bindings:
+        if payload.get(name) != expected:
+            blockers.append(f"ECONOMIC_ARTIFACT_{name.upper()}_MISMATCH")
+    predicates = payload.get("predicates")
+    if not isinstance(predicates, dict) or set(predicates) != set(required_predicates):
+        blockers.append("ECONOMIC_AUDIT_PREDICATES_INVALID")
+    else:
+        blockers.extend(
+            f"ECONOMIC_AUDIT_{name.upper()}_NOT_SATISFIED"
+            for name in required_predicates
+            if predicates.get(name) is not True
+        )
+    if recomputed_report is None or recomputed_report.get("status") != "PASS" or (
+        recomputed_report.get("promotion_eligible") is not True
+    ):
+        blockers.append("DOWNSTREAM_ECONOMIC_AUDIT_NOT_PASSING")
+    return payload, tuple(dict.fromkeys(blockers))
 
 
 def audit_evidence(bundle: dict[str, Any]) -> dict[str, Any]:
