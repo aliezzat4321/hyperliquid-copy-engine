@@ -69,6 +69,7 @@ def test_identical_material_loop_opens_deduplicated_stalled_alert(tmp_path):
     value.watchdog()
     value.watchdog()
     value.watchdog()
+    value.watchdog()
     assert len(value.gh.comments) == 1
     assert "WATCHDOG_ALERT=OPEN" in value.gh.comments[0][1]
     assert value.ledger.watchdog_snapshot()["active_alerts"][0]["kind"] == "NO_PROGRESS"

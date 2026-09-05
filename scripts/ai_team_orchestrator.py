@@ -1550,7 +1550,7 @@ class Orchestrator:
             key = "NO_PROGRESS:" + fingerprint
             seen.add(key)
             incident = self.ledger.open_incident(
-                key, "NO_PROGRESS", f"identical material state repeated for {cycles} cycles",
+                key, "NO_PROGRESS", "identical material state exceeded the configured cycle SLA",
                 task=tasks[0], last_progress_at=last_progress,
             )
             self._notify_incident(incident)
