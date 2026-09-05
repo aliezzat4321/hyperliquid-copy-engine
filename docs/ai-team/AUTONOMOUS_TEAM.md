@@ -12,11 +12,10 @@ repository diff. Re-observing the same blocker changes its occurrence count but 
 not create a child or spend an action attempt. Unknown, contradictory, and unauthorized
 records fail closed for their dependency component.
 
-Fresh high-value issues must supply the strict `AI_INITIAL_*` route authorized for
-their `AI_TASK_CLASS` and begin as Claude Opus `RESEARCH`; successful research creates
-a Codex `BUILD` child tied to the immutable research result. Explicit routine work
-starts as Codex `BUILD`. Provider waits and scoped terminal blockers do not stop
-unrelated dependency components.
+Fresh high-value issues supply the strict route authorized for their profile. QUANT
+begins with an Opus methodology challenge whose result is frozen before a Codex build;
+routine and engine-critical work begin with Codex. Provider waits and scoped terminal
+blockers do not stop unrelated Codex builder/reviewer work.
 
 ## Architecture
 
@@ -34,18 +33,20 @@ cycle. Ready, active, previously attempted, blocked, closed, done, malformed,
 untrusted, and dependency-blocked Issues are not eligible. `ai-team:pending` denotes
 an already assigned Issue; it is not a queue-entry label. Queue eligibility is never
 inferred from an Issue title. The VM timer wakes the orchestrator, not a model; the
-orchestrator creates a machine-readable assignment, launches exactly one scoped agent
-task, records the result, and exits.
+orchestrator creates machine-readable assignments and launches at most one scoped task
+per free execution slot, records the leases, and exits without waiting for model work.
 
 ```text
 GitHub Issue ai-team:ready (direct) or eligible ai-team:queued (automatic promotion)
   -> root orchestrator + SQLite ledger + flock
   -> Codex isolated checkout (non-root, no GitHub credentials)
-  -> root validates changes, commits/pushes, opens PR
-  -> exact-SHA CLAUDE assignment comment
-  -> Claude isolated checkout (Sonnet by default)
+  -> root validates changes, commits/pushes, opens PR, runs deterministic preflight
+  -> exact-SHA CODEX_REVIEWER assignment comment
+  -> fresh Codex process in a separate read-only checkout
   -> PASS/FAIL exact-SHA result comment
-     FAIL -> Codex repair -> delta-only Claude re-review
+     FAIL -> Codex repair -> deterministic preflight -> delta-only Codex re-review
+     ENGINE_CRITICAL/QUANT -> selective Sonnet challenge
+     QUANT/DESTRUCTIVE decision -> exact-final Opus verdict
      PASS -> wait for CI
   -> routine + CI green -> root orchestrator squash-merges
   -> all agents exit; timer returns to GitHub-only polling
@@ -80,7 +81,7 @@ TARGET_SHA=<40-char sha>
 STATUS=PENDING
 ```
 
-Claude review results contain `AI_TEAM_RESULT_V1` with:
+Reviewer results contain `AI_TEAM_RESULT_V1` with:
 
 ```text
 REVIEWED_SHA=<40-char sha>
@@ -96,12 +97,19 @@ A PR whose head changes during or after review is not mergeable from the old ver
 
 Policy lives in `config/ai_team_router.json`.
 
+`AI_TEAM_REVIEW_PROFILE=ROUTINE|ENGINE_CRITICAL|QUANT|DESTRUCTIVE` may explicitly
+strengthen the minimum derived from `AI_TASK_CLASS`, protected-change metadata, and
+changed-path sensitivity; it can never weaken that floor. Downgrades, invalid values,
+and duplicates fail closed. The cumulative strength order is ROUTINE,
+ENGINE_CRITICAL, DESTRUCTIVE, then QUANT. QUANT final Opus is created only after an exact-SHA
+`AI_TEAM_PROSPECTIVE_EVIDENCE_SHA` and
+`AI_TEAM_PROSPECTIVE_EVIDENCE_VALIDATED=YES` pass the manager evidence gate.
+
 - `CODEX_DEFAULT`: build, repair, engineering, CI, deployment code, ordinary debugging.
-- `SONNET`: routine and ordinary major-architecture independent PR review.
-- `OPUS`: entry research for every high-value class; final review for quant/profitability,
-  statistical methodology, unresolved disagreement, and capital-sensitive methodology.
-  Major architecture uses Opus for final review only when the trusted Issue contains
-  `OPUS_ESCALATION_REASON=MAJOR_ARCHITECTURE`.
+- `CODEX_REVIEWER`: default independent adversarial exact-SHA reviewer, using a fresh
+  process and separate clean, read-only checkout with no builder transcript.
+- `SONNET`: selective post-Codex challenge for ENGINE_CRITICAL and QUANT.
+- `OPUS`: pre-build frozen methodology and final quant/capital/destructive decisions.
 
 Agents cannot choose Opus. The orchestrator validates the task class and escalation reason. Routine work with an Opus escalation request is rejected. Review-model routing is independent of merge eligibility: every recognized task class becomes merge-eligible only after an independent exact-SHA review PASS and green CI.
 
@@ -171,12 +179,17 @@ Do not stop unrelated Hyperliquid services and do not touch Polymarket.
 ## Failure behavior
 
 - Agent crash: task remains in the ledger and retries with bounded attempts.
-- VM/orchestrator restart: a `RUNNING` task becomes `RETRY`; workdir/session metadata is preserved.
+- VM/orchestrator restart: an unleased or expired `RUNNING` task becomes `RETRY`;
+  a worker with a live lease is left alone. Workdir/session metadata is preserved.
 - GitHub unavailable: cycle exits without a model call; the next timer cycle retries.
 - Claude/Codex usage limit: checkpoint/session ID is retained and retry is deferred; no rapid retry loop.
 - Stale SHA / PR changed while reviewing: old review becomes stale and a new exact-SHA review is queued.
-- Two tasks: flock prevents concurrent orchestrator instances; the ledger selects one due task per cycle.
-- Claude `FAIL`: blockers become a Codex repair task, followed by delta-only re-review.
+- Scheduler concurrency: the flock protects only reconciliation and atomic lease/claim
+  decisions. Each due task is launched into a separate worker unit after claiming one of
+  the `codex_builder`, `codex_reviewer`, `claude_specialist`, or `manager` slots.
+  Model execution does not hold the scheduler lock; a live lease prevents duplicate claims.
+- Reviewer `FAIL`: blockers become a bounded Codex repair (at least three attempts while
+  SHA or failure detail progresses), followed by deterministic checks and re-review.
 - Missing/malformed model result: bounded retry, then `ai-team:blocked`.
 - Missing Claude auth: review stops as `CLAUDE_AUTH_REQUIRED`; no fallback token hack.
 - CI failure: no merge.
