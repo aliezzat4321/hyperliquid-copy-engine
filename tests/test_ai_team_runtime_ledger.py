@@ -124,6 +124,22 @@ def test_redacts_auth_material() -> None:
     assert "access_token=hello" not in redacted
 
 
+def test_projection_without_ledger_is_fail_closed_and_watchdog_complete(tmp_path: Path) -> None:
+    files = runtime.RuntimeLedgerFiles(
+        tmp_path / "state", tmp_path / "missing.sqlite3", "owner/repo", 130
+    )
+
+    current = files.project_current()
+
+    assert current["last_scheduler_heartbeat"] is None
+    assert current["last_productive_progress_at"] is None
+    assert current["stale_assignments"] == []
+    assert current["recovery_actions"] == []
+    assert current["active_alerts"] == []
+    assert current["queue_age"] == []
+    assert current["health"] == "DEGRADED"
+
+
 def test_projection_distinguishes_assignment_from_runtime(tmp_path: Path) -> None:
     db_path = tmp_path / "ledger.sqlite3"
     make_db(db_path)

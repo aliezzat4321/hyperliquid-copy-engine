@@ -443,6 +443,14 @@ class RuntimeLedgerFiles:
                 "repository": self.repository,
                 "assignment": {"codex": None, "claude": None},
                 "runtime": {"codex": None, "claude": None},
+                "last_scheduler_heartbeat": None,
+                "last_productive_progress_at": None,
+                "heartbeats": {},
+                "stale_assignments": [],
+                "recovery_actions": [],
+                "active_alerts": [],
+                "queue_age": [],
+                "health": "DEGRADED",
                 "safety": {"real_trading": "NO", "polymarket_scope": "DENIED"},
             }
             _atomic_json(self.root / "current.json", payload)
