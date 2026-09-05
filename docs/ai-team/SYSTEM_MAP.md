@@ -25,6 +25,7 @@ Update this file only when a component moves, is added, or is retired.
 | Experiment freeze/audit | `src/hlcopy/research/experiment_controller.py` | Fingerprints ex-ante contracts; fail-closed promotion-report verdict |
 | Storage pressure controller | `scripts/storage_controller.py`, `config/storage_policy.json` | Read-only fail-closed budgets, forecast and writer decisions |
 | Storage exit-gate evaluator | `scripts/storage_exit_gate_report.py` | Read-only conjunction over reviewed apply, policy and uncontaminated controller evidence |
+| Autonomous acceptance lifecycle | `scripts/ai_team_orchestrator.py`, `scripts/ai_team_runtime_ledger.py`, `scripts/trello_team_bridge.py` | Durable merge-to-evidence phases, deterministic proof records, restart recovery, and Done/Proven projection |
 | Market tape lifecycle | `scripts/market_tape_lifecycle.py`, `config/market_tape_lifecycle.json` | Exact-SHA lossless historical Parquet compaction; no deletion without review |
 | Database | `src/hlcopy/db/postgres.py`, `db/schema.sql` | Append-only raw + derived tables |
 | CLI | `src/hlcopy/cli.py` | `hlcopy` entry point |
