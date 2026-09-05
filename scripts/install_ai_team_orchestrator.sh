@@ -67,6 +67,28 @@ else
 fi
 
 install -m 0755 "$ROOT/scripts/ai_team_orchestrator.py" "$OPT/scripts/ai_team_orchestrator.py"
+
+# Temporary P0 bootstrap repair for #233. The current orchestrator recursively normalizes
+# agent worktree ownership with os.chown(...), whose default follows symlinks. A Codex-created
+# .venv/bin/python3.10 symlink can therefore make the root finalizer attempt to chown a
+# read-only host Python target and fail with EROFS. Patch only the installed runtime copy so
+# current-main can recover and let #233 land the durable source-level fix + regression.
+# Fail closed if the expected source shape changes; remove this shim once #233 is merged.
+python3 - "$OPT/scripts/ai_team_orchestrator.py" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+old = "            os.chown(Path(root) / name, uid, gid)"
+new = "            os.chown(Path(root) / name, uid, gid, follow_symlinks=False)"
+count = text.count(old)
+if count != 2:
+    raise SystemExit(f"expected exactly two worktree descendant chown calls, found {count}")
+path.write_text(text.replace(old, new))
+print("AI_TEAM_WORKTREE_CHOWN_HOTFIX=APPLIED")
+PY
+
 install -m 0644 "$ROOT/scripts/ai_team_runtime_ledger.py" "$OPT/scripts/ai_team_runtime_ledger.py"
 install -o root -g root -m 0755 "$ROOT/scripts/trello_team_bridge.py" "$OPT/scripts/trello_team_bridge.py"
 install -m 0755 "$ROOT/scripts/ai_team_auth_codex.sh" "$OPT/scripts/ai_team_auth_codex.sh"
