@@ -1,0 +1,47 @@
+name: PDH PDL sweep experiment
+
+on:
+  pull_request:
+    paths:
+      - "src/hlcopy/research/pdh_pdl_sweep.py"
+      - "tests/test_pdh_pdl_sweep.py"
+      - ".github/workflows/pdh-pdl-sweep-experiment.yml"
+      - "docs/ai-team/experiments/registry.json"
+      - "docs/ai-team/experiments/INDEX.md"
+      - "docs/ai-team/experiments/EXP-002.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install project
+        run: python -m pip install -e ".[dev]"
+      - name: Unit tests
+        run: pytest -q tests/test_pdh_pdl_sweep.py
+      - name: Lint experiment files
+        run: ruff check src/hlcopy/research/pdh_pdl_sweep.py tests/test_pdh_pdl_sweep.py
+      - name: Run frozen historical experiment
+        run: |
+          mkdir -p artifacts
+          python -m hlcopy.research.pdh_pdl_sweep \
+            --start 2021-01-01 \
+            --end 2026-08-31 \
+            --cache-dir .cache/pdh-pdl \
+            --output artifacts/pdh_pdl_sweep_report.json \
+            | tee artifacts/pdh_pdl_sweep_stdout.json
+      - name: Upload experiment report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdh-pdl-sweep-report
+          path: artifacts/
+          if-no-files-found: warn
