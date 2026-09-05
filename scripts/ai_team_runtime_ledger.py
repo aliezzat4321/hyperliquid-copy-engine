@@ -486,7 +486,7 @@ class RuntimeLedgerFiles:
                 "SELECT key,value FROM meta WHERE key LIKE 'heartbeat:%' "
                 "OR key LIKE 'watchdog:%'"
             ).fetchall()}
-        now = dt.datetime.now(dt.timezone.utc)
+        now = dt.datetime.now(dt.UTC)
         queue_ages = []
         for row in active:
             if row.get("status") not in {"PENDING", "RETRY"}:
