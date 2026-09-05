@@ -55,7 +55,9 @@ GIT_PUSH_REMOTE = f"git@github.com:{REPO}.git"
 MACHINE_ASSIGNMENT = "AI_TEAM_ASSIGNMENT_V1"
 MACHINE_RESULT = "AI_TEAM_RESULT_V1"
 ACTIVE_STATUSES = {"PENDING", "RETRY", "WAITING_RATE_LIMIT", "WAITING_CI", "RUNNING"}
-TERMINAL_STATUSES = {"DONE", "FAILED", "BLOCKED", "STALE"}
+TERMINAL_STATUSES = {
+    "DONE", "FAILED", "BLOCKED", "STALE", "CODE_MERGED_BUT_NOT_COMPLETE",
+}
 TRELLO_BRIDGE = Path("/opt/hyperliquid-ai-team/scripts/trello_team_bridge.py")
 
 # Protected AI-control-plane files that Codex may propose, but never merge merely
@@ -1068,6 +1070,32 @@ def acceptance_flag(body: str, name: str) -> bool:
     return bool(re.search(rf"(?mi)^\s*{re.escape(name)}\s*=\s*YES\s*$", body))
 
 
+_POST_MERGE_REQUIREMENTS = {
+    "DESTRUCTIVE_APPLY", "PRODUCTION_DEPLOYMENT", "RUNTIME_PROOF",
+    "STORAGE_RECLAIM", "PROSPECTIVE_EVIDENCE", "SHADOW_EVIDENCE",
+    "PROFITABILITY_VERDICT", "DATA_BACKFILL", "DATA_MIGRATION",
+    "EXTERNAL_CONVERGENCE", "MEASURED_OPERATIONAL_OUTCOME",
+    "OWNER_AUTHORIZED_ACTION",
+}
+
+
+def completion_policy(body: str, task_class: str = "ROUTINE") -> tuple[bool, str]:
+    """Evaluate merge-time completion from explicit metadata; ambiguity fails closed."""
+    flags = _machine_values(body, "AI_TEAM_CLOSE_ON_MERGE")
+    requirements = _machine_values(body, "AI_TEAM_COMPLETION_REQUIRES")
+    if len(flags) != 1 or flags[0] != "YES":
+        return False, "AI_TEAM_CLOSE_ON_MERGE=YES is absent or ambiguous"
+    if task_class == "QUANT_PROFITABILITY":
+        return False, "QUANT_PROFITABILITY requires a post-merge verdict"
+    parsed: set[str] = set()
+    for value in requirements:
+        parsed.update(x.strip().upper() for x in value.split(",") if x.strip())
+    unsafe = sorted(parsed & _POST_MERGE_REQUIREMENTS)
+    if unsafe:
+        return False, "post-merge closure evidence required: " + ",".join(unsafe)
+    return True, "explicit pure-implementation close-on-merge predicate"
+
+
 def queue_metadata(body: str) -> tuple[int, tuple[int, ...]] | None:
     if not acceptance_flag(body, "AI_TEAM_AUTO_QUEUE"):
         return None
@@ -1530,7 +1558,25 @@ class Orchestrator:
         if self.ledger.meta_get(key):
             return False
         parent = self.gh.issue(parent_number)
+        parent_close, predicate = completion_policy(
+            str(parent.get("body") or ""),
+            parse_task_class(str(parent.get("body") or ""))[0],
+        )
+        if not parent_close:
+            self.runtime.event(
+                "CODE_MERGED_BUT_NOT_COMPLETE", issue=parent_number,
+                child_issue=child_number, status="CODE_MERGED_BUT_NOT_COMPLETE",
+                completion_state="code_merged_but_not_complete", result=predicate,
+                next_action="collect parent closure evidence",
+            )
+            return False
         parent_labels = {str(x.get("name")) for x in parent.get("labels", [])}
+        self.gh.comment(
+            parent_number,
+            "AI_TEAM_CLOSURE_EVIDENCE_V1\n"
+            f"PREDICATE={predicate}\nCHILD_ISSUE={child_number}\n"
+            "CHILD_CANONICAL_SUCCESS=YES",
+        )
         self.gh.add_labels(parent_number, [labels["done"]])
         for stale in (
             labels["blocked"], labels["pending"], labels["ready"], labels["queued"]
@@ -2205,7 +2251,7 @@ Finish by stating what changed, tests run, and any blocker. Keep changes scoped.
 Autonomous implementation for Issue #{issue["number"]}: {issue.get("title", "")}
 
 ## GitHub Issue
-Closes #{issue["number"]}
+Refs #{issue["number"]}
 
 ## Lane / subsystem
 AI-team infrastructure / assigned Issue scope
@@ -3078,17 +3124,33 @@ that non-code work needs a CODE_CHANGE. Unknown or contradictory evidence is TER
                 retry_after=retry_at,
             )
             return
-        self.ledger.update(task["id"], status="DONE", retry_at=None, last_error=None)
+        close_on_merge, predicate = completion_policy(
+            str(issue.get("body") or ""), str(task["task_class"])
+        )
+        merged_status = "DONE" if close_on_merge else "CODE_MERGED_BUT_NOT_COMPLETE"
+        self.ledger.update(task["id"], status=merged_status, retry_at=None, last_error=None)
         self.gh.remove_label(int(task["pr_number"]), self.cfg["labels"]["waiting_review"])
-        self.gh.add_labels(int(task["issue_number"]), [self.cfg["labels"]["done"]])
         self.gh.remove_label(int(task["issue_number"]), self.cfg["labels"]["pending"])
-        self.gh.close_issue(int(task["issue_number"]))
         self.gh.comment(
             int(task["issue_number"]),
             f"AI_TEAM_AUTONOMOUS_MERGE=YES\nPR={task['pr_number']}\nTARGET_SHA={target}\n"
-            f"CI=PASS\nASYNC_CLAUDE_AUDIT=NO\nMERGED_AT={utcnow()}",
+            f"EXACT_SHA_REVIEW=PASS\nCI=PASS\nASYNC_CLAUDE_AUDIT=NO\n"
+            f"CLOSURE_PREDICATE={predicate}\nCLOSE_ON_MERGE={'YES' if close_on_merge else 'NO'}\n"
+            f"COMPLETION_STATE={'done' if close_on_merge else 'code_merged_but_not_complete'}\n"
+            f"MERGED_AT={utcnow()}",
         )
-        self.emit_terminal_projection(task, target)
+        if close_on_merge:
+            self.gh.add_labels(int(task["issue_number"]), [self.cfg["labels"]["done"]])
+            self.gh.close_issue(int(task["issue_number"]))
+            self.emit_terminal_projection(task, target)
+        else:
+            self.runtime.event(
+                "CODE_MERGED_BUT_NOT_COMPLETE", assignment_id=task["id"],
+                issue=task["issue_number"], pr=task["pr_number"], target_sha=target,
+                status="CODE_MERGED_BUT_NOT_COMPLETE",
+                completion_state="code_merged_but_not_complete", result=predicate,
+                next_action="collect deterministic closure evidence",
+            )
 
     def retry_or_block(
         self,

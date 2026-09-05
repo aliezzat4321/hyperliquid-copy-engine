@@ -660,7 +660,7 @@ def test_successful_merge_durably_completes_before_terminal_projection(tmp_path)
         def changed_files(self, number):
             return []
         def issue(self, number):
-            return {"author_association": "OWNER", "body": ""}
+            return {"author_association": "OWNER", "body": "AI_TEAM_CLOSE_ON_MERGE=YES"}
         def merge(self, number, sha):
             actions.append("merge")
             return {"merged": True}
@@ -787,7 +787,7 @@ def test_parent_finalization_requires_canonical_child_success_and_is_idempotent(
         "labels": [{"name": labels["done"]}],
     }
     parent = {
-        "number": 154, "state": "open",
+        "number": 154, "state": "open", "body": "AI_TEAM_CLOSE_ON_MERGE=YES",
         "labels": [{"name": labels["blocked"]}, {"name": labels["queued"]}],
     }
 
@@ -805,6 +805,8 @@ def test_parent_finalization_requires_canonical_child_success_and_is_idempotent(
         def close_issue(self, number):
             self.closed.append(number)
             parent["state"] = "closed"
+        def comment(self, number, body):
+            assert "AI_TEAM_CLOSURE_EVIDENCE_V1" in body
 
     class Runtime:
         def __init__(self):
@@ -829,6 +831,65 @@ def test_parent_finalization_requires_canonical_child_success_and_is_idempotent(
     assert team.reconcile_parent_finalizers() is False
 
 
+def test_completion_policy_is_explicit_and_fail_closed():
+    assert orch.completion_policy("")[0] is False
+    assert orch.completion_policy("AI_TEAM_CLOSE_ON_MERGE=YES") == (
+        True, "explicit pure-implementation close-on-merge predicate",
+    )
+    assert orch.completion_policy(
+        "AI_TEAM_CLOSE_ON_MERGE=YES\nAI_TEAM_COMPLETION_REQUIRES=STORAGE_RECLAIM"
+    )[0] is False
+    assert orch.completion_policy(
+        "AI_TEAM_CLOSE_ON_MERGE=YES\nAI_TEAM_COMPLETION_REQUIRES=PRODUCTION_DEPLOYMENT"
+    )[0] is False
+    assert orch.completion_policy(
+        "AI_TEAM_CLOSE_ON_MERGE=YES", "QUANT_PROFITABILITY"
+    )[0] is False
+
+
+def test_merged_evidence_task_stays_open_and_projects_distinct_state(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    task_id = ledger.create_task(
+        issue_number=120, pr_number=189, target_sha="a" * 40,
+        task_type="REVIEW", agent="CLAUDE", model_class="SONNET",
+        task_class="ROUTINE", status="WAITING_CI",
+    )
+    actions = []
+
+    class GH:
+        def pr(self, number): return {"head": {"sha": "a" * 40}}
+        def check_state(self, sha): return "PASS", "green"
+        def changed_files(self, number): return []
+        def issue(self, number):
+            return {"author_association": "OWNER", "body":
+                    "AI_TEAM_COMPLETION_REQUIRES=STORAGE_RECLAIM,RUNTIME_PROOF"}
+        def merge(self, number, sha): return {"merged": True}
+        def remove_label(self, *args): actions.append("remove_label")
+        def add_labels(self, *args): actions.append("add_labels")
+        def close_issue(self, *args): actions.append("close_issue")
+        def comment(self, number, body): actions.append(("comment", body))
+
+    class Runtime:
+        def event(self, kind, **payload): actions.append((kind, payload))
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.gh = orch.DEFAULT_CONFIG, ledger, GH()
+    team.runtime, team.trusted = Runtime(), {"OWNER"}
+    team.handle_ci(ledger.get(task_id))
+    assert ledger.get(task_id)["status"] == "CODE_MERGED_BUT_NOT_COMPLETE"
+    assert "close_issue" not in actions
+    assert "add_labels" not in actions
+    assert actions[-1][0] == "CODE_MERGED_BUT_NOT_COMPLETE"
+
+
+def test_generated_pr_reference_never_uses_stale_closing_keyword():
+    source = MODULE_PATH.read_text()
+    create_pr = source[source.index("    def create_pr(\n", source.index("class Orchestrator")):
+                       source.index("    def enqueue_review(")]
+    assert 'Refs #{issue["number"]}' in create_pr
+    assert 'Closes #{issue["number"]}' not in create_pr
+
+
 def test_untrusted_or_noncanonical_child_cannot_finalize_parent(tmp_path):
     ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
     ledger.create_task(
@@ -850,6 +911,40 @@ def test_untrusted_or_noncanonical_child_cannot_finalize_parent(tmp_path):
     team.cfg, team.ledger, team.gh = orch.DEFAULT_CONFIG, ledger, GH()
     team.trusted = {"OWNER"}
     assert team.reconcile_parent_finalizers() is False
+
+
+def test_child_success_cannot_finalize_parent_with_unmet_predicate(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    ledger.create_task(
+        issue_number=161, task_type="BUILD", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", task_class="ROUTINE", status="DONE",
+    )
+    labels = orch.DEFAULT_CONFIG["labels"]
+    child = {
+        "number": 161, "body": "AI_TEAM_FINALIZES_PARENT=154",
+        "author_association": "OWNER", "state": "closed",
+        "labels": [{"name": labels["done"]}],
+    }
+    actions = []
+
+    class GH:
+        def finalizer_issues(self, done_label): return [child]
+        def issue(self, number):
+            return {"number": 154, "state": "open", "body":
+                    "AI_TEAM_COMPLETION_REQUIRES=RUNTIME_PROOF", "labels": []}
+        def close_issue(self, number): actions.append("closed")
+
+    class Runtime:
+        def event(self, kind, **payload): actions.append((kind, payload))
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.gh = orch.DEFAULT_CONFIG, ledger, GH()
+    team.runtime, team.trusted = Runtime(), {"OWNER"}
+    team.sync_runtime_checkpoint = lambda: None
+    team.kick_trello_reconciliation = lambda: None
+    assert team.reconcile_parent_finalizers() is False
+    assert "closed" not in actions
+    assert actions[-1][0] == "CODE_MERGED_BUT_NOT_COMPLETE"
 
 
 def test_queue_promotes_smallest_satisfied_priority_and_claims_once(tmp_path):
