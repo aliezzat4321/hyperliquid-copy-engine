@@ -473,6 +473,34 @@ class RuntimeLedgerFiles:
             last_ok = db.execute(
                 "SELECT ended_at FROM runs WHERE exit_code=0 ORDER BY id DESC LIMIT 1"
             ).fetchone()
+            try:
+                alerts = [dict(r) for r in db.execute(
+                    "SELECT * FROM watchdog_incidents WHERE status='OPEN' ORDER BY first_seen_at"
+                ).fetchall()]
+                recoveries = [dict(r) for r in db.execute(
+                    "SELECT * FROM watchdog_recovery_actions ORDER BY id DESC LIMIT 20"
+                ).fetchall()]
+            except sqlite3.OperationalError:  # rolling deploy from a pre-watchdog ledger
+                alerts, recoveries = [], []
+            meta = {str(r["key"]): str(r["value"]) for r in db.execute(
+                "SELECT key,value FROM meta WHERE key LIKE 'heartbeat:%' "
+                "OR key LIKE 'watchdog:%'"
+            ).fetchall()}
+        now = dt.datetime.now(dt.UTC)
+        queue_ages = []
+        for row in active:
+            if row.get("status") not in {"PENDING", "RETRY"}:
+                continue
+            try:
+                created = dt.datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00"))
+                age = max(0, int((now - created).total_seconds()))
+            except (TypeError, ValueError):
+                age = None
+            queue_ages.append({"assignment_id": row.get("id"), "issue": row.get("issue_number"),
+                               "status": row.get("status"), "age_seconds": age})
+        health = "STALLED" if any(a.get("kind") == "NO_PROGRESS" for a in alerts) else (
+            "DEGRADED" if alerts else "HEALTHY"
+        )
         payload = {
             "version": 1,
             "repository": self.repository,
@@ -482,6 +510,15 @@ class RuntimeLedgerFiles:
             "latest_run": _row_dict(last_run),
             "last_successful_run": last_ok["ended_at"] if last_ok else None,
             "last_material_events": self.last_events(5),
+            "last_scheduler_heartbeat": meta.get("heartbeat:scheduler"),
+            "last_productive_progress_at": meta.get("watchdog:last_productive_progress_at"),
+            "heartbeats": {k.split(":", 1)[1]: v for k, v in meta.items()
+                           if k.startswith("heartbeat:")},
+            "stale_assignments": [a for a in alerts if a.get("assignment_id")],
+            "recovery_actions": recoveries,
+            "active_alerts": alerts,
+            "queue_age": queue_ages,
+            "health": health,
             "safety": {"real_trading": "NO", "polymarket_scope": "DENIED"},
         }
         if payload["latest_run"]:
@@ -516,6 +553,13 @@ class RuntimeLedgerFiles:
             "latest_review": current.get("latest_review"),
             "last_successful_run": current.get("last_successful_run"),
             "pending_owner_action": pending_owner_action,
+            "last_scheduler_heartbeat": current.get("last_scheduler_heartbeat"),
+            "last_productive_progress_at": current.get("last_productive_progress_at"),
+            "stale_assignments": current.get("stale_assignments", []),
+            "recovery_actions": current.get("recovery_actions", [])[-8:],
+            "active_alerts": current.get("active_alerts", []),
+            "queue_age": current.get("queue_age", []),
+            "health": current.get("health", "DEGRADED"),
             "last_5_material_events": current.get("last_material_events", [])[-5:],
         }
         # Keep the GitHub checkpoint compact and stable. Drop low-value fields before
