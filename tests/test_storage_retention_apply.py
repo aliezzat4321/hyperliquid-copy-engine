@@ -291,3 +291,20 @@ def test_apply_refuses_unreachable_target_before_deletion(tmp_path, monkeypatch)
         )
     assert deleted == []
     assert candidate_path.exists()
+
+
+def test_apply_audit_attests_compress_candidates_are_never_deleted(tmp_path, monkeypatch):
+    market, candidate_path = _layout(tmp_path)
+    candidate = MODULE.Candidate(
+        path=candidate_path, day="2026-08-27", coin="DOGE", canonical_coin="DOGE",
+        bytes_planned=1234, device=candidate_path.lstat().st_dev,
+        inode=candidate_path.lstat().st_ino,
+    )
+    monkeypatch.setattr(
+        MODULE, "disk_usage",
+        lambda _: SimpleNamespace(capacity_df=1000, used=700, available=300, used_pct=70),
+    )
+    result = MODULE.apply_candidates(
+        [candidate], mount=tmp_path, market_root=market, target_used_pct=75, apply=False,
+    )
+    assert result["compress_candidates_deleted"] == 0

@@ -321,6 +321,9 @@ def apply_candidates(
         "skipped_missing": skipped_missing,
         "target_reached": after_pct <= target_used_pct,
         "apply": apply,
+        # This applier accepts DELETE_CANDIDATE rows only. Useful older evidence
+        # classified for future compression is never an input to deletion.
+        "compress_candidates_deleted": 0,
         "processed": processed,
     }
 

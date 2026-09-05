@@ -31,6 +31,7 @@ RAW_PAYLOAD_OVERHEAD_FACTOR = 1.35
 LEADERBOARD_RELATION_OVERHEAD_FACTOR = 1.50
 LEADERBOARD_WAL_FACTOR = 1.50
 RAW_API_WAL_FACTOR = 1.50
+MIN_LEADERBOARD_SAMPLE_ROWS = 1_000
 UTC = timezone(timedelta(0))
 EMPTY_PAYLOAD_SHA256 = hashlib.sha256(
     json.dumps({}, sort_keys=True, separators=(",", ":")).encode()
@@ -105,6 +106,28 @@ def _float(sql: str) -> float:
 
 def _available_bytes() -> int:
     return disk_usage(DATA_MOUNT).available
+
+
+def _wal_on_data_mount() -> tuple[Path, bool]:
+    data_directory = Path(_scalar("SHOW data_directory")).resolve()
+    pg_wal_path = (data_directory / "pg_wal").resolve()
+    return pg_wal_path, pg_wal_path == DATA_MOUNT or DATA_MOUNT in pg_wal_path.parents
+
+
+def _leaderboard_geometry_sample() -> tuple[int, float, float]:
+    value = _scalar(
+        "SELECT count(*)::text || '|' || "
+        "COALESCE(avg(pg_column_size(raw_json)),0)::text || '|' || "
+        "COALESCE(avg(pg_column_size(ROW(snapshot_at,address,ranking_period,rank,pnl,roi,"
+        "volume,account_value))),0)::text "
+        "FROM leaderboard_snapshots TABLESAMPLE SYSTEM (0.25)"
+    )
+    count, raw_bytes, non_raw_bytes = value.split("|", 2)
+    if int(count) < MIN_LEADERBOARD_SAMPLE_ROWS:
+        raise RuntimeError(
+            f"leaderboard geometry sample too small: {count} < {MIN_LEADERBOARD_SAMPLE_ROWS}"
+        )
+    return int(count), float(raw_bytes), float(non_raw_bytes)
 
 
 def _relation_bytes(name: str) -> int:
@@ -363,18 +386,24 @@ def build_plan(path: Path) -> dict[str, Any]:
     source_relation_bytes = _relation_bytes("leaderboard_snapshots")
     raw_api_relation_bytes = _relation_bytes("raw_api_responses")
     existing_payload_relation_bytes = _optional_relation_bytes("raw_api_payloads")
-    sample_avg_raw_json_bytes = _float(
-        "SELECT COALESCE(avg(pg_column_size(raw_json)),0) "
-        "FROM leaderboard_snapshots TABLESAMPLE SYSTEM (0.25)"
+    sample_rows, sample_avg_raw_json_bytes, sample_avg_non_raw_row_bytes = (
+        _leaderboard_geometry_sample()
     )
-    raw_json_estimate = min(
-        source_relation_bytes,
-        int(math.ceil(source_rows * sample_avg_raw_json_bytes)),
-    )
-    non_raw_source_bytes = max(1, source_relation_bytes - raw_json_estimate)
+    raw_json_estimate = int(math.ceil(source_rows * sample_avg_raw_json_bytes))
+    if raw_json_estimate >= int(source_relation_bytes * 0.99):
+        raise RuntimeError(
+            "leaderboard raw_json estimate consumes at least 99% of relation geometry"
+        )
+    non_raw_source_bytes = source_relation_bytes - raw_json_estimate
     keep_ratio = keep_rows / source_rows
+    measured_kept_non_raw_bytes = int(math.ceil(keep_rows * sample_avg_non_raw_row_bytes))
+    max_post_cutoff_non_raw_bytes = int(
+        math.ceil(MAX_POST_CUTOFF_ROWS * sample_avg_non_raw_row_bytes)
+    )
     compact_relation_estimate = int(
-        math.ceil(non_raw_source_bytes * keep_ratio * LEADERBOARD_RELATION_OVERHEAD_FACTOR)
+        math.ceil((max(non_raw_source_bytes * keep_ratio, measured_kept_non_raw_bytes)
+                   + max_post_cutoff_non_raw_bytes)
+                  * LEADERBOARD_RELATION_OVERHEAD_FACTOR)
     )
     leaderboard_wal_reserve = int(
         math.ceil(compact_relation_estimate * LEADERBOARD_WAL_FACTOR)
@@ -388,10 +417,15 @@ def build_plan(path: Path) -> dict[str, Any]:
         int(math.ceil(raw_api_unique_body_bytes * RAW_PAYLOAD_OVERHEAD_FACTOR)),
     )
     raw_observation_after_estimate = max(64 * 1024**2, raw_api_rows * 2_048)
+    pg_wal_path, wal_on_data_mount = _wal_on_data_mount()
+    raw_api_wal_reserve = int(math.ceil(
+        (raw_api_relation_bytes if wal_on_data_mount else raw_observation_after_estimate)
+        * RAW_API_WAL_FACTOR
+    ))
     raw_api_phase_required = max(
         MIN_AVAILABLE_BYTES,
         max(0, payload_relation_estimate - existing_payload_relation_bytes)
-        + int(math.ceil(raw_observation_after_estimate * RAW_API_WAL_FACTOR))
+        + raw_api_wal_reserve
         + FIXED_PEAK_MARGIN_BYTES,
     )
     projected_raw_api_net_reclaim = max(
@@ -414,7 +448,7 @@ def build_plan(path: Path) -> dict[str, Any]:
         )
 
     plan: dict[str, Any] = {
-        "schema_version": 4,
+        "schema_version": 5,
         "mode": "REVIEW_ONLY_NO_MUTATION",
         "generated_at": datetime.now(UTC).isoformat(),
         "database": {"port": int(PG_PORT), "name": PG_DB},
@@ -438,6 +472,11 @@ def build_plan(path: Path) -> dict[str, Any]:
             "keep_rows_through_cutoff": keep_rows,
             "source_relation_bytes": source_relation_bytes,
             "sample_avg_raw_json_bytes": sample_avg_raw_json_bytes,
+            "geometry_sample_rows": sample_rows,
+            "sample_avg_non_raw_row_bytes": sample_avg_non_raw_row_bytes,
+            "measured_kept_non_raw_bytes_floor": measured_kept_non_raw_bytes,
+            "max_post_cutoff_rows": MAX_POST_CUTOFF_ROWS,
+            "max_post_cutoff_non_raw_bytes": max_post_cutoff_non_raw_bytes,
             "estimated_compact_relation_bytes": compact_relation_estimate,
             "estimated_wal_reserve_bytes": leaderboard_wal_reserve,
             "required_peak_available_bytes": leaderboard_peak_required,
@@ -462,6 +501,9 @@ def build_plan(path: Path) -> dict[str, Any]:
             "blank_empty_payload_observations_without_payload": empty_payload_orphans,
             "blank_nonempty_payload_observations_without_payload": nonempty_payload_orphans,
             "wal_factor": RAW_API_WAL_FACTOR,
+            "estimated_wal_reserve_bytes": raw_api_wal_reserve,
+            "pg_wal_path": str(pg_wal_path),
+            "wal_on_data_mount": wal_on_data_mount,
         },
         "fills": {
             "rows_at_plan": _int("SELECT count(*) FROM fills"),
@@ -488,7 +530,7 @@ def _validate_plan(path: Path, expected_sha256: str) -> dict[str, Any]:
     if actual != expected_sha256:
         raise RuntimeError(f"manifest hash mismatch: {actual}")
     plan = json.loads(path.read_text())
-    if int(plan.get("schema_version", 0)) != 4:
+    if int(plan.get("schema_version", 0)) != 5:
         raise RuntimeError("unexpected plan schema")
     if plan.get("mode") != "REVIEW_ONLY_NO_MUTATION":
         raise RuntimeError("unexpected plan mode")
@@ -534,6 +576,10 @@ def _validate_plan(path: Path, expected_sha256: str) -> dict[str, Any]:
         raise RuntimeError("reviewed plan contains unrecoverable blank payload observations")
     if float(plan["raw_api"]["wal_factor"]) != RAW_API_WAL_FACTOR:
         raise RuntimeError("reviewed raw API WAL factor mismatch")
+    if int(plan["leaderboard"].get("geometry_sample_rows", 0)) < MIN_LEADERBOARD_SAMPLE_ROWS:
+        raise RuntimeError("reviewed leaderboard geometry sample is insufficient")
+    if int(plan["leaderboard"].get("max_post_cutoff_rows", -1)) != MAX_POST_CUTOFF_ROWS:
+        raise RuntimeError("reviewed post-cutoff growth bound changed")
     if plan["leaderboard"].get("structure") != {
         "columns": EXPECTED_LEADERBOARD_COLUMNS,
         "indexes": EXPECTED_LEADERBOARD_INDEXES,
@@ -627,6 +673,10 @@ $verify$;
 UPDATE raw_api_responses
 SET response_json='{{}}'::jsonb
 WHERE response_json <> '{{}}'::jsonb;
+CREATE OR REPLACE VIEW raw_api_responses_full AS
+SELECT r.id,r.source,r.endpoint,r.request_json,p.response_json,r.fetched_at,r.content_sha256
+FROM raw_api_responses r
+JOIN raw_api_payloads p USING(content_sha256);
 COMMIT;
 """
     )
@@ -794,9 +844,11 @@ def apply_plan(path: Path, expected_sha256: str) -> None:
             "WAL retention preflight failed: "
             f"archive_mode={archive_mode} replication_slots={replication_slots}"
         )
-    data_directory = Path(_scalar("SHOW data_directory")).resolve()
-    pg_wal_path = (data_directory / "pg_wal").resolve()
-    wal_on_data_mount = pg_wal_path == DATA_MOUNT or DATA_MOUNT in pg_wal_path.parents
+    pg_wal_path, wal_on_data_mount = _wal_on_data_mount()
+    if wal_on_data_mount is not plan["raw_api"].get("wal_on_data_mount"):
+        raise RuntimeError("pg_wal mount placement changed after planning")
+    if str(pg_wal_path) != plan["raw_api"].get("pg_wal_path"):
+        raise RuntimeError("pg_wal path changed after planning")
     fills_before = _int("SELECT count(*) FROM fills")
     leaderboard_bytes_before = _relation_bytes("leaderboard_snapshots")
     raw_api_bytes_before = _relation_bytes("raw_api_responses")
@@ -833,6 +885,7 @@ def apply_plan(path: Path, expected_sha256: str) -> None:
     }
     _write_audit(audit)
     try:
+        _psql("CHECKPOINT")
         audit["phase"] = "RAW_API_NORMALIZATION_STARTED"
         _write_audit(audit)
         _normalize_raw_api_payloads(plan)
@@ -840,6 +893,7 @@ def apply_plan(path: Path, expected_sha256: str) -> None:
         audit["after_raw_api_available_bytes"] = _available_bytes()
         audit["phase"] = "RAW_API_NORMALIZATION_COMPLETE"
         _write_audit(audit)
+        _psql("CHECKPOINT")
 
         other_sessions = _active_other_client_sessions()
         if other_sessions:

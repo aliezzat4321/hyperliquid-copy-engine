@@ -17,6 +17,10 @@ CREATE TABLE IF NOT EXISTS raw_api_responses (
 -- canonical response body lives once in raw_api_payloads. Do not add a large
 -- observation-table hash index during storage recovery because the write path uses
 -- the raw_api_payloads primary key instead.
+CREATE OR REPLACE VIEW raw_api_responses_full AS
+SELECT r.id,r.source,r.endpoint,r.request_json,p.response_json,r.fetched_at,r.content_sha256
+FROM raw_api_responses r
+JOIN raw_api_payloads p USING(content_sha256);
 
 CREATE TABLE IF NOT EXISTS wallets (
     address TEXT PRIMARY KEY,

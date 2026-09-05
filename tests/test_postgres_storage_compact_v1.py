@@ -218,6 +218,16 @@ def test_raw_api_normalization_seeds_empty_payload_and_vacuums_before_full(
     transaction = statements[1]
     assert MODULE.EMPTY_PAYLOAD_SHA256 in transaction
     assert "SELECT content_sha256,'{}'::jsonb,min(fetched_at)" in transaction
+    assert "CREATE OR REPLACE VIEW raw_api_responses_full" in transaction
     assert statements.index("VACUUM raw_api_responses") < statements.index(
         "VACUUM (FULL, ANALYZE) raw_api_responses"
     )
+
+
+def test_leaderboard_geometry_sample_requires_meaningful_coverage(monkeypatch) -> None:
+    monkeypatch.setattr(MODULE, "_scalar", lambda _: "999|100|80")
+    with pytest.raises(RuntimeError, match="geometry sample too small"):
+        MODULE._leaderboard_geometry_sample()
+
+    monkeypatch.setattr(MODULE, "_scalar", lambda _: "1000|100.5|80.25")
+    assert MODULE._leaderboard_geometry_sample() == (1000, 100.5, 80.25)

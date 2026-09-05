@@ -30,7 +30,9 @@ independent Claude Opus review is required before either apply step.
 5. Restart capture/research/profitability loops through manager controls and collect
    successive controller observations across at least the configured 24-hour window.
 6. Run `scripts/storage_exit_gate_report.py` over the immutable apply audit, review
-   provenance, current policy and controller history. A zero exit and `exit_ready: true`
+   provenance, current policy, lifecycle audit, an independently reviewed retention-apply
+   audit or explicit `retention_apply: NOT_REQUIRED` attestation, and controller history.
+   A zero exit and `exit_ready: true`
    are required; the evaluator is read-only and does not replace human verification of
    the evidence inputs.
 

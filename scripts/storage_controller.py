@@ -164,7 +164,10 @@ def decide(
             for x in rows
             if x["mount"] == name and x["bytes_per_hour"] is not None
         ]
+        # A measured non-positive aggregate growth rate is stable, not missing
+        # evidence. JSON has no portable infinity, so record the semantic state.
         hours_to_full = usage.available / sum(rates) if sum(rates) > 0 else None
+        forecast_unbounded = bool(rates) and sum(rates) <= 0
         breach = unaccounted > int(cfg["unaccounted_budget_bytes"])
         active = (usage.used_pct >= float(cfg["stop_used_pct"]) or breach or
                   any(
@@ -178,7 +181,8 @@ def decide(
         mounts.append({"name": name, "path": cfg["path"], "capacity_df_bytes": usage.capacity_df,
                        "used_bytes": usage.used, "available_bytes": usage.available,
                        "used_pct": round(usage.used_pct, 3), "unaccounted_bytes": unaccounted,
-                       "unaccounted_budget_breached": breach, "hours_to_full": hours_to_full})
+                       "unaccounted_budget_breached": breach, "hours_to_full": hours_to_full,
+                       "forecast_unbounded": forecast_unbounded})
     actions = [{"writer": x["writer"], "action": x["pressure_control"] if pressure else "ALLOW"}
                for x in rows if x["pressure_control"] != "NEVER_STOP"]
     warn = any(

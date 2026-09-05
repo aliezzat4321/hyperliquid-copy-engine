@@ -45,10 +45,18 @@ def test_plan_apply_is_exact_sha_and_lossless(tmp_path, monkeypatch):
     digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
     result = MODULE.apply(manifest_path, digest, policy(), max_age_minutes=30, min_free=0)
     assert result["rows_lost"] == 0
+    assert result["reader_column_registry_satisfied"] is True
+    assert result["groups_verified"] == 1
+    assert result["source_rows_verified"] == result["output_rows_verified"] == 1
     assert not source.exists()
     output = next(directory.glob("part-lifecycle-*.parquet"))
     assert pl.read_parquet(output).height == 1
     assert "raw_json" not in pl.read_parquet_schema(output)
+
+    repeated = MODULE.apply(manifest_path, digest, policy(), max_age_minutes=30, min_free=0)
+    assert repeated["groups_already_applied"] == 1
+    assert repeated["reader_column_registry_satisfied"] is True
+    assert repeated["rows_lost"] == 0
 
 
 def test_recent_partition_and_sha_mismatch_are_refused(tmp_path):
