@@ -1031,12 +1031,12 @@ def normalize_worktree_ownership(workdir: Path, user: str) -> tuple[int, int]:
     """Return a generated worktree fully to its dedicated non-root agent identity."""
     uid = int(run(["id", "-u", user], check=True).stdout.strip())
     gid = int(run(["id", "-g", user], check=True).stdout.strip())
-    os.chown(workdir, uid, gid)
+    os.chown(workdir, uid, gid, follow_symlinks=False)
     for root, dirs, files in os.walk(workdir):
         for name in dirs:
-            os.chown(Path(root) / name, uid, gid)
+            os.chown(Path(root) / name, uid, gid, follow_symlinks=False)
         for name in files:
-            os.chown(Path(root) / name, uid, gid)
+            os.chown(Path(root) / name, uid, gid, follow_symlinks=False)
     return uid, gid
 
 
@@ -1476,7 +1476,10 @@ class Orchestrator:
             if task["pr_number"]:
                 try:
                     pr = self.gh.pr(int(task["pr_number"]))
-                    if str(pr.get("state") or "open").lower() != "open":
+                    if (
+                        str(pr.get("state") or "open").lower() != "open"
+                        and not pr.get("merged_at")
+                    ):
                         kind = "OBSOLETE_PR"
                         blocker = "active assignment references closed/superseded PR"
                         action = "mark STALE and release claim"

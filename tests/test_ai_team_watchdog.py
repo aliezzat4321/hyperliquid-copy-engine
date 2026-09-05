@@ -24,11 +24,17 @@ class Runtime:
 
 
 class GH:
-    def __init__(self, pr_state="open", checks="PENDING"):
-        self.pr_state, self.checks, self.comments = pr_state, checks, []
+    def __init__(self, pr_state="open", checks="PENDING", merged_at=None):
+        self.pr_state, self.checks, self.merged_at, self.comments = (
+            pr_state, checks, merged_at, []
+        )
 
     def pr(self, _number):
-        return {"state": self.pr_state, "head": {"sha": "a" * 40}}
+        return {
+            "state": self.pr_state,
+            "merged_at": self.merged_at,
+            "head": {"sha": "a" * 40},
+        }
 
     def check_state(self, _sha):
         return self.checks, "test"
@@ -58,6 +64,21 @@ def test_closed_waiting_ci_is_staled_and_claim_released(tmp_path):
     value.watchdog()
     assert value.ledger.get(task_id)["status"] == "STALE"
     assert value.ledger.has_queue_claim_conflict() is False
+
+
+def test_merged_waiting_ci_is_not_staled_or_claim_released(tmp_path):
+    value = team(
+        tmp_path,
+        GH(pr_state="closed", merged_at="2026-01-01T00:00:00Z"),
+    )
+    task_id = value.ledger.create_task(
+        issue_number=205, pr_number=209, target_sha="a" * 40,
+        task_type="REVIEW", agent="CLAUDE", model_class="SONNET",
+        task_class="ROUTINE", status="WAITING_CI",
+    )
+    value.watchdog()
+    assert value.ledger.get(task_id)["status"] == "WAITING_CI"
+    assert value.ledger.has_queue_claim_conflict() is True
 
 
 def test_identical_material_loop_opens_deduplicated_stalled_alert(tmp_path):
