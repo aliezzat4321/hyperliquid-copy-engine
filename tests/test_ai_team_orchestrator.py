@@ -601,6 +601,35 @@ def test_commit_and_push_restores_agent_ownership_before_staging(
     assert normalized == [(tmp_path, orch.CODEX_USER)]
 
 
+def test_normalize_worktree_ownership_never_follows_symlinks(
+    tmp_path: Path, monkeypatch
+) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    external = tmp_path / "external-python"
+    external.write_text("system target")
+    link = worktree / "python3"
+    link.symlink_to(external)
+    calls = []
+
+    def fake_run(cmd, **_kwargs):
+        value = "111\n" if cmd[1] == "-u" else "222\n"
+        return subprocess.CompletedProcess(cmd, 0, value, "")
+
+    def fake_chown(path, uid, gid, *, follow_symlinks=True):
+        calls.append((Path(path), uid, gid, follow_symlinks))
+
+    monkeypatch.setattr(orch, "run", fake_run)
+    monkeypatch.setattr(orch.os, "chown", fake_chown)
+
+    assert orch.normalize_worktree_ownership(worktree, "agent") == (111, 222)
+    assert calls == [
+        (worktree, 111, 222, False),
+        (link, 111, 222, False),
+    ]
+    assert external.read_text() == "system target"
+
+
 def test_codex_resume_places_exec_options_before_resume_subcommand(
     tmp_path: Path, monkeypatch
 ) -> None:

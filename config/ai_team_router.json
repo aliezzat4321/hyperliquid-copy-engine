@@ -48,6 +48,15 @@
   ],
   "max_attempts": 3,
   "poll_seconds": 60,
+  "watchdog": {
+    "runnable_stale_seconds": 300,
+    "running_grace_seconds": 120,
+    "ci_consumption_stale_seconds": 300,
+    "rate_limit_resume_stale_seconds": 300,
+    "status_mirror_stale_seconds": 300,
+    "no_progress_cycles": 5,
+    "max_recovery_attempts": 2
+  },
   "default_rate_limit_retry_seconds": 3600,
   "claude_readiness_probe_seconds": 300,
   "claude_readiness_probe_timeout_seconds": 20,
