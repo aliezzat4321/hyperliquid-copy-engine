@@ -132,6 +132,9 @@ def test_projection_distinguishes_assignment_from_runtime(tmp_path: Path) -> Non
     assert current["assignment"]["codex"]["assignment_id"] == "task123"
     assert current["runtime"]["codex"]["status"] == "RUNNING"
     assert current["assignment"]["claude"] is None
+    assert current["last_scheduler_heartbeat"] is None
+    assert current["active_alerts"] == []
+    assert current["health"] == "DEGRADED"
     assert current["safety"] == {"real_trading": "NO", "polymarket_scope": "DENIED"}
     assert (tmp_path / "state" / "current.json").is_file()
     assert (tmp_path / "state" / "checkpoints" / "codex.json").is_file()

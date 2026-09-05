@@ -480,12 +480,18 @@ class RuntimeLedgerFiles:
                 recoveries = [dict(r) for r in db.execute(
                     "SELECT * FROM watchdog_recovery_actions ORDER BY id DESC LIMIT 20"
                 ).fetchall()]
+                watchdog_available = True
             except sqlite3.OperationalError:  # rolling deploy from a pre-watchdog ledger
                 alerts, recoveries = [], []
-            meta = {str(r["key"]): str(r["value"]) for r in db.execute(
-                "SELECT key,value FROM meta WHERE key LIKE 'heartbeat:%' "
-                "OR key LIKE 'watchdog:%'"
-            ).fetchall()}
+                watchdog_available = False
+            try:
+                meta = {str(r["key"]): str(r["value"]) for r in db.execute(
+                    "SELECT key,value FROM meta WHERE key LIKE 'heartbeat:%' "
+                    "OR key LIKE 'watchdog:%'"
+                ).fetchall()}
+            except sqlite3.OperationalError:  # rolling deploy from a pre-orchestrator ledger
+                meta = {}
+                watchdog_available = False
         now = dt.datetime.now(dt.timezone.utc)
         queue_ages = []
         for row in active:
@@ -499,7 +505,7 @@ class RuntimeLedgerFiles:
             queue_ages.append({"assignment_id": row.get("id"), "issue": row.get("issue_number"),
                                "status": row.get("status"), "age_seconds": age})
         health = "STALLED" if any(a.get("kind") == "NO_PROGRESS" for a in alerts) else (
-            "DEGRADED" if alerts else "HEALTHY"
+            "DEGRADED" if alerts or not watchdog_available else "HEALTHY"
         )
         payload = {
             "version": 1,
