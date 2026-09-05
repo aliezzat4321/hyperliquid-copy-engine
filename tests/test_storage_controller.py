@@ -77,6 +77,19 @@ def test_unaccounted_space_breach(tmp_path, monkeypatch):
     assert result["pressure_active"]
 
 
+def test_zero_measured_growth_is_unbounded_forecast(tmp_path, monkeypatch):
+    prepare(tmp_path, monkeypatch)
+    now = datetime(2026, 9, 3, 12, tzinfo=UTC)
+    history = [{"observed_at": (now - timedelta(hours=n)).isoformat(),
+                "pressure_active": False,
+                "datasets": [{"name": "tape", "bytes": 100},
+                             {"name": "fills", "bytes": 100}]}
+               for n in (2, 1)]
+    result = MODULE.decide(policy(tmp_path), history, now=now)
+    assert result["mounts"][0]["hours_to_full"] is None
+    assert result["mounts"][0]["forecast_unbounded"] is True
+
+
 def test_main_writes_fail_closed_decision(tmp_path, monkeypatch):
     output = tmp_path / "decision.json"
     monkeypatch.setattr(

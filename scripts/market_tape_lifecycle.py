@@ -137,8 +137,23 @@ def _compact_group(
     if not any(path.exists() for path in sources) and sidecar.exists():
         recorded = json.loads(sidecar.read_text()).get("groups", [])
         wanted = {x["sha256"] for x in group["sources"]}
-        if any({x["sha256"] for x in item.get("sources", [])} == wanted for item in recorded):
-            return {"partition": group["partition"], "already_applied": True}
+        match = next((item for item in recorded
+                      if {x["sha256"] for x in item.get("sources", [])} == wanted), None)
+        if match is not None:
+            final = directory / str(match.get("output", ""))
+            if (match.get("verification") != "PASS" or not final.is_file()
+                    or _sha(final) != match.get("output_sha256")):
+                raise ValueError(f"already-applied group verification failed: {directory}")
+            checked = pl.read_parquet(final)
+            required = set(policy["reader_required_columns"].get(str(group["channel"]), []))
+            source_rows = sum(int(x["rows"]) for x in group["sources"])
+            if checked.height != source_rows or not required <= set(checked.columns):
+                raise ValueError(
+                    f"already-applied group schema/row verification failed: {directory}"
+                )
+            return {"partition": group["partition"], "already_applied": True,
+                    "source_rows": source_rows, "output_rows": checked.height,
+                    "reader_column_registry_satisfied": True}
     for path, expected in zip(sources, group["sources"], strict=True):
         if not path.is_file() or _sha(path) != expected["sha256"]:
             raise ValueError(f"source identity changed: {path}")
@@ -194,6 +209,8 @@ def _compact_group(
     finally:
         os.close(directory_fd)
     return {"partition": group["partition"], "rows": checked.height,
+            "source_rows": sum(int(x["rows"]) for x in group["sources"]),
+            "output_rows": checked.height, "reader_column_registry_satisfied": True,
             "bytes_after": final.stat().st_size}
 
 
@@ -247,8 +264,16 @@ def apply(
         raise ValueError("manifest mode or age invalid")
     root = Path(manifest["root"])
     results = [_compact_group(root, group, policy, min_free) for group in manifest["groups"]]
+    source_rows = sum(int(item["source_rows"]) for item in results)
+    output_rows = sum(int(item["output_rows"]) for item in results)
     return {"success": True, "manifest_sha256": expected_sha, "groups": results,
-            "rows_lost": 0, "real_trading_changed": False, "polymarket_mutation": False}
+            "groups_verified": len(results),
+            "groups_already_applied": sum(bool(item.get("already_applied")) for item in results),
+            "source_rows_verified": source_rows, "output_rows_verified": output_rows,
+            "rows_lost": source_rows - output_rows,
+            "reader_column_registry_satisfied": bool(results) and all(
+                item.get("reader_column_registry_satisfied") is True for item in results),
+            "real_trading_changed": False, "polymarket_mutation": False}
 
 
 def main() -> None:

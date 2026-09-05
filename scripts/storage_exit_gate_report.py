@@ -25,6 +25,7 @@ def evaluate(
     *, apply: dict[str, Any], controller_history: dict[str, Any],
     policy: dict[str, Any], review: dict[str, Any],
     lifecycle: dict[str, Any] | None = None,
+    retention: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     observations = controller_history.get("observations", [])
     completed = datetime.fromisoformat(str(apply.get("completed_at", "")).replace("Z", "+00:00"))
@@ -61,7 +62,14 @@ def evaluate(
         "lossless_lifecycle": lifecycle is not None and (
             int(lifecycle.get("rows_lost", -1)) == 0
             and lifecycle.get("reader_column_registry_satisfied") is True
-            and int(lifecycle.get("compress_candidates_deleted", -1)) == 0
+            and int(lifecycle.get("groups_verified", 0)) > 0
+        ),
+        "compress_candidates_preserved": retention is not None and (
+            int(retention.get("compress_candidates_deleted", -1)) == 0
+            and (
+                retention.get("apply") is True
+                or retention.get("retention_apply") == "NOT_REQUIRED"
+            )
         ),
         "at_least_24_post_reclaim_observations": len(post) >= 24 and (
             datetime.fromisoformat(str(post[-1]["observed_at"]).replace("Z", "+00:00"))
@@ -73,8 +81,10 @@ def evaluate(
         "post_reclaim_bounds": bool(post) and all(
             float(mount.get("used_pct", 100)) < 75
             and float(mount.get("unaccounted_bytes", 2**63)) <= 4 * 1024**3
-            and mount.get("hours_to_full") is not None
-            and float(mount["hours_to_full"]) >= 48
+            and (mount.get("forecast_unbounded") is True or (
+                mount.get("hours_to_full") is not None
+                and float(mount["hours_to_full"]) >= 48
+            ))
             for mount in mounts
         ) and all(
             int(dataset.get("bytes_over_budget", 1)) == 0
@@ -97,9 +107,24 @@ def evaluate(
             lifecycle is not None
             and review.get("lifecycle_manifest_sha256")
             == lifecycle.get("manifest_sha256")
-        ),
+        ) and (retention is not None and (
+            retention.get("retention_apply") == "NOT_REQUIRED"
+            or (
+                review.get("retention_manifest_sha256")
+                == retention.get("manifest_sha256")
+                and bool(review.get("retention_manifest_sha256"))
+            )
+        )),
         "safety_boundaries": apply.get("real_trading_change") is False
-        and apply.get("polymarket_mutation") is False,
+        and apply.get("polymarket_mutation") is False
+        and lifecycle is not None
+        and lifecycle.get("real_trading_changed") is False
+        and lifecycle.get("polymarket_mutation") is False
+        and retention is not None
+        and (retention.get("retention_apply") == "NOT_REQUIRED" or (
+            retention.get("real_trading_changed") is False
+            and retention.get("polymarket_mutation") is False
+        )),
     }
     return {
         "schema_version": 1,
@@ -127,12 +152,14 @@ def main() -> None:
     parser.add_argument("--policy", type=Path, default=Path("config/storage_policy.json"))
     parser.add_argument("--review-provenance", type=Path, required=True)
     parser.add_argument("--lifecycle-audit", type=Path, required=True)
+    parser.add_argument("--retention-audit", type=Path, required=True)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     result = evaluate(
         apply=_load(args.apply_audit), controller_history=_load(args.controller_history),
         policy=_load(args.policy), review=_load(args.review_provenance),
         lifecycle=_load(args.lifecycle_audit) if args.lifecycle_audit else None,
+        retention=_load(args.retention_audit) if args.retention_audit else None,
     )
     result["input_sha256"] = {
         "apply_audit": _sha(args.apply_audit),
@@ -140,6 +167,7 @@ def main() -> None:
         "policy": _sha(args.policy),
         "review_provenance": _sha(args.review_provenance),
         **({"lifecycle_audit": _sha(args.lifecycle_audit)} if args.lifecycle_audit else {}),
+        **({"retention_audit": _sha(args.retention_audit)} if args.retention_audit else {}),
     }
     rendered = json.dumps(result, indent=2, sort_keys=True) + "\n"
     if args.output:
