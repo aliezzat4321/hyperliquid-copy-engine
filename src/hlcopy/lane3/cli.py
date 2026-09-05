@@ -99,14 +99,15 @@ def _slice(
         e.cost_completeness == CostCompleteness.MEASURED for e in economics
     )
     nets = [float(e.net_pnl_usd) for e in economics if e.net_pnl_usd is not None]
-    returns = [float(e.net_return_bps) for e in economics if e.net_return_bps is not None]
     observations = [
         (
             datetime.fromtimestamp(p.exit_leg.timestamp_ms / 1000, UTC).date().isoformat(),
-            value,
+            float(e.net_return_bps),
         )
-        for p, value in zip(closed, returns, strict=False)
+        for p, e in zip(closed, economics, strict=True)
+        if e.net_return_bps is not None
     ]
+    returns = [value for _, value in observations]
     boot = day_block_bootstrap(observations, seed=int(cfg["bootstrap_seed"]),
                                confidence_level=float(policy["thresholds"]["confidence_level"]))
     gross = sum((e.gross_mid_to_mid_pnl_usd for e in economics), D("0"))
