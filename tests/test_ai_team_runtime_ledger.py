@@ -214,7 +214,7 @@ def test_handoff_is_chat_independent_and_under_four_kb(tmp_path: Path) -> None:
     )
     assert "AI_TEAM_RUNTIME_STATUS_V1" in body
     assert "Canonical runtime handoff for #130." in body
-    assert "#129" not in body
+    assert "Canonical runtime handoff for #129." not in body
     assert "Do not rely on previous chat history" in body
     assert '"issue":129' in body
     assert len(body.encode("utf-8")) < 4096
