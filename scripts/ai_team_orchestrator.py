@@ -120,6 +120,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
     ],
     "max_attempts": 3,
     "poll_seconds": 60,
+    "watchdog": {
+        "runnable_stale_seconds": 300,
+        "running_grace_seconds": 120,
+        "ci_consumption_stale_seconds": 300,
+        "rate_limit_resume_stale_seconds": 300,
+        "status_mirror_stale_seconds": 300,
+        "no_progress_cycles": 5,
+        "max_recovery_attempts": 2,
+    },
     "default_rate_limit_retry_seconds": 3600,
     "claude_readiness_probe_seconds": 300,
     "claude_readiness_probe_timeout_seconds": 20,
@@ -243,11 +252,19 @@ class GitHub:
         if payload is not None:
             cmd += ["--input", "-"]
             text = json.dumps(payload, separators=(",", ":"))
-        cp = run(cmd, input_text=text, timeout=60)
-        if cp.returncode != 0:
-            raise RuntimeError(
-                f"GitHub unavailable/error: {cp.stderr[-1500:] or cp.stdout[-1500:]}"
-            )
+        cp = None
+        for attempt in range(3):
+            cp = run(cmd, input_text=text, timeout=60)
+            if cp.returncode == 0:
+                break
+            detail = cp.stderr[-1500:] or cp.stdout[-1500:]
+            transient = bool(re.search(
+                r"(?:HTTP\s*)?5\d\d|Bad Gateway|Service Unavailable", detail, re.I
+            ))
+            if not transient or attempt == 2:
+                raise RuntimeError(f"GitHub unavailable/error: {detail}")
+            time.sleep(0.25 * (2 ** attempt))
+        assert cp is not None
         if not cp.stdout.strip():
             return None
         return json.loads(cp.stdout)
@@ -441,6 +458,18 @@ class Ledger:
               completion_evidence TEXT, parent_assignment_id TEXT,
               requested_action_json TEXT NOT NULL, created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS watchdog_incidents (
+              incident_key TEXT PRIMARY KEY, kind TEXT NOT NULL,
+              assignment_id TEXT, issue_number INTEGER, pr_number INTEGER,
+              status TEXT NOT NULL, blocker TEXT NOT NULL,
+              first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL,
+              last_progress_at TEXT, recovery_attempts INTEGER NOT NULL DEFAULT 0,
+              last_recovery TEXT, notified_fingerprint TEXT, closed_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS watchdog_recovery_actions (
+              id INTEGER PRIMARY KEY AUTOINCREMENT, incident_key TEXT NOT NULL,
+              action TEXT NOT NULL, outcome TEXT NOT NULL, at TEXT NOT NULL
             );
             """
         )
@@ -662,6 +691,71 @@ class Ledger:
             (key, value),
         )
         self.db.commit()
+
+    def heartbeat(self, component: str, at: str | None = None) -> None:
+        self.meta_set(f"heartbeat:{component}", at or utcnow())
+
+    def active_tasks(self) -> list[sqlite3.Row]:
+        return self.db.execute(
+            "SELECT * FROM tasks WHERE status IN "
+            "('PENDING','RETRY','WAITING_RATE_LIMIT','WAITING_CI','RUNNING') "
+            "ORDER BY created_at"
+        ).fetchall()
+
+    def open_incident(self, key: str, kind: str, blocker: str, *,
+                      task: sqlite3.Row | dict[str, Any] | None = None,
+                      last_progress_at: str | None = None) -> sqlite3.Row:
+        data = dict(task or {})
+        now = utcnow()
+        self.db.execute(
+            "INSERT INTO watchdog_incidents(incident_key,kind,assignment_id,issue_number,"
+            "pr_number,status,blocker,first_seen_at,last_seen_at,last_progress_at) "
+            "VALUES(?,?,?,?,?,'OPEN',?,?,?,?) ON CONFLICT(incident_key) DO UPDATE SET "
+            "status='OPEN',blocker=excluded.blocker,last_seen_at=excluded.last_seen_at,"
+            "closed_at=NULL",
+            (key, kind, data.get("id"), data.get("issue_number"), data.get("pr_number"),
+             blocker[:1500], now, now, last_progress_at),
+        )
+        self.db.commit()
+        return self.db.execute(
+            "SELECT * FROM watchdog_incidents WHERE incident_key=?", (key,)
+        ).fetchone()
+
+    def record_recovery(self, key: str, action: str, outcome: str) -> None:
+        now = utcnow()
+        self.db.execute(
+            "INSERT INTO watchdog_recovery_actions(incident_key,action,outcome,at) VALUES(?,?,?,?)",
+            (key, action[:500], outcome[:500], now),
+        )
+        self.db.execute(
+            "UPDATE watchdog_incidents SET recovery_attempts=recovery_attempts+1,"
+            "last_recovery=?,last_seen_at=? WHERE incident_key=?",
+            (f"{action}: {outcome}"[:1000], now, key),
+        )
+        self.db.commit()
+
+    def close_missing_incidents(self, seen: set[str]) -> list[sqlite3.Row]:
+        rows = self.db.execute(
+            "SELECT * FROM watchdog_incidents WHERE status='OPEN'"
+        ).fetchall()
+        closed = [row for row in rows if row["incident_key"] not in seen]
+        now = utcnow()
+        for row in closed:
+            self.db.execute(
+                "UPDATE watchdog_incidents SET status='CLOSED',closed_at=?,last_seen_at=? "
+                "WHERE incident_key=?", (now, now, row["incident_key"]),
+            )
+        self.db.commit()
+        return closed
+
+    def watchdog_snapshot(self) -> dict[str, Any]:
+        alerts = [dict(r) for r in self.db.execute(
+            "SELECT * FROM watchdog_incidents WHERE status='OPEN' ORDER BY first_seen_at"
+        )]
+        actions = [dict(r) for r in self.db.execute(
+            "SELECT * FROM watchdog_recovery_actions ORDER BY id DESC LIMIT 20"
+        )]
+        return {"active_alerts": alerts, "recovery_actions": actions}
 
     def open_run(self, task: sqlite3.Row, log_path: Path) -> int:
         cur = self.db.execute(
@@ -1285,6 +1379,196 @@ class Orchestrator:
         self.runtime = RuntimeLedgerFiles(STATE_ROOT, DB_PATH, REPO, RUNTIME_STATUS_ISSUE)
         self.trusted = set(self.cfg["trusted_author_associations"])
 
+    def _watchdog_age(self, value: str | None) -> float:
+        parsed = parse_utc(value)
+        if parsed is None:
+            return float("inf")
+        return max(0.0, (dt.datetime.now(dt.timezone.utc) - parsed).total_seconds())
+
+    def _task_timeout(self, task: sqlite3.Row | dict[str, Any]) -> int:
+        return int(self.cfg.get({
+            "REVIEW": "review_timeout_seconds", "RESEARCH": "research_timeout_seconds",
+        }.get(str(task["task_type"]), "build_timeout_seconds"), 1800))
+
+    def _notify_incident(self, incident: sqlite3.Row, event: str = "OPEN") -> None:
+        """Notify once per incident state/blocker; GitHub is the operator channel."""
+        fingerprint = hashlib.sha256(
+            f"{event}\0{incident['blocker']}\0{incident['recovery_attempts']}".encode()
+        ).hexdigest()
+        if incident["notified_fingerprint"] == fingerprint:
+            return
+        issue = incident["issue_number"] or RUNTIME_STATUS_ISSUE
+        age = int(self._watchdog_age(incident["first_seen_at"]))
+        owner_required = int(incident["recovery_attempts"]) >= int(
+            self.cfg["watchdog"]["max_recovery_attempts"]
+        )
+        body = (
+            f"<!-- AI_TEAM_WATCHDOG_ALERT_V1 INCIDENT={incident['incident_key']} -->\n"
+            f"WATCHDOG_ALERT={event}\nASSIGNMENT={incident['assignment_id'] or 'NONE'}\n"
+            f"ISSUE={incident['issue_number'] or 'NONE'}\nPR={incident['pr_number'] or 'NONE'}\n"
+            f"STALE_SECONDS={age}\nLAST_PROGRESS={incident['last_progress_at'] or 'UNKNOWN'}\n"
+            f"BLOCKER={incident['blocker']}\nRECOVERY_ATTEMPTS={incident['recovery_attempts']}\n"
+            f"LAST_RECOVERY={incident['last_recovery'] or 'NONE'}\n"
+            f"NEXT_SAFE_ACTION={'OWNER_ACTION_REQUIRED' if owner_required else 'AUTONOMOUS_RETRY'}"
+        )
+        try:
+            self.gh.comment(int(issue), body)
+        except Exception as exc:
+            self.runtime.event("WATCHDOG_NOTIFICATION_FAILED", issue=issue, error=str(exc))
+            return
+        self.ledger.db.execute(
+            "UPDATE watchdog_incidents SET notified_fingerprint=? WHERE incident_key=?",
+            (fingerprint, incident["incident_key"]),
+        )
+        self.ledger.db.commit()
+        self.runtime.event("WATCHDOG_ALERT", issue=int(issue), pr=incident["pr_number"],
+                           assignment_id=incident["assignment_id"], status="BLOCKED",
+                           blocker=incident["blocker"], alert_event=event)
+
+    def watchdog(self) -> None:
+        """Detect lack of material progress, recover safe states, and alert durably."""
+        cfg = self.cfg["watchdog"]
+        now = utcnow()
+        previous_scheduler = self.ledger.meta_get("heartbeat:scheduler")
+        self.ledger.heartbeat("orchestrator", now)
+        tasks = self.ledger.active_tasks()
+        self.ledger.heartbeat("scheduler", now)
+        for task in tasks:
+            if task["agent"] == "CODEX_CHATGPT":
+                self.ledger.heartbeat("codex_builder", now)
+            if task["agent"] == "CLAUDE":
+                component = "codex_reviewer" if task["task_type"] == "REVIEW" else "evidence"
+                self.ledger.heartbeat(component, now)
+                self.ledger.heartbeat(str(task["model_class"]).lower(), now)
+            if task["status"] == "WAITING_CI":
+                self.ledger.heartbeat("deploy", now)
+        material = [{k: row[k] for k in (
+            "id", "status", "attempt", "retry_at", "pr_number", "target_sha", "last_error"
+        )} for row in tasks]
+        fingerprint = hashlib.sha256(canonical_json(material).encode()).hexdigest()
+        previous = self.ledger.meta_get("watchdog:material_fingerprint")
+        cycles = int(self.ledger.meta_get("watchdog:no_progress_cycles") or "0")
+        if fingerprint != previous:
+            cycles = 0
+            self.ledger.meta_set("watchdog:last_productive_progress_at", now)
+        else:
+            cycles += 1
+        self.ledger.meta_set("watchdog:material_fingerprint", fingerprint)
+        self.ledger.meta_set("watchdog:no_progress_cycles", str(cycles))
+        seen: set[str] = set()
+        last_progress = self.ledger.meta_get("watchdog:last_productive_progress_at") or now
+
+        if (
+            previous_scheduler
+            and self._watchdog_age(previous_scheduler) > 3 * int(self.cfg["poll_seconds"])
+        ):
+            key = "SCHEDULER_HEARTBEAT"
+            seen.add(key)
+            incident = self.ledger.open_incident(
+                key, "SCHEDULER_HEARTBEAT", "scheduler missed more than three poll intervals",
+                last_progress_at=previous_scheduler,
+            )
+            self._notify_incident(incident)
+
+        for task in tasks:
+            age = self._watchdog_age(task["updated_at"])
+            kind = blocker = action = None
+            if task["pr_number"]:
+                try:
+                    pr = self.gh.pr(int(task["pr_number"]))
+                    if str(pr.get("state") or "open").lower() != "open":
+                        kind = "OBSOLETE_PR"
+                        blocker = "active assignment references closed/superseded PR"
+                        action = "mark STALE and release claim"
+                except Exception as exc:
+                    self.runtime.event(
+                        "WATCHDOG_GITHUB_RETRY", assignment_id=task["id"], error=str(exc)
+                    )
+                    kind = "GITHUB_API"
+                    blocker = f"GitHub/API inspection failed: {exc}"
+                    action = "retry exact control-plane phase with bounded backoff"
+            if (
+                kind is None and task["status"] in {"PENDING", "RETRY"}
+                and age > int(cfg["runnable_stale_seconds"])
+            ):
+                kind = "UNDISPATCHED"
+                blocker = "runnable assignment exceeded dispatch SLA"
+                action = "requeue exact assignment"
+            if (
+                kind is None and task["status"] == "RUNNING"
+                and age > self._task_timeout(task) + int(cfg["running_grace_seconds"])
+            ):
+                kind = "WORKER_TIMEOUT"
+                blocker = "model task exceeded timeout plus grace"
+                action = "release worker lease and retry"
+            if (
+                kind is None and task["status"] == "WAITING_CI"
+                and age > int(cfg["ci_consumption_stale_seconds"])
+            ):
+                try:
+                    check, _detail = self.gh.check_state(str(task["target_sha"]))
+                    if check != "PENDING":
+                        kind = "CI_NOT_CONSUMED"
+                        blocker = "completed CI state exceeded consumption SLA"
+                        action = "requeue CI/merge phase"
+                except Exception as exc:
+                    self.runtime.event(
+                        "WATCHDOG_GITHUB_RETRY", assignment_id=task["id"], error=str(exc)
+                    )
+            if (
+                kind is None and task["status"] == "WAITING_RATE_LIMIT"
+                and task["retry_at"]
+                and self._watchdog_age(task["retry_at"])
+                > int(cfg["rate_limit_resume_stale_seconds"])
+            ):
+                kind = "RATE_LIMIT_EXPIRED"
+                blocker = "expired provider wait was not resumed"
+                action = "resume saved assignment"
+            if kind is None:
+                continue
+            key = f"{kind}:{task['id']}"
+            seen.add(key)
+            incident = self.ledger.open_incident(key, kind, blocker, task=task,
+                                                 last_progress_at=last_progress)
+            if int(incident["recovery_attempts"]) < int(cfg["max_recovery_attempts"]):
+                if kind == "OBSOLETE_PR":
+                    self.ledger.update(task["id"], status="STALE", retry_at=None,
+                                       systemd_unit=None, last_error=blocker)
+                else:
+                    if kind == "WORKER_TIMEOUT":
+                        self.reap_stale_child(task)
+                    self.ledger.update(task["id"], status="RETRY", retry_at=now,
+                                       systemd_unit=None, last_error=blocker)
+                self.ledger.record_recovery(key, action, "scheduled")
+                incident = self.ledger.open_incident(key, kind, blocker,
+                                                     task=self.ledger.get(task["id"]),
+                                                     last_progress_at=last_progress)
+            if int(incident["recovery_attempts"]) >= int(cfg["max_recovery_attempts"]):
+                self._notify_incident(incident)
+
+        if cycles >= int(cfg["no_progress_cycles"]) and tasks:
+            key = "NO_PROGRESS:" + fingerprint
+            seen.add(key)
+            incident = self.ledger.open_incident(
+                key, "NO_PROGRESS", "identical material state exceeded the configured cycle SLA",
+                task=tasks[0], last_progress_at=last_progress,
+            )
+            self._notify_incident(incident)
+
+        mirror_at = self.ledger.meta_get("heartbeat:status_mirror")
+        if mirror_at is None:
+            self.ledger.heartbeat("status_mirror", now)
+            mirror_at = now
+        if mirror_at and self._watchdog_age(mirror_at) > int(cfg["status_mirror_stale_seconds"]):
+            key = "STATUS_MIRROR:130"
+            seen.add(key)
+            self._notify_incident(self.ledger.open_incident(
+                key, "STATUS_MIRROR", "runtime status #130 mirror exceeded freshness SLA",
+                last_progress_at=mirror_at,
+            ))
+        for closed in self.ledger.close_missing_incidents(seen):
+            self._notify_incident(closed, "RECOVERED")
+
     def kick_trello_reconciliation(self) -> None:
         """Start projection outside model workers; canonical work never waits for it."""
         if not TRELLO_BRIDGE.exists():
@@ -1347,6 +1631,7 @@ class Orchestrator:
                     f"repos/{REPO}/issues/{RUNTIME_STATUS_ISSUE}",
                     {"body": body},
                 )
+            self.ledger.heartbeat("status_mirror")
         except Exception as exc:
             self.runtime.event("CHECKPOINT_MIRROR_FAILED", error=str(exc))
 
@@ -1695,6 +1980,7 @@ class Orchestrator:
                 issue=stale["issue_number"], pr=stale["pr_number"],
                 target_sha=stale["target_sha"], session_id=stale["session_id"],
             )
+        self.watchdog()
         self.migrate_legacy_remediation()
         self.reconcile_handoffs()
         if self.ledger.due() is not None:

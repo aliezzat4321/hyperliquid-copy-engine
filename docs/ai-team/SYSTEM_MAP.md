@@ -22,6 +22,7 @@ Update this file only when a component moves, is added, or is retired.
 | Trading permission boundary | `src/hlcopy/trading/permissions.py` | `REAL_TRADING_ENABLED`; **live-sensitive** |
 | Risk eligibility ceiling | `src/hlcopy/risk/governor.py` | Deterministic candidate state; never authorizes real trading |
 | Config | `src/hlcopy/config.py` | `HLCOPY_*` settings |
+| AI-team autonomy watchdog | `scripts/ai_team_orchestrator.py`, `scripts/ai_team_runtime_ledger.py`, `config/ai_team_router.json` | Durable heartbeats/incidents, stale recovery, deduplicated operator alerts, and #130 health projection |
 | Experiment freeze/audit | `src/hlcopy/research/experiment_controller.py` | Fingerprints ex-ante contracts; fail-closed promotion-report verdict |
 | Storage pressure controller | `scripts/storage_controller.py`, `config/storage_policy.json` | Read-only fail-closed budgets, forecast and writer decisions |
 | Storage exit-gate evaluator | `scripts/storage_exit_gate_report.py` | Read-only conjunction over reviewed apply, policy and uncontaminated controller evidence |

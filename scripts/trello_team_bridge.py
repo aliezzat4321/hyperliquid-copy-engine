@@ -100,7 +100,9 @@ def phase(event: dict[str, Any]) -> str:
     # the canonical GitHub close + ai-team:done transition may project terminal.
     if kind in {"COMPLETED", "ISSUE_COMPLETED", "PARENT_FINALIZED"}:
         return "DONE"
-    if kind in {"BLOCKED", "OWNER_ACTION", "AUTH_FAILURE"} or status == "BLOCKED":
+    if kind in {"BLOCKED", "OWNER_ACTION", "AUTH_FAILURE", "WATCHDOG_ALERT"} or status in {
+        "BLOCKED", "STALE", "STALLED"
+    }:
         return "BLOCKED"
     review_events = {
         "PR_OPENED", "REVIEW_STARTED", "REVIEW_PASS", "REVIEW_FAIL",
