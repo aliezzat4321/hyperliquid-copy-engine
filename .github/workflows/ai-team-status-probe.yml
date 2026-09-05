@@ -29,6 +29,6 @@ jobs:
           journalctl -u hyperliquid-ai-team-orchestrator.service -n 160 --no-pager -l || true
           echo '=== INSTALLED OWNERSHIP HOTFIX ==='
           grep -n 'follow_symlinks=False' /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py || true
-          echo 'PROBE_REVISION=4'
+          echo 'PROBE_REVISION=5'
           echo 'POLYMARKET_TOUCHED=NO'
           echo 'REAL_TRADING_TOUCHED=NO'
