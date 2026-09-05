@@ -516,8 +516,11 @@ class RuntimeLedgerFiles:
                 age = None
             queue_ages.append({"assignment_id": row.get("id"), "issue": row.get("issue_number"),
                                "status": row.get("status"), "age_seconds": age})
+        scheduler_heartbeat = meta.get("heartbeat:scheduler")
         health = "STALLED" if any(a.get("kind") == "NO_PROGRESS" for a in alerts) else (
-            "DEGRADED" if alerts or not watchdog_available else "HEALTHY"
+            "DEGRADED"
+            if alerts or not watchdog_available or scheduler_heartbeat is None
+            else "HEALTHY"
         )
         payload = {
             "version": 1,
@@ -528,7 +531,7 @@ class RuntimeLedgerFiles:
             "latest_run": _row_dict(last_run),
             "last_successful_run": last_ok["ended_at"] if last_ok else None,
             "last_material_events": self.last_events(5),
-            "last_scheduler_heartbeat": meta.get("heartbeat:scheduler"),
+            "last_scheduler_heartbeat": scheduler_heartbeat,
             "last_productive_progress_at": meta.get("watchdog:last_productive_progress_at"),
             "heartbeats": {k.split(":", 1)[1]: v for k, v in meta.items()
                            if k.startswith("heartbeat:")},
@@ -627,7 +630,8 @@ class RuntimeLedgerFiles:
         body = (
             "<!-- AI_TEAM_RUNTIME_STATUS_V1 -->\n"
             "# AI TEAM RUNTIME STATUS\n\n"
-            "Canonical runtime handoff for #129. GitHub remains canonical for accepted "
+            f"Canonical runtime handoff for #{self.status_issue}. GitHub remains canonical for "
+            "accepted "
             "code/tasks/reviews; "
             "the VM ledger is canonical for transient execution.\n\n"
             "```json\n"
