@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import importlib.util
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -17,6 +19,199 @@ spec.loader.exec_module(orch)
 
 def test_routine_review_routes_to_sonnet():
     assert orch.route_review(orch.DEFAULT_CONFIG, "ROUTINE", None) == "SONNET"
+
+
+def test_completion_contract_is_explicit_and_fail_closed():
+    with pytest.raises(ValueError, match="MISSING_COMPLETION_CONTRACT"):
+        orch.parse_completion_contract("acceptance is somewhere in prose")
+    assert orch.parse_completion_contract("AI_TEAM_CLOSE_ON_MERGE=YES") == {
+        "version": 1, "close_on_merge": True, "requirements": []
+    }
+    assert orch.parse_completion_contract(
+        "AI_TEAM_COMPLETION_REQUIRES=RUNTIME_PROOF,MEASUREMENT_PROOF"
+    )["requirements"] == ["RUNTIME_PROOF", "MEASUREMENT_PROOF"]
+    with pytest.raises(ValueError, match="CONFLICTS"):
+        orch.parse_completion_contract(
+            "AI_TEAM_CLOSE_ON_MERGE=YES\nAI_TEAM_COMPLETION_REQUIRES=RUNTIME_PROOF"
+        )
+
+
+def test_completion_contract_missing_number_preserves_fail_closed_error():
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.trusted = orch.DEFAULT_CONFIG, {"OWNER"}
+
+    with pytest.raises(ValueError, match="MISSING_COMPLETION_CONTRACT"):
+        team.completion_contract({"author_association": "OWNER", "body": ""})
+
+
+def _artifact(tmp_path, *, requirement="RUNTIME_PROOF", phase="PRODUCTION_VALIDATION",
+              producer="production-validation-runner", code_sha="a" * 40,
+              result=None, observed_at=None, **extra):
+    root = tmp_path / "trusted"
+    root.mkdir(exist_ok=True)
+    observed_at = observed_at or orch.utcnow()
+    observed_dt = orch.parse_utc(observed_at)
+    if orch.PHASE_EVIDENCE_SPECS.get(phase, {}).get("window") and observed_dt:
+        extra.setdefault(
+            "window_start",
+            (observed_dt - dt.timedelta(hours=2)).isoformat().replace("+00:00", "Z"),
+        )
+        extra.setdefault(
+            "window_end",
+            (observed_dt - dt.timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
+        )
+    payload = {
+        "schema_version": orch.ACCEPTANCE_ARTIFACT_SCHEMA_VERSION,
+        "policy_version": orch.ACCEPTANCE_POLICY_VERSION,
+        "requirement": requirement,
+        "phase": phase,
+        "producer": producer,
+        "observed_at": observed_at,
+        "code_sha": code_sha,
+        "data_hash": "sha256:" + "b" * 64,
+        "manifests": {"input": "sha256:" + "c" * 64},
+        "result": result or {"status": "PASS"},
+        **extra,
+    }
+    path = root / f"{phase.lower()}.json"
+    raw = json.dumps(payload, sort_keys=True).encode()
+    path.write_bytes(raw)
+    path.chmod(0o600)
+    return root, payload, {"artifact_path": str(path),
+                           "artifact_hash": hashlib.sha256(raw).hexdigest()}
+
+
+def _ledger(path, root):
+    ledger = orch.Ledger(path, trusted_evidence_root=root)
+    ledger.trusted_evidence_uid = os.getuid()
+    return ledger
+
+
+def test_acceptance_artifact_is_verified_and_predicate_recomputed(tmp_path):
+    root, _, evidence = _artifact(tmp_path)
+    ledger = _ledger(tmp_path / "ledger.sqlite3", root)
+    ledger.record_merged_code(issue_number=1, code_sha="a" * 40, pr_number=2,
+                              observed_at=orch.utcnow())
+    _, predicate = ledger.record_acceptance_evidence(
+        issue_number=1, requirement="RUNTIME_PROOF",
+        phase="PRODUCTION_VALIDATION", evidence=evidence,
+    )
+    assert predicate is True
+    assert ledger.proven_requirements(1) == {"RUNTIME_PROOF"}
+
+
+def test_legacy_self_attested_rows_never_become_proven(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    ledger.record_merged_code(issue_number=1, code_sha="a" * 40, pr_number=2,
+                              observed_at=orch.utcnow())
+    ledger.db.execute(
+        "INSERT INTO acceptance_evidence("
+        "evidence_id,issue_number,requirement,phase,source,observed_at,manifests_json,"
+        "measured_result_json,predicate_result,created_at,code_sha) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        ("legacy", 1, "RUNTIME_PROOF", "PRODUCTION_VALIDATION", "self-attested",
+         orch.utcnow(), "{}", '{"status":"PASS"}', 1, orch.utcnow(), "a" * 40),
+    )
+    ledger.db.commit()
+    assert ledger.proven_requirements(1) == set()
+
+
+@pytest.mark.parametrize("requirement,phase,producer,result,extra", [
+    (requirement, phase, next(iter(orch.PHASE_EVIDENCE_SPECS[phase]["producers"])),
+     {orch.PHASE_EVIDENCE_SPECS[phase]["field"]: orch.PHASE_EVIDENCE_SPECS[phase]["value"]},
+     ({"review_model": "OPUS"}
+      if phase in {"DESTRUCTIVE_REVIEW", "EVIDENCE_AUDIT", "FINAL_VERDICT"} else {})
+     | ({"authorization": {"authorized_by": "repository-owner", "scope": "reviewed-plan",
+                            "issued_at": orch.utcnow()}}
+        if phase == "AUTHORIZED_APPLY" else {}))
+    for requirement, phases in orch.COMPLETION_REQUIREMENTS.items()
+    for phase in phases
+])
+def test_each_canonical_artifact_proves_only_its_valid_phase(
+        tmp_path, requirement, phase, producer, result, extra):
+    root, _, evidence = _artifact(
+        tmp_path, requirement=requirement, phase=phase, producer=producer,
+        result=result, **extra,
+    )
+    ledger = _ledger(tmp_path / "ledger.sqlite3", root)
+    ledger.record_merged_code(issue_number=1, code_sha="a" * 40, pr_number=2,
+                              observed_at=orch.utcnow())
+    _, predicate = ledger.record_acceptance_evidence(
+        issue_number=1, requirement=requirement, phase=phase, evidence=evidence,
+    )
+    assert predicate is True
+    assert ledger.phase_is_proven(1, requirement, phase)
+    other_phases = set(orch.PHASE_EVIDENCE_SPECS) - {phase}
+    assert all(not ledger.phase_is_proven(1, requirement, other) for other in other_phases)
+
+
+@pytest.mark.parametrize("mutation,error", [
+    ({"predicate_result": True}, "NON_CANONICAL"),
+    ({"artifact_hash": "0" * 64}, "HASH_MISMATCH"),
+])
+def test_fabricated_envelopes_and_fake_hashes_fail(tmp_path, mutation, error):
+    root, _, evidence = _artifact(tmp_path)
+    ledger = _ledger(tmp_path / "ledger.sqlite3", root)
+    ledger.record_merged_code(issue_number=1, code_sha="a" * 40, pr_number=2,
+                              observed_at=orch.utcnow())
+    evidence.update(mutation)
+    with pytest.raises(ValueError, match=error):
+        ledger.record_acceptance_evidence(issue_number=1, requirement="RUNTIME_PROOF",
+                                          phase="PRODUCTION_VALIDATION", evidence=evidence)
+    assert not ledger.proven_requirements(1)
+
+
+@pytest.mark.parametrize("change,error", [
+    ({"code_sha": "d" * 40}, "CODE_SHA_MISMATCH"),
+    ({"producer": "model-self-attestation"}, "UNTRUSTED_ACCEPTANCE_PRODUCER"),
+    ({"observed_at": "2020-01-01T00:00:00Z"}, "STALE_ACCEPTANCE_EVIDENCE"),
+    ({"data_hash": "sha256:not-a-hash"}, "INVALID_ACCEPTANCE_ARTIFACT_IDENTITY"),
+    ({"policy_version": "obsolete"}, "INCOMPATIBLE_ACCEPTANCE_ARTIFACT_VERSION"),
+])
+def test_wrong_sha_untrusted_stale_and_incompatible_artifacts_fail(tmp_path, change, error):
+    root, payload, _ = _artifact(tmp_path)
+    payload.update(change)
+    path = root / "mutated.json"
+    raw = json.dumps(payload, sort_keys=True).encode()
+    path.write_bytes(raw)
+    path.chmod(0o600)
+    evidence = {"artifact_path": str(path), "artifact_hash": hashlib.sha256(raw).hexdigest()}
+    ledger = _ledger(tmp_path / "ledger.sqlite3", root)
+    ledger.record_merged_code(issue_number=1, code_sha="a" * 40, pr_number=2,
+                              observed_at=orch.utcnow())
+    with pytest.raises(ValueError, match=error):
+        ledger.record_acceptance_evidence(issue_number=1, requirement="RUNTIME_PROOF",
+                                          phase="PRODUCTION_VALIDATION", evidence=evidence)
+    assert not ledger.proven_requirements(1)
+
+
+def test_failed_measurement_enqueues_repair_not_done(tmp_path):
+    root, _, evidence = _artifact(
+        tmp_path, requirement="MEASUREMENT_PROOF", phase="MEASUREMENT",
+        producer="measurement-runner", code_sha="b" * 40, result={"verdict": "FAIL"},
+    )
+    ledger = _ledger(tmp_path / "ledger.sqlite3", root)
+    ledger.record_merged_code(issue_number=92, code_sha="b" * 40, pr_number=93,
+                              observed_at=orch.utcnow())
+    task_id = ledger.create_task(
+        issue_number=92, task_type="MEASUREMENT", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", task_class="ROUTINE", target_sha="b" * 40,
+        lifecycle_phase="MEASUREMENT", evidence={"requirement": "MEASUREMENT_PROOF"},
+    )
+    issue = {"number": 92, "author_association": "OWNER", "state": "open",
+             "body": "AI_TEAM_COMPLETION_REQUIRES=MEASUREMENT_PROOF"}
+    class GH:
+        def issue(self, number): return issue
+    class Runtime:
+        def event(self, *args, **kwargs): pass
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.gh = orch.DEFAULT_CONFIG, ledger, GH()
+    team.runtime, team.trusted = Runtime(), {"OWNER"}
+    repair = team.complete_acceptance_phase(
+        ledger.get(task_id), evidence
+    )
+    assert repair is not None and repair["task_type"] == "REPAIR"
+    assert not ledger.successful_issue(92)
 
 
 def test_quant_review_routes_to_opus_only_under_explicit_class():
@@ -660,10 +855,14 @@ def test_successful_merge_durably_completes_before_terminal_projection(tmp_path)
         def changed_files(self, number):
             return []
         def issue(self, number):
-            return {"author_association": "OWNER", "body": ""}
+            return {
+                "number": number,
+                "author_association": "OWNER",
+                "body": "AI_TEAM_CLOSE_ON_MERGE=YES",
+            }
         def merge(self, number, sha):
             actions.append("merge")
-            return {"merged": True}
+            return {"merged": True, "sha": "b" * 40}
         def remove_label(self, *args):
             actions.append("github")
         def add_labels(self, *args):
@@ -682,13 +881,17 @@ def test_successful_merge_durably_completes_before_terminal_projection(tmp_path)
     team.cfg, team.ledger, team.gh = orch.DEFAULT_CONFIG, ledger, GH()
     team.runtime, team.trusted = Runtime(), {"OWNER"}
     team.handle_ci(ledger.get(task_id))
+    assert ledger.db.execute(
+        "SELECT code_sha FROM merged_code WHERE issue_number=159"
+    ).fetchone()["code_sha"] == "b" * 40
     kind, payload = actions[-1]
     assert kind == "COMPLETED"
     assert actions[-2] == "github"
     assert payload == {
         "assignment_id": task_id, "issue": 159, "pr": 160,
         "target_sha": "a" * 40, "status": "DONE",
-        "result": "merged and proven", "next_action": "Done / Proven",
+        "result": "explicit close-on-merge contract proven",
+        "lifecycle_phase": "DONE", "next_action": "Done / Proven",
     }
 
 
@@ -788,6 +991,8 @@ def test_parent_finalization_requires_canonical_child_success_and_is_idempotent(
     }
     parent = {
         "number": 154, "state": "open",
+        "author_association": "OWNER",
+        "body": "AI_TEAM_CLOSE_ON_MERGE=YES",
         "labels": [{"name": labels["blocked"]}, {"name": labels["queued"]}],
     }
 
