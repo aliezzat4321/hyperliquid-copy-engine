@@ -38,7 +38,7 @@ _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 
 
 def utcnow() -> str:
-    now = dt.datetime.now(dt.UTC)
+    now = dt.datetime.now(dt.timezone.utc)
     return now.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
@@ -486,7 +486,7 @@ class RuntimeLedgerFiles:
                 "SELECT key,value FROM meta WHERE key LIKE 'heartbeat:%' "
                 "OR key LIKE 'watchdog:%'"
             ).fetchall()}
-        now = dt.datetime.now(dt.UTC)
+        now = dt.datetime.now(dt.timezone.utc)
         queue_ages = []
         for row in active:
             if row.get("status") not in {"PENDING", "RETRY"}:
