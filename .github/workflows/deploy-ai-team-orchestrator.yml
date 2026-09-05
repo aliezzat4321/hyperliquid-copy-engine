@@ -67,7 +67,15 @@ jobs:
           test -x /usr/local/bin/codex-code-mode-host
           test -x /usr/local/bin/bwrap
           test -x /usr/local/sbin/hl-ai-team-auth-codex
-          systemctl start hyperliquid-ai-team-orchestrator.service
+          if ! systemctl start hyperliquid-ai-team-orchestrator.service; then
+            echo '=== AI TEAM SERVICE STATUS ==='
+            systemctl status hyperliquid-ai-team-orchestrator.service --no-pager -l || true
+            echo '=== AI TEAM SERVICE JOURNAL ==='
+            journalctl -u hyperliquid-ai-team-orchestrator.service -n 200 --no-pager -l || true
+            echo 'POLYMARKET_TOUCHED=NO'
+            echo 'REAL_TRADING_TOUCHED=NO'
+            exit 1
+          fi
           systemctl is-enabled hyperliquid-ai-team-orchestrator.timer
           hl-ai-team-status
           echo 'POLYMARKET_TOUCHED=NO'
