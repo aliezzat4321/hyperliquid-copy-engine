@@ -78,28 +78,29 @@ jobs:
           path = Path(sys.argv[1])
           text = path.read_text()
           old = '        merged = self.gh.merge(int(task["pr_number"]), target)\n'
-          new = '''        try:
-              merged = self.gh.merge(int(task["pr_number"]), target)
-          except RuntimeError as exc:
-              error = str(exc)
-              if "HTTP 405" not in error and "not mergeable" not in error and "merge conflicts" not in error:
-                  raise
-              self.ledger.update(
-                  task["id"],
-                  status="STALE",
-                  retry_at=None,
-                  last_error=f"merge no longer applicable: {error[-500:]}",
-              )
-              self.runtime.event(
-                  "MERGE_TASK_STALE",
-                  assignment_id=task["id"],
-                  issue=task["issue_number"],
-                  pr=task["pr_number"],
-                  target_sha=target,
-                  error=error[-500:],
-              )
-              return
-          '''
+          new = (
+              '        try:\n'
+              '            merged = self.gh.merge(int(task["pr_number"]), target)\n'
+              '        except RuntimeError as exc:\n'
+              '            error = str(exc)\n'
+              '            if "HTTP 405" not in error and "not mergeable" not in error and "merge conflicts" not in error:\n'
+              '                raise\n'
+              '            self.ledger.update(\n'
+              '                task["id"],\n'
+              '                status="STALE",\n'
+              '                retry_at=None,\n'
+              '                last_error=f"merge no longer applicable: {error[-500:]}",\n'
+              '            )\n'
+              '            self.runtime.event(\n'
+              '                "MERGE_TASK_STALE",\n'
+              '                assignment_id=task["id"],\n'
+              '                issue=task["issue_number"],\n'
+              '                pr=task["pr_number"],\n'
+              '                target_sha=target,\n'
+              '                error=error[-500:],\n'
+              '            )\n'
+              '            return\n'
+          )
           count = text.count(old)
           if count != 1:
               raise SystemExit(f"expected exactly one merge call, found {count}")
