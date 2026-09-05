@@ -72,6 +72,7 @@ Update this file only when a component moves, is added, or is retired.
 | Invo API client | `services/invo-notification-executor/src/invo-client.ts` | `/v1_0/posts/get_feed`; **live-sensitive** (`/dex/position/*`) |
 | Hyperliquid client | `services/invo-notification-executor/src/hl-client.ts` | **live-sensitive** (order placement) |
 | Signal import (Python) | `src/hlcopy/signals/invo.py`, `generic_csv.py` | — |
+| Net executable profitability ledger | `src/hlcopy/lane3/`, `scripts/lane3_net_edge_report.py` | Offline, fail-closed Phase A/B2 measurement; no live permissions |
 
 ## Data stores
 
