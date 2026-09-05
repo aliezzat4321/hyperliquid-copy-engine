@@ -358,7 +358,7 @@ def reconcile_ledger(
             rows = db.execute(
                 """SELECT t.id, t.issue_number, t.pr_number, t.target_sha,
                           t.task_type, t.agent, t.model_class, t.status,
-                          t.last_error, t.updated_at
+                          t.last_error, t.updated_at, t.lifecycle_phase
                      FROM tasks t
                      JOIN (SELECT issue_number, MAX(updated_at) AS updated_at
                              FROM tasks GROUP BY issue_number) latest
@@ -379,10 +379,9 @@ def reconcile_ledger(
         # a crash, failed event write, or deploy.  Requiring that cache to
         # corroborate the row makes the documented ledger fallback circular.
         terminal = (
-            task_type == "REVIEW"
-            and status == "DONE"
+            status == "DONE"
+            and str(row["lifecycle_phase"] or "").upper() == "DONE"
             and not row["last_error"]
-            and row["pr_number"] is not None
             and row["target_sha"] is not None
         )
         if terminal:

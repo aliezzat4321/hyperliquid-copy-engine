@@ -107,6 +107,24 @@ Agents cannot choose Opus. The orchestrator validates the task class and escalat
 
 Automatic merge requires an explicit recognized task class (`TASK_CLASS` or `AI_TASK_CLASS`). A missing or invalid task class is recorded as `UNCLASSIFIED` and cannot be automatically merged. Protected AI-control-plane files additionally require a trusted Issue author, `AI_TEAM_PROTECTED_CHANGE=YES`, and membership in the narrow `AUTO_APPLY_CONTROL_PLANE_PATHS` allowlist before the same exact-SHA PASS + green-CI merge step. GitHub workflow, systemd deployment, trading/live, capital, credential, and other paths outside that allowlist remain non-automatically mergeable.
 
+Issue completion is a separate durable lifecycle. Trusted issue metadata must declare
+`AI_TEAM_COMPLETION_REQUIRES` using a supported requirement (`RUNTIME_PROOF`,
+`DEPLOYMENT_RUNTIME_PROOF`, `MEASUREMENT_PROOF`, `PROSPECTIVE_EVIDENCE`, or
+`STORAGE_PROOF`). After merge the ledger creates the next unmet evidence phase and leaves
+the issue active. Evidence is accepted only as a canonical `ai-team-acceptance-v1` JSON
+artifact in the root-owned acceptance spool. The task supplies only its path and SHA-256.
+The manager verifies owner/mode, byte hash, phase-specific trusted producer, current
+policy version, freshness, exact GitHub merge-result SHA, `sha256:` data and manifest
+identities, and any required observation window. It independently recomputes the phase
+predicate from the phase result; a caller/model boolean is not accepted as authority.
+Pre-schema ledger rows migrate as unverified and cannot satisfy proof. Failed recomputed
+predicates enqueue repair or research; restarts and provider waits retain the same phase.
+Only machine-verified positive records transition through `PROVEN` to `DONE`. Pure
+implementation may instead declare
+`AI_TEAM_CLOSE_ON_MERGE=YES`; it cannot be combined with a post-merge requirement. Missing,
+duplicate, unknown, or contradictory completion metadata fails closed. Generated PRs use
+`Refs #N`, so GitHub merge does not bypass this lifecycle.
+
 For an Issue that truly requires Opus, use an explicit trusted Issue field, for example:
 
 ```text

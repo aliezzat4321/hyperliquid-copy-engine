@@ -312,12 +312,12 @@ def terminal_ledger(path: Path) -> None:
         db.execute(
             "CREATE TABLE tasks(id TEXT, issue_number INTEGER, pr_number INTEGER, "
             "target_sha TEXT, task_type TEXT, agent TEXT, model_class TEXT, "
-            "status TEXT, last_error TEXT, updated_at TEXT)"
+            "status TEXT, last_error TEXT, updated_at TEXT, lifecycle_phase TEXT)"
         )
         db.execute(
-            "INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             ("review-157", 157, 158, "c" * 40, "REVIEW", "CLAUDE", "SONNET", "DONE", None,
-             "2026-09-01T12:00:00Z"),
+             "2026-09-01T12:00:00Z", "DONE"),
         )
 
 

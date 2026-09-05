@@ -58,6 +58,61 @@ ACTIVE_STATUSES = {"PENDING", "RETRY", "WAITING_RATE_LIMIT", "WAITING_CI", "RUNN
 TERMINAL_STATUSES = {"DONE", "FAILED", "BLOCKED", "STALE"}
 TRELLO_BRIDGE = Path("/opt/hyperliquid-ai-team/scripts/trello_team_bridge.py")
 
+COMPLETION_REQUIREMENTS = {
+    "RUNTIME_PROOF": ("PRODUCTION_VALIDATION",),
+    "DEPLOYMENT_RUNTIME_PROOF": ("DEPLOY", "PRODUCTION_VALIDATION"),
+    "MEASUREMENT_PROOF": ("MEASUREMENT",),
+    "PROSPECTIVE_EVIDENCE": (
+        "POST_MERGE_EVIDENCE", "EVIDENCE_AUDIT", "FINAL_VERDICT"
+    ),
+    "STORAGE_PROOF": (
+        "PRODUCTION_AUDIT", "IMMUTABLE_PLAN", "DESTRUCTIVE_REVIEW",
+        "AUTHORIZED_APPLY", "MEASUREMENT", "STABILITY_VALIDATION",
+    ),
+}
+EVIDENCE_TASK_TYPES = {phase for phases in COMPLETION_REQUIREMENTS.values() for phase in phases}
+
+ACCEPTANCE_ARTIFACT_SCHEMA_VERSION = "ai-team-acceptance-v1"
+ACCEPTANCE_POLICY_VERSION = "2026-09-05"
+PHASE_EVIDENCE_SPECS: dict[str, dict[str, Any]] = {
+    "DEPLOY": {"producers": {"deployment-controller"}, "field": "status", "value": "DEPLOYED"},
+    "PRODUCTION_VALIDATION": {
+        "producers": {"production-validation-runner"}, "field": "status", "value": "PASS"
+    },
+    "MEASUREMENT": {
+        "producers": {"measurement-runner"}, "field": "verdict", "value": "PASS",
+        "window": True,
+    },
+    "POST_MERGE_EVIDENCE": {
+        "producers": {"post-merge-evidence-runner"}, "field": "status",
+        "value": "COMPLETE", "window": True,
+    },
+    "EVIDENCE_AUDIT": {
+        "producers": {"evidence-audit-runner"}, "field": "verdict", "value": "PASS",
+        "window": True,
+    },
+    "FINAL_VERDICT": {
+        "producers": {"final-verdict-runner"}, "field": "verdict", "value": "PASS",
+        "window": True,
+    },
+    "PRODUCTION_AUDIT": {
+        "producers": {"production-audit-runner"}, "field": "verdict", "value": "PASS"
+    },
+    "IMMUTABLE_PLAN": {
+        "producers": {"immutable-plan-runner"}, "field": "status", "value": "FROZEN"
+    },
+    "DESTRUCTIVE_REVIEW": {
+        "producers": {"destructive-review-runner"}, "field": "verdict", "value": "PASS"
+    },
+    "AUTHORIZED_APPLY": {
+        "producers": {"authorized-apply-runner"}, "field": "status", "value": "APPLIED"
+    },
+    "STABILITY_VALIDATION": {
+        "producers": {"stability-validation-runner"}, "field": "verdict", "value": "PASS",
+        "window": True,
+    },
+}
+
 # Protected AI-control-plane files that Codex may propose, but never merge merely
 # because it changed them. Automatic apply additionally requires a trusted Issue
 # flag, independent exact-SHA Claude PASS, and green CI.
@@ -97,6 +152,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "legacy_remediation_migration": {"version": 1, "issues": [166, 168, 170],
                                      "supersede_issue": 170, "release_issue": 120},
+    "completion_reconciliation": {
+        "120": ["STORAGE_PROOF"],
+        "93": ["RUNTIME_PROOF"], "196": ["PROSPECTIVE_EVIDENCE"],
+        "197": ["PROSPECTIVE_EVIDENCE"], "91": ["PROSPECTIVE_EVIDENCE"],
+        "92": ["MEASUREMENT_PROOF"], "150": ["MEASUREMENT_PROOF"],
+    },
     "opus_allowed_task_classes": [
         "QUANT_PROFITABILITY",
         "STATISTICAL_METHODOLOGY",
@@ -378,8 +439,10 @@ class GitHub:
 
 
 class Ledger:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, trusted_evidence_root: Path | None = None) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
+        self.trusted_evidence_root = trusted_evidence_root or STATE_ROOT / "acceptance-artifacts"
+        self.trusted_evidence_uid = 0
         self.db = sqlite3.connect(path)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
@@ -442,12 +505,34 @@ class Ledger:
               requested_action_json TEXT NOT NULL, created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS acceptance_evidence (
+              evidence_id TEXT PRIMARY KEY, issue_number INTEGER NOT NULL,
+              requirement TEXT NOT NULL, phase TEXT NOT NULL, source TEXT NOT NULL,
+              observed_at TEXT NOT NULL, window_start TEXT, window_end TEXT,
+              code_sha TEXT, data_hash TEXT, manifests_json TEXT NOT NULL,
+              measured_result_json TEXT NOT NULL, predicate_result INTEGER NOT NULL,
+              created_at TEXT NOT NULL,
+              UNIQUE(issue_number, requirement, source, observed_at, code_sha, data_hash)
+            );
+            CREATE TABLE IF NOT EXISTS merged_code (
+              issue_number INTEGER PRIMARY KEY, code_sha TEXT NOT NULL,
+              pr_number INTEGER NOT NULL, observed_at TEXT NOT NULL
+            );
             """
         )
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(tasks)")}
-        for name in ("limit_text", "systemd_unit"):
+        for name in ("limit_text", "systemd_unit", "lifecycle_phase",
+                     "completion_contract_json", "evidence_json"):
             if name not in columns:
                 self.db.execute(f"ALTER TABLE tasks ADD COLUMN {name} TEXT")
+        evidence_columns = {
+            row[1] for row in self.db.execute("PRAGMA table_info(acceptance_evidence)")
+        }
+        if "machine_verified" not in evidence_columns:
+            self.db.execute(
+                "ALTER TABLE acceptance_evidence ADD COLUMN machine_verified "
+                "INTEGER NOT NULL DEFAULT 0"
+            )
         self.db.commit()
 
     def observe_remediation(self, blocker: dict[str, Any], *, issue_number: int,
@@ -528,6 +613,9 @@ class Ledger:
             "systemd_unit": kw.get("systemd_unit"),
             "last_error": kw.get("last_error"),
             "parent_id": kw.get("parent_id"),
+            "lifecycle_phase": kw.get("lifecycle_phase", "IMPLEMENTING"),
+            "completion_contract_json": json.dumps(kw.get("completion_contract") or {}),
+            "evidence_json": json.dumps(kw.get("evidence") or {}),
             "created_at": now,
             "updated_at": now,
         }
@@ -567,6 +655,12 @@ class Ledger:
             params.append(target_sha)
         sql += " ORDER BY created_at LIMIT 1"
         return self.db.execute(sql, params).fetchone()
+
+    def phase_task(self, issue_number: int, requirement: str) -> sqlite3.Row | None:
+        return self.db.execute(
+            "SELECT * FROM tasks WHERE issue_number=? AND lifecycle_phase=? "
+            "ORDER BY created_at DESC LIMIT 1", (issue_number, requirement)
+        ).fetchone()
 
     def handoff_candidates(self) -> list[sqlite3.Row]:
         return self.db.execute(
@@ -650,6 +744,138 @@ class Ledger:
             (issue_number,),
         ).fetchone()
         return bool(row and row["status"] == "DONE" and not row["last_error"])
+
+    def record_merged_code(self, *, issue_number: int, code_sha: str,
+                           pr_number: int, observed_at: str) -> None:
+        if not re.fullmatch(r"[0-9a-f]{40}", code_sha) or not parse_utc(observed_at):
+            raise ValueError("INVALID_MERGED_CODE_EVIDENCE")
+        self.db.execute(
+            "INSERT INTO merged_code VALUES(?,?,?,?) ON CONFLICT(issue_number) DO UPDATE SET "
+            "code_sha=excluded.code_sha,pr_number=excluded.pr_number,"
+            "observed_at=excluded.observed_at",
+            (issue_number, code_sha, pr_number, observed_at),
+        )
+        self.db.commit()
+
+    def _verified_acceptance_artifact(self, *, requirement: str, phase: str,
+                                      evidence: dict[str, Any]) -> tuple[dict[str, Any], str]:
+        """Read proof from the manager-owned spool; caller assertions are never proof."""
+        if set(evidence) != {"artifact_path", "artifact_hash"}:
+            raise ValueError("NON_CANONICAL_ACCEPTANCE_ENVELOPE")
+        root = self.trusted_evidence_root.resolve()
+        path = Path(str(evidence["artifact_path"]))
+        if path.is_symlink() or path.parent.resolve() != root or not path.is_file():
+            raise ValueError("UNTRUSTED_ACCEPTANCE_ARTIFACT_PATH")
+        root_stat = root.stat()
+        stat = path.stat()
+        if (root_stat.st_uid != self.trusted_evidence_uid or root_stat.st_mode & 0o022
+                or stat.st_uid != self.trusted_evidence_uid or stat.st_mode & 0o022):
+            raise ValueError("UNTRUSTED_ACCEPTANCE_ARTIFACT_OWNER")
+        raw = path.read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        if (not re.fullmatch(r"[0-9a-f]{64}", str(evidence["artifact_hash"]))
+                or digest != evidence["artifact_hash"]):
+            raise ValueError("ACCEPTANCE_ARTIFACT_HASH_MISMATCH")
+        try:
+            artifact = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("INVALID_ACCEPTANCE_ARTIFACT") from exc
+        spec = PHASE_EVIDENCE_SPECS.get(phase)
+        required = {"schema_version", "policy_version", "requirement", "phase", "producer",
+                    "observed_at", "code_sha", "data_hash", "manifests", "result"}
+        optional = {"window_start", "window_end", "authorization", "review_model"}
+        if (not isinstance(artifact, dict) or set(artifact) - (required | optional)
+                or not required.issubset(artifact)):
+            raise ValueError("INVALID_ACCEPTANCE_ARTIFACT_SCHEMA")
+        if (artifact["schema_version"] != ACCEPTANCE_ARTIFACT_SCHEMA_VERSION
+                or artifact["policy_version"] != ACCEPTANCE_POLICY_VERSION):
+            raise ValueError("INCOMPATIBLE_ACCEPTANCE_ARTIFACT_VERSION")
+        if artifact["requirement"] != requirement or artifact["phase"] != phase or not spec:
+            raise ValueError("ACCEPTANCE_ARTIFACT_PHASE_MISMATCH")
+        if artifact["producer"] not in spec["producers"]:
+            raise ValueError("UNTRUSTED_ACCEPTANCE_PRODUCER")
+        observed = parse_utc(str(artifact["observed_at"]))
+        now = dt.datetime.now(dt.timezone.utc)
+        if (not observed or observed > now + dt.timedelta(minutes=5)
+                or now - observed > dt.timedelta(days=7)):
+            raise ValueError("STALE_ACCEPTANCE_EVIDENCE")
+        if (not re.fullmatch(r"[0-9a-f]{40}", str(artifact["code_sha"]))
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", str(artifact["data_hash"]))):
+            raise ValueError("INVALID_ACCEPTANCE_ARTIFACT_IDENTITY")
+        if (not isinstance(artifact["manifests"], dict) or not artifact["manifests"]
+                or any(not re.fullmatch(r"sha256:[0-9a-f]{64}", str(value))
+                       for value in artifact["manifests"].values())):
+            raise ValueError("INVALID_ACCEPTANCE_MANIFEST_HASH")
+        if spec.get("window"):
+            start = parse_utc(str(artifact.get("window_start")))
+            end = parse_utc(str(artifact.get("window_end")))
+            if not start or not end or not start < end <= observed:
+                raise ValueError("INVALID_ACCEPTANCE_WINDOW")
+        if (phase in {"DESTRUCTIVE_REVIEW", "EVIDENCE_AUDIT", "FINAL_VERDICT"}
+                and artifact.get("review_model") != "OPUS"):
+            raise ValueError("REQUIRED_OPUS_EVIDENCE_MISSING")
+        if phase == "AUTHORIZED_APPLY":
+            authorization = artifact.get("authorization")
+            if (not isinstance(authorization, dict)
+                    or not all(authorization.get(key) for key in (
+                        "authorized_by", "scope", "issued_at"
+                    ))
+                    or not parse_utc(str(authorization["issued_at"]))):
+                raise ValueError("APPLY_AUTHORIZATION_MISSING")
+        if not isinstance(artifact["result"], dict):
+            raise ValueError("INVALID_ACCEPTANCE_RESULT")
+        return artifact, digest
+
+    def record_acceptance_evidence(self, *, issue_number: int, requirement: str,
+                                   phase: str, evidence: dict[str, Any]) -> tuple[str, bool]:
+        """Verify immutable machine output and independently recompute its predicate."""
+        artifact, digest = self._verified_acceptance_artifact(
+            requirement=requirement, phase=phase, evidence=evidence
+        )
+        merged = self.db.execute(
+            "SELECT code_sha FROM merged_code WHERE issue_number=?", (issue_number,)
+        ).fetchone()
+        if not merged or artifact["code_sha"] != merged["code_sha"]:
+            raise ValueError("EVIDENCE_CODE_SHA_MISMATCH")
+        spec = PHASE_EVIDENCE_SPECS[phase]
+        predicate = artifact["result"].get(spec["field"]) == spec["value"]
+        identity = canonical_json({"issue": issue_number, "artifact_hash": digest, **artifact})
+        evidence_id = hashlib.sha256(identity.encode()).hexdigest()
+        self.db.execute(
+            "INSERT OR IGNORE INTO acceptance_evidence("
+            "evidence_id,issue_number,requirement,phase,source,observed_at,window_start,"
+            "window_end,code_sha,data_hash,manifests_json,measured_result_json,"
+            "predicate_result,created_at,machine_verified) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)",
+            (evidence_id, issue_number, requirement, phase, str(artifact["producer"]),
+             str(artifact["observed_at"]), artifact.get("window_start"),
+             artifact.get("window_end"), artifact["code_sha"], artifact["data_hash"],
+             canonical_json(artifact["manifests"]), canonical_json(artifact["result"]),
+             int(predicate), utcnow()),
+        )
+        self.db.commit()
+        return evidence_id, predicate
+
+    def proven_requirements(self, issue_number: int) -> set[str]:
+        rows = self.db.execute(
+            "SELECT e.requirement,e.phase FROM acceptance_evidence e JOIN merged_code m "
+            "ON m.issue_number=e.issue_number AND m.code_sha=e.code_sha "
+            "WHERE e.issue_number=? AND e.predicate_result=1 AND e.machine_verified=1",
+            (issue_number,),
+        ).fetchall()
+        observed: dict[str, set[str]] = {}
+        for requirement, phase in rows:
+            observed.setdefault(str(requirement), set()).add(str(phase))
+        return {requirement for requirement, phases in COMPLETION_REQUIREMENTS.items()
+                if set(phases).issubset(observed.get(requirement, set()))}
+
+    def phase_is_proven(self, issue_number: int, requirement: str, phase: str) -> bool:
+        return bool(self.db.execute(
+            "SELECT 1 FROM acceptance_evidence e JOIN merged_code m "
+            "ON m.issue_number=e.issue_number "
+            "AND m.code_sha=e.code_sha WHERE e.issue_number=? AND e.requirement=? "
+            "AND e.phase=? AND e.predicate_result=1 AND e.machine_verified=1 LIMIT 1",
+            (issue_number, requirement, phase),
+        ).fetchone())
 
     def meta_get(self, key: str) -> str | None:
         row = self.db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
@@ -1068,6 +1294,31 @@ def acceptance_flag(body: str, name: str) -> bool:
     return bool(re.search(rf"(?mi)^\s*{re.escape(name)}\s*=\s*YES\s*$", body))
 
 
+def parse_completion_contract(body: str) -> dict[str, Any]:
+    """Parse only trusted machine metadata; prose never becomes acceptance proof."""
+    matches = re.findall(
+        r"(?mi)^\s*AI_TEAM_COMPLETION_REQUIRES\s*=\s*([^\n]+?)\s*$", body or ""
+    )
+    close_values = _machine_values(body or "", "AI_TEAM_CLOSE_ON_MERGE")
+    if len(matches) > 1 or len(close_values) > 1:
+        raise ValueError("AMBIGUOUS_COMPLETION_CONTRACT")
+    close_on_merge = close_values == ["YES"]
+    if close_values and close_values[0] not in {"YES", "NO"}:
+        raise ValueError("INVALID_CLOSE_ON_MERGE")
+    requirements: list[str] = []
+    if matches:
+        requirements = [item.strip().upper() for item in matches[0].split(",")]
+        if (not all(requirements) or len(set(requirements)) != len(requirements)
+                or any(item not in COMPLETION_REQUIREMENTS for item in requirements)):
+            raise ValueError("INVALID_COMPLETION_REQUIREMENT")
+    if close_on_merge and requirements:
+        raise ValueError("CLOSE_ON_MERGE_CONFLICTS_WITH_POST_MERGE_REQUIREMENT")
+    if not close_on_merge and not requirements:
+        raise ValueError("MISSING_COMPLETION_CONTRACT")
+    return {"version": 1, "close_on_merge": close_on_merge,
+            "requirements": requirements}
+
+
 def queue_metadata(body: str) -> tuple[int, tuple[int, ...]] | None:
     if not acceptance_flag(body, "AI_TEAM_AUTO_QUEUE"):
         return None
@@ -1317,6 +1568,152 @@ class Orchestrator:
             # Trello/runtime observability must not turn a successful merge into failure.
             return
 
+    def completion_contract(self, issue: dict[str, Any]) -> dict[str, Any]:
+        if str(issue.get("author_association") or "") not in self.trusted:
+            raise ValueError("UNTRUSTED_COMPLETION_CONTRACT")
+        try:
+            return parse_completion_contract(str(issue.get("body") or ""))
+        except ValueError as exc:
+            issue_number = issue.get("number")
+            reconciled = (
+                self.cfg.get("completion_reconciliation", {}).get(str(issue_number))
+                if issue_number is not None
+                else None
+            )
+            if not reconciled or str(exc) != "MISSING_COMPLETION_CONTRACT":
+                raise
+            if any(item not in COMPLETION_REQUIREMENTS for item in reconciled):
+                raise ValueError("INVALID_RECONCILED_COMPLETION_CONTRACT") from exc
+            return {"version": 1, "close_on_merge": False,
+                    "requirements": list(reconciled), "source": "rollout_reconciliation"}
+
+    def reconcile_completion_rollout(self) -> None:
+        """Resume named reopened incidents from merged checkpoints, idempotently."""
+        for raw_number in self.cfg.get("completion_reconciliation", {}):
+            number = int(raw_number)
+            if self.ledger.active_for_issue(number):
+                continue
+            try:
+                issue = self.gh.issue(number)
+                if str(issue.get("state") or "open").lower() != "open":
+                    continue
+                task = self.enqueue_acceptance(issue, parent_id=None)
+                if task:
+                    self.gh.add_labels(number, [self.cfg["labels"]["pending"]])
+                    self.runtime.event("ROLLOUT_ACCEPTANCE_RECONCILED", issue=number,
+                                       assignment_id=task["id"], task_type=task["task_type"],
+                                       status="PENDING")
+            except Exception as exc:
+                self.runtime.event("ROLLOUT_ACCEPTANCE_RETRY", issue=number, error=str(exc))
+
+    def enqueue_acceptance(self, issue: dict[str, Any], *, parent_id: str | None,
+                           merged_sha: str | None = None) -> sqlite3.Row | None:
+        """Create exactly the next unmet durable acceptance phase."""
+        number = int(issue["number"])
+        contract = self.completion_contract(issue)
+        proven = self.ledger.proven_requirements(number)
+        for requirement in contract["requirements"]:
+            if requirement in proven:
+                continue
+            for phase in COMPLETION_REQUIREMENTS[requirement]:
+                existing = self.ledger.phase_task(number, phase)
+                if existing:
+                    if str(existing["status"]) in ACTIVE_STATUSES:
+                        return existing
+                    if self.ledger.phase_is_proven(number, requirement, phase):
+                        continue
+                opus_phase = phase in {"DESTRUCTIVE_REVIEW", "EVIDENCE_AUDIT", "FINAL_VERDICT"}
+                manager_phase = phase == "AUTHORIZED_APPLY"
+                task_id = self.ledger.create_task(
+                    issue_number=number, task_type=phase,
+                    agent="TRUSTED_MANAGER" if manager_phase else (
+                        "CLAUDE" if opus_phase else "CODEX_CHATGPT"),
+                    model_class="NONE" if manager_phase else (
+                        "OPUS" if opus_phase else "CODEX_DEFAULT"),
+                    task_class="ROUTINE", status="PENDING", target_sha=merged_sha,
+                    parent_id=parent_id, lifecycle_phase=phase,
+                    completion_contract=contract, evidence={"requirement": requirement},
+                )
+                self.runtime.event(
+                    "POST_MERGE_PHASE_ENQUEUED", assignment_id=task_id, issue=number,
+                    target_sha=merged_sha, task_type=phase, lifecycle_phase=phase,
+                    requirement=requirement, status="PENDING",
+                    next_action=f"execute {phase.lower()} and record deterministic proof",
+                )
+                return self.ledger.get(task_id)
+        return None
+
+    def acceptance_is_proven(self, issue: dict[str, Any]) -> bool:
+        contract = self.completion_contract(issue)
+        return set(contract["requirements"]).issubset(
+            self.ledger.proven_requirements(int(issue["number"]))
+        )
+
+    def finalize_proven_issue(self, issue: dict[str, Any], task: sqlite3.Row,
+                              *, result: str = "acceptance predicate proven") -> None:
+        if not self.acceptance_is_proven(issue):
+            raise ValueError("ACCEPTANCE_NOT_PROVEN")
+        number = int(issue["number"])
+        labels = self.cfg["labels"]
+        self.ledger.update(task["id"], status="DONE", lifecycle_phase="DONE",
+                           retry_at=None, last_error=None)
+        self.gh.add_labels(number, [labels["done"]])
+        for stale in (labels["blocked"], labels["pending"], labels["ready"], labels["queued"]):
+            self.gh.remove_label(number, stale)
+        if str(issue.get("state") or "open").lower() != "closed":
+            self.gh.close_issue(number)
+        self.runtime.event("COMPLETED", assignment_id=task["id"], issue=number,
+                           pr=task["pr_number"], target_sha=task["target_sha"],
+                           status="DONE", result=result,
+                           lifecycle_phase="DONE", next_action="Done / Proven")
+
+    def complete_acceptance_phase(self, task: sqlite3.Row,
+                                  evidence: dict[str, Any]) -> sqlite3.Row | None:
+        """Atomic manager entry point used by deterministic phase runners."""
+        issue = self.gh.issue(int(task["issue_number"]))
+        saved = json.loads(task["evidence_json"] or "{}")
+        requirement = str(saved.get("requirement") or "")
+        contract = self.completion_contract(issue)
+        if requirement not in contract["requirements"]:
+            raise ValueError("EVIDENCE_REQUIREMENT_NOT_IN_CONTRACT")
+        phase = str(task["lifecycle_phase"])
+        if phase == "AUTHORIZED_APPLY":
+            if not self.ledger.phase_is_proven(
+                int(task["issue_number"]), requirement, "DESTRUCTIVE_REVIEW"
+            ):
+                raise ValueError("APPLY_REQUIRES_PROVEN_DESTRUCTIVE_REVIEW")
+        _, predicate = self.ledger.record_acceptance_evidence(
+            issue_number=int(task["issue_number"]), requirement=requirement,
+            phase=phase, evidence=evidence,
+        )
+        if not predicate:
+            repair_type = "RESEARCH" if requirement == "PROSPECTIVE_EVIDENCE" else "REPAIR"
+            agent = "CLAUDE" if repair_type == "RESEARCH" else "CODEX_CHATGPT"
+            model = "OPUS" if repair_type == "RESEARCH" else "CODEX_DEFAULT"
+            self.ledger.update(task["id"], status="DONE", last_error="acceptance predicate failed",
+                               lifecycle_phase="REPAIR")
+            repair_id = self.ledger.create_task(
+                issue_number=int(task["issue_number"]), task_type=repair_type, agent=agent,
+                model_class=model, task_class=str(task["task_class"]), parent_id=str(task["id"]),
+                target_sha=task["target_sha"], lifecycle_phase="REPAIR",
+                completion_contract=contract, blockers=["acceptance predicate failed"],
+            )
+            self.runtime.event("ACCEPTANCE_REPAIR_ENQUEUED", assignment_id=repair_id,
+                               issue=task["issue_number"], status="PENDING",
+                               lifecycle_phase="REPAIR", requirement=requirement)
+            return self.ledger.get(repair_id)
+        self.ledger.update(task["id"], status="DONE", last_error=None)
+        next_task = self.enqueue_acceptance(issue, parent_id=str(task["id"]),
+                                            merged_sha=task["target_sha"])
+        if next_task:
+            return next_task
+        self.ledger.update(task["id"], lifecycle_phase="PROVEN")
+        self.runtime.event("ACCEPTANCE_PROVEN", assignment_id=task["id"],
+                           issue=task["issue_number"], target_sha=task["target_sha"],
+                           status="PROVEN", lifecycle_phase="PROVEN")
+        self.finalize_proven_issue(issue, self.ledger.get(str(task["id"])))
+        return None
+
     def sync_runtime_checkpoint(self) -> None:
         """Project SQLite runtime state and mirror a compact chat-independent handoff."""
         try:
@@ -1394,6 +1791,7 @@ class Orchestrator:
             body = str(issue.get("body") or "")
             try:
                 route = parse_initial_route(body, self.cfg)
+                completion_contract = self.completion_contract(issue)
             except ValueError as exc:
                 task_id = self.ledger.create_task(
                     issue_number=number, task_type="TERMINAL", agent="MANAGER",
@@ -1414,6 +1812,8 @@ class Orchestrator:
                 agent=route["agent"],
                 model_class=route["model_class"],
                 task_class=task_class,
+                lifecycle_phase="IMPLEMENTING",
+                completion_contract=completion_contract,
             )
             self.gh.comment(
                 number,
@@ -1531,6 +1931,27 @@ class Orchestrator:
             return False
         parent = self.gh.issue(parent_number)
         parent_labels = {str(x.get("name")) for x in parent.get("labels", [])}
+        try:
+            parent_proven = self.acceptance_is_proven(parent)
+        except ValueError as exc:
+            self.runtime.event("PARENT_ACCEPTANCE_BLOCKED", issue=parent_number,
+                               child_issue=child_number, status="BLOCKED", error=str(exc))
+            return False
+        if not parent_proven:
+            continuation = self.enqueue_acceptance(
+                parent, parent_id=None, merged_sha=str(child.get("target_sha") or "") or None
+            )
+            if continuation:
+                self.gh.add_labels(parent_number, [labels["pending"]])
+                self.gh.remove_label(parent_number, labels["done"])
+                self.runtime.event(
+                    "PARENT_ACCEPTANCE_CONTINUED", issue=parent_number,
+                    child_issue=child_number, assignment_id=continuation["id"],
+                    task_type=continuation["task_type"], status="PENDING",
+                    next_action=f"execute {str(continuation['task_type']).lower()}",
+                )
+                return True
+            return False
         self.gh.add_labels(parent_number, [labels["done"]])
         for stale in (
             labels["blocked"], labels["pending"], labels["ready"], labels["queued"]
@@ -1696,6 +2117,7 @@ class Orchestrator:
                 target_sha=stale["target_sha"], session_id=stale["session_id"],
             )
         self.migrate_legacy_remediation()
+        self.reconcile_completion_rollout()
         self.reconcile_handoffs()
         if self.ledger.due() is not None:
             self.reconcile_parent_finalizers()
@@ -1715,6 +2137,19 @@ class Orchestrator:
                 self.handle_ci(task)
             elif task["status"] == "WAITING_RATE_LIMIT" and task["agent"] == "CLAUDE":
                 self.handle_claude_probe(task)
+            elif task["task_type"] in EVIDENCE_TASK_TYPES:
+                # Evidence runners deposit a complete envelope durably before this
+                # transition. A missing result remains runnable and never becomes Done.
+                payload = json.loads(task["evidence_json"] or "{}")
+                if isinstance(payload.get("result"), dict):
+                    self.complete_acceptance_phase(task, payload["result"])
+                else:
+                    retry_at = retry_at_after(max(60, int(self.cfg["poll_seconds"])))
+                    self.ledger.update(task["id"], status="RETRY", retry_at=retry_at,
+                                       last_error="awaiting deterministic phase runner evidence")
+                    self.runtime.event("ACCEPTANCE_PHASE_READY", assignment_id=task["id"],
+                                       issue=task["issue_number"], task_type=task["task_type"],
+                                       status="RETRY", retry_after=retry_at)
             elif task["task_type"] in {"BUILD", "REPAIR"}:
                 self.handle_codex(task)
             elif task["task_type"] == "REVIEW":
@@ -2205,7 +2640,7 @@ Finish by stating what changed, tests run, and any blocker. Keep changes scoped.
 Autonomous implementation for Issue #{issue["number"]}: {issue.get("title", "")}
 
 ## GitHub Issue
-Closes #{issue["number"]}
+Refs #{issue["number"]}
 
 ## Lane / subsystem
 AI-team infrastructure / assigned Issue scope
@@ -3078,17 +3513,38 @@ that non-code work needs a CODE_CHANGE. Unknown or contradictory evidence is TER
                 retry_after=retry_at,
             )
             return
-        self.ledger.update(task["id"], status="DONE", retry_at=None, last_error=None)
+        merged_at = utcnow()
+        merged_sha = str(merged.get("sha") or "")
+        if not re.fullmatch(r"[0-9a-f]{40}", merged_sha):
+            self.block(task, "merge response lacks exact merged commit SHA")
+            return
+        self.ledger.record_merged_code(issue_number=int(task["issue_number"]),
+                                       code_sha=merged_sha, pr_number=int(task["pr_number"]),
+                                       observed_at=merged_at)
+        contract = self.completion_contract(issue)
+        self.ledger.update(task["id"], status="DONE", retry_at=None, last_error=None,
+                           lifecycle_phase="MERGED",
+                           completion_contract_json=canonical_json(contract))
         self.gh.remove_label(int(task["pr_number"]), self.cfg["labels"]["waiting_review"])
-        self.gh.add_labels(int(task["issue_number"]), [self.cfg["labels"]["done"]])
-        self.gh.remove_label(int(task["issue_number"]), self.cfg["labels"]["pending"])
-        self.gh.close_issue(int(task["issue_number"]))
         self.gh.comment(
             int(task["issue_number"]),
             f"AI_TEAM_AUTONOMOUS_MERGE=YES\nPR={task['pr_number']}\nTARGET_SHA={target}\n"
-            f"CI=PASS\nASYNC_CLAUDE_AUDIT=NO\nMERGED_AT={utcnow()}",
+            f"CI=PASS\nASYNC_CLAUDE_AUDIT=NO\nMERGED_AT={merged_at}\n"
+            f"LIFECYCLE=MERGED\nACCEPTANCE_PENDING={'NO' if contract['close_on_merge'] else 'YES'}",
         )
-        self.emit_terminal_projection(task, target)
+        if contract["close_on_merge"]:
+            self.ledger.update(task["id"], lifecycle_phase="PROVEN")
+            self.runtime.event("ACCEPTANCE_PROVEN", assignment_id=task["id"],
+                               issue=task["issue_number"], target_sha=target,
+                               status="PROVEN", lifecycle_phase="PROVEN")
+            self.finalize_proven_issue(issue, self.ledger.get(str(task["id"])),
+                                       result="explicit close-on-merge contract proven")
+            return
+        next_task = self.enqueue_acceptance(issue, parent_id=str(task["id"]),
+                                            merged_sha=merged_sha)
+        if next_task is None:
+            self.block(self.ledger.get(str(task["id"])),
+                       "post-merge contract has no runnable unmet phase")
 
     def retry_or_block(
         self,
