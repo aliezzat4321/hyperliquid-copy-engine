@@ -2,7 +2,7 @@ name: ai-team-status-probe
 
 on:
   push:
-    branches: [codex/126-ai-orchestrator]
+    branches: [main, codex/126-ai-orchestrator]
     paths: [".github/workflows/ai-team-status-probe.yml"]
 
 permissions:
@@ -21,12 +21,14 @@ jobs:
           echo 'POLYMARKET_INSPECTION=NO'
           echo 'POLYMARKET_MUTATION=NO'
           echo 'REAL_TRADING_CHANGE=NO'
-          hl-ai-team-status
-          echo '=== DRY RUN CODEX LOG ==='
-          find /var/lib/hyperliquid-ai-team/agents/codex/logs -maxdepth 1 -type f \
-            -name '5e939708d6ac4568-*' -print -exec tail -n 120 {} \; || true
+          echo '=== SERVICE STATUS ==='
+          systemctl status hyperliquid-ai-team-orchestrator.service --no-pager -l || true
+          echo '=== AI TEAM STATUS ==='
+          hl-ai-team-status || true
           echo '=== AI TEAM SERVICE JOURNAL ==='
-          journalctl -u hyperliquid-ai-team-orchestrator.service -n 60 --no-pager -l || true
-          echo 'PROBE_REVISION=3'
+          journalctl -u hyperliquid-ai-team-orchestrator.service -n 160 --no-pager -l || true
+          echo '=== INSTALLED OWNERSHIP HOTFIX ==='
+          grep -n 'follow_symlinks=False' /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py || true
+          echo 'PROBE_REVISION=4'
           echo 'POLYMARKET_TOUCHED=NO'
           echo 'REAL_TRADING_TOUCHED=NO'
