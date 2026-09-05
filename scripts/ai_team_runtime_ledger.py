@@ -38,7 +38,7 @@ _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 
 
 def utcnow() -> str:
-    now = dt.datetime.now(dt.timezone.utc)  # noqa: UP017 - VM supports Python 3.10
+    now = dt.datetime.now(dt.UTC)
     return now.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
