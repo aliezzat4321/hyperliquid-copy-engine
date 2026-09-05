@@ -16,12 +16,25 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+from hlcopy.profitability.evidence_auditor import verify_economic_evidence_artifact
+
 Verdict = Literal[
     "EXPLORATORY_UNFROZEN",
     "FROZEN_NOT_YET_PROSPECTIVE",
-    "PROSPECTIVE_SHADOW_VALID",
+    "PROSPECTIVE_CONTRACT_VALID",
     "INVALID_CONTRACT_DRIFT_OR_EVIDENCE_LEAKAGE",
 ]
+
+ECONOMIC_GATE_CHECKS = (
+    "minimum_evidence",
+    "primary_metrics",
+    "success_criteria",
+    "uncertainty_method",
+    "multiple_testing_treatment",
+    "execution_costs",
+    "unresolved_exposure",
+    "capacity",
+)
 
 CONTRACT_FIELDS = (
     "contract_version", "experiment_id", "hypothesis", "causal_rationale",
@@ -79,14 +92,14 @@ def _validate_contract_content(contract: Mapping[str, Any]) -> None:
 @dataclass(frozen=True)
 class ExperimentAudit:
     verdict: Verdict
-    promotion_eligible: bool
+    prospective_contract_valid: bool
     fingerprint: str | None
     blockers: tuple[str, ...]
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "verdict": self.verdict,
-            "promotion_eligible": self.promotion_eligible,
+            "prospective_contract_valid": self.prospective_contract_valid,
             "fingerprint": self.fingerprint,
             "blockers": list(self.blockers),
         }
@@ -292,6 +305,9 @@ def validate_evidence(
                 blockers.append("EVALUATION_BEFORE_FREEZE")
             if evaluation.get("code_sha") not in repair_shas:
                 blockers.append("UNRECORDED_CODE_PROVENANCE")
+            data_sha = evaluation.get("data_sha256")
+            if not isinstance(data_sha, str) or not SHA256_RE.fullmatch(data_sha):
+                blockers.append("EVALUATION_DATA_PROVENANCE_MISSING")
             if latest_code_sha is not None and evaluation.get("code_sha") != latest_code_sha:
                 blockers.append("EVIDENCE_NOT_RERUN_AFTER_REPAIR")
             if evaluated_at < end:
@@ -309,16 +325,52 @@ def validate_evidence(
         )
     if not evaluations:
         return ExperimentAudit("FROZEN_NOT_YET_PROSPECTIVE", False, actual, ())
-    return ExperimentAudit("PROSPECTIVE_SHADOW_VALID", True, actual, ())
+    return ExperimentAudit("PROSPECTIVE_CONTRACT_VALID", True, actual, ())
 
 
 def audit_promotion_report(
-    report: Mapping[str, Any], *, registry: Mapping[str, Any] | None = None
+    report: Mapping[str, Any],
+    *,
+    registry: Mapping[str, Any] | None = None,
+    economic_evidence_artifact: object = None,
 ) -> dict[str, Any]:
-    """Attach the experiment verdict to promotion output; absent lock fails closed."""
+    """Combine structural validity with independently reproducible economic evidence."""
     output = dict(report)
     audit = validate_evidence(report, registry=registry)
     output["experiment_audit"] = audit.to_dict()
-    if not audit.promotion_eligible:
-        output["promotion_eligible"] = False
+    evaluations = report.get("evaluations")
+    latest = (
+        evaluations[-1]
+        if isinstance(evaluations, list)
+        and evaluations
+        and isinstance(evaluations[-1], Mapping)
+        else None
+    )
+    payload, economic_blockers = verify_economic_evidence_artifact(
+        economic_evidence_artifact,
+        contract_fingerprint=audit.fingerprint,
+        code_sha=latest.get("code_sha") if latest else None,
+        data_sha256=latest.get("data_sha256") if latest else None,
+        evaluation_window=latest.get("window") if latest else None,
+        required_predicates=ECONOMIC_GATE_CHECKS,
+    )
+    blockers = list(economic_blockers)
+    if not audit.prospective_contract_valid:
+        blockers.insert(0, "PROSPECTIVE_CONTRACT_INVALID")
+    promotion_ready = audit.prospective_contract_valid and not blockers
+    output["promotion_eligible"] = promotion_ready
+    output["promotion_gate"] = {
+        "promotion_eligible": promotion_ready,
+        "blockers": blockers,
+        "economic_evidence": (
+            {
+                "artifact_version": payload.get("artifact_version"),
+                "auditor": payload.get("auditor"),
+                "policy": payload.get("policy"),
+                "evidence_sha256": economic_evidence_artifact.evidence_sha256,
+            }
+            if payload is not None
+            else None
+        ),
+    }
     return output
