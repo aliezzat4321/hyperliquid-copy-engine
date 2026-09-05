@@ -205,48 +205,78 @@ def economic_bundle(candidate):
         "evaluation_window": evaluation["window"],
         "selection": {"prospective": True, "frozen_at": "2026-02-01T12:00:00Z"},
         "funding_applicable": True,
-        "population": {"input_count": 1},
+        "population": {"input_count": 30},
         "positions": [
             {
-                "position_id": "p1",
+                "position_id": f"p{index}",
                 "status": "closed",
                 "timestamps": {
-                    "signal": "2026-02-02T00:00:00Z",
-                    "decision": "2026-02-02T00:00:01Z",
-                    "shadow_or_execution": "2026-02-02T00:00:02Z",
-                    "open": "2026-02-02T00:00:03Z",
-                    "close": "2026-03-01T00:00:00Z",
+                    "signal": f"2026-02-0{2 + index % 5}T00:00:00Z",
+                    "decision": f"2026-02-0{2 + index % 5}T00:00:01Z",
+                    "shadow_or_execution": f"2026-02-0{2 + index % 5}T00:00:02Z",
+                    "open": f"2026-02-0{2 + index % 5}T00:00:03Z",
+                    "close": f"2026-02-0{2 + index % 5}T01:00:00Z",
                 },
                 "economics": {
                     "gross_pnl": "11",
                     **costs,
                     "funding": {"amount": "1", "coverage": "complete"},
                 },
-            },
+            }
+            for index in range(30)
         ],
-        "economics_totals": {"final_net": "5"},
+        "economics_totals": {"final_net": "150"},
+        "promotion_statistics": {
+            "primary_metrics": {"mean_return_bps": "25"},
+            "lower_bound_return_bps": "20",
+            "round_trip_cost_bps": "15",
+            "confidence_level": "0.90",
+            "uncertainty_method": "day-block bootstrap",
+            "multiple_testing_treatment": "Holm correction across three thresholds",
+            "estimated_capacity_usd": "100",
+            "target_notional_usd": "100",
+        },
     }
 
 
-def economic_artifact(candidate, **predicate_overrides):
-    predicates = {
-        name: True
-        for name in (
-            "minimum_evidence",
-            "primary_metrics",
-            "success_criteria",
-            "uncertainty_method",
-            "multiple_testing_treatment",
-            "execution_costs",
-            "unresolved_exposure",
-            "capacity",
-        )
-    }
-    predicates.update(predicate_overrides)
+def economic_artifact(candidate, failed_predicate=None):
+    bundle = economic_bundle(candidate)
+    statistics = bundle["promotion_statistics"]
+    if failed_predicate == "minimum_evidence":
+        bundle["positions"] = bundle["positions"][:29]
+        bundle["population"]["input_count"] = 29
+        bundle["economics_totals"]["final_net"] = "145"
+    elif failed_predicate == "primary_metrics":
+        statistics["primary_metrics"] = {}
+    elif failed_predicate == "success_criteria":
+        statistics["lower_bound_return_bps"] = "15"
+    elif failed_predicate == "uncertainty_method":
+        statistics["confidence_level"] = "0.89"
+    elif failed_predicate == "multiple_testing_treatment":
+        statistics["multiple_testing_treatment"] = ""
+    elif failed_predicate == "execution_costs":
+        bundle["positions"][0]["economics"]["fees"]["basis"] = "assumption"
+    elif failed_predicate == "unresolved_exposure":
+        for index in range(20):
+            bundle["positions"].append(
+                {
+                    "position_id": f"u{index}",
+                    "status": "unresolved",
+                    "timestamps": {
+                        "signal": "2026-02-02T00:00:00Z",
+                        "decision": "2026-02-02T00:00:01Z",
+                        "shadow_or_execution": "2026-02-02T00:00:02Z",
+                        "open": "2026-02-02T00:00:03Z",
+                    },
+                    "economics": {"unresolved_mtm": "0"},
+                }
+            )
+        bundle["population"]["input_count"] = 50
+    elif failed_predicate == "capacity":
+        statistics["estimated_capacity_usd"] = "99"
     return build_economic_evidence_artifact(
-        economic_bundle(candidate),
+        bundle,
         contract_fingerprint=candidate["contract_fingerprint"],
-        predicates=predicates,
     )
 
 
@@ -316,7 +346,7 @@ def test_bound_artifact_requires_every_predicate(failed_predicate):
     result = audit_promotion_report(
         candidate,
         registry=registry_for(candidate["frozen_contract"]),
-        economic_evidence_artifact=economic_artifact(candidate, **{failed_predicate: False}),
+        economic_evidence_artifact=economic_artifact(candidate, failed_predicate),
     )
     assert result["promotion_eligible"] is False
     expected = f"ECONOMIC_AUDIT_{failed_predicate.upper()}_NOT_SATISFIED"
@@ -327,7 +357,7 @@ def test_artifact_payload_tampering_breaks_cryptographic_binding():
     candidate = report()
     artifact = economic_artifact(candidate)
     tampered = EconomicEvidenceArtifact(
-        artifact.canonical_payload.replace(b'"final_net":"5"', b'"final_net":"6"'),
+        artifact.canonical_payload.replace(b'"final_net":"150"', b'"final_net":"151"'),
         artifact.evidence_sha256,
     )
     result = audit_promotion_report(

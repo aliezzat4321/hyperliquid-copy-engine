@@ -11,7 +11,6 @@ import hashlib
 import json
 import re
 from collections import Counter
-from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -22,6 +21,7 @@ SCHEMA_VERSION = "profitability-evidence-audit-v1"
 PROMOTION_ARTIFACT_VERSION = "profitability-promotion-artifact-v1"
 AUDITOR_IDENTITY = "hlcopy.profitability.evidence_auditor"
 POLICY_IDENTITY = "docs/ai-team/PROMOTION_POLICY.md"
+POLICY_PATH = Path(__file__).parents[3] / "docs/ai-team/promotion_policy.json"
 VALID_STATUSES = {"closed", "open", "unresolved", "quarantined"}
 MATERIAL_COSTS = ("fees", "spread", "depth", "slippage", "impact")
 TOLERANCE = Decimal("0.00000001")
@@ -56,6 +56,134 @@ def _canonical_bytes(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 
 
+def _promotion_policy() -> dict[str, Any]:
+    """Load the repository policy which defines the promotion floors."""
+    try:
+        policy = json.loads(POLICY_PATH.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("promotion policy is unavailable or malformed") from exc
+    if not isinstance(policy, dict):
+        raise ValueError("promotion policy must be an object")
+    return policy
+
+
+def _profit_concentration(bundle: dict[str, Any]) -> Decimal | None:
+    """Calculate the largest closed-position profit share from row economics."""
+    profits: list[Decimal] = []
+    positions = bundle.get("positions")
+    if not isinstance(positions, list):
+        return None
+    for row in positions:
+        if not isinstance(row, dict) or row.get("status") != "closed":
+            continue
+        economics = row.get("economics")
+        if not isinstance(economics, dict):
+            return None
+        gross = _decimal(economics.get("gross_pnl"))
+        costs: list[Decimal] = []
+        for name in MATERIAL_COSTS:
+            item = economics.get(name)
+            amount = _decimal(item.get("amount")) if isinstance(item, dict) else None
+            if amount is None:
+                return None
+            costs.append(amount)
+        funding = economics.get("funding")
+        funding_amount = (
+            _decimal(funding.get("amount")) if isinstance(funding, dict) else Decimal(0)
+        )
+        if gross is None or funding_amount is None:
+            return None
+        net = gross - sum(costs, Decimal(0)) - funding_amount
+        if net > 0:
+            profits.append(net)
+    total_profit = sum(profits, Decimal(0))
+    return max(profits) / total_profit if total_profit > 0 else None
+
+
+def _economic_predicates(
+    bundle: dict[str, Any], audit_report: dict[str, Any], policy: dict[str, Any]
+) -> dict[str, bool]:
+    """Derive promotion checks from sealed evidence, never caller assertions."""
+    thresholds = policy.get("thresholds")
+    risk_thresholds = policy.get("risk_governor", {}).get("thresholds")
+    statistics = bundle.get("promotion_statistics")
+    if not isinstance(thresholds, dict):
+        thresholds = {}
+    if not isinstance(risk_thresholds, dict):
+        risk_thresholds = {}
+    if not isinstance(statistics, dict):
+        statistics = {}
+
+    counts = audit_report.get("counts", {})
+    closed = counts.get("closed")
+    days = counts.get("trading_days")
+    minimum_evidence = (
+        isinstance(closed, int)
+        and isinstance(days, int)
+        and closed >= thresholds.get("min_closed_trades", float("inf"))
+        and days >= thresholds.get("min_distinct_days", float("inf"))
+    )
+
+    primary = statistics.get("primary_metrics")
+    mean_return = _decimal(primary.get("mean_return_bps")) if isinstance(primary, dict) else None
+    lower_bound = _decimal(statistics.get("lower_bound_return_bps"))
+    round_trip_cost = _decimal(statistics.get("round_trip_cost_bps"))
+    confidence = _decimal(statistics.get("confidence_level"))
+    concentration = _profit_concentration(bundle)
+    uncertainty_method = statistics.get("uncertainty_method")
+    multiple_testing = statistics.get("multiple_testing_treatment")
+    total = counts.get("input")
+    unresolved = counts.get("unresolved")
+    unresolved_share = (
+        Decimal(unresolved) / Decimal(total)
+        if isinstance(total, int) and total > 0 and isinstance(unresolved, int)
+        else None
+    )
+    estimated_capacity = _decimal(statistics.get("estimated_capacity_usd"))
+    target_notional = _decimal(statistics.get("target_notional_usd"))
+    required_confidence = _decimal(thresholds.get("confidence_level"))
+    max_concentration = _decimal(thresholds.get("max_profit_concentration"))
+    max_unresolved = _decimal(thresholds.get("max_unresolved_share"))
+    minimum_capacity = _decimal(risk_thresholds.get("minimum_capacity_usd"))
+    measured_costs = audit_report.get("economics_basis") == "MEASURED_COMPONENTS"
+
+    return {
+        "minimum_evidence": minimum_evidence,
+        "primary_metrics": mean_return is not None,
+        "success_criteria": bool(
+            lower_bound is not None
+            and round_trip_cost is not None
+            and lower_bound > round_trip_cost
+            and concentration is not None
+            and max_concentration is not None
+            and concentration <= max_concentration
+        ),
+        "uncertainty_method": bool(
+            isinstance(uncertainty_method, str)
+            and uncertainty_method.strip()
+            and confidence is not None
+            and required_confidence is not None
+            and confidence >= required_confidence
+        ),
+        "multiple_testing_treatment": bool(
+            isinstance(multiple_testing, str) and multiple_testing.strip()
+        ),
+        "execution_costs": bool(measured_costs and round_trip_cost is not None),
+        "unresolved_exposure": bool(
+            unresolved_share is not None
+            and max_unresolved is not None
+            and unresolved_share <= max_unresolved
+        ),
+        "capacity": bool(
+            estimated_capacity is not None
+            and target_notional is not None
+            and minimum_capacity is not None
+            and estimated_capacity >= minimum_capacity
+            and target_notional <= estimated_capacity
+        ),
+    }
+
+
 @dataclass(frozen=True)
 class EconomicEvidenceArtifact:
     """Immutable canonical output of the economic evidence engine."""
@@ -68,17 +196,20 @@ def build_economic_evidence_artifact(
     bundle: dict[str, Any],
     *,
     contract_fingerprint: str,
-    predicates: Mapping[str, bool],
 ) -> EconomicEvidenceArtifact:
     """Audit evidence and seal the result and promotion bindings as canonical bytes."""
     audit_report = audit_evidence(bundle)
+    policy = _promotion_policy()
+    predicates = _economic_predicates(bundle, audit_report, policy)
     provenance = bundle.get("provenance")
     payload = {
         "artifact_version": PROMOTION_ARTIFACT_VERSION,
         "auditor": {"identity": AUDITOR_IDENTITY, "version": SCHEMA_VERSION},
         "policy": {
             "identity": POLICY_IDENTITY,
-            "version": bundle.get("policy_version"),
+            "id": policy.get("policy_id"),
+            "version": policy.get("policy_version"),
+            "sha256": _canonical_hash(policy),
         },
         "contract_fingerprint": contract_fingerprint,
         "code_sha": provenance.get("code_commit") if isinstance(provenance, dict) else None,
@@ -86,7 +217,7 @@ def build_economic_evidence_artifact(
             provenance.get("data_sha256") if isinstance(provenance, dict) else None
         ),
         "evaluation_window": bundle.get("evaluation_window"),
-        "predicates": dict(predicates),
+        "predicates": predicates,
         "evidence_bundle": bundle,
         "audit_report": audit_report,
     }
@@ -145,11 +276,26 @@ def verify_economic_evidence_artifact(
         recomputed_report = audit_evidence(bundle)
         if recomputed_report != recorded_report:
             blockers.append("ECONOMIC_AUDIT_RECOMPUTATION_MISMATCH")
+    try:
+        policy = _promotion_policy()
+    except ValueError:
+        policy = {}
+        blockers.append("ECONOMIC_POLICY_UNAVAILABLE")
     expected_policy = {
         "identity": POLICY_IDENTITY,
-        "version": bundle.get("policy_version") if isinstance(bundle, dict) else None,
+        "id": policy.get("policy_id"),
+        "version": policy.get("policy_version"),
+        "sha256": _canonical_hash(policy),
     }
-    if payload.get("policy") != expected_policy or not expected_policy["version"]:
+    expected_bundle_version = (
+        f"{policy.get('policy_id')}-{policy.get('policy_version')}" if policy else None
+    )
+    if (
+        payload.get("policy") != expected_policy
+        or not expected_policy["version"]
+        or not isinstance(bundle, dict)
+        or bundle.get("policy_version") != expected_bundle_version
+    ):
         blockers.append("ECONOMIC_POLICY_IDENTITY_MISMATCH")
     exact_bindings = (
         ("contract_fingerprint", contract_fingerprint),
@@ -161,7 +307,16 @@ def verify_economic_evidence_artifact(
         if payload.get(name) != expected:
             blockers.append(f"ECONOMIC_ARTIFACT_{name.upper()}_MISMATCH")
     predicates = payload.get("predicates")
-    if not isinstance(predicates, dict) or set(predicates) != set(required_predicates):
+    recomputed_predicates = (
+        _economic_predicates(bundle, recomputed_report, policy)
+        if isinstance(bundle, dict) and recomputed_report is not None and policy
+        else None
+    )
+    if (
+        not isinstance(predicates, dict)
+        or set(predicates) != set(required_predicates)
+        or predicates != recomputed_predicates
+    ):
         blockers.append("ECONOMIC_AUDIT_PREDICATES_INVALID")
     else:
         blockers.extend(
