@@ -103,7 +103,18 @@ def _agent_key(agent: str) -> str:
     return "claude" if agent.upper().startswith("CLAUDE") else "codex"
 
 
+def _slot(task: dict[str, Any]) -> str:
+    agent = str(task.get("agent") or "")
+    if agent == "CODEX_REVIEWER":
+        return "codex_reviewer"
+    if agent.startswith("CODEX"):
+        return "codex_builder"
+    return "opus" if str(task.get("model_class")) == "OPUS" else "sonnet"
+
+
 def _role(task: dict[str, Any]) -> str:
+    if str(task.get("task_type")) in {"CHALLENGE", "FINAL_REVIEW"}:
+        return "QUANT" if str(task.get("model_class")) == "OPUS" else "REVIEWER"
     if str(task.get("task_type")) == "REVIEW":
         if str(task.get("task_class")) in {
             "QUANT_PROFITABILITY",
@@ -146,9 +157,9 @@ def _next_step(task: dict[str, Any]) -> str:
     if status == "BLOCKED":
         return "repair blocker or explicitly re-queue as a new assignment"
     if status == "DONE" and task_type in {"BUILD", "REPAIR"}:
-        return "independent exact-SHA Claude review"
+        return "deterministic preflight then independent exact-SHA Codex review"
     if status == "DONE" and task_type == "REVIEW":
-        return "CI/merge gate or Codex repair according to verdict"
+        return "next configured review-profile gate, CI, or Codex repair"
     return "no automatic next step"
 
 
@@ -441,8 +452,10 @@ class RuntimeLedgerFiles:
             payload = {
                 "version": 1,
                 "repository": self.repository,
-                "assignment": {"codex": None, "claude": None},
-                "runtime": {"codex": None, "claude": None},
+                "assignment": {"codex": None, "claude": None, "codex_builder": None,
+                               "codex_reviewer": None, "sonnet": None, "opus": None},
+                "runtime": {"codex": None, "claude": None, "codex_builder": None,
+                            "codex_reviewer": None, "sonnet": None, "opus": None},
                 "safety": {"real_trading": "NO", "polymarket_scope": "DENIED"},
             }
             _atomic_json(self.root / "current.json", payload)
@@ -464,6 +477,11 @@ class RuntimeLedgerFiles:
                 running = [r for r in candidates if r.get("status") == "RUNNING"]
                 if running:
                     runtime[key] = self._task_view(running[0])
+            for slot in ("codex_builder", "codex_reviewer", "sonnet", "opus"):
+                candidates = [r for r in active if _slot(r) == slot]
+                assignment[slot] = self._task_view(candidates[0]) if candidates else None
+                running = [r for r in candidates if r.get("status") == "RUNNING"]
+                runtime[slot] = self._task_view(running[0]) if running else None
             last_review_row = db.execute(
                 "SELECT * FROM tasks WHERE task_type='REVIEW' ORDER BY updated_at DESC LIMIT 1"
             ).fetchone()
@@ -512,6 +530,8 @@ class RuntimeLedgerFiles:
             "active_p0_p1": active_priorities[:8],
             "codex": current["assignment"].get("codex"),
             "claude": current["assignment"].get("claude"),
+            "logical_roles": {key: current["assignment"].get(key) for key in
+                              ("codex_builder", "codex_reviewer", "sonnet", "opus")},
             "runtime": current.get("runtime"),
             "latest_review": current.get("latest_review"),
             "last_successful_run": current.get("last_successful_run"),
@@ -547,11 +567,12 @@ class RuntimeLedgerFiles:
 
         payload["codex"] = compact_task(payload["codex"])
         payload["claude"] = compact_task(payload["claude"])
+        payload["logical_roles"] = {
+            key: compact_task(value) for key, value in payload["logical_roles"].items()
+        }
         if isinstance(payload.get("runtime"), dict):
-            payload["runtime"] = {
-                "codex": compact_task(payload["runtime"].get("codex")),
-                "claude": compact_task(payload["runtime"].get("claude")),
-            }
+            payload["runtime"] = {key: compact_task(value)
+                                  for key, value in payload["runtime"].items()}
         payload["latest_review"] = compact_task(payload["latest_review"])
         raw = json.dumps(payload, separators=(",", ":"), sort_keys=True)
         while len(raw.encode("utf-8")) > 3300 and payload["last_5_material_events"]:
