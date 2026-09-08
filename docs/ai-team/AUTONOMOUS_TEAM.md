@@ -170,6 +170,15 @@ Do not stop unrelated Hyperliquid services and do not touch Polymarket.
 
 ## Failure behavior
 
+The scheduler watchdog persists component heartbeats, material-state fingerprints,
+recovery actions, and alert incidents in the SQLite ledger. Process liveness alone is
+not health: five identical material cycles are `STALLED`. Runnable work, expired
+provider waits, worker timeouts, completed-but-unconsumed CI, closed PR assignments,
+and a stale #130 mirror are recovered where safe and otherwise produce one operator
+alert on open, blocker change, and recovery. The #130 projection reports queue age,
+stale assignments, recovery actions, active alerts, productive progress, and
+`HEALTHY`/`DEGRADED`/`STALLED` state.
+
 - Agent crash: task remains in the ledger and retries with bounded attempts.
 - VM/orchestrator restart: a `RUNNING` task becomes `RETRY`; workdir/session metadata is preserved.
 - GitHub unavailable: cycle exits without a model call; the next timer cycle retries.

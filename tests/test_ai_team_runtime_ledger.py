@@ -124,6 +124,26 @@ def test_redacts_auth_material() -> None:
     assert "access_token=hello" not in redacted
 
 
+def test_projection_without_ledger_is_fail_closed_and_watchdog_complete(tmp_path: Path) -> None:
+    files = runtime.RuntimeLedgerFiles(
+        tmp_path / "state", tmp_path / "missing.sqlite3", "owner/repo", 130
+    )
+
+    current = files.project_current()
+
+    assert current["latest_review"] is None
+    assert current["latest_run"] is None
+    assert current["last_successful_run"] is None
+    assert current["last_material_events"] == []
+    assert current["last_scheduler_heartbeat"] is None
+    assert current["last_productive_progress_at"] is None
+    assert current["stale_assignments"] == []
+    assert current["recovery_actions"] == []
+    assert current["active_alerts"] == []
+    assert current["queue_age"] == []
+    assert current["health"] == "DEGRADED"
+
+
 def test_projection_distinguishes_assignment_from_runtime(tmp_path: Path) -> None:
     db_path = tmp_path / "ledger.sqlite3"
     make_db(db_path)
@@ -132,6 +152,9 @@ def test_projection_distinguishes_assignment_from_runtime(tmp_path: Path) -> Non
     assert current["assignment"]["codex"]["assignment_id"] == "task123"
     assert current["runtime"]["codex"]["status"] == "RUNNING"
     assert current["assignment"]["claude"] is None
+    assert current["last_scheduler_heartbeat"] is None
+    assert current["active_alerts"] == []
+    assert current["health"] == "DEGRADED"
     assert current["safety"] == {"real_trading": "NO", "polymarket_scope": "DENIED"}
     assert (tmp_path / "state" / "current.json").is_file()
     assert (tmp_path / "state" / "checkpoints" / "codex.json").is_file()
@@ -190,6 +213,8 @@ def test_handoff_is_chat_independent_and_under_four_kb(tmp_path: Path) -> None:
         active_priorities=[{"issue": 129, "title": "P0 durable runtime ledger"}],
     )
     assert "AI_TEAM_RUNTIME_STATUS_V1" in body
+    assert "Canonical runtime handoff for #130." in body
+    assert "Canonical runtime handoff for #129." not in body
     assert "Do not rely on previous chat history" in body
     assert '"issue":129' in body
     assert len(body.encode("utf-8")) < 4096
