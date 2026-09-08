@@ -1548,7 +1548,15 @@ class Orchestrator:
                         if kind == "GITHUB_API" and task["status"] == "WAITING_CI"
                         else "RETRY"
                     )
-                    self.ledger.update(task["id"], status=retry_status, retry_at=now,
+                    # Do not turn a GitHub outage into a tight scheduler loop. The
+                    # API client already retries each request; defer the next
+                    # control-plane attempt by at least one poll interval.
+                    retry_at = (
+                        retry_at_after(max(60, int(self.cfg["poll_seconds"])))
+                        if kind == "GITHUB_API"
+                        else now
+                    )
+                    self.ledger.update(task["id"], status=retry_status, retry_at=retry_at,
                                        systemd_unit=None, last_error=blocker)
                 self.ledger.record_recovery(key, action, "scheduled")
                 incident = self.ledger.open_incident(key, kind, blocker,

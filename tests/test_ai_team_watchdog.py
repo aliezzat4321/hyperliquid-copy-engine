@@ -166,7 +166,9 @@ def test_exhausted_ci_inspection_retries_open_one_durable_alert(tmp_path):
     value.ledger.db.commit()
 
     value.watchdog()
-    assert value.ledger.get(task_id)["status"] == "WAITING_CI"
+    recovered = value.ledger.get(task_id)
+    assert recovered["status"] == "WAITING_CI"
+    assert orch.parse_utc(recovered["retry_at"]) > dt.datetime.now(dt.timezone.utc)
     value.ledger.db.execute(
         "UPDATE tasks SET updated_at=? WHERE id=?", (old(), task_id)
     )
