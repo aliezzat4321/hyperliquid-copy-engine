@@ -119,7 +119,7 @@ def test_fabricated_envelopes_fake_hashes_and_untrusted_sources_fail_closed(
     ("a" * 40, True, "STALE_ACCEPTANCE_EVIDENCE"),
 ])
 def test_wrong_merged_sha_and_stale_artifacts_fail_closed(tmp_path, bad_sha, stale, error):
-    observed = ((dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=8))
+    observed = ((dt.datetime.now(dt.UTC) - dt.timedelta(days=8))
                 .isoformat().replace("+00:00", "Z")) if stale else None
     root, evidence = trusted_artifact(
         tmp_path, issue=3, requirement="RUNTIME_PROOF",
