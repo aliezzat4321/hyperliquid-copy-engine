@@ -435,7 +435,7 @@ def test_claude_unavailability_detection_fixtures(message):
 def test_rate_limit_reset_time_fixtures(message):
     limited, retry_at = orch.rate_limit_info(f"usage limit; {message}", 300)
     assert limited is True
-    assert orch.parse_utc(retry_at) > dt.datetime.now(dt.UTC)
+    assert orch.parse_utc(retry_at) > dt.datetime.now(dt.timezone.utc)  # noqa: UP017 - VM supports Python 3.10
 
 
 def test_rate_limit_iso_reset_fixture():
