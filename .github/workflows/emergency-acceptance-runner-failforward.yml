@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   patch-runtime:
-    runs-on: [self-hosted, signal-engine-hyperliquid]
+    runs-on: [self-hosted, hyperliquid]
     timeout-minutes: 10
     steps:
       - name: Patch deployed orchestrator fail-forward only
