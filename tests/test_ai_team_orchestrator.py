@@ -188,10 +188,15 @@ def test_failed_measurement_enqueues_repair_not_done(tmp_path):
     )
     issue = {"number": 92, "author_association": "OWNER", "state": "open",
              "body": "AI_TEAM_COMPLETION_REQUIRES=MEASUREMENT_PROOF"}
+
     class GH:
-        def issue(self, number): return issue
+        def issue(self, number):
+            return issue
+
     class Runtime:
-        def event(self, *args, **kwargs): pass
+        def event(self, *args, **kwargs):
+            pass
+
     team = object.__new__(orch.Orchestrator)
     team.cfg, team.ledger, team.gh = orch.DEFAULT_CONFIG, ledger, GH()
     team.runtime, team.trusted = Runtime(), {"OWNER"}
