@@ -1,0 +1,1 @@
+P0 acceptance-runner deadlock is tracked in docs/ai-team/INCIDENT-2026-09-08-acceptance-runner-deadlock.md and must be repaired before more acceptance-phase work is allowed to head-of-line block the autonomous queue.
