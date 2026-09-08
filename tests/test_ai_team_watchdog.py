@@ -144,12 +144,18 @@ def test_github_5xx_retries_are_bounded(monkeypatch):
 
 def test_exhausted_ci_inspection_retries_open_one_durable_alert(tmp_path):
     class FailingCI(GH):
+        def __init__(self):
+            super().__init__()
+            self.check_calls = 0
+
         def check_state(self, _sha):
+            self.check_calls += 1
             raise RuntimeError("GitHub unavailable/error: HTTP 503")
 
+    gh = FailingCI()
     value = team(
         tmp_path,
-        FailingCI(),
+        gh,
         ci_consumption_stale_seconds=1,
         max_recovery_attempts=2,
     )
@@ -169,13 +175,23 @@ def test_exhausted_ci_inspection_retries_open_one_durable_alert(tmp_path):
     recovered = value.ledger.get(task_id)
     assert recovered["status"] == "WAITING_CI"
     assert orch.parse_utc(recovered["retry_at"]) > dt.datetime.now(dt.timezone.utc)
+    assert gh.check_calls == 1
+    restarted = team(
+        tmp_path,
+        gh,
+        ci_consumption_stale_seconds=1,
+        max_recovery_attempts=2,
+    )
+    restarted.watchdog()
+    assert gh.check_calls == 1
+
     value.ledger.db.execute(
-        "UPDATE tasks SET updated_at=? WHERE id=?", (old(), task_id)
+        "UPDATE tasks SET updated_at=?, retry_at=? WHERE id=?", (old(), old(), task_id)
     )
     value.ledger.db.commit()
     value.watchdog()
     value.ledger.db.execute(
-        "UPDATE tasks SET updated_at=? WHERE id=?", (old(), task_id)
+        "UPDATE tasks SET updated_at=?, retry_at=? WHERE id=?", (old(), old(), task_id)
     )
     value.ledger.db.commit()
     value.watchdog()

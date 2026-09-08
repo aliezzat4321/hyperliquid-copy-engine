@@ -1471,6 +1471,16 @@ class Orchestrator:
             self._notify_incident(incident)
 
         for task in tasks:
+            # A prior GitHub inspection failure may have scheduled durable
+            # backoff.  Keep its incident open, but do not hit GitHub again
+            # until that deadline has elapsed (including after a restart).
+            if (
+                task["retry_at"]
+                and parse_utc(str(task["retry_at"])) > parse_utc(now)
+                and str(task["last_error"] or "").startswith("GitHub/API")
+            ):
+                seen.add(f"GITHUB_API:{task['id']}")
+                continue
             age = self._watchdog_age(task["updated_at"])
             kind = blocker = action = None
             if task["pr_number"]:
