@@ -166,13 +166,14 @@ def test_exhausted_ci_inspection_retries_open_one_durable_alert(tmp_path):
     value.ledger.db.commit()
 
     value.watchdog()
+    assert value.ledger.get(task_id)["status"] == "WAITING_CI"
     value.ledger.db.execute(
-        "UPDATE tasks SET status='WAITING_CI', updated_at=? WHERE id=?", (old(), task_id)
+        "UPDATE tasks SET updated_at=? WHERE id=?", (old(), task_id)
     )
     value.ledger.db.commit()
     value.watchdog()
     value.ledger.db.execute(
-        "UPDATE tasks SET status='WAITING_CI', updated_at=? WHERE id=?", (old(), task_id)
+        "UPDATE tasks SET updated_at=? WHERE id=?", (old(), task_id)
     )
     value.ledger.db.commit()
     value.watchdog()

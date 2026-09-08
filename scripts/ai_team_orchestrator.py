@@ -1540,7 +1540,15 @@ class Orchestrator:
                 else:
                     if kind == "WORKER_TIMEOUT":
                         self.reap_stale_child(task)
-                    self.ledger.update(task["id"], status="RETRY", retry_at=now,
+                    # WAITING_CI is a control-plane phase.  Preserve it when its
+                    # GitHub inspection fails so cycle() retries handle_ci()
+                    # instead of unnecessarily redispatching the model task.
+                    retry_status = (
+                        "WAITING_CI"
+                        if kind == "GITHUB_API" and task["status"] == "WAITING_CI"
+                        else "RETRY"
+                    )
+                    self.ledger.update(task["id"], status=retry_status, retry_at=now,
                                        systemd_unit=None, last_error=blocker)
                 self.ledger.record_recovery(key, action, "scheduled")
                 incident = self.ledger.open_incident(key, kind, blocker,
