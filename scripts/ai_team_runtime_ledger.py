@@ -114,6 +114,10 @@ def _role(task: dict[str, Any]) -> str:
         return "REVIEWER"
     if str(task.get("task_type")) in {"BUILD", "REPAIR"}:
         return "BUILDER"
+    if str(task.get("task_type")) in {
+        "POST_MERGE_EVIDENCE", "DEPLOY", "PRODUCTION_VALIDATION", "MEASUREMENT"
+    }:
+        return "EVIDENCE"
     return "OPS"
 
 
@@ -140,6 +144,10 @@ def _next_step(task: dict[str, Any]) -> str:
     if status == "WAITING_CI":
         return "recheck CI; auto-merge only if routine and policy-safe"
     if status in {"PENDING", "RETRY"}:
+        if task_type in {
+            "POST_MERGE_EVIDENCE", "DEPLOY", "PRODUCTION_VALIDATION", "MEASUREMENT"
+        }:
+            return f"execute durable {task_type.lower()} runner and record predicate evidence"
         return f"launch {task_type.lower()} in isolated agent worktree"
     if status == "RUNNING":
         return "persist result/checkpoint before any subsequent assignment"
@@ -207,6 +215,8 @@ class RuntimeLedgerFiles:
             "role": _role(task),
             "task_type": task.get("task_type"),
             "task_class": task.get("task_class"),
+            "lifecycle_phase": task.get("lifecycle_phase"),
+            "completion_contract": task.get("completion_contract_json"),
             "issue": task.get("issue_number"),
             "pr": task.get("pr_number"),
             "target_sha": task.get("target_sha"),

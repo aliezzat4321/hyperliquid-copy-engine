@@ -25,6 +25,15 @@
     "protected_actions": {}
   },
   "legacy_remediation_migration": {"version": 1, "issues": [166, 168, 170], "supersede_issue": 170, "release_issue": 120},
+  "completion_reconciliation": {
+    "120": ["STORAGE_PROOF"],
+    "93": ["RUNTIME_PROOF"],
+    "196": ["PROSPECTIVE_EVIDENCE"],
+    "197": ["PROSPECTIVE_EVIDENCE"],
+    "91": ["PROSPECTIVE_EVIDENCE"],
+    "92": ["MEASUREMENT_PROOF"],
+    "150": ["MEASUREMENT_PROOF"]
+  },
   "opus_allowed_task_classes": [
     "QUANT_PROFITABILITY",
     "STATISTICAL_METHODOLOGY",
