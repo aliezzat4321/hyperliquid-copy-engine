@@ -1515,6 +1515,9 @@ class Orchestrator:
                     self.runtime.event(
                         "WATCHDOG_GITHUB_RETRY", assignment_id=task["id"], error=str(exc)
                     )
+                    kind = "GITHUB_API"
+                    blocker = f"GitHub/API CI inspection failed: {exc}"
+                    action = "retry exact CI/merge phase with bounded backoff"
             if (
                 kind is None and task["status"] == "WAITING_RATE_LIMIT"
                 and task["retry_at"]

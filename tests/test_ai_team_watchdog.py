@@ -140,3 +140,49 @@ def test_github_5xx_retries_are_bounded(monkeypatch):
     monkeypatch.setattr(orch.time, "sleep", lambda _seconds: None)
     assert orch.GitHub(orch.REPO).issue(226) == {}
     assert len(calls) == 3
+
+
+def test_exhausted_ci_inspection_retries_open_one_durable_alert(tmp_path):
+    class FailingCI(GH):
+        def check_state(self, _sha):
+            raise RuntimeError("GitHub unavailable/error: HTTP 503")
+
+    value = team(
+        tmp_path,
+        FailingCI(),
+        ci_consumption_stale_seconds=1,
+        max_recovery_attempts=2,
+    )
+    task_id = value.ledger.create_task(
+        issue_number=226,
+        target_sha="a" * 40,
+        task_type="REVIEW",
+        agent="CLAUDE",
+        model_class="SONNET",
+        task_class="ROUTINE",
+        status="WAITING_CI",
+    )
+    value.ledger.db.execute("UPDATE tasks SET updated_at=? WHERE id=?", (old(), task_id))
+    value.ledger.db.commit()
+
+    value.watchdog()
+    value.ledger.db.execute(
+        "UPDATE tasks SET status='WAITING_CI', updated_at=? WHERE id=?", (old(), task_id)
+    )
+    value.ledger.db.commit()
+    value.watchdog()
+    value.ledger.db.execute(
+        "UPDATE tasks SET status='WAITING_CI', updated_at=? WHERE id=?", (old(), task_id)
+    )
+    value.ledger.db.commit()
+    value.watchdog()
+    value.watchdog()
+
+    task = value.ledger.get(task_id)
+    alerts = value.ledger.watchdog_snapshot()["active_alerts"]
+    assert task["status"] == "WAITING_CI"
+    assert task["last_error"].startswith("GitHub/API CI inspection failed")
+    assert [alert["kind"] for alert in alerts] == ["GITHUB_API"]
+    assert alerts[0]["recovery_attempts"] == 2
+    assert len(value.gh.comments) == 1
+    assert "OWNER_ACTION_REQUIRED" in value.gh.comments[0][1]
