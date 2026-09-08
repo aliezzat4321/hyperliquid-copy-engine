@@ -721,6 +721,22 @@ class Ledger:
         ).fetchone()
         return bool(row and row["status"] == "DONE" and not row["last_error"])
 
+    def latest_merged_sha(self, issue_number: int) -> str | None:
+        """Return the newest exact SHA from a successful merge lifecycle row."""
+        rows = self.db.execute(
+            "SELECT target_sha FROM tasks WHERE issue_number=? "
+            "AND status='DONE' AND last_error IS NULL AND pr_number IS NOT NULL "
+            "AND lifecycle_phase IN ('MERGED','PROVEN','DONE') "
+            "AND target_sha IS NOT NULL "
+            "ORDER BY updated_at DESC, created_at DESC, rowid DESC",
+            (issue_number,),
+        ).fetchall()
+        for row in rows:
+            sha = str(row["target_sha"] or "")
+            if re.fullmatch(r"[0-9a-f]{40}", sha):
+                return sha
+        return None
+
     def record_acceptance_evidence(self, *, issue_number: int, requirement: str,
                                    phase: str, evidence: dict[str, Any],
                                    expected_merged_sha: str | None = None) -> str:
@@ -1925,8 +1941,16 @@ class Orchestrator:
                                child_issue=child_number, status="BLOCKED", error=str(exc))
             return False
         if not parent_proven:
+            merged_sha = self.ledger.latest_merged_sha(parent_number)
+            if merged_sha is None:
+                self.runtime.event(
+                    "PARENT_ACCEPTANCE_BLOCKED", issue=parent_number,
+                    child_issue=child_number, status="BLOCKED",
+                    error="MISSING_EXACT_MERGED_SHA",
+                )
+                return False
             continuation = self.enqueue_acceptance(
-                parent, parent_id=None, merged_sha=str(child.get("target_sha") or "") or None
+                parent, parent_id=None, merged_sha=merged_sha
             )
             if continuation:
                 self.gh.add_labels(parent_number, [labels["pending"]])
@@ -2127,16 +2151,25 @@ class Orchestrator:
             elif task["task_type"] in EVIDENCE_TASK_TYPES:
                 # Evidence runners deposit a complete envelope durably before this
                 # transition. A missing result remains runnable and never becomes Done.
-                payload = json.loads(task["evidence_json"] or "{}")
-                if isinstance(payload.get("result"), dict):
-                    self.complete_acceptance_phase(task, payload["result"])
-                else:
-                    retry_at = retry_at_after(max(60, int(self.cfg["poll_seconds"])))
-                    self.ledger.update(task["id"], status="RETRY", retry_at=retry_at,
-                                       last_error="awaiting deterministic phase runner evidence")
-                    self.runtime.event("ACCEPTANCE_PHASE_READY", assignment_id=task["id"],
-                                       issue=task["issue_number"], task_type=task["task_type"],
-                                       status="RETRY", retry_after=retry_at)
+                try:
+                    payload = json.loads(task["evidence_json"] or "{}")
+                    if not isinstance(payload, dict):
+                        raise ValueError("INVALID_ACCEPTANCE_TASK_EVIDENCE")
+                    if isinstance(payload.get("result"), dict):
+                        self.complete_acceptance_phase(task, payload["result"])
+                    else:
+                        retry_at = retry_at_after(max(60, int(self.cfg["poll_seconds"])))
+                        self.ledger.update(
+                            task["id"], status="RETRY", retry_at=retry_at,
+                            last_error="awaiting deterministic phase runner evidence",
+                        )
+                        self.runtime.event(
+                            "ACCEPTANCE_PHASE_READY", assignment_id=task["id"],
+                            issue=task["issue_number"], task_type=task["task_type"],
+                            status="RETRY", retry_after=retry_at,
+                        )
+                except ValueError as exc:
+                    self.block(task, f"acceptance evidence verification failed: {exc}")
             elif task["task_type"] in {"BUILD", "REPAIR"}:
                 self.handle_codex(task)
             elif task["task_type"] == "REVIEW":

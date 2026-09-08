@@ -1019,6 +1019,115 @@ def test_parent_finalization_requires_canonical_child_success_and_is_idempotent(
     assert team.reconcile_parent_finalizers() is False
 
 
+def test_parent_finalization_continues_from_parent_merged_sha(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    parent_sha = "d" * 40
+    ledger.create_task(
+        issue_number=154, task_type="BUILD", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", task_class="ROUTINE", status="DONE",
+        lifecycle_phase="IMPLEMENTING", target_sha="c" * 40, pr_number=153,
+    )
+    ledger.create_task(
+        issue_number=154, task_type="REVIEW", agent="CLAUDE",
+        model_class="SONNET", task_class="ROUTINE", status="DONE",
+        lifecycle_phase="MERGED", target_sha=parent_sha, pr_number=153,
+    )
+    ledger.create_task(
+        issue_number=161, task_type="BUILD", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", task_class="ROUTINE", status="DONE",
+        lifecycle_phase="PROVEN", target_sha="e" * 40,
+    )
+    labels = orch.DEFAULT_CONFIG["labels"]
+    child = {
+        "number": 161, "body": "AI_TEAM_FINALIZES_PARENT=154",
+        "author_association": "OWNER", "state": "closed",
+        "labels": [{"name": labels["done"]}],
+    }
+    parent = {
+        "number": 154, "state": "open", "author_association": "OWNER",
+        "body": "AI_TEAM_COMPLETION_REQUIRES=RUNTIME_PROOF", "labels": [],
+    }
+
+    class GH:
+        def finalizer_issues(self, done_label):
+            return [child]
+        def issue(self, number):
+            return parent
+        def add_labels(self, number, values):
+            pass
+        def remove_label(self, number, label):
+            pass
+
+    class Runtime:
+        def __init__(self):
+            self.events = []
+        def event(self, kind, **payload):
+            self.events.append((kind, payload))
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.gh = orch.DEFAULT_CONFIG, ledger, GH()
+    team.runtime, team.trusted = Runtime(), {"OWNER"}
+    team.sync_runtime_checkpoint = lambda: None
+    team.kick_trello_reconciliation = lambda: None
+
+    assert team.reconcile_parent_finalizers() is True
+    phase = ledger.phase_task(154, "PRODUCTION_VALIDATION")
+    assert phase is not None
+    assert phase["target_sha"] == parent_sha
+    assert [kind for kind, _ in team.runtime.events] == [
+        "POST_MERGE_PHASE_ENQUEUED", "PARENT_ACCEPTANCE_CONTINUED"
+    ]
+
+
+def test_cycle_blocks_only_invalid_acceptance_evidence_task(tmp_path):
+    root, evidence = trusted_artifact(
+        tmp_path, issue=154, requirement="RUNTIME_PROOF",
+        phase="PRODUCTION_VALIDATION", sha="a" * 40,
+    )
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3", root)
+    task_id = ledger.create_task(
+        issue_number=154, task_type="PRODUCTION_VALIDATION", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", task_class="ROUTINE", status="PENDING",
+        lifecycle_phase="PRODUCTION_VALIDATION", target_sha=None,
+        evidence={"requirement": "RUNTIME_PROOF", "result": evidence},
+    )
+    issue = {
+        "number": 154, "state": "open", "author_association": "OWNER",
+        "body": "AI_TEAM_COMPLETION_REQUIRES=RUNTIME_PROOF", "labels": [],
+    }
+
+    class GH:
+        def issue(self, number):
+            return issue
+        def add_labels(self, number, values):
+            pass
+        def remove_label(self, number, label):
+            pass
+        def comment(self, number, body):
+            pass
+
+    class Runtime:
+        def event(self, *args, **kwargs):
+            pass
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.gh = orch.DEFAULT_CONFIG, ledger, GH()
+    team.runtime, team.trusted = Runtime(), {"OWNER"}
+    team.reap_stale_child = lambda task: None
+    team.migrate_legacy_remediation = lambda: None
+    team.reconcile_completion_rollout = lambda: None
+    team.reconcile_handoffs = lambda: None
+    team.reconcile_parent_finalizers = lambda: False
+    team.sync_runtime_checkpoint = lambda: None
+    team.kick_trello_reconciliation = lambda: None
+
+    team.cycle()
+
+    task = ledger.get(task_id)
+    assert task["status"] == "BLOCKED"
+    assert "MISSING_EXACT_MERGED_SHA" in task["last_error"]
+
+
 def test_untrusted_or_noncanonical_child_cannot_finalize_parent(tmp_path):
     ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
     ledger.create_task(
