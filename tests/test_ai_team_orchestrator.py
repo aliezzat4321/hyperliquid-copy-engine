@@ -985,6 +985,7 @@ def test_recovery_creates_deduped_scoped_assignment_and_keeps_queue_free(tmp_pat
     class Runtime:
         def __init__(self):
             self.events = []
+
         def event(self, kind, **payload):
             self.events.append((kind, payload))
 
@@ -1006,6 +1007,50 @@ def test_recovery_creates_deduped_scoped_assignment_and_keeps_queue_free(tmp_pat
     assert context["target_sha"] == "a" * 40
     assert ledger.due()["id"] == recoveries[0]["id"]
     assert team.runtime.events[0][1]["unrelated_work_continuing"] is True
+
+
+def test_failed_recovery_child_advances_bounded_chain_then_dead_letters(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    parent_id = ledger.create_task(
+        issue_number=99, task_type="BUILD", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", task_class="ROUTINE", status="BLOCKED",
+        target_sha="a" * 40, attempt=1,
+        last_error="runner process exited unexpectedly",
+    )
+
+    class Runtime:
+        def __init__(self):
+            self.events = []
+
+        def event(self, kind, **payload):
+            self.events.append((kind, payload))
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.runtime = orch.DEFAULT_CONFIG, ledger, Runtime()
+
+    failed_id = parent_id
+    for expected_attempt in range(1, 4):
+        team.reconcile_recovery()
+        recovery = ledger.db.execute(
+            "SELECT * FROM tasks WHERE parent_id=?", (failed_id,)
+        ).fetchone()
+        assert recovery is not None
+        assert int(recovery["recovery_attempt"]) == expected_attempt
+        failed_id = recovery["id"]
+        ledger.update(
+            failed_id, status="BLOCKED",
+            last_error=f"runner worktree cleanup failed attempt {expected_attempt}",
+        )
+
+    team.reconcile_recovery()
+    assert ledger.get(failed_id)["status"] == "QUARANTINED"
+    dead_letters = [
+        payload for kind, payload in team.runtime.events
+        if kind == "RECOVERY_DEAD_LETTERED"
+    ]
+    assert len(dead_letters) == 1
+    assert dead_letters[0]["assignment_id"] == failed_id
+    assert dead_letters[0]["recovery_attempt"] == 3
 
 
 def test_recovery_waits_have_exact_time_and_owner_action_is_not_rewritten(tmp_path):

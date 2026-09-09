@@ -704,11 +704,12 @@ class Ledger:
         ).fetchone()
         return int(row["n"] if row else 0)
 
-    def active_recovery(self, fingerprint: str) -> sqlite3.Row | None:
+    def active_recovery(self, fingerprint: str, parent_id: str) -> sqlite3.Row | None:
+        """Return an active attempt spawned for this exact failed assignment."""
         return self.db.execute(
-            "SELECT * FROM tasks WHERE recovery_fingerprint=? AND parent_id IS NOT NULL "
+            "SELECT * FROM tasks WHERE recovery_fingerprint=? AND parent_id=? "
             "AND status IN ('RECOVERY_PENDING','PENDING','RUNNING','RETRY','WAITING_CI') "
-            "ORDER BY created_at DESC LIMIT 1", (fingerprint,),
+            "ORDER BY created_at DESC LIMIT 1", (fingerprint, parent_id),
         ).fetchone()
 
     def pending_owner_action(self) -> str | None:
@@ -1679,7 +1680,7 @@ class Orchestrator:
                                    recovery_fingerprint=fingerprint,
                                    next_action="resume when the named dependency is proven")
                 continue
-            if self.ledger.active_recovery(fingerprint):
+            if self.ledger.active_recovery(fingerprint, str(task["id"])):
                 self.ledger.update(task["id"], status="RECOVERY_PENDING",
                                    failure_class=failure_class,
                                    recovery_fingerprint=fingerprint)
