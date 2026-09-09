@@ -1794,12 +1794,30 @@ class Orchestrator:
                 if issue_number is not None
                 else None
             )
-            if not reconciled or str(exc) != "MISSING_COMPLETION_CONTRACT":
+            if str(exc) != "MISSING_COMPLETION_CONTRACT":
                 raise
-            if any(item not in COMPLETION_REQUIREMENTS for item in reconciled):
-                raise ValueError("INVALID_RECONCILED_COMPLETION_CONTRACT") from exc
-            return {"version": 1, "close_on_merge": False,
-                    "requirements": list(reconciled), "source": "rollout_reconciliation"}
+            if reconciled:
+                if any(item not in COMPLETION_REQUIREMENTS for item in reconciled):
+                    raise ValueError("INVALID_RECONCILED_COMPLETION_CONTRACT") from exc
+                return {"version": 1, "close_on_merge": False,
+                        "requirements": list(reconciled), "source": "rollout_reconciliation"}
+            # A legacy/malformed trusted issue must never crash the global scheduler.
+            # Fail closed: require deterministic runtime proof before completion, while
+            # allowing unrelated tasks and lane collectors to continue. The owner can
+            # later replace this fallback with explicit canonical completion metadata.
+            self.runtime.event(
+                "MISSING_COMPLETION_CONTRACT_FAIL_CLOSED",
+                issue=issue_number,
+                status="RECOVERY_PENDING",
+                failure_class="MISSING_COMPLETION_CONTRACT",
+                unrelated_work_continuing=True,
+            )
+            return {
+                "version": 1,
+                "close_on_merge": False,
+                "requirements": ["RUNTIME_PROOF"],
+                "source": "safe_fail_closed_missing_contract",
+            }
 
     def reconcile_completion_rollout(self) -> None:
         """Resume named reopened incidents from merged checkpoints, idempotently."""
