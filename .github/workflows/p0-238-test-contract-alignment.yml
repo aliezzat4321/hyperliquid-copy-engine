@@ -1,0 +1,38 @@
+name: p0-238-test-contract-alignment
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/p0-238-test-contract-alignment.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  align:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Align stale internal-failure regression with #238 invariant
+        shell: bash
+        run: |
+          set -euo pipefail
+          git pull --ff-only origin main
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('tests/test_ai_team_orchestrator.py')
+          s=p.read_text()
+          old='''    team.block(ledger.get(task_id), "terminal failure")\n    assert {x["name"] for x in issue["labels"]} == {labels["blocked"]}\n    assert team.promote_queued_issue() is False\n'''
+          new='''    team.block(ledger.get(task_id), "terminal failure")\n    task = ledger.get(task_id)\n    assert task["status"] == "STALE"\n    assert task["failure_class"] != "OWNER_AUTH_REQUIRED"\n    assert {x["name"] for x in issue["labels"]} == {labels["pending"]}\n    assert team.promote_queued_issue() is False\n'''
+          if old not in s: raise SystemExit('expected regression block missing')
+          p.write_text(s.replace(old,new,1))
+          PY
+          git diff --check
+          git config user.name 'AI Team Supervisor'
+          git config user.email 'ai-team@localhost'
+          git add tests/test_ai_team_orchestrator.py
+          git commit -m 'P0 #238: align internal quarantine regression contract'
+          git push origin HEAD:main
