@@ -133,6 +133,10 @@ def _current_step(task: dict[str, Any]) -> str:
         "BLOCKED": f"{task_type} blocked",
         "DONE": f"{task_type} complete",
         "STALE": f"{task_type} stale; replacement assignment required",
+        "RECOVERY_PENDING": f"{task_type} awaiting scoped recovery",
+        "QUARANTINED": f"{task_type} recovery dead-lettered",
+        "WAITING_DEPENDENCY": f"{task_type} waiting for named dependency",
+        "WAITING_EVIDENCE_WINDOW": f"{task_type} waiting for prospective evidence window",
     }.get(status, f"{task_type} status {status.lower()}")
 
 
@@ -233,6 +237,11 @@ class RuntimeLedgerFiles:
             "current_step": _current_step(task),
             "next_step": _next_step(task),
             "updated_at": task.get("updated_at"),
+            "failure_class": task.get("failure_class"),
+            "recovery_fingerprint": task.get("recovery_fingerprint"),
+            "recovery_attempt": task.get("recovery_attempt"),
+            "last_progress": task.get("last_progress_at") or task.get("updated_at"),
+            "next_action": task.get("next_action") or _next_step(task),
             "issue_url": f"https://github.com/{self.repository}/issues/{task.get('issue_number')}",
             "pr_url": (
                 f"https://github.com/{self.repository}/pull/{task.get('pr_number')}"
@@ -483,6 +492,27 @@ class RuntimeLedgerFiles:
             last_ok = db.execute(
                 "SELECT ended_at FROM runs WHERE exit_code=0 ORDER BY id DESC LIMIT 1"
             ).fetchone()
+            stopped = [r for r in rows if str(r.get("status")) in {
+                "BLOCKED", "STALE", "QUARANTINED", "RECOVERY_PENDING",
+                "WAITING_DEPENDENCY", "WAITING_EVIDENCE_WINDOW",
+            }]
+            by_class: dict[str, int] = {}
+            for row in stopped:
+                klass = str(row.get("failure_class") or "UNCLASSIFIED")
+                by_class[klass] = by_class.get(klass, 0) + 1
+            recoveries = [r for r in rows if r.get("recovery_fingerprint") and
+                          r.get("parent_id") and r.get("status") in
+                          {"RECOVERY_PENDING", "PENDING", "RUNNING", "RETRY", "WAITING_CI"}]
+            oldest = min((str(r.get("updated_at")) for r in stopped), default=None)
+            oldest_age_seconds = None
+            if oldest:
+                try:
+                    observed = dt.datetime.fromisoformat(oldest.replace("Z", "+00:00"))
+                    oldest_age_seconds = max(0, int(
+                        (dt.datetime.now(dt.timezone.utc) - observed).total_seconds()
+                    ))
+                except ValueError:
+                    pass
         payload = {
             "version": 1,
             "repository": self.repository,
@@ -493,6 +523,12 @@ class RuntimeLedgerFiles:
             "last_successful_run": last_ok["ended_at"] if last_ok else None,
             "last_material_events": self.last_events(5),
             "safety": {"real_trading": "NO", "polymarket_scope": "DENIED"},
+            "recovery": {
+                "blocked_count_by_class": by_class, "oldest_blocked_at": oldest,
+                "oldest_blocked_age_seconds": oldest_age_seconds,
+                "active_assignment": self._task_view(recoveries[0]) if recoveries else None,
+                "unrelated_work_continuing": bool(active),
+            },
         }
         if payload["latest_run"]:
             for key in ("result", "error"):
@@ -526,6 +562,7 @@ class RuntimeLedgerFiles:
             "latest_review": current.get("latest_review"),
             "last_successful_run": current.get("last_successful_run"),
             "pending_owner_action": pending_owner_action,
+            "recovery": current.get("recovery"),
             "last_5_material_events": current.get("last_material_events", [])[-5:],
         }
         # Keep the GitHub checkpoint compact and stable. Drop low-value fields before
@@ -552,6 +589,10 @@ class RuntimeLedgerFiles:
                 "current_step",
                 "next_step",
                 "updated_at",
+                "failure_class",
+                "recovery_fingerprint",
+                "recovery_attempt",
+                "last_progress",
             )
             return {k: task.get(k) for k in keep if task.get(k) not in (None, "", [])}
 

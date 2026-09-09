@@ -956,6 +956,100 @@ def test_terminal_block_releases_worker_marker():
     assert "systemd_unit=None" in block
 
 
+@pytest.mark.parametrize(("task_type", "error", "expected"), [
+    ("BUILD", "unsafe changed path .github/workflows/x.yml", "PROTECTED_PATH_ATTEMPT"),
+    ("BUILD", "MISSING_COMPLETION_CONTRACT", "MISSING_COMPLETION_CONTRACT"),
+    ("REVIEW", "review FAIL", "REVIEW_FAILURE"),
+    ("BUILD", "CI check failed: lint", "CI_FAILURE"),
+    ("BUILD", "runner process exited", "RUNNER_FAILURE"),
+    ("DEPLOY", "service failed preflight", "SERVICE/DEPLOYMENT_FAILURE"),
+    ("RESEARCH", "provider rate limit quota", "PROVIDER/RATE_LIMIT_WAIT"),
+    ("BUILD", "dependency #10 incomplete", "DEPENDENCY_WAIT"),
+    ("RESEARCH", "future prospective evidence window", "EVIDENCE_WINDOW_WAIT"),
+    ("TERMINAL", "unexpected internal state", "UNKNOWN_INTERNAL"),
+    ("TERMINAL", "OWNER_AUTH_REQUIRED: capital permission", "OWNER_AUTH_REQUIRED"),
+])
+def test_recovery_failure_classification(task_type, error, expected):
+    assert orch.classify_recovery_failure({"task_type": task_type, "last_error": error}) == expected
+
+
+def test_recovery_creates_deduped_scoped_assignment_and_keeps_queue_free(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    parent_id = ledger.create_task(
+        issue_number=93, task_type="BUILD", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", task_class="ROUTINE", status="BLOCKED",
+        target_sha="a" * 40, attempt=2,
+        last_error="unsafe changed path .github/workflows/proof.yml",
+    )
+
+    class Runtime:
+        def __init__(self):
+            self.events = []
+        def event(self, kind, **payload):
+            self.events.append((kind, payload))
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.runtime = orch.DEFAULT_CONFIG, ledger, Runtime()
+    team.reconcile_recovery()
+    team.reconcile_recovery()
+
+    parent = ledger.get(parent_id)
+    recoveries = ledger.db.execute(
+        "SELECT * FROM tasks WHERE parent_id=?", (parent_id,)
+    ).fetchall()
+    assert parent["status"] == "RECOVERY_PENDING"
+    assert parent["failure_class"] == "PROTECTED_PATH_ATTEMPT"
+    assert len(recoveries) == 1
+    context = json.loads(recoveries[0]["evidence_json"])["recovery_context"]
+    assert context["failed_assignment"] == parent_id
+    assert context["previous_attempt"] == 2
+    assert context["target_sha"] == "a" * 40
+    assert ledger.due()["id"] == recoveries[0]["id"]
+    assert team.runtime.events[0][1]["unrelated_work_continuing"] is True
+
+
+def test_recovery_waits_have_exact_time_and_owner_action_is_not_rewritten(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    rate_id = ledger.create_task(
+        issue_number=1, task_type="RESEARCH", agent="CLAUDE", model_class="OPUS",
+        status="BLOCKED", last_error="provider rate limit quota",
+        retry_at="2030-01-01T00:00:00Z",
+    )
+    owner_id = ledger.create_task(
+        issue_number=2, task_type="TERMINAL", agent="MANAGER", model_class="NONE",
+        status="BLOCKED", last_error="OWNER_AUTH_REQUIRED: explicit approval",
+    )
+
+    class Runtime:
+        def event(self, *args, **kwargs):
+            pass
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.runtime = orch.DEFAULT_CONFIG, ledger, Runtime()
+    team.reconcile_recovery()
+    assert ledger.get(rate_id)["status"] == "WAITING_RATE_LIMIT"
+    assert ledger.get(rate_id)["retry_at"] == "2030-01-01T00:00:00Z"
+    assert ledger.get(owner_id)["status"] == "BLOCKED"
+    assert ledger.get(owner_id)["failure_class"] == "OWNER_AUTH_REQUIRED"
+
+
+def test_runtime_projection_exposes_recovery_state(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    ledger.create_task(
+        issue_number=223, task_type="RECOVERY", agent="TRUSTED_MANAGER",
+        model_class="NONE", status="RECOVERY_PENDING",
+        parent_id="failed-parent",
+        failure_class="MISSING_COMPLETION_CONTRACT", recovery_fingerprint="f" * 64,
+        next_action="reconcile canonical rollout map",
+    )
+    runtime = orch.RuntimeLedgerFiles(tmp_path / "runtime", tmp_path / "ledger.sqlite3",
+                                      orch.REPO, 130)
+    recovery = runtime.project_current()["recovery"]
+    assert recovery["blocked_count_by_class"] == {"MISSING_COMPLETION_CONTRACT": 1}
+    assert recovery["active_assignment"]["recovery_fingerprint"] == "f" * 64
+    assert recovery["active_assignment"]["next_action"] == "reconcile canonical rollout map"
+
+
 def test_queue_metadata_is_explicit_and_strict():
     assert orch.queue_metadata("AI_TEAM_QUEUE_PRIORITY=1") is None
     assert orch.queue_metadata(
