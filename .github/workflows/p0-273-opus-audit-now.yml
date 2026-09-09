@@ -10,6 +10,10 @@ permissions:
   contents: read
   issues: write
 
+concurrency:
+  group: p0-273-opus-audit
+  cancel-in-progress: false
+
 jobs:
   opus-audit:
     runs-on: self-hosted
