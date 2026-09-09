@@ -116,10 +116,12 @@ def _verified_report(path: Path) -> dict[str, str] | None:
     }
 
 
-def _collect_attestations(reports_dir: Path) -> dict[str, dict[str, str]]:
+def _collect_attestations(
+    reports_dir: Path,
+) -> tuple[dict[str, dict[str, str]], list[dict[str, Any]]]:
     by_identity: dict[str, list[dict[str, str]]] = {}
     if not reports_dir.exists():
-        return {}
+        return {}, []
     for path in sorted(reports_dir.glob("*/wallet_identification_*.json")):
         attestation = _verified_report(path)
         if attestation is None:
@@ -127,17 +129,23 @@ def _collect_attestations(reports_dir: Path) -> dict[str, dict[str, str]]:
         by_identity.setdefault(attestation["portfolio_id"], []).append(attestation)
 
     output: dict[str, dict[str, str]] = {}
+    conflicts: list[dict[str, Any]] = []
     for identity, rows in sorted(by_identity.items()):
-        wallets = {row["wallet"] for row in rows}
+        wallets = sorted({row["wallet"] for row in rows})
         if len(wallets) != 1:
-            # Contradictory proofs for one Invo identity invalidate the full
-            # publication because we cannot know which address owns that identity.
-            raise ValueError(
-                f"conflicting verified Hyperliquid wallets for Invo portfolio {identity}: "
-                + ", ".join(sorted(wallets))
+            # Contradictory proofs for one Invo identity fail closed for that identity
+            # only. Quarantine it and continue publishing unrelated verified identities.
+            conflicts.append(
+                {
+                    "portfolio_ids": [identity],
+                    "wallets": wallets,
+                    "status": "QUARANTINED_CONFLICTING_VERIFIED_PROOFS",
+                    "proof_reports": [row["proof_report"] for row in rows],
+                }
             )
+            continue
         output[identity] = rows[-1]
-    return output
+    return output, conflicts
 
 
 def publish_durable_verified_identities(*, state_dir: Path) -> dict[str, Any]:
@@ -148,7 +156,7 @@ def publish_durable_verified_identities(*, state_dir: Path) -> dict[str, Any]:
     # Any malformed queue/report set must revoke the public view before failing.
     _write_atomic(identities_path, _empty_publication())
     queue = _load_queue(queue_path)
-    attestations = _collect_attestations(reports_dir)
+    attestations, same_identity_conflicts = _collect_attestations(reports_dir)
 
     # Only current queue identities participate in cross-identity uniqueness.
     # Historical/disappeared identities must not freeze unrelated current wallets.
@@ -161,8 +169,12 @@ def publish_durable_verified_identities(*, state_dir: Path) -> dict[str, Any]:
     for portfolio_id, proof in selected.items():
         wallet_owners.setdefault(proof["wallet"], []).append(portfolio_id)
 
-    conflicting_ids: set[str] = set()
-    conflicts: list[dict[str, Any]] = []
+    conflicting_ids: set[str] = {
+        str(conflict["portfolio_ids"][0])
+        for conflict in same_identity_conflicts
+        if conflict.get("portfolio_ids")
+    }
+    conflicts: list[dict[str, Any]] = list(same_identity_conflicts)
     for wallet, owners in sorted(wallet_owners.items()):
         if len(owners) <= 1:
             continue
@@ -201,6 +213,6 @@ def publish_durable_verified_identities(*, state_dir: Path) -> dict[str, Any]:
     publication["identities"] = identities
     publication["identity_conflicts"] = conflicts
     publication["quarantined_identity_count"] = len(conflicting_ids)
-    publication["attestation_reports_seen"] = len(attestations)
+    publication["attestation_reports_seen"] = len(attestations) + len(same_identity_conflicts)
     _write_atomic(identities_path, publication)
     return publication
