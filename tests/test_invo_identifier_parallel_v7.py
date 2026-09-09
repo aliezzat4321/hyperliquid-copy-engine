@@ -202,6 +202,13 @@ def test_durable_wrapper_publishes_after_partial_portfolio_failure(
     publication_calls = 0
 
     async def fake_run_once(_: Namespace) -> dict[str, object]:
+        running = json.loads(
+            (tmp_path / "lane2_measurements" / "latest.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert running["status"] == "RUNNING"
+        assert not (tmp_path / "lane2_measurements" / "runs.ndjson").exists()
         raise invo_identifier_job.PortfolioResolutionBatchError(
             "1 of 4 Invo wallet identification attempts failed",
             summary={
@@ -239,9 +246,45 @@ def test_durable_wrapper_publishes_after_partial_portfolio_failure(
         (tmp_path / "lane2_measurements" / "latest.json").read_text(encoding="utf-8")
     )
     assert latest["schema"] == "hlcopy-lane2-resolution-measurement/v1"
+    assert latest["status"] == "COMPLETED"
+    assert latest["run_id"]
     assert latest["identifier"]["partial_failure"] is True
     assert latest["real_trading_enabled"] is False
     history = (tmp_path / "lane2_measurements" / "runs.ndjson").read_text(
         encoding="utf-8"
     )
     assert len(history.splitlines()) == 1
+
+
+def test_durable_wrapper_records_runtime_blocker_before_reraising(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    args = Namespace(state_dir=tmp_path)
+
+    async def broken_run_once(_: Namespace) -> dict[str, object]:
+        raise ValueError("resolution queue is malformed")
+
+    monkeypatch.setattr(invo_identifier_durable_job, "_parse_args", lambda: args)
+    monkeypatch.setattr(invo_identifier_durable_job, "run_once", broken_run_once)
+
+    try:
+        asyncio.run(invo_identifier_durable_job._main())
+    except ValueError as exc:
+        assert str(exc) == "resolution queue is malformed"
+    else:
+        raise AssertionError("fatal resolver errors must remain fatal")
+
+    latest = json.loads(
+        (tmp_path / "lane2_measurements" / "latest.json").read_text(encoding="utf-8")
+    )
+    assert latest["status"] == "FAILED"
+    assert latest["runtime_blocker"] == {
+        "type": "ValueError",
+        "message": "resolution queue is malformed",
+    }
+    assert latest["real_trading_enabled"] is False
+    history = (tmp_path / "lane2_measurements" / "runs.ndjson").read_text(
+        encoding="utf-8"
+    )
+    assert json.loads(history)["run_id"] == latest["run_id"]
