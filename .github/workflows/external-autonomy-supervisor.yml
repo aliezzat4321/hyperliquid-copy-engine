@@ -1,0 +1,128 @@
+name: external-autonomy-supervisor
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/external-autonomy-supervisor.yml
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+env:
+  STATUS_ISSUE: '130'
+  STALE_SECONDS: '360'
+
+jobs:
+  supervise:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 12
+    steps:
+      - name: Check canonical runtime freshness
+        id: freshness
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os, urllib.request
+          from datetime import datetime, timezone
+
+          repo = os.environ['REPO']
+          issue = os.environ['STATUS_ISSUE']
+          token = os.environ['GH_TOKEN']
+          req = urllib.request.Request(
+              f'https://api.github.com/repos/{repo}/issues/{issue}',
+              headers={
+                  'Authorization': f'Bearer {token}',
+                  'Accept': 'application/vnd.github+json',
+                  'X-GitHub-Api-Version': '2022-11-28',
+              },
+          )
+          with urllib.request.urlopen(req, timeout=20) as r:
+              data = json.load(r)
+          updated = datetime.fromisoformat(data['updated_at'].replace('Z', '+00:00'))
+          age = int((datetime.now(timezone.utc) - updated).total_seconds())
+          stale = age > int(os.environ['STALE_SECONDS'])
+          print(f'age_seconds={age}')
+          print(f'stale={str(stale).lower()}')
+          print(f'updated_at={data["updated_at"]}')
+          print(f'#130 updated_at={data["updated_at"]} age_seconds={age} stale={stale}')
+          PY
+
+      - name: Recover stalled control plane
+        if: steps.freshness.outputs.stale == 'true' || github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ORCH=/opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py
+          if [ ! -x "$ORCH" ]; then
+            echo "P0 supervisor preflight failed: orchestrator missing/not executable: $ORCH" >&2
+            exit 2
+          fi
+
+          # First try bounded reconciliation without destructive intervention.
+          recovered=0
+          for i in 1 2 3; do
+            if sudo timeout 90 "$ORCH" --once; then
+              recovered=1
+              break
+            fi
+            sleep 3
+          done
+
+          # If the scheduler itself is wedged, terminate only orchestrator processes,
+          # never agent worktrees/systemd agent units, then retry bounded reconciliation.
+          if [ "$recovered" -ne 1 ]; then
+            sudo pkill -TERM -f '/opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py' || true
+            sleep 5
+            sudo pkill -KILL -f '/opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py' || true
+            sleep 2
+            for i in 1 2 3 4; do
+              sudo timeout 90 "$ORCH" --once && recovered=1 && break
+              sleep 3
+            done
+          fi
+
+          sudo timeout 30 "$ORCH" --status || true
+          if [ "$recovered" -ne 1 ]; then
+            echo 'P0 external supervisor could not restore one successful orchestrator cycle' >&2
+            exit 3
+          fi
+
+      - name: Re-check #130 freshness after recovery
+        if: steps.freshness.outputs.stale == 'true' || github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          sleep 5
+          python3 - <<'PY'
+          import json, os, urllib.request
+          from datetime import datetime, timezone
+
+          req = urllib.request.Request(
+              f'https://api.github.com/repos/{os.environ["REPO"]}/issues/{os.environ["STATUS_ISSUE"]}',
+              headers={
+                  'Authorization': f'Bearer {os.environ["GH_TOKEN"]}',
+                  'Accept': 'application/vnd.github+json',
+                  'X-GitHub-Api-Version': '2022-11-28',
+              },
+          )
+          with urllib.request.urlopen(req, timeout=20) as r:
+              data = json.load(r)
+          updated = datetime.fromisoformat(data['updated_at'].replace('Z', '+00:00'))
+          age = int((datetime.now(timezone.utc) - updated).total_seconds())
+          print(f'#130 post-recovery updated_at={data["updated_at"]} age_seconds={age}')
+          if age > int(os.environ['STALE_SECONDS']):
+              raise SystemExit('P0: #130 is still stale after external recovery')
+          PY
