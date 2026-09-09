@@ -1,3 +1,3 @@
 AUTONOMOUS_PASS_DRILL=OK
 
-This is a harmless orchestration proof only.
+This marker is a harmless orchestration proof only.
