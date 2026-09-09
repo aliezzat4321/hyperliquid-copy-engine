@@ -1,0 +1,39 @@
+name: p0-checkpoint-auth-diagnostic
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p0-checkpoint-auth-diagnostic.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 8
+    steps:
+      - name: Inspect trusted root GitHub path and checkpoint failure
+        shell: bash
+        run: |
+          set +e
+          echo '=== root env ==='
+          sudo -H sh -c 'printf "HOME=%s\n" "$HOME"; command -v gh; gh --version | head -1'
+          echo '=== root gh auth ==='
+          sudo -H gh auth status 2>&1
+          echo "gh_auth_rc=$?"
+          echo '=== root issue read ==='
+          sudo -H gh api repos/aliezzat4321/hyperliquid-copy-engine/issues/130 --jq '.updated_at' 2>&1
+          echo "gh_issue_rc=$?"
+          echo '=== checkpoint ==='
+          sudo -H /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py --checkpoint 2>&1
+          echo "checkpoint_rc=$?"
+          echo '=== runtime mirror failures ==='
+          sudo grep -R 'CHECKPOINT_MIRROR_FAILED' /var/lib/hyperliquid-ai-team 2>/dev/null | tail -n 20 || true
+          echo '=== supervisor log ==='
+          sudo tail -n 120 /var/lib/hyperliquid-ai-team/external-supervisor/supervisor.log 2>&1 || true
+          echo '=== service journal ==='
+          sudo journalctl -u hyperliquid-ai-external-supervisor.service -n 100 --no-pager 2>&1 || true
+          exit 0
