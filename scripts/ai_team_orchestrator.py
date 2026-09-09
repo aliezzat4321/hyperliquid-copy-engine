@@ -1943,6 +1943,9 @@ class Orchestrator:
                 active_priorities=priorities,
                 pending_owner_action=pending_owner_action,
             )
+            # #130 freshness is a control-plane heartbeat. Force a material body delta
+            # on every checkpoint even when the semantic runtime state is unchanged.
+            body = body.rstrip() + f"\n<!-- AI_TEAM_HEARTBEAT={utcnow()} -->\n"
             status_issue = self.gh.issue(RUNTIME_STATUS_ISSUE)
             if str(status_issue.get("body") or "") != body:
                 self.gh.api(
@@ -2687,11 +2690,25 @@ class Orchestrator:
                         str(remediation["remediation_id"]), status="TERMINAL",
                         completion_evidence="completed code action produced no progress",
                     )
-                self.block(current, "unchanged CODE_CHANGE fingerprint after one completed action")
+                quarantine_error = (
+                    "unchanged CODE_CHANGE fingerprint after one completed action; "
+                    "task-local quarantine"
+                )
+                self.ledger.update(
+                    current["id"], status="STALE", retry_at=None, systemd_unit=None,
+                    last_error=quarantine_error, failure_class="CODE_CHANGE",
+                    next_action="recovery scheduler must reroute or dead-letter this fingerprint",
+                )
+                self.runtime.event(
+                    "TASK_QUARANTINED", assignment_id=current["id"],
+                    issue=current["issue_number"], pr=current["pr_number"],
+                    failure_class="CODE_CHANGE", status="QUARANTINED",
+                    unrelated_work_continuing=True,
+                )
                 self.finish_runtime_run(
                     run_id, str(task["id"]), stdout=cp.stdout, stderr=cp.stderr,
                     exit_code=1, session_id=session_id, usage=usage, result=result,
-                    error=error, status="BLOCKED",
+                    error=quarantine_error, status="STALE",
                 )
                 return
             fail_closed_markers = (
