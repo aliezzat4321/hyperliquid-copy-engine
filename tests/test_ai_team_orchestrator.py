@@ -1537,5 +1537,8 @@ def test_newly_blocked_task_clears_queue_state_and_is_not_reclaimed(tmp_path):
     team.runtime, team.trusted = Runtime(), {"OWNER"}
     team.sync_runtime_checkpoint = lambda: None
     team.block(ledger.get(task_id), "terminal failure")
-    assert {x["name"] for x in issue["labels"]} == {labels["blocked"]}
+    task = ledger.get(task_id)
+    assert task["status"] == "STALE"
+    assert task["failure_class"] != "OWNER_AUTH_REQUIRED"
+    assert {x["name"] for x in issue["labels"]} == {labels["pending"]}
     assert team.promote_queued_issue() is False
