@@ -57,6 +57,42 @@ jobs:
           print(f'#130 updated_at={data["updated_at"]} age_seconds={age} stale={stale}')
           PY
 
+      - name: Install fail-forward control-plane containment
+        if: steps.freshness.outputs.stale == 'true' || github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ORCH=/opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py
+          if [ ! -f "$ORCH" ]; then
+            echo "P0 supervisor preflight failed: orchestrator missing: $ORCH" >&2
+            exit 2
+          fi
+          sudo python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('/opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py')
+          text = path.read_text()
+          marker = 'CONTROL_PLANE_STEP_QUARANTINED'
+          if marker in text:
+              print('fail-forward containment already installed')
+              raise SystemExit(0)
+
+          old = '''        self.migrate_legacy_remediation()\n        self.reconcile_recovery()\n        self.reconcile_completion_rollout()\n        self.reconcile_handoffs()\n        if self.ledger.due() is not None:\n            self.reconcile_parent_finalizers()\n        self.sync_runtime_checkpoint()\n        self.kick_trello_reconciliation()\n        task = self.ledger.due()\n        if task is None:\n            if not self.claim_ready_issue():\n                self.reconcile_parent_finalizers()\n                if not self.claim_ready_issue():\n                    self.promote_queued_issue()\n            task = self.ledger.due()\n'''
+          new = '''        def _safe_control_plane_step(name: str, fn):\n            try:\n                return fn()\n            except Exception as exc:\n                self.runtime.event(\n                    "CONTROL_PLANE_STEP_QUARANTINED", step=name,\n                    error=f"{type(exc).__name__}: {exc}", status="QUARANTINED",\n                )\n                return None\n\n        _safe_control_plane_step("migrate_legacy_remediation", self.migrate_legacy_remediation)\n        _safe_control_plane_step("reconcile_recovery", self.reconcile_recovery)\n        _safe_control_plane_step("reconcile_completion_rollout", self.reconcile_completion_rollout)\n        _safe_control_plane_step("reconcile_handoffs", self.reconcile_handoffs)\n        if self.ledger.due() is not None:\n            _safe_control_plane_step("reconcile_parent_finalizers", self.reconcile_parent_finalizers)\n        _safe_control_plane_step("sync_runtime_checkpoint", self.sync_runtime_checkpoint)\n        _safe_control_plane_step("kick_trello_reconciliation", self.kick_trello_reconciliation)\n        task = self.ledger.due()\n        if task is None:\n            claimed = bool(_safe_control_plane_step("claim_ready_issue", self.claim_ready_issue))\n            if not claimed:\n                _safe_control_plane_step("reconcile_parent_finalizers", self.reconcile_parent_finalizers)\n                claimed = bool(_safe_control_plane_step("claim_ready_issue", self.claim_ready_issue))\n                if not claimed:\n                    _safe_control_plane_step("promote_queued_issue", self.promote_queued_issue)\n            task = self.ledger.due()\n'''
+          if old not in text:
+              raise SystemExit('P0 containment refused: expected cycle block not found')
+          text = text.replace(old, new, 1)
+
+          old_dispatch = '''            else:\n                self.block(task, f"unsupported task type {task['task_type']}")\n        finally:\n            self.sync_runtime_checkpoint()\n            self.kick_trello_reconciliation()\n'''
+          new_dispatch = '''            else:\n                self.block(task, f"unsupported task type {task['task_type']}")\n        except ValueError as exc:\n            if str(exc) == "MISSING_COMPLETION_CONTRACT":\n                self.ledger.update(\n                    task["id"], status="STALE", retry_at=None, systemd_unit=None,\n                    last_error="MISSING_COMPLETION_CONTRACT; task-local quarantine",\n                )\n                self.runtime.event(\n                    "TASK_QUARANTINED", assignment_id=task["id"],\n                    issue=task["issue_number"], pr=task["pr_number"],\n                    failure_class="MISSING_COMPLETION_CONTRACT",\n                    status="QUARANTINED",\n                )\n            else:\n                raise\n        finally:\n            self.sync_runtime_checkpoint()\n            self.kick_trello_reconciliation()\n'''
+          if old_dispatch not in text:
+              raise SystemExit('P0 containment refused: expected dispatch block not found')
+          text = text.replace(old_dispatch, new_dispatch, 1)
+          path.write_text(text)
+          path.chmod(0o755)
+          print('installed task-local fail-forward containment')
+          PY
+
       - name: Recover stalled control plane
         if: steps.freshness.outputs.stale == 'true' || github.event_name == 'workflow_dispatch'
         shell: bash
@@ -68,7 +104,6 @@ jobs:
             exit 2
           fi
 
-          # First try bounded reconciliation without destructive intervention.
           recovered=0
           for i in 1 2 3; do
             if sudo timeout 90 "$ORCH" --once; then
@@ -78,8 +113,6 @@ jobs:
             sleep 3
           done
 
-          # If the scheduler itself is wedged, terminate only orchestrator processes,
-          # never agent worktrees/systemd agent units, then retry bounded reconciliation.
           if [ "$recovered" -ne 1 ]; then
             sudo pkill -TERM -f '/opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py' || true
             sleep 5
