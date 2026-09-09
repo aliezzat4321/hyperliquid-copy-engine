@@ -1,0 +1,125 @@
+name: install-external-autonomy-supervisor-timer
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/install-external-autonomy-supervisor-timer.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 10
+    steps:
+      - name: Install host-level supervisor
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo tee /usr/local/sbin/hyperliquid-ai-external-supervisor >/dev/null <<'SH'
+          #!/usr/bin/env bash
+          set -uo pipefail
+
+          ORCH=/opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py
+          LOCK=/run/hyperliquid-ai-team/external-supervisor.lock
+          STATE=/var/lib/hyperliquid-ai-team/external-supervisor
+          mkdir -p "$(dirname "$LOCK")" "$STATE"
+
+          exec 9>"$LOCK"
+          flock -n 9 || exit 0
+
+          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          printf '%s start\n' "$now" >> "$STATE/supervisor.log"
+
+          if [ ! -x "$ORCH" ]; then
+            printf '%s preflight_fail orchestrator_missing\n' "$now" >> "$STATE/supervisor.log"
+            exit 2
+          fi
+
+          # A supervisor tick must never wait indefinitely on the orchestrator.
+          if timeout 90 "$ORCH" --once >>"$STATE/supervisor.log" 2>&1; then
+            date -u +%Y-%m-%dT%H:%M:%SZ > "$STATE/last_success_at"
+            timeout 30 "$ORCH" --status > "$STATE/last_status.txt" 2>&1 || true
+            exit 0
+          fi
+
+          rc=$?
+          printf '%s first_cycle_failed rc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$rc" >> "$STATE/supervisor.log"
+
+          # If the primary orchestrator is wedged, terminate only that process and retry.
+          pkill -TERM -f '/opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py' || true
+          sleep 5
+          pkill -KILL -f '/opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py' || true
+          sleep 2
+
+          if timeout 90 "$ORCH" --once >>"$STATE/supervisor.log" 2>&1; then
+            date -u +%Y-%m-%dT%H:%M:%SZ > "$STATE/last_success_at"
+            printf '%s recovered_after_restart\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$STATE/supervisor.log"
+            timeout 30 "$ORCH" --status > "$STATE/last_status.txt" 2>&1 || true
+            exit 0
+          fi
+
+          rc=$?
+          printf '%s recovery_failed rc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$rc" >> "$STATE/supervisor.log"
+          exit "$rc"
+          SH
+          sudo chmod 0755 /usr/local/sbin/hyperliquid-ai-external-supervisor
+
+          sudo tee /etc/systemd/system/hyperliquid-ai-external-supervisor.service >/dev/null <<'UNIT'
+          [Unit]
+          Description=Hyperliquid AI external autonomy supervisor
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          User=root
+          ExecStart=/usr/local/sbin/hyperliquid-ai-external-supervisor
+          TimeoutStartSec=220
+          Nice=5
+          IOSchedulingClass=best-effort
+          IOSchedulingPriority=6
+          NoNewPrivileges=yes
+          PrivateTmp=yes
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+
+          sudo tee /etc/systemd/system/hyperliquid-ai-external-supervisor.timer >/dev/null <<'UNIT'
+          [Unit]
+          Description=Run Hyperliquid AI external autonomy supervisor every 2 minutes
+
+          [Timer]
+          OnBootSec=45s
+          OnUnitActiveSec=2min
+          AccuracySec=10s
+          Persistent=true
+          Unit=hyperliquid-ai-external-supervisor.service
+
+          [Install]
+          WantedBy=timers.target
+          UNIT
+
+          sudo systemctl daemon-reload
+          sudo systemctl enable --now hyperliquid-ai-external-supervisor.timer
+
+          # Prove installation and execute one immediate recovery tick.
+          sudo systemctl start hyperliquid-ai-external-supervisor.service || true
+          sudo systemctl is-enabled hyperliquid-ai-external-supervisor.timer
+          sudo systemctl is-active hyperliquid-ai-external-supervisor.timer
+          sudo systemctl list-timers hyperliquid-ai-external-supervisor.timer --no-pager
+
+      - name: Verify persistent supervisor state
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x /usr/local/sbin/hyperliquid-ai-external-supervisor
+          sudo systemctl is-enabled --quiet hyperliquid-ai-external-supervisor.timer
+          sudo systemctl is-active --quiet hyperliquid-ai-external-supervisor.timer
+          sudo systemctl show hyperliquid-ai-external-supervisor.timer -p NextElapseUSecRealtime -p LastTriggerUSec --no-pager
+          sudo tail -n 40 /var/lib/hyperliquid-ai-team/external-supervisor/supervisor.log || true
