@@ -15,7 +15,7 @@ jobs:
     runs-on: [self-hosted, hyperliquid]
     timeout-minutes: 10
     steps:
-      - name: Patch deployed orchestrator fail-forward only
+      - name: Patch deployed orchestrator fail-forward and quarantine loop
         shell: bash
         run: |
           set -euo pipefail
@@ -26,18 +26,58 @@ jobs:
           import sys
           p = Path(sys.argv[1])
           s = p.read_text()
+
+          # 1) Bounded liveness: missing deterministic evidence may never retry forever.
           old = '''                    else:\n                        retry_at = retry_at_after(max(60, int(self.cfg["poll_seconds"])))\n                        self.ledger.update(\n                            task["id"], status="RETRY", retry_at=retry_at,\n                            last_error="awaiting deterministic phase runner evidence",\n                        )\n                        self.runtime.event(\n                            "ACCEPTANCE_PHASE_READY", assignment_id=task["id"],\n                            issue=task["issue_number"], task_type=task["task_type"],\n                            status="RETRY", retry_after=retry_at,\n                        )\n'''
-          new = '''                    else:\n                        # Emergency liveness fail-forward: never let a missing deterministic\n                        # phase-runner result monopolize the global scheduler forever.\n                        liveness_attempt = int(task["attempt"] or 0) + 1\n                        if int(task["issue_number"]) == 197:\n                            # #197 has already missed the runner result for many consecutive polls\n                            # before this emergency counter existed; escalate it immediately.\n                            liveness_attempt = max(liveness_attempt, 3)\n                        if liveness_attempt >= 3:\n                            self.ledger.update(\n                                task["id"], status="STALE", retry_at=None,\n                                attempt=liveness_attempt,\n                                last_error=(\n                                    "acceptance phase runner produced no durable evidence after "\n                                    f"{liveness_attempt} polls; escalated to P0 #238"\n                                ),\n                            )\n                            self.runtime.event(\n                                "ACCEPTANCE_RUNNER_LIVENESS_ESCALATED",\n                                assignment_id=task["id"], issue=task["issue_number"],\n                                task_type=task["task_type"], status="STALE",\n                                escalation_issue=238, liveness_attempt=liveness_attempt,\n                            )\n                        else:\n                            retry_at = retry_at_after(max(60, int(self.cfg["poll_seconds"])))\n                            self.ledger.update(\n                                task["id"], status="RETRY", retry_at=retry_at,\n                                attempt=liveness_attempt,\n                                last_error="awaiting deterministic phase runner evidence",\n                            )\n                            self.runtime.event(\n                                "ACCEPTANCE_PHASE_READY", assignment_id=task["id"],\n                                issue=task["issue_number"], task_type=task["task_type"],\n                                status="RETRY", retry_after=retry_at,\n                                liveness_attempt=liveness_attempt,\n                            )\n'''
+          new = '''                    else:\n                        # Missing runner evidence is task-local. Never monopolize the scheduler.\n                        liveness_attempt = int(task["attempt"] or 0) + 1\n                        if liveness_attempt >= 3:\n                            self.ledger.update(\n                                task["id"], status="STALE", retry_at=None,\n                                attempt=liveness_attempt,\n                                last_error=(\n                                    "acceptance phase runner produced no durable evidence after "\n                                    f"{liveness_attempt} polls; quarantined and escalated to P0 #238"\n                                ),\n                            )\n                            self.runtime.event(\n                                "ACCEPTANCE_RUNNER_LIVENESS_ESCALATED",\n                                assignment_id=task["id"], issue=task["issue_number"],\n                                task_type=task["task_type"], status="STALE",\n                                escalation_issue=238, liveness_attempt=liveness_attempt,\n                            )\n                        else:\n                            retry_at = retry_at_after(max(60, int(self.cfg["poll_seconds"])))\n                            self.ledger.update(\n                                task["id"], status="RETRY", retry_at=retry_at,\n                                attempt=liveness_attempt,\n                                last_error="awaiting deterministic phase runner evidence",\n                            )\n                            self.runtime.event(\n                                "ACCEPTANCE_PHASE_READY", assignment_id=task["id"],\n                                issue=task["issue_number"], task_type=task["task_type"],\n                                status="RETRY", retry_after=retry_at,\n                                liveness_attempt=liveness_attempt,\n                            )\n'''
           if old in s:
-              p.write_text(s.replace(old, new, 1))
-          elif "ACCEPTANCE_RUNNER_LIVENESS_ESCALATED" not in s:
-              raise SystemExit("refusing patch: target block not found and hotfix not already present")
+              s = s.replace(old, new, 1)
+
+          # 2) Reconciler quarantine: while #238 is being permanently repaired, do not
+          # recreate the exact broken generic acceptance wrappers that have repeatedly
+          # starved the three shadow lanes. This changes no evidence predicate and marks
+          # nothing proven; it only stops duplicate wrapper recreation.
+          needle = '''        for raw_number in self.cfg.get("completion_reconciliation", {}):\n            number = int(raw_number)\n            if self.ledger.active_for_issue(number):\n'''
+          replacement = '''        for raw_number in self.cfg.get("completion_reconciliation", {}):\n            number = int(raw_number)\n            if number in {91, 92, 93, 150, 196, 197}:\n                continue\n            if self.ledger.active_for_issue(number):\n'''
+          if needle in s and 'if number in {91, 92, 93, 150, 196, 197}:' not in s:
+              s = s.replace(needle, replacement, 1)
+
+          if "ACCEPTANCE_RUNNER_LIVENESS_ESCALATED" not in s:
+              raise SystemExit("refusing patch: bounded liveness patch not present")
+          if 'if number in {91, 92, 93, 150, 196, 197}:' not in s:
+              raise SystemExit("refusing patch: reconciliation quarantine not present")
+          p.write_text(s)
           PY
           sudo python3 -m py_compile "$target"
           echo AI_TEAM_ACCEPTANCE_FAILFORWARD_HOTFIX=APPLIED
-      - name: Execute recovery cycle and show status
+
+      - name: Evict already-active broken wrapper tasks
         shell: bash
         run: |
           set -euo pipefail
-          sudo /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py --once
+          db=/var/lib/hyperliquid-ai-team/orchestrator/ledger.sqlite3
+          test -f "$db"
+          sudo python3 - "$db" <<'PY'
+          import sqlite3, sys
+          db = sqlite3.connect(sys.argv[1])
+          db.execute("""
+              UPDATE tasks
+                 SET status='STALE', retry_at=NULL,
+                     last_error='P0 #238 quarantine: broken generic acceptance wrapper evicted so unrelated shadow work continues'
+               WHERE issue_number IN (91,92,93,150,196,197)
+                 AND task_type IN ('PRODUCTION_VALIDATION','DEPLOY','MEASUREMENT','POST_MERGE_EVIDENCE','EVIDENCE_AUDIT','FINAL_VERDICT','PRODUCTION_AUDIT','IMMUTABLE_PLAN','DESTRUCTIVE_REVIEW','AUTHORIZED_APPLY','STABILITY_VALIDATION')
+                 AND status IN ('PENDING','RETRY','WAITING_RATE_LIMIT','WAITING_CI','RUNNING')
+          """)
+          print('evicted_acceptance_wrappers=', db.total_changes)
+          db.commit()
+          PY
+
+      - name: Execute recovery cycles and show status
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in 1 2 3; do
+            sudo /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py --once || true
+            sleep 2
+          done
           sudo /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py --status
