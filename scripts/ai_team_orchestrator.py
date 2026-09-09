@@ -669,6 +669,21 @@ def parse_task_class(body: str) -> tuple[str, str | None]:
     return task_class, e.group(1) if e else None
 
 
+def is_superseded_issue(issue: dict[str, Any]) -> bool:
+    """Treat an explicitly retired issue as terminal queue input.
+
+    Supersession is intentionally recognized only from the issue title or a
+    dedicated Markdown heading.  Incidental discussion of another superseded
+    issue must not silently retire otherwise actionable work.
+    """
+    title = str(issue.get("title") or "").strip()
+    body = str(issue.get("body") or "")
+    return bool(
+        re.match(r"(?i)^SUPERSEDED(?:\s*:|\b)", title)
+        or re.search(r"(?im)^#{1,6}\s+Superseded\s+by\s+#\d+\b", body)
+    )
+
+
 def live_sensitive_declaration(body: str) -> str | None:
     """Read the PR classification used by the live-sensitive CI guard."""
     match = LIVE_SENSITIVE_RE.search(body or "")
@@ -1282,7 +1297,7 @@ class Orchestrator:
         label = self.cfg["labels"]["ready"]
         for issue in self.gh.ready_issues(label):
             number = int(issue["number"])
-            if self.ledger.active_for_issue(number):
+            if is_superseded_issue(issue) or self.ledger.active_for_issue(number):
                 continue
             if str(issue.get("author_association") or "") not in self.trusted:
                 continue
@@ -1329,7 +1344,8 @@ class Orchestrator:
             number = int(issue["number"])
             body = str(issue.get("body") or "")
             if (
-                str(issue.get("state") or "open").lower() != "open"
+                is_superseded_issue(issue)
+                or str(issue.get("state") or "open").lower() != "open"
                 or str(issue.get("author_association") or "") not in self.trusted
                 or parse_task_class(body)[0] != "ROUTINE"
                 or not acceptance_flag(body, "AI_TEAM_PROTECTED_CHANGE")
@@ -1388,7 +1404,8 @@ class Orchestrator:
             body = str(issue.get("body") or "")
             metadata = queue_metadata(body)
             if (
-                metadata is None or names & blocked_labels
+                is_superseded_issue(issue)
+                or metadata is None or names & blocked_labels
                 or str(issue.get("author_association") or "") not in self.trusted
             ):
                 continue

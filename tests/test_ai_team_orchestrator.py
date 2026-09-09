@@ -423,6 +423,51 @@ def test_non_deploy_pr_remains_declared_not_live_sensitive():
     assert orch.live_sensitive_declaration(captured["body"]) == "NO"
 
 
+@pytest.mark.parametrize(
+    "issue",
+    [
+        {"title": "SUPERSEDED: retired workflow", "body": ""},
+        {"title": "Old workflow", "body": "## Superseded by #172 -> #170\n"},
+    ],
+)
+def test_superseded_issue_requires_explicit_retirement_marker(issue):
+    assert orch.is_superseded_issue(issue) is True
+
+
+def test_superseded_issue_does_not_match_incidental_prose():
+    assert orch.is_superseded_issue(
+        {
+            "title": "Implement remediation router",
+            "body": "This replaces a superseded issue after #172.",
+        }
+    ) is False
+
+
+def test_claim_ready_issue_skips_superseded_issue(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+
+    class GH:
+        def ready_issues(self, label):
+            return [
+                {
+                    "number": 168,
+                    "title": "SUPERSEDED: protected workflow handoff",
+                    "body": "## Superseded by #172 -> #170",
+                    "author_association": "OWNER",
+                }
+            ]
+
+        def comment(self, *args):
+            raise AssertionError("superseded issue must not receive an assignment")
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.gh = orch.DEFAULT_CONFIG, ledger, GH()
+    team.trusted = {"OWNER"}
+
+    assert team.claim_ready_issue() is False
+    assert ledger.db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+
+
 def test_deploy_workflow_requires_safe_pr_validation_structure():
     valid = """name: deploy
 on:
