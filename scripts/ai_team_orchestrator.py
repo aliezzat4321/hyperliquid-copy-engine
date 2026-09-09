@@ -1442,9 +1442,18 @@ class Orchestrator:
                 self.ledger.heartbeat(str(task["model_class"]).lower(), now)
             if task["status"] == "WAITING_CI":
                 self.ledger.heartbeat("deploy", now)
+        # A task with a future retry deadline is making the progress its state
+        # permits: waiting durably until that deadline.  Counting it as an
+        # identical no-progress loop would raise STALLED during ordinary
+        # provider or GitHub backoff.  It remains active for heartbeat/status
+        # reporting and becomes eligible for no-progress detection when due.
+        progress_expected = [
+            row for row in tasks
+            if not row["retry_at"] or parse_utc(str(row["retry_at"])) <= parse_utc(now)
+        ]
         material = [{k: row[k] for k in (
             "id", "status", "attempt", "retry_at", "pr_number", "target_sha", "last_error"
-        )} for row in tasks]
+        )} for row in progress_expected]
         fingerprint = hashlib.sha256(canonical_json(material).encode()).hexdigest()
         previous = self.ledger.meta_get("watchdog:material_fingerprint")
         cycles = int(self.ledger.meta_get("watchdog:no_progress_cycles") or "0")
@@ -1575,12 +1584,12 @@ class Orchestrator:
             if int(incident["recovery_attempts"]) >= int(cfg["max_recovery_attempts"]):
                 self._notify_incident(incident)
 
-        if cycles >= int(cfg["no_progress_cycles"]) and tasks:
+        if cycles >= int(cfg["no_progress_cycles"]) and progress_expected:
             key = "NO_PROGRESS:" + fingerprint
             seen.add(key)
             incident = self.ledger.open_incident(
                 key, "NO_PROGRESS", "identical material state exceeded the configured cycle SLA",
-                task=tasks[0], last_progress_at=last_progress,
+                task=progress_expected[0], last_progress_at=last_progress,
             )
             self._notify_incident(incident)
 

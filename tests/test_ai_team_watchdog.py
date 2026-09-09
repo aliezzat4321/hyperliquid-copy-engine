@@ -104,6 +104,23 @@ def test_expired_claude_wait_resumes_without_claiming_codex_slot(tmp_path):
     assert value.ledger.get(task_id)["status"] == "RETRY"
 
 
+def test_future_retry_deadline_does_not_trigger_no_progress_alert(tmp_path):
+    value = team(tmp_path, no_progress_cycles=2)
+    retry_at = (
+        dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)
+    ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    value.ledger.create_task(
+        issue_number=208, task_type="REVIEW", agent="CLAUDE", model_class="SONNET",
+        task_class="ROUTINE", status="WAITING_RATE_LIMIT", retry_at=retry_at,
+    )
+
+    for _ in range(4):
+        value.watchdog()
+
+    assert value.ledger.watchdog_snapshot()["active_alerts"] == []
+    assert value.gh.comments == []
+
+
 def test_status_mirror_staleness_is_separate_and_alert_is_deduplicated(tmp_path):
     value = team(tmp_path, status_mirror_stale_seconds=1)
     value.ledger.heartbeat("status_mirror", old())
