@@ -92,10 +92,13 @@ def phase(event: dict[str, Any]) -> str:
     status = str(event.get("status", "")).upper()
     if kind in {"COMPLETED", "MERGED"} or status == "DONE":
         return "DONE"
-    if kind in {"BLOCKED", "OWNER_ACTION", "AUTH_FAILURE"} or status in {
-        "BLOCKED",
-        "FAILED",
-    }:
+    review_events = {
+        "PR_OPENED", "REVIEW_STARTED", "REVIEW_PASS", "REVIEW_FAIL",
+        "CI_PENDING", "CI_PASS", "CI_FAIL",
+    }
+    if kind in review_events:
+        return "REVIEW_CI"
+    if kind in {"BLOCKED", "OWNER_ACTION", "AUTH_FAILURE"} or status == "BLOCKED":
         return "BLOCKED"
     task_type = str(event.get("task_type", "")).upper()
     if task_type in {"BUILD", "REPAIR", "RESEARCH"} and status in {
@@ -105,16 +108,7 @@ def phase(event: dict[str, Any]) -> str:
         "WAITING_RATE_LIMIT",
     }:
         return "IN_PROGRESS"
-    review_events = {
-        "PR_OPENED",
-        "REVIEW_STARTED",
-        "REVIEW_PASS",
-        "REVIEW_FAIL",
-        "CI_PENDING",
-        "CI_PASS",
-        "CI_FAIL",
-    }
-    if kind in review_events or event.get("pr"):
+    if event.get("pr"):
         return "REVIEW_CI"
     active_events = {
         "ASSIGNED",
@@ -281,16 +275,32 @@ def sync(event: dict[str, Any], client: Trello, state_path: Path, ledger: Path) 
     state = load_state(state_path)
     cards = state.setdefault("cards", {})
     key = f"{REPOSITORY}#{issue}"
+    projections = state.setdefault("projections", {})
+    previous = projections.get(key, {})
+    if not isinstance(previous, dict):
+        previous = {}
+    # Runtime and GitHub events are intentionally sparse. Keep last-known
+    # metadata so each transition still projects a complete card.
+    projected = {
+        **previous,
+        **{name: value for name, value in event.items() if value is not None},
+        "repository": REPOSITORY,
+        "issue": issue,
+    }
+    current_kind = str(projected.get("event", "")).upper()
+    if current_kind not in {"BLOCKED", "OWNER_ACTION", "AUTH_FAILURE"} and "blocker" not in event:
+        projected.pop("blocker", None)
+    projections[key] = projected
     card_id = cards.get(key)
     if not card_id:
         card_id = existing_card_for_issue(client, issue)
         if card_id:
             cards[key] = card_id
-    title = f"[{event.get('priority', 'P?')}] #{issue} {event.get('title', 'AI team task')}"
+    title = f"[{projected.get('priority', 'P?')}] #{issue} {projected.get('title', 'AI team task')}"
     payload = {
         "name": title,
-        "desc": description(event, now, ledger),
-        "idList": LISTS[phase(event)],
+        "desc": description(projected, now, ledger),
+        "idList": LISTS[phase(projected)],
     }
     if card_id:
         client.call("PUT", f"/cards/{card_id}", payload)
@@ -300,12 +310,12 @@ def sync(event: dict[str, Any], client: Trello, state_path: Path, ledger: Path) 
         cards[key] = card_id
     state.update({"version": 1, "last_success_at": iso(now), "last_error": None})
     atomic_json(state_path, state)
-    kind = str(event.get("event", "")).upper()
+    kind = str(projected.get("event", "")).upper()
     if kind in NOTIFY:
         summary = str(
-            event.get("result")
-            or event.get("blocker")
-            or event.get("next_action")
+            projected.get("result")
+            or projected.get("blocker")
+            or projected.get("next_action")
             or kind
         )
         client.call(
@@ -313,7 +323,12 @@ def sync(event: dict[str, Any], client: Trello, state_path: Path, ledger: Path) 
             f"/cards/{card_id}/actions/comments",
             {"text": f"@{OWNER} {kind}: {summary[:500]}"},
         )
-    return {"card_id": card_id, "issue": issue, "list": phase(event), "notified": kind in NOTIFY}
+    return {
+        "card_id": card_id,
+        "issue": issue,
+        "list": phase(projected),
+        "notified": kind in NOTIFY,
+    }
 
 
 def record_failure(path: Path, event: dict[str, Any], error: Exception) -> None:

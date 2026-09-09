@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import urllib.parse
 from pathlib import Path
@@ -42,6 +43,18 @@ def requester(req, timeout=0):
 
 def test_verify_checks_member_exact_board_and_lists() -> None:
     auth.verify("api-key", "api-token", requester)
+
+
+def test_verify_allows_unrelated_extra_board_lists() -> None:
+    def with_extra_list(req, timeout=0):
+        response = requester(req, timeout)
+        if req.full_url.split("?")[0].endswith("/lists"):
+            rows = json.loads(response.read())
+            rows.append({"id": "unrelated-list", "closed": False})
+            return Response(json.dumps(rows))
+        return response
+
+    auth.verify("api-key", "api-token", with_extra_list)
 
 
 def test_store_is_mode_0600_and_contains_both_values(tmp_path: Path) -> None:

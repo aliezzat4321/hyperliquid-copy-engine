@@ -45,7 +45,7 @@ def verify(key: str, token: str, request: Callable[..., Any] = urllib.request.ur
         raise RuntimeError("exact Trello board is unavailable")
     lists = api_get(f"/boards/{BOARD_ID}/lists", key, token, request)
     visible = {row.get("id") for row in lists if not row.get("closed")}
-    if visible != LIST_IDS:
+    if not LIST_IDS.issubset(visible):
         missing = sorted(LIST_IDS - visible)
         raise RuntimeError(f"exact Trello lists unavailable: {','.join(missing)}")
 

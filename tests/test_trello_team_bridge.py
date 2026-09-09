@@ -106,6 +106,62 @@ def test_active_repair_stays_in_progress_even_with_existing_pr() -> None:
     assert bridge.phase(payload) == "IN_PROGRESS"
 
 
+def test_review_and_ci_failures_stay_in_review_even_with_failed_status() -> None:
+    assert bridge.phase(event("REVIEW_FAIL", status="FAILED")) == "REVIEW_CI"
+    assert bridge.phase(event("CI_FAIL", status="FAILED")) == "REVIEW_CI"
+
+
+def test_sparse_event_preserves_last_known_projection_fields(tmp_path: Path) -> None:
+    client = FakeTrello()
+    state = tmp_path / "state.json"
+    ledger = tmp_path / "ledger.sqlite3"
+    bridge.sync(
+        event(
+            "PR_OPENED", pr=149, sha="f94b3f7",
+            reviewer_model="CLAUDE / SONNET", status="WAITING_REVIEW",
+        ),
+        client,
+        state,
+        ledger,
+    )
+    bridge.sync(
+        {
+            "repository": bridge.REPOSITORY,
+            "issue": 146,
+            "event": "CI_PASS",
+            "result": "checks passed",
+        },
+        client,
+        state,
+        ledger,
+    )
+    update = next(
+        data
+        for method, path, data in reversed(client.calls)
+        if method == "PUT" and path == "/cards/card-146"
+    )
+    assert "PR / SHA: #149 / f94b3f7" in update["desc"]
+    assert "Owner: CODEX_CHATGPT" in update["desc"]
+    assert "Reviewer / model: CLAUDE / SONNET" in update["desc"]
+    saved = json.loads(state.read_text())["projections"][f"{bridge.REPOSITORY}#146"]
+    assert saved["pr"] == 149
+    assert saved["event"] == "CI_PASS"
+
+
+def test_transition_out_of_blocked_clears_stale_blocker(tmp_path: Path) -> None:
+    client = FakeTrello()
+    state = tmp_path / "state.json"
+    ledger = tmp_path / "ledger.sqlite3"
+    bridge.sync(event("BLOCKED", blocker="owner decision"), client, state, ledger)
+    bridge.sync(event("COMPLETED", result="done"), client, state, ledger)
+    update = next(
+        data
+        for method, path, data in reversed(client.calls)
+        if method == "PUT" and path == "/cards/card-146"
+    )
+    assert "Blocker: none" in update["desc"]
+
+
 def test_external_github_comment_and_ci_converge_on_same_card(tmp_path: Path) -> None:
     client = FakeTrello()
     state = tmp_path / "state.json"
