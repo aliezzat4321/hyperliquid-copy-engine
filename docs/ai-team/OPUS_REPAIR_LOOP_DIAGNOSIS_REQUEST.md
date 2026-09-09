@@ -15,6 +15,11 @@ Task classification: `UNRESOLVED_DISAGREEMENT`.
 The response must be authored by Claude Opus. Treat prior Codex and Sonnet conclusions
 as evidence to test, not conclusions to inherit.
 
+The ensuing Claude Opus `REVIEW` invocation is itself the diagnosis execution. It must
+not merely judge whether this request is well formed. Before emitting its final
+machine-readable `VERDICT` and `BLOCKERS_JSON` lines, Opus must provide the complete
+root-cause diagnosis and the one prescribed recovery architecture required below.
+
 The transport PR body must use the non-closing reference `Refs #172`; it must not use
 `Closes #172` or another closing keyword. Issue #172 remains open until the complete
 Claude Opus diagnosis described below lands.
@@ -65,6 +70,9 @@ available.
 11. Why does the architecture fail closed while preserving all existing protected-path
     controls and `REAL_TRADING_ENABLED=NO`?
 12. Should #170 be superseded, salvaged, or closed after this diagnosis, and why?
+13. How must initial task routing allow explicitly approved high-value task classes to
+    start with Claude Opus `RESEARCH`/`ARCHITECT`, without a transport-only Codex build,
+    while keeping routine engineering Codex-first?
 
 ## Required diagnosis format
 
@@ -86,6 +94,20 @@ Return one architecture, not a menu of alternatives. The written diagnosis must 
   least one test must cover a PR-metadata remediation that expects zero code changes and
   still reaches the next valid state automatically.
 - A fail-closed safety argument and a single recommendation for #170.
+- One integrated Opus-first task-entry design based on explicit machine-readable
+  initial-route and task-class fields, not title or prose inference. It must allow
+  `QUANT_PROFITABILITY`, `STATISTICAL_METHODOLOGY`, `MAJOR_ARCHITECTURE`,
+  `UNRESOLVED_DISAGREEMENT`, and `CAPITAL_SENSITIVE_METHODOLOGY` to start with Claude
+  Opus `RESEARCH`/`ARCHITECT` when approved. Routine engineering must remain Codex
+  `BUILD` first.
+- The default high-ROI sequence: Opus research/architecture, then Codex implementation,
+  then Sonnet routine review, with Opus final review only when required by task class or
+  a high-stakes gate. Apply this entry design to #93 and #92; #91 may remain routine
+  implementation, but its profitability/sample-design gate must escalate to Opus.
+- Queue isolation for Opus-first work so it cannot stall unrelated safe Codex work.
+- Acceptance tests proving that fresh ready `MAJOR_ARCHITECTURE` and
+  `QUANT_PROFITABILITY` issues are initially assigned to Claude Opus research, while a
+  fresh ready `ROUTINE` issue is initially assigned to Codex build.
 
 Claude Opus must record the complete written diagnosis in the durable in-repository
 artifact `docs/ai-team/OPUS_REPAIR_LOOP_DIAGNOSIS.md`; a review transcript or the
