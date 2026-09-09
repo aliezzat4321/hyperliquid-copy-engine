@@ -1,0 +1,62 @@
+name: p0-supervisor-auth-repair
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p0-supervisor-auth-repair.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repair:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 10
+    steps:
+      - name: Diagnose trusted checkpoint path
+        shell: bash
+        run: |
+          set -u
+          echo '=== direct checkpoint ==='
+          sudo -H timeout 45 /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py --checkpoint
+          rc=$?
+          echo "direct_checkpoint_rc=$rc"
+          echo '=== service status before repair ==='
+          sudo systemctl status hyperliquid-ai-external-supervisor.service --no-pager -l || true
+          sudo journalctl -u hyperliquid-ai-external-supervisor.service -n 80 --no-pager || true
+          exit "$rc"
+
+      - name: Give trusted root supervisor read-only credential home access
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo python3 - <<'PY'
+          from pathlib import Path
+          p = Path('/etc/systemd/system/hyperliquid-ai-external-supervisor.service')
+          s = p.read_text()
+          if 'ProtectHome=yes' in s:
+              s = s.replace('ProtectHome=yes', 'ProtectHome=read-only')
+          elif 'ProtectHome=read-only' not in s:
+              s += '\nProtectHome=read-only\n'
+          p.write_text(s)
+          PY
+          sudo systemctl daemon-reload
+          sudo systemctl restart hyperliquid-ai-external-supervisor.timer
+          sudo systemctl start hyperliquid-ai-external-supervisor.service
+          sleep 3
+          sudo systemctl is-active --quiet hyperliquid-ai-external-supervisor.timer
+          sudo tail -n 100 /var/lib/hyperliquid-ai-team/external-supervisor/supervisor.log
+          test -s /var/lib/hyperliquid-ai-team/external-supervisor/last_checkpoint_at
+
+      - name: Prove heartbeat can run while scheduler lock may be occupied
+        shell: bash
+        run: |
+          set -euo pipefail
+          before="$(cat /var/lib/hyperliquid-ai-team/external-supervisor/last_checkpoint_at)"
+          sleep 2
+          sudo systemctl start hyperliquid-ai-external-supervisor.service
+          after="$(cat /var/lib/hyperliquid-ai-team/external-supervisor/last_checkpoint_at)"
+          printf 'checkpoint_before=%s\ncheckpoint_after=%s\n' "$before" "$after"
+          test "$after" \> "$before"
