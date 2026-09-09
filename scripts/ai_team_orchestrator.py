@@ -1924,8 +1924,12 @@ class Orchestrator:
         self.finalize_proven_issue(issue, self.ledger.get(str(task["id"])))
         return None
 
-    def sync_runtime_checkpoint(self) -> None:
-        """Project SQLite runtime state and mirror a compact chat-independent handoff."""
+    def sync_runtime_checkpoint(self) -> bool:
+        """Project SQLite runtime state and mirror a compact chat-independent handoff.
+
+        This is deliberately callable outside the scheduler lock so status freshness is
+        independent of a long-running model turn.
+        """
         try:
             main = self.gh.api("GET", f"repos/{REPO}/commits/main") or {}
             rows = self.gh.api("GET", f"repos/{REPO}/issues?state=open&per_page=100") or []
@@ -1953,8 +1957,10 @@ class Orchestrator:
                     f"repos/{REPO}/issues/{RUNTIME_STATUS_ISSUE}",
                     {"body": body},
                 )
+            return True
         except Exception as exc:
             self.runtime.event("CHECKPOINT_MIRROR_FAILED", error=str(exc))
+            return False
 
     def finish_runtime_run(
         self,
@@ -3809,11 +3815,34 @@ that non-code work needs a CODE_CHANGE. Unknown or contradictory evidence is TER
         )
 
     def block(self, task: sqlite3.Row, error: str) -> None:
-        self.ledger.update(
-            task["id"], status="BLOCKED", retry_at=None,
-            last_error=error[:1500], systemd_unit=None,
-        )
+        """Reserve BLOCKED for genuine owner authorization; quarantine internal faults."""
+        context = dict(task)
+        context["last_error"] = error
+        failure_class = classify_recovery_failure(context)
         number = int(task["issue_number"])
+        if failure_class != "OWNER_AUTH_REQUIRED":
+            self.ledger.update(
+                task["id"], status="STALE", retry_at=None, last_error=error[:1500],
+                systemd_unit=None, failure_class=failure_class,
+                next_action="automatic recovery/reroute required; unrelated work continues",
+            )
+            try:
+                self.gh.remove_label(number, self.cfg["labels"]["blocked"])
+                self.runtime.event(
+                    "TASK_QUARANTINED", assignment_id=task["id"],
+                    issue=task["issue_number"], pr=task["pr_number"],
+                    agent=task["agent"], error=error, failure_class=failure_class,
+                    status="QUARANTINED", unrelated_work_continuing=True,
+                )
+                self.sync_runtime_checkpoint()
+            except Exception:
+                pass
+            return
+        self.ledger.update(
+            task["id"], status="BLOCKED", retry_at=None, last_error=error[:1500],
+            systemd_unit=None, failure_class=failure_class,
+            next_action="await explicit owner authorization",
+        )
         try:
             self.gh.add_labels(number, [self.cfg["labels"]["blocked"]])
             self.gh.remove_label(number, self.cfg["labels"]["pending"])
@@ -3823,18 +3852,12 @@ that non-code work needs a CODE_CHANGE. Unknown or contradictory evidence is TER
                 number,
                 f"<!-- AI_TEAM_BLOCKED_V1\nASSIGNMENT_ID={task['id']}\n"
                 f"ERROR={error[:1000].replace(chr(10), ' ')}\n-->\n"
-                f"Autonomous task blocked: {error[:1200]}",
+                f"Owner authorization required: {error[:1200]}",
             )
-        except Exception:
-            pass
-        try:
             self.runtime.event(
-                "TASK_BLOCKED",
-                assignment_id=task["id"],
-                issue=task["issue_number"],
-                pr=task["pr_number"],
-                agent=task["agent"],
-                error=error,
+                "TASK_BLOCKED", assignment_id=task["id"], issue=task["issue_number"],
+                pr=task["pr_number"], agent=task["agent"], error=error,
+                failure_class=failure_class,
             )
             self.sync_runtime_checkpoint()
         except Exception:
@@ -3895,6 +3918,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--status", action="store_true")
+    parser.add_argument("--checkpoint", action="store_true")
     parser.add_argument("--init-db", action="store_true")
     args = parser.parse_args()
     cfg = load_config()
@@ -3906,6 +3930,9 @@ def main() -> int:
     if args.status:
         print_status(ledger)
         return 0
+    if args.checkpoint:
+        # Heartbeat publication must not depend on acquiring the scheduler/model lock.
+        return 0 if Orchestrator().sync_runtime_checkpoint() else 1
     if args.init_db and not args.once:
         return 0
     lockf = LOCK_PATH.open("a+")
