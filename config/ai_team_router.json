@@ -35,6 +35,9 @@
     "protected_actions": {}
   },
   "legacy_remediation_migration": {"version": 1, "issues": [166, 168, 170], "supersede_issue": 170, "release_issue": 120},
+  "obsolete_targets": [
+    {"issue": 195, "pr": 199, "superseded_by_issue": 215}
+  ],
   "opus_allowed_task_classes": [
     "QUANT_PROFITABILITY",
     "STATISTICAL_METHODOLOGY",

@@ -113,6 +113,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "legacy_remediation_migration": {"version": 1, "issues": [166, 168, 170],
                                      "supersede_issue": 170, "release_issue": 120},
+    "obsolete_targets": [
+        {"issue": 195, "pr": 199, "superseded_by_issue": 215},
+    ],
     "opus_allowed_task_classes": [
         "QUANT_PROFITABILITY",
         "STATISTICAL_METHODOLOGY",
@@ -1797,6 +1800,8 @@ class Orchestrator:
         if task is None:
             return
         try:
+            if self.drop_obsolete_target(task):
+                return
             if task["status"] == "WAITING_CI":
                 self.handle_ci(task)
             elif task["status"] == "WAITING_RATE_LIMIT" and task["agent"] == "CLAUDE":
@@ -1812,6 +1817,28 @@ class Orchestrator:
         finally:
             self.sync_runtime_checkpoint()
             self.kick_trello_reconciliation()
+
+    def drop_obsolete_target(self, task: sqlite3.Row) -> bool:
+        """Tombstone an explicitly superseded issue/PR before any provider or merge work."""
+        for target in self.cfg.get("obsolete_targets", []):
+            if (
+                int(task["issue_number"]) == int(target["issue"])
+                and task["pr_number"] is not None
+                and int(task["pr_number"]) == int(target["pr"])
+            ):
+                successor = int(target["superseded_by_issue"])
+                reason = f"OBSOLETE_TARGET: superseded by issue #{successor}"
+                self.ledger.update(
+                    task["id"], status="STALE", retry_at=None,
+                    last_error=reason, systemd_unit=None,
+                )
+                self.runtime.event(
+                    "OBSOLETE_TARGET_DROPPED", assignment_id=task["id"],
+                    issue=task["issue_number"], pr=task["pr_number"],
+                    successor_issue=successor, task_type=task["task_type"],
+                )
+                return True
+        return False
 
     def reap_stale_child(self, task: dict[str, Any] | sqlite3.Row) -> None:
         unit = task["systemd_unit"]

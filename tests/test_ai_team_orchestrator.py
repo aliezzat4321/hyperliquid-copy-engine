@@ -181,6 +181,34 @@ def test_codex_reviewer_sandbox_is_read_only_and_transcript_free(tmp_path, monke
     assert "resume" not in captured["command"]
 
 
+def test_obsolete_195_199_task_is_dropped_before_provider_or_merge(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    task_id = ledger.create_task(
+        issue_number=195, pr_number=199, task_type="FINAL_REVIEW", agent="CLAUDE",
+        model_class="OPUS", task_class="QUANT", target_sha="a" * 40,
+    )
+    events = []
+
+    class Runtime:
+        def event(self, kind, **payload):
+            events.append((kind, payload))
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg = orch.DEFAULT_CONFIG
+    team.ledger = ledger
+    team.runtime = Runtime()
+
+    assert team.drop_obsolete_target(ledger.get(task_id)) is True
+    task = ledger.get(task_id)
+    assert task["status"] == "STALE"
+    assert task["retry_at"] is None
+    assert task["last_error"] == "OBSOLETE_TARGET: superseded by issue #215"
+    assert events == [("OBSOLETE_TARGET_DROPPED", {
+        "assignment_id": task_id, "issue": 195, "pr": 199,
+        "successor_issue": 215, "task_type": "FINAL_REVIEW",
+    })]
+
+
 def test_machine_assignment_contains_exact_sha_and_model():
     sha = "a" * 40
     text = orch.assignment_marker(
