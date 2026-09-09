@@ -21,20 +21,23 @@ NOTIONALS=[D('100'),D('1000'),D('5000')]
 def atomic(path,payload):
  path.parent.mkdir(parents=True,exist_ok=True); tmp=path.with_suffix('.tmp'); tmp.write_text(json.dumps(payload,indent=2)+'\n'); tmp.replace(path)
 
-def load_frozen_targets(queue_path):
+def load_challenger_queue(queue_path):
  payload=json.loads(queue_path.read_text())
  targets=[]
  for row in payload.get('candidates',[]):
   if row.get('status')!='challenger': continue
   targets.append({'wallet':str(row['wallet_address']).lower(),'coin':str(row['coin']),'primary_notional':str(row['notional_usd']),'prospective_start_ns':int(row['prospective_start_ns']),'candidate_key':str(row['candidate_key'])})
- return targets
+ return payload,targets
+
+def load_frozen_targets(queue_path):
+ return load_challenger_queue(queue_path)[1]
 
 def main():
  if os.getenv('REAL_TRADING_ENABLED','NO').upper()=='YES': raise SystemExit('REAL_TRADING_ENABLED must remain NO')
  ap=argparse.ArgumentParser(); ap.add_argument('--challenger-queue',type=Path,default=DEFAULT_QUEUE); args=ap.parse_args()
  BASE.mkdir(parents=True,exist_ok=True)
  if not args.challenger_queue.exists(): raise SystemExit(f'challenger queue missing: {args.challenger_queue}')
- targets=load_frozen_targets(args.challenger_queue)
+ queue,targets=load_challenger_queue(args.challenger_queue)
  atomic(CFG,{'mode':'AUTONOMOUS_FROZEN_PROSPECTIVE_V2','updated_ns':time.time_ns(),'source_queue':str(args.challenger_queue),'targets':targets,'real_trading':False})
  cutoff=min((int(t['prospective_start_ns']) for t in targets),default=time.time_ns())
  events=load_wide_events(WIDE,cutoff_ns=cutoff)
@@ -58,7 +61,7 @@ def main():
   else:
    target['worst_primary_return_bps']=None; target['actions_floor']=0; target['approved']=False
   rows.append(target)
- report={'mode':'AUTONOMOUS_CLEAN_PROSPECTIVE_LANE_V2','cutoff_ns':cutoff,'age_hours':(time.time_ns()-cutoff)/3.6e12,'real_trading':False,'targets':rows,'challenger_count':len(targets),'prospective_shadow_count':sum(1 for r in rows if r['event_count']>0),'approved_count':sum(1 for r in rows if r['approved']),'rejections':[] if targets else [{'reason':'NO_ACTIVE_CHALLENGERS','timestamp_ns':time.time_ns()}]}
+ report={'mode':'AUTONOMOUS_CLEAN_PROSPECTIVE_LANE_V2','cutoff_ns':cutoff,'age_hours':(time.time_ns()-cutoff)/3.6e12,'real_trading':False,'challenger_queue_generated_at':queue.get('generated_at'),'challenger_queue_counts':queue.get('counts',{}),'targets':rows,'challenger_count':len(targets),'prospective_shadow_count':sum(1 for r in rows if r['event_count']>0),'approved_count':sum(1 for r in rows if r['approved']),'rejections':queue.get('rejections',[]) or ([] if targets else [{'reason':'NO_ACTIVE_CHALLENGERS','timestamp_ns':time.time_ns()}]),'demoted':queue.get('demoted',[])}
  atomic(REPORT,report)
  print('=== PROSPECTIVE CHAMPIONS ==='); print('age_hours=',round(report['age_hours'],3),'approved=',report['approved_count'])
  for r in rows: print(r['wallet_address'][:14],r['coin'],'events=',r['event_count'],'actions_floor=',r['actions_floor'],'worst_primary_bps=',r['worst_primary_return_bps'],'APPROVED=',r['approved'])
