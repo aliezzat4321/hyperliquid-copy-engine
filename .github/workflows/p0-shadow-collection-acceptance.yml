@@ -1,0 +1,105 @@
+name: p0-shadow-collection-acceptance
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/p0-shadow-collection-acceptance.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p0-shadow-collection-acceptance
+  cancel-in-progress: false
+
+jobs:
+  accept:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Sync current production source
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo git -C /root/hyperliquid-copy-engine fetch origin main
+          sudo git -C /root/hyperliquid-copy-engine reset --hard origin/main
+          test "${REAL_TRADING_ENABLED:-NO}" != YES
+
+      - name: Arm and snapshot Lane 1 prospective shadow
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo systemctl reset-failed hyperliquid-selective-shadow.service hyperliquid-prospective-champions.service || true
+          sudo systemctl start hyperliquid-selective-shadow.service || true
+          sudo systemctl start hyperliquid-prospective-champions.service || true
+          sudo -H /root/hyperliquid-copy-engine/.venv/bin/python /root/hyperliquid-copy-engine/scripts/prospective_champion_lane.py
+          sudo python3 - <<'PY'
+          import json
+          from pathlib import Path
+          q=json.loads(Path('/root/hyperliquid-audit/funnel/challenger_queue.json').read_text())
+          r=json.loads(Path('/root/hyperliquid-audit/prospective-champions/report.json').read_text())
+          print('LANE1_COUNTS',q.get('counts'))
+          print('LANE1_PROSPECTIVE', {k:r.get(k) for k in ('challenger_count','prospective_shadow_count','approved_count','age_hours','real_trading')})
+          assert r.get('real_trading') is False
+          assert q.get('counts',{}).get('challenger',0) > 0
+          PY
+          echo '=== Lane1 newest artifacts ==='
+          sudo find /root/hyperliquid-audit/prospective-champions /root/hyperliquid-audit/funnel -type f -printf '%T@ %TY-%Tm-%TdT%TH:%TM:%TSZ %s %p\n' 2>/dev/null | sort -nr | head -n 40
+
+      - name: Arm and snapshot Lane 2 verified-wallet shadow
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo systemctl reset-failed hyperliquid-invo-wallet-identifier.service hyperliquid-invo-verified-shadow-sync.service || true
+          sudo systemctl start hyperliquid-invo-wallet-identifier.service || true
+          sudo systemctl start hyperliquid-invo-verified-shadow-sync.service || true
+          echo '=== Lane2 service status ==='
+          sudo systemctl status hyperliquid-invo-verified-shadow-sync.service --no-pager -l || true
+          echo '=== Lane2 newest evidence ==='
+          sudo find /var/lib/hyperliquid-copy-engine /root/hyperliquid-audit -maxdepth 7 -type f \
+            \( -iname '*verified*' -o -iname '*shadow*' -o -iname '*decision*' -o -iname '*execution*' -o -iname '*position*' -o -iname '*pnl*' \) \
+            -printf '%T@ %TY-%Tm-%TdT%TH:%TM:%TSZ %s %p\n' 2>/dev/null | sort -nr | head -n 100
+          sudo python3 - <<'PY'
+          import json
+          from pathlib import Path
+          p=Path('/var/lib/hyperliquid-copy-engine/invo/identified_wallets.json')
+          d=json.loads(p.read_text())
+          print('LANE2_IDENTITIES', {k:d.get(k) for k in ('verified_count','quarantined_identity_count')})
+          assert d.get('verified_count',0) > 0
+          assert d.get('safety',{}).get('auto_trading_promotion') is False
+          PY
+
+      - name: Arm and snapshot Lane 3 direct shadow
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo systemctl restart hyperliquid-invo-notification-executor.service
+          sleep 8
+          health="$(curl -fsS --max-time 4 http://127.0.0.1:8787/health)"
+          echo "LANE3_HEALTH=$health"
+          echo "$health" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["ok"] and d["initialized"] and not d["live"]'
+          echo '=== Lane3 fresh audit tail ==='
+          sudo tail -n 160 /var/lib/hyperliquid-copy-engine/invo-notification-executor/audit.jsonl || true
+          echo '=== Lane3 newest shadow-ish files ==='
+          sudo find /var/lib/hyperliquid-copy-engine/invo-notification-executor /root/hyperliquid-audit -maxdepth 7 -type f \
+            \( -iname '*shadow*' -o -iname '*decision*' -o -iname '*execution*' -o -iname '*position*' -o -iname '*pnl*' -o -iname '*audit*' \) \
+            -printf '%T@ %TY-%Tm-%TdT%TH:%TM:%TSZ %s %p\n' 2>/dev/null | sort -nr | head -n 100
+
+      - name: Verify continuous collectors and safety
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${REAL_TRADING_ENABLED:-NO}" != YES
+          sudo systemctl is-active --quiet hyperliquid-ai-external-supervisor.timer
+          for u in hyperliquid-invo-notification-executor.service hyperliquid-invo-verified-shadow-sync.service; do
+            echo "UNIT=$u ACTIVE=$(systemctl is-active "$u" || true) FAILED=$(systemctl is-failed "$u" || true)"
+          done
+          sudo -H /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py --status || true
+          echo REAL_TRADING_ENABLED=NO
