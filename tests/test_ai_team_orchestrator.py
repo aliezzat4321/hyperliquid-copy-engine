@@ -661,6 +661,7 @@ def test_continuity_loops_cover_review_pr_move_limits_and_restart():
     dispatch_race = handle_review.index("after_dispatch = self.gh.pr")
     failure_handling = handle_review.index("if cp.returncode != 0")
     assert dispatch_race < failure_handling
+    assert 'if cp.returncode != 0 else None' not in handle_review
     assert "PR moved before review dispatch completed" in handle_review
     assert 'status="STALE"' in handle_review[dispatch_race:failure_handling]
     assert "self.enqueue_replacement_review(task, current_sha)" in handle_review[

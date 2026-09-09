@@ -2459,13 +2459,8 @@ not run on re-review because previous_sha is then populated.
         # A head update can race the pre-dispatch check.  Treat that as stale work,
         # not a reviewer failure: no result for the old SHA can authorize a merge,
         # and the unchanged continuity path must review the new head instead.
-        after_dispatch = (
-            self.gh.pr(int(task["pr_number"])) if cp.returncode != 0 else None
-        )
-        if (
-            after_dispatch is not None
-            and str(after_dispatch["head"]["sha"]) != target_sha
-        ):
+        after_dispatch = self.gh.pr(int(task["pr_number"]))
+        if str(after_dispatch["head"]["sha"]) != target_sha:
             current_sha = str(after_dispatch["head"]["sha"])
             self.ledger.update(
                 task["id"], status="STALE", retry_at=None,
