@@ -594,7 +594,12 @@ class RuntimeLedgerFiles:
                 "recovery_attempt",
                 "last_progress",
             )
-            return {k: task.get(k) for k in keep if task.get(k) not in (None, "", [])}
+            result = {k: task.get(k) for k in keep if task.get(k) not in (None, "", [])}
+            # Free-form diagnostics must never be able to suppress the canonical heartbeat.
+            for key, limit in (("blocker", 320), ("current_step", 220), ("next_step", 260)):
+                if key in result:
+                    result[key] = bounded_redacted(str(result[key]), limit)
+            return result
 
         payload["codex"] = compact_task(payload["codex"])
         payload["claude"] = compact_task(payload["claude"])
@@ -604,15 +609,75 @@ class RuntimeLedgerFiles:
                 "claude": compact_task(payload["runtime"].get("claude")),
             }
         payload["latest_review"] = compact_task(payload["latest_review"])
-        raw = json.dumps(payload, separators=(",", ":"), sort_keys=True)
-        while len(raw.encode("utf-8")) > 3300 and payload["last_5_material_events"]:
+        recovery = payload.get("recovery")
+        if isinstance(recovery, dict):
+            recovery = dict(recovery)
+            recovery["active_assignment"] = compact_task(recovery.get("active_assignment"))
+            payload["recovery"] = recovery
+        if payload.get("pending_owner_action"):
+            payload["pending_owner_action"] = bounded_redacted(
+                str(payload["pending_owner_action"]), 320
+            )
+
+        def encoded() -> str:
+            return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+        raw = encoded()
+        while len(raw.encode("utf-8")) > 3000 and payload["last_5_material_events"]:
             payload["last_5_material_events"] = payload["last_5_material_events"][1:]
-            raw = json.dumps(payload, separators=(",", ":"), sort_keys=True)
-        if len(raw.encode("utf-8")) > 3300:
+            raw = encoded()
+        if len(raw.encode("utf-8")) > 3000:
             payload["active_p0_p1"] = payload["active_p0_p1"][:3]
-            raw = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+            raw = encoded()
+        # runtime duplicates assignment state; discard it before sacrificing canonical
+        # queue/recovery information.
+        if len(raw.encode("utf-8")) > 3200:
+            payload.pop("runtime", None)
+            raw = encoded()
+        if len(raw.encode("utf-8")) > 3200:
+            payload.pop("latest_review", None)
+            raw = encoded()
+        if len(raw.encode("utf-8")) > 3300:
+            rec = payload.get("recovery")
+            payload["recovery"] = {
+                "blocked_count_by_class": rec.get("blocked_count_by_class", {})
+                if isinstance(rec, dict) else {},
+                "oldest_blocked_age_seconds": rec.get("oldest_blocked_age_seconds")
+                if isinstance(rec, dict) else None,
+                "active_assignment": compact_task(rec.get("active_assignment"))
+                if isinstance(rec, dict) else None,
+                "unrelated_work_continuing": rec.get("unrelated_work_continuing")
+                if isinstance(rec, dict) else None,
+            }
+            raw = encoded()
         if len(raw.encode("utf-8")) > 3500:
-            raise RuntimeError("runtime handoff exceeded compact checkpoint budget")
+            # Last-resort fail-safe is still semantically useful and, critically, keeps
+            # heartbeat/freshness alive rather than failing the entire status publisher.
+            payload = {
+                "protocol": "AI_TEAM_RUNTIME_STATUS_V1",
+                "repository": self.repository,
+                "main_head": main_head,
+                "live_trading": "NO",
+                "polymarket_scope": "DENIED",
+                "active_p0_p1": active_priorities[:2],
+                "codex": compact_task(current["assignment"].get("codex")),
+                "claude": compact_task(current["assignment"].get("claude")),
+                "pending_owner_action": bounded_redacted(
+                    str(pending_owner_action), 240
+                ) if pending_owner_action else None,
+                "recovery": {
+                    "blocked_count_by_class": current.get("recovery", {}).get(
+                        "blocked_count_by_class", {}
+                    ),
+                    "unrelated_work_continuing": current.get("recovery", {}).get(
+                        "unrelated_work_continuing"
+                    ),
+                },
+                "checkpoint_compacted": True,
+            }
+            raw = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+        if len(raw.encode("utf-8")) > 3900:
+            raise RuntimeError("minimal runtime handoff unexpectedly exceeded hard budget")
         body = (
             "<!-- AI_TEAM_RUNTIME_STATUS_V1 -->\n"
             "# AI TEAM RUNTIME STATUS\n\n"
