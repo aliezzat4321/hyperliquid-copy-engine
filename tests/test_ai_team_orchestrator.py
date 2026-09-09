@@ -1052,6 +1052,17 @@ def test_failed_recovery_child_advances_bounded_chain_then_dead_letters(tmp_path
     assert dead_letters[0]["assignment_id"] == failed_id
     assert dead_letters[0]["recovery_attempt"] == 3
 
+    team.reconcile_recovery()
+    dead_letters = [
+        payload for kind, payload in team.runtime.events
+        if kind == "RECOVERY_DEAD_LETTERED"
+    ]
+    assert len(dead_letters) == 1
+    assert ledger.db.execute(
+        "SELECT COUNT(*) AS n FROM tasks WHERE recovery_fingerprint=?",
+        (ledger.get(failed_id)["recovery_fingerprint"],),
+    ).fetchone()["n"] == 4
+
 
 def test_recovery_waits_have_exact_time_and_owner_action_is_not_rewritten(tmp_path):
     ledger = orch.Ledger(tmp_path / "ledger.sqlite3")

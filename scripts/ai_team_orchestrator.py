@@ -1654,6 +1654,12 @@ class Orchestrator:
         cfg = self.cfg.get("recovery", {})
         max_attempts = int(cfg.get("max_attempts", 3))
         for task in self.ledger.recovery_candidates(int(cfg.get("no_progress_seconds", 3600))):
+            if (task["status"] == "QUARANTINED"
+                    and task["next_action"] == "dead-lettered after bounded recovery retries"):
+                # A dead letter is terminal until an operator or a separately scoped
+                # repair changes its state.  Re-scanning it must not emit duplicate
+                # events or turn the recovery loop itself into scheduler churn.
+                continue
             if task["status"] == "RUNNING":
                 self.reap_stale_child(task)
             failure_class = classify_recovery_failure(task)
