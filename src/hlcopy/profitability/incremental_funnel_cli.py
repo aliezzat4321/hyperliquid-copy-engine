@@ -9,7 +9,10 @@ from decimal import Decimal
 from pathlib import Path
 
 from hlcopy.profitability.causal_book import CausalParquetL2BookProvider
-from hlcopy.profitability.lane1_handoff import build_challenger_queue
+from hlcopy.profitability.lane1_handoff import (
+    LANE1_SELECTION_CONTRACT_V1,
+    build_challenger_queue,
+)
 from hlcopy.profitability.portfolio_position_copy import simulate_copy_with_portfolio_capital
 from hlcopy.profitability.position_copy import CopyFillEvent, load_wide_events
 from hlcopy.profitability.position_live_cli import NOTIONALS, SCENARIOS, _summary
@@ -312,6 +315,7 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     queue = build_challenger_queue(
         robust,
+        selection_contract_version=LANE1_SELECTION_CONTRACT_V1,
         output_path=args.output_dir / "challenger_queue.json",
         universe_state_path=args.universe_state,
         max_universe_age_hours=max(0.0, args.max_universe_age_hours),
