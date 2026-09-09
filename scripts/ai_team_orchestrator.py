@@ -2456,6 +2456,36 @@ not run on re-review because previous_sha is then populated.
             result=result,
             error=None if cp.returncode == 0 else combined[-1500:],
         )
+        # A head update can race the pre-dispatch check.  Treat that as stale work,
+        # not a reviewer failure: no result for the old SHA can authorize a merge,
+        # and the unchanged continuity path must review the new head instead.
+        after_dispatch = (
+            self.gh.pr(int(task["pr_number"])) if cp.returncode != 0 else None
+        )
+        if (
+            after_dispatch is not None
+            and str(after_dispatch["head"]["sha"]) != target_sha
+        ):
+            current_sha = str(after_dispatch["head"]["sha"])
+            self.ledger.update(
+                task["id"], status="STALE", retry_at=None,
+                last_error=f"PR moved before review dispatch completed: {current_sha}",
+                systemd_unit=None,
+            )
+            self.enqueue_replacement_review(task, current_sha)
+            self.finish_runtime_run(
+                run_id,
+                str(task["id"]),
+                stdout=cp.stdout,
+                stderr=cp.stderr,
+                exit_code=cp.returncode,
+                session_id=resume_session,
+                usage=usage,
+                result=result,
+                error="PR moved before review dispatch completed",
+                status="STALE",
+            )
+            return
         if limited:
             self.ledger.update(
                 task["id"], status="WAITING_RATE_LIMIT", retry_at=retry_at,

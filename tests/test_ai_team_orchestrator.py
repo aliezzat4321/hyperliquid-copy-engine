@@ -655,6 +655,17 @@ def test_continuity_loops_cover_review_pr_move_limits_and_restart():
     source = MODULE_PATH.read_text()
     assert "self.dispatch_remediations(task, blockers" in source
     assert "self.enqueue_replacement_review(task, current_sha)" in source
+    handle_review = source[source.index("    def handle_review("):source.index(
+        "    def enqueue_repair("
+    )]
+    dispatch_race = handle_review.index("after_dispatch = self.gh.pr")
+    failure_handling = handle_review.index("if cp.returncode != 0")
+    assert dispatch_race < failure_handling
+    assert "PR moved before review dispatch completed" in handle_review
+    assert 'status="STALE"' in handle_review[dispatch_race:failure_handling]
+    assert "self.enqueue_replacement_review(task, current_sha)" in handle_review[
+        dispatch_race:failure_handling
+    ]
     assert "WAITING_RATE_LIMIT" in source
     assert "STALE_RUN_REQUEUED" in source
 
