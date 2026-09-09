@@ -137,6 +137,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          SUCCESSFUL_CYCLES: ${{ steps.recover.outputs.successful_cycles }}
         run: |
           set -euo pipefail
           sleep 3
@@ -187,7 +188,3 @@ jobs:
               result = json.load(r)
           print(f'#130 degraded checkpoint published updated_at={result["updated_at"]}')
           PY
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          SUCCESSFUL_CYCLES: ${{ steps.recover.outputs.successful_cycles }}
