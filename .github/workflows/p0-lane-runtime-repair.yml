@@ -16,108 +16,145 @@ concurrency:
 jobs:
   repair:
     runs-on: [self-hosted, hyperliquid]
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Repair and verify Lane 3 executor
-        continue-on-error: true
+      - name: Sync production source
         shell: bash
         run: |
-          set -u -o pipefail
-          sudo bash scripts/deploy_invo_notification_executor_self_hosted.sh || true
+          set -euo pipefail
+          sudo git -C /root/hyperliquid-copy-engine fetch origin main
+          sudo git -C /root/hyperliquid-copy-engine reset --hard origin/main
+          test "${REAL_TRADING_ENABLED:-NO}" != YES
+
+      - name: Repair and verify Lane 3 executor
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo bash /root/hyperliquid-copy-engine/scripts/deploy_invo_notification_executor_self_hosted.sh
           stamp="$(date -u +%Y%m%dT%H%M%SZ)"
           audit=/var/lib/hyperliquid-copy-engine/invo-notification-executor/audit.jsonl
-          if sudo test -f "$audit"; then
-            sudo mv "$audit" "${audit}.preverify-${stamp}"
-          fi
+          if sudo test -f "$audit"; then sudo mv "$audit" "${audit}.preverify-${stamp}"; fi
           sudo systemctl restart hyperliquid-invo-notification-executor.service
           sleep 8
-          sudo systemctl is-active --quiet hyperliquid-invo-notification-executor.service || exit 1
-          health="$(curl -fsS --max-time 4 http://127.0.0.1:8787/health)" || exit 1
+          sudo systemctl is-active --quiet hyperliquid-invo-notification-executor.service
+          health="$(curl -fsS --max-time 4 http://127.0.0.1:8787/health)"
           echo "LANE3_HEALTH=$health"
-          sudo test -f /var/lib/hyperliquid-copy-engine/invo-notification-executor/trader-population.json || exit 1
-          echo '=== LANE3 FRESH AUDIT ==='
-          sudo tail -n 120 "$audit" || true
-          if sudo grep -q "Invalid feed type" "$audit"; then
-            echo 'LANE3_FAIL=invalid_feed_type_after_clean_restart' >&2
-            exit 1
-          fi
-          if sudo grep -q "no such file or directory, mkdir '/root/hyperliquid-copy-engine/services/invo-notification-executor/data'" "$audit"; then
-            echo 'LANE3_FAIL=relative_data_path_after_clean_restart' >&2
-            exit 1
-          fi
+          sudo test -f /var/lib/hyperliquid-copy-engine/invo-notification-executor/trader-population.json
+          ! sudo grep -q "Invalid feed type" "$audit"
+          ! sudo grep -q "no such file or directory, mkdir '/root/hyperliquid-copy-engine/services/invo-notification-executor/data'" "$audit"
           echo LANE3_RUNTIME_ACCEPTANCE=PASS
 
-      - name: Diagnose and repair Lane 1 producer chain
-        continue-on-error: true
+      - name: Repair Lane 1 clean cutoff and producer chain
         shell: bash
         run: |
-          set -u -o pipefail
-          units=(hyperliquid-universe-scout.service hyperliquid-wallet-research.service hyperliquid-selective-shadow.service hyperliquid-prospective-champions.service)
-          for unit in "${units[@]}"; do
-            echo "=== BEFORE $unit ==="
-            sudo systemctl status "$unit" --no-pager -l || true
-            sudo journalctl -u "$unit" -n 100 --no-pager -l || true
-            sudo systemctl reset-failed "$unit" || true
-            sudo systemctl start "$unit" || true
+          set -euo pipefail
+          start_epoch="$(date +%s)"
+          cutoff=/mnt/HC_Volume_106576526/hyperliquid/selective-shadow/clean_evidence_cutoff_ns.txt
+          sudo mkdir -p "$(dirname "$cutoff")"
+          if ! sudo awk 'NF==1 && $1 ~ /^[0-9]+$/ {ok=1} END{exit ok?0:1}' "$cutoff" 2>/dev/null; then
+            now_ns="$(date +%s%N)"
+            printf '%s\n' "$now_ns" | sudo tee "${cutoff}.tmp" >/dev/null
+            sudo mv "${cutoff}.tmp" "$cutoff"
+            echo "LANE1_CUTOFF_REPAIRED=$now_ns"
+          fi
+          sudo systemctl reset-failed hyperliquid-universe-scout.service hyperliquid-wallet-research.service hyperliquid-selective-shadow.service || true
+          sudo systemctl start hyperliquid-universe-scout.service
+          sudo systemctl start hyperliquid-wallet-research.service
+          sudo bash /root/hyperliquid-copy-engine/scripts/deploy_profitability_funnel_self_hosted.sh
+          for _ in $(seq 1 120); do
+            state="$(systemctl is-active hlcopy-profitability-funnel.service || true)"
+            [[ "$state" == inactive || "$state" == failed ]] && break
+            sleep 5
           done
-          sleep 10
-          for unit in "${units[@]}"; do
-            echo "=== AFTER $unit ==="
-            sudo systemctl status "$unit" --no-pager -l || true
-            sudo journalctl -u "$unit" -n 60 --no-pager -l || true
-          done
-          echo '=== LANE1 ARTIFACTS ==='
-          sudo stat -c 'LANE1_QUEUE_MTIME=%Y %y' /root/hyperliquid-audit/funnel/challenger_queue.json || true
-          sudo stat -c 'LANE1_REPORT_MTIME=%Y %y' /root/hyperliquid-audit/prospective-champions/report.json || true
-          sudo head -c 16000 /root/hyperliquid-audit/funnel/challenger_queue.json || true
-          echo
-          sudo cat /root/hyperliquid-audit/prospective-champions/report.json || true
+          test "$(systemctl is-failed hlcopy-profitability-funnel.service || true)" != failed
+          queue=/root/hyperliquid-audit/funnel/challenger_queue.json
+          sudo test -s "$queue"
+          queue_mtime="$(sudo stat -c %Y "$queue")"
+          test "$queue_mtime" -ge "$start_epoch"
+          sudo systemctl start hyperliquid-selective-shadow.service
+          test "$(systemctl is-failed hyperliquid-selective-shadow.service || true)" != failed
+          sudo systemctl start hyperliquid-prospective-champions.service
+          report=/root/hyperliquid-audit/prospective-champions/report.json
+          sudo test -s "$report"
+          sudo python3 - <<'PY'
+          import json
+          from pathlib import Path
+          q=json.loads(Path('/root/hyperliquid-audit/funnel/challenger_queue.json').read_text())
+          r=json.loads(Path('/root/hyperliquid-audit/prospective-champions/report.json').read_text())
+          print('LANE1_COUNTS', q.get('counts'))
+          print('LANE1_REPORT', {k:r.get(k) for k in ('challenger_count','prospective_shadow_count','approved_count','real_trading')})
+          if q.get('real_trading') is not False or r.get('real_trading') is not False:
+              raise SystemExit('Lane1 safety flag invalid')
+          if q.get('counts',{}).get('challenger',0) < 1:
+              raise SystemExit('Lane1 has no fresh challengers after repaired funnel')
+          PY
+          echo LANE1_RUNTIME_ACCEPTANCE=PASS
 
-      - name: Diagnose and repair Lane 2 resolver chain
-        continue-on-error: true
+      - name: Repair and verify Lane 2 resolver handoff
         shell: bash
         run: |
-          set -u -o pipefail
-          units=(hyperliquid-external-coverage.service hyperliquid-external-resolver.service hyperliquid-invo-wallet-identifier.service hyperliquid-invo-verified-shadow-sync.service)
-          for unit in "${units[@]}"; do
-            echo "=== BEFORE $unit ==="
-            sudo systemctl status "$unit" --no-pager -l || true
-            sudo journalctl -u "$unit" -n 120 --no-pager -l || true
-            sudo systemctl reset-failed "$unit" || true
-            sudo systemctl start "$unit" || true
-          done
-          sleep 10
-          for unit in "${units[@]}"; do
-            echo "=== AFTER $unit ==="
-            sudo systemctl status "$unit" --no-pager -l || true
-            sudo journalctl -u "$unit" -n 80 --no-pager -l || true
-          done
-          echo '=== LANE2 ARTIFACT DISCOVERY ==='
-          sudo find /var/lib/hyperliquid-copy-engine /root/hyperliquid-audit -maxdepth 6 -type f \
-            \( -iname '*resolver*' -o -iname '*identifier*' -o -iname '*verified*' -o -iname '*handoff*' -o -iname '*measurement*' \) \
-            -printf '%TY-%Tm-%TdT%TH:%TM:%TSZ %s %p\n' 2>/dev/null | sort -r | head -n 120 || true
+          set -euo pipefail
+          sudo systemctl reset-failed hyperliquid-external-coverage.service hyperliquid-external-resolver.service hyperliquid-invo-wallet-identifier.service || true
+          sudo systemctl start hyperliquid-external-coverage.service
+          sudo systemctl start hyperliquid-external-resolver.service
+          sudo systemctl start hyperliquid-invo-wallet-identifier.service
+          test "$(systemctl is-failed hyperliquid-invo-wallet-identifier.service || true)" != failed
+          sudo systemctl start hyperliquid-invo-verified-shadow-sync.service
+          identities=/var/lib/hyperliquid-copy-engine/invo/identified_wallets.json
+          sudo test -s "$identities"
+          sudo python3 - <<'PY'
+          import json
+          from pathlib import Path
+          p=json.loads(Path('/var/lib/hyperliquid-copy-engine/invo/identified_wallets.json').read_text())
+          print('LANE2_PUBLICATION', {k:p.get(k) for k in ('verified_count','quarantined_identity_count','identity_conflicts')})
+          if p.get('verified_count',0) < 1:
+              raise SystemExit('Lane2 did not publish any unaffected verified identity')
+          conflicts=p.get('identity_conflicts') or []
+          if not any(c.get('status')=='QUARANTINED_CONFLICTING_VERIFIED_PROOFS' for c in conflicts):
+              raise SystemExit('Lane2 conflicting proof was not quarantined explicitly')
+          if p.get('safety',{}).get('auto_trading_promotion') is not False:
+              raise SystemExit('Lane2 live safety flag invalid')
+          PY
+          echo LANE2_RUNTIME_ACCEPTANCE=PASS
+
+      - name: Repair orchestrator and verify no completion-contract crash
+        shell: bash
+        run: |
+          set -euo pipefail
+          since="$(date -u '+%Y-%m-%d %H:%M:%S')"
+          sudo systemctl reset-failed hyperliquid-ai-team-orchestrator.service || true
+          sudo systemctl restart hyperliquid-ai-team-orchestrator.service || true
+          sudo systemctl start hyperliquid-ai-external-supervisor.service
+          sleep 15
+          sudo systemctl is-active --quiet hyperliquid-ai-external-supervisor.timer
+          sudo -H /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py --once || true
+          sleep 5
+          recent="$(sudo journalctl -u hyperliquid-ai-team-orchestrator.service --since "$since" --no-pager -o cat || true)"
+          printf '%s\n' "$recent"
+          if grep -q 'MISSING_COMPLETION_CONTRACT' <<<"$recent"; then
+            echo 'CONTROL_PLANE_FAIL=completion_contract_escape' >&2
+            exit 1
+          fi
+          sudo -H /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py --status || true
+          echo CONTROL_PLANE_RUNTIME_ACCEPTANCE=PASS
 
       - name: Final autonomy and safety acceptance
-        if: always()
         shell: bash
         run: |
           set -euo pipefail
           test "${REAL_TRADING_ENABLED:-NO}" != YES
           sudo systemctl is-active --quiet hyperliquid-ai-external-supervisor.timer
-          sudo systemctl start hyperliquid-ai-external-supervisor.service || true
-          sleep 3
-          sudo tail -n 60 /var/lib/hyperliquid-ai-team/external-supervisor/supervisor.log || true
-          sudo -H /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py --status || true
-          echo '=== FAILED HYPERLIQUID UNITS ==='
-          sudo systemctl --failed --no-pager | grep -E 'hyperliquid|hlcopy' || true
-          echo '=== FINAL LANE3 ==='
           curl -fsS --max-time 4 http://127.0.0.1:8787/health
-          audit=/var/lib/hyperliquid-copy-engine/invo-notification-executor/audit.jsonl
-          ! sudo grep -q "Invalid feed type" "$audit"
-          ! sudo grep -q "no such file or directory, mkdir '/root/hyperliquid-copy-engine/services/invo-notification-executor/data'" "$audit"
+          echo '=== FAILED ACTIVE LANE/CONTROL UNITS ==='
+          for unit in hyperliquid-ai-team-orchestrator.service hyperliquid-invo-wallet-identifier.service hyperliquid-selective-shadow.service; do
+            state="$(systemctl is-failed "$unit" || true)"
+            echo "$unit=$state"
+            test "$state" != failed
+          done
           echo REAL_TRADING_ENABLED=NO
+          echo P0_RUNTIME_REPAIR_ACCEPTANCE=PASS
