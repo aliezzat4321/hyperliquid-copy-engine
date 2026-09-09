@@ -1,13 +1,14 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
 import { dirname } from 'path';
+import type { EvidencePolicy, TraderView } from './trader-tracker.js';
 
 type Funnel = Record<string, number>;
 
 export interface PopulationReport {
-  policy: Record<string, number>;
+  policy: EvidencePolicy;
   funnel: Funnel;
   assessmentQueue: string[];
-  traders: Array<{ eventCount: number; observationDays: string[]; symbols: string[]; missingOrFailedReasons: Record<string, number> }>;
+  traders: TraderView[];
 }
 
 interface AuditSummary {
@@ -27,7 +28,7 @@ interface EvidenceSnapshot {
   observedAt: string;
   windowStartedAt: string;
   live: false;
-  policy: Record<string, number>;
+  policy: EvidencePolicy;
   baseline: { funnel: Funnel; audit: AuditSummary };
   current: { funnel: Funnel; audit: AuditSummary; eventCount: number; observationDays: string[]; symbols: string[]; missingOrFailedReasons: Record<string, number>; traders: PopulationReport['traders'] };
   growth: { discovered: number; receivingNotifications: number; shadowAssessable: number; canonicalSignals: number; causalDecisions: number };
