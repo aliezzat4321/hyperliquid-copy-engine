@@ -169,6 +169,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "CAPITAL_SENSITIVE_METHODOLOGY",
     ],
     "max_attempts": 3,
+    "recovery": {"max_attempts": 3, "no_progress_seconds": 3600,
+                 "diagnostic_retry_seconds": 300},
     "poll_seconds": 60,
     "default_rate_limit_retry_seconds": 3600,
     "claude_readiness_probe_seconds": 300,
@@ -208,6 +210,62 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "agent_hidden_paths": ["/root", "/mnt"],
     },
 }
+
+RECOVERY_CLASSES = {
+    "CODE_CHANGE", "PROTECTED_PATH_ATTEMPT", "MISSING_COMPLETION_CONTRACT",
+    "CI_FAILURE", "REVIEW_FAILURE", "RUNNER_FAILURE",
+    "SERVICE/DEPLOYMENT_FAILURE", "PROVIDER/RATE_LIMIT_WAIT", "DEPENDENCY_WAIT",
+    "EVIDENCE_WINDOW_WAIT", "UNKNOWN_INTERNAL", "OWNER_AUTH_REQUIRED",
+}
+
+
+def classify_recovery_failure(task: sqlite3.Row | dict[str, Any]) -> str:
+    """Classify stopped work from durable context; owner waits must be explicit."""
+    row = dict(task)
+    if str(row.get("failure_class") or "") in RECOVERY_CLASSES:
+        return str(row["failure_class"])
+    text = str(row.get("last_error") or "").lower()
+    task_type = str(row.get("task_type") or "")
+    if re.search(r"\b(owner_auth_required|owner authorization required|auth_required)\b", text):
+        return "OWNER_AUTH_REQUIRED"
+    if "missing_completion_contract" in text:
+        return "MISSING_COMPLETION_CONTRACT"
+    if any(x in text for x in ("protected change", "unsafe changed path", "protected-path")):
+        return "PROTECTED_PATH_ATTEMPT"
+    if "rate limit" in text or "quota" in text or "usage limit" in text:
+        return "PROVIDER/RATE_LIMIT_WAIT"
+    if "evidence window" in text or "prospective window" in text or "future window" in text:
+        return "EVIDENCE_WINDOW_WAIT"
+    if "dependency" in text:
+        return "DEPENDENCY_WAIT"
+    if task_type == "REVIEW" or "review fail" in text or "review blocker" in text:
+        return "REVIEW_FAILURE"
+    if "ci " in text or "check run" in text or "check failed" in text:
+        return "CI_FAILURE"
+    if task_type in {"DEPLOY", "PRODUCTION_VALIDATION"} or any(
+        x in text for x in ("systemd", "service failed", "deployment failed")
+    ):
+        return "SERVICE/DEPLOYMENT_FAILURE"
+    if any(x in text for x in ("runner", "worktree", "session end", "process")):
+        return "RUNNER_FAILURE"
+    if task_type in {"BUILD", "REPAIR"} or any(
+        x in text for x in ("test failed", "lint", "compile", "code change")
+    ):
+        return "CODE_CHANGE"
+    return "UNKNOWN_INTERNAL"
+
+
+def recovery_fingerprint(task: sqlite3.Row | dict[str, Any], failure_class: str) -> str:
+    row = dict(task)
+    if row.get("recovery_fingerprint"):
+        return str(row["recovery_fingerprint"])
+    identity = canonical_json({
+        "class": failure_class, "issue": row.get("issue_number"),
+        "pr": row.get("pr_number"), "sha": row.get("target_sha"),
+        "task_type": row.get("task_type"),
+        "error": str(row.get("last_error") or "")[:1500],
+    })
+    return hashlib.sha256(identity.encode()).hexdigest()
 
 
 def utcnow() -> str:
@@ -506,7 +564,9 @@ class Ledger:
         )
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(tasks)")}
         for name in ("limit_text", "systemd_unit", "lifecycle_phase",
-                     "completion_contract_json", "evidence_json"):
+                     "completion_contract_json", "evidence_json", "failure_class",
+                     "recovery_fingerprint", "recovery_attempt", "last_progress_at",
+                     "next_action"):
             if name not in columns:
                 self.db.execute(f"ALTER TABLE tasks ADD COLUMN {name} TEXT")
         self.db.commit()
@@ -592,6 +652,11 @@ class Ledger:
             "lifecycle_phase": kw.get("lifecycle_phase", "IMPLEMENTING"),
             "completion_contract_json": json.dumps(kw.get("completion_contract") or {}),
             "evidence_json": json.dumps(kw.get("evidence") or {}),
+            "failure_class": kw.get("failure_class"),
+            "recovery_fingerprint": kw.get("recovery_fingerprint"),
+            "recovery_attempt": kw.get("recovery_attempt"),
+            "last_progress_at": kw.get("last_progress_at", now),
+            "next_action": kw.get("next_action"),
             "created_at": now,
             "updated_at": now,
         }
@@ -620,6 +685,39 @@ class Ledger:
             [*kw.values(), task_id],
         )
         self.db.commit()
+
+    def recovery_candidates(self, no_progress_seconds: int) -> list[sqlite3.Row]:
+        cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(
+            seconds=no_progress_seconds
+        )).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        return self.db.execute(
+            "SELECT * FROM tasks WHERE status IN ('BLOCKED','STALE','QUARANTINED') "
+            "OR (status='RUNNING' AND COALESCE(last_progress_at,updated_at) <= ?) "
+            "ORDER BY updated_at LIMIT 100", (cutoff,),
+        ).fetchall()
+
+    def recovery_attempts(self, fingerprint: str) -> int:
+        row = self.db.execute(
+            "SELECT COUNT(*) AS n FROM tasks "
+            "WHERE recovery_fingerprint=? AND parent_id IS NOT NULL",
+            (fingerprint,),
+        ).fetchone()
+        return int(row["n"] if row else 0)
+
+    def active_recovery(self, fingerprint: str, parent_id: str) -> sqlite3.Row | None:
+        """Return an active attempt spawned for this exact failed assignment."""
+        return self.db.execute(
+            "SELECT * FROM tasks WHERE recovery_fingerprint=? AND parent_id=? "
+            "AND status IN ('RECOVERY_PENDING','PENDING','RUNNING','RETRY','WAITING_CI') "
+            "ORDER BY created_at DESC LIMIT 1", (fingerprint, parent_id),
+        ).fetchone()
+
+    def pending_owner_action(self) -> str | None:
+        row = self.db.execute(
+            "SELECT last_error FROM tasks WHERE status='BLOCKED' "
+            "AND failure_class='OWNER_AUTH_REQUIRED' ORDER BY updated_at LIMIT 1"
+        ).fetchone()
+        return str(row["last_error"])[:500] if row else None
 
     def child(
         self, parent_id: str, task_type: str, target_sha: str | None = None
@@ -670,7 +768,8 @@ class Ledger:
             """
             SELECT *
               FROM tasks
-             WHERE status IN ('PENDING','RETRY','WAITING_RATE_LIMIT','WAITING_CI')
+             WHERE status IN ('PENDING','RETRY','WAITING_RATE_LIMIT','WAITING_CI',
+                              'WAITING_EVIDENCE_WINDOW')
                AND (retry_at IS NULL OR retry_at <= ?)
              ORDER BY CASE status WHEN 'WAITING_CI' THEN 0 ELSE 1 END, created_at
              LIMIT 1
@@ -1550,6 +1649,114 @@ class Orchestrator:
         except OSError as exc:
             self.runtime.event("TRELLO_RECONCILE_DEFERRED", error=type(exc).__name__)
 
+    def reconcile_recovery(self) -> None:
+        """Turn stopped internal work into bounded, fingerprinted recovery work."""
+        cfg = self.cfg.get("recovery", {})
+        max_attempts = int(cfg.get("max_attempts", 3))
+        for task in self.ledger.recovery_candidates(int(cfg.get("no_progress_seconds", 3600))):
+            if (
+                task["status"] == "QUARANTINED"
+                and task["next_action"] == "dead-lettered after bounded recovery retries"
+            ):
+                # A dead letter is terminal until an operator or a separately scoped
+                # repair changes its state.  Re-scanning it must not emit duplicate
+                # events or turn the recovery loop itself into scheduler churn.
+                continue
+            if task["status"] == "RUNNING":
+                self.reap_stale_child(task)
+            failure_class = classify_recovery_failure(task)
+            fingerprint = recovery_fingerprint(task, failure_class)
+            if failure_class == "OWNER_AUTH_REQUIRED":
+                self.ledger.update(task["id"], failure_class=failure_class,
+                                   recovery_fingerprint=fingerprint,
+                                   next_action="await explicit owner authorization")
+                continue
+            if failure_class in {"PROVIDER/RATE_LIMIT_WAIT", "EVIDENCE_WINDOW_WAIT"}:
+                eligible = parse_utc(task["retry_at"]) or (
+                    dt.datetime.now(dt.timezone.utc) + dt.timedelta(
+                        seconds=int(cfg.get("diagnostic_retry_seconds", 300))))
+                retry_at = eligible.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+                status = ("WAITING_RATE_LIMIT" if failure_class == "PROVIDER/RATE_LIMIT_WAIT"
+                          else "WAITING_EVIDENCE_WINDOW")
+                self.ledger.update(task["id"], status=status, retry_at=retry_at,
+                                   failure_class=failure_class, recovery_fingerprint=fingerprint,
+                                   next_action=f"resume at exact eligible time {retry_at}")
+                continue
+            if failure_class == "DEPENDENCY_WAIT":
+                self.ledger.update(task["id"], status="WAITING_DEPENDENCY",
+                                   failure_class=failure_class,
+                                   recovery_fingerprint=fingerprint,
+                                   next_action="resume when the named dependency is proven")
+                continue
+            if self.ledger.active_recovery(fingerprint, str(task["id"])):
+                self.ledger.update(task["id"], status="RECOVERY_PENDING",
+                                   failure_class=failure_class,
+                                   recovery_fingerprint=fingerprint)
+                continue
+            attempt = self.ledger.recovery_attempts(fingerprint) + 1
+            if attempt > max_attempts:
+                self.ledger.update(task["id"], status="QUARANTINED",
+                                   failure_class=failure_class,
+                                   recovery_fingerprint=fingerprint,
+                                   next_action="dead-lettered after bounded recovery retries")
+                self.runtime.event("RECOVERY_DEAD_LETTERED", assignment_id=task["id"],
+                                   issue=task["issue_number"], failure_class=failure_class,
+                                   fingerprint=fingerprint, recovery_attempt=attempt - 1)
+                continue
+            context = {
+                "failure_class": failure_class, "fingerprint": fingerprint,
+                "failed_assignment": task["id"], "previous_attempt": int(task["attempt"]),
+                "previous_task_type": task["task_type"],
+                "exact_error": str(task["last_error"] or "")[:1500],
+                "target_sha": task["target_sha"], "pr_number": task["pr_number"],
+            }
+            action = {
+                "PROTECTED_PATH_ATTEMPT": (
+                    "strip/revert forbidden paths and re-dispatch original work using "
+                    "approved scripts/services only"
+                ),
+                "MISSING_COMPLETION_CONTRACT": (
+                    "reconcile canonical completion policy/rollout map; repair metadata "
+                    "without owner-blocking parent"
+                ),
+                "CI_FAILURE": "repair exact failing SHA/check, then resume CI and exact-SHA review",
+                "REVIEW_FAILURE": (
+                    "repair exact-SHA review blockers, then enqueue replacement review"
+                ),
+                "RUNNER_FAILURE": (
+                    "run deterministic preflight and repair only the failed runner dependency"
+                ),
+                "SERVICE/DEPLOYMENT_FAILURE": (
+                    "run deterministic preflight and repair only the failed "
+                    "service/deployment dependency"
+                ),
+                "UNKNOWN_INTERNAL": (
+                    "perform one bounded diagnostic pass and produce a narrow repair"
+                ),
+            }.get(failure_class, "repair the exact internal failure and resume the original task")
+            manager_reconciliation = failure_class == "MISSING_COMPLETION_CONTRACT"
+            recovery_id = self.ledger.create_task(
+                issue_number=int(task["issue_number"]), pr_number=task["pr_number"],
+                task_type="RECOVERY" if manager_reconciliation else "REPAIR",
+                agent="TRUSTED_MANAGER" if manager_reconciliation else "CODEX_CHATGPT",
+                model_class="NONE" if manager_reconciliation else "CODEX_DEFAULT",
+                task_class=str(task["task_class"]),
+                status="RECOVERY_PENDING" if manager_reconciliation else "PENDING",
+                target_sha=task["target_sha"], previous_sha=task["previous_sha"],
+                parent_id=str(task["id"]), blockers=[context], failure_class=failure_class,
+                recovery_fingerprint=fingerprint, next_action=action,
+                recovery_attempt=attempt,
+                evidence={"recovery_context": context, "action": action, "attempt": attempt},
+            )
+            self.ledger.update(task["id"], status="RECOVERY_PENDING",
+                               failure_class=failure_class,
+                               recovery_fingerprint=fingerprint, next_action=action)
+            self.runtime.event("RECOVERY_ASSIGNED", assignment_id=recovery_id,
+                               parent_assignment_id=task["id"], issue=task["issue_number"],
+                               failure_class=failure_class, fingerprint=fingerprint,
+                               recovery_attempt=attempt, next_action=action,
+                               unrelated_work_continuing=True)
+
     def emit_terminal_projection(self, task: sqlite3.Row, target_sha: str) -> None:
         """Queue terminal observability only after canonical completion is durable."""
         try:
@@ -1730,11 +1937,7 @@ class Orchestrator:
                 if not title.upper().startswith(("P0", "P1")):
                     continue
                 priorities.append({"issue": int(row["number"]), "title": title[:160]})
-            snap = self.ledger.status_snapshot()
-            cur = snap.get("current") or {}
-            pending_owner_action = None
-            if "AUTH_REQUIRED" in str(cur.get("last_error") or ""):
-                pending_owner_action = str(cur.get("last_error"))[:500]
+            pending_owner_action = self.ledger.pending_owner_action()
             body = self.runtime.handoff(
                 main_head=str(main.get("sha") or "UNKNOWN"),
                 active_priorities=priorities,
@@ -2128,6 +2331,7 @@ class Orchestrator:
                 target_sha=stale["target_sha"], session_id=stale["session_id"],
             )
         self.migrate_legacy_remediation()
+        self.reconcile_recovery()
         self.reconcile_completion_rollout()
         self.reconcile_handoffs()
         if self.ledger.due() is not None:
