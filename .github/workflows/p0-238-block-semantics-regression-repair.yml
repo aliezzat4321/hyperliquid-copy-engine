@@ -1,0 +1,74 @@
+name: p0-238-block-semantics-regression-repair
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/p0-238-block-semantics-regression-repair.yml']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: p0-238-block-semantics-regression-repair
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Patch owner-block versus internal-quarantine semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          git pull --ff-only origin main
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('scripts/ai_team_orchestrator.py')
+          s = p.read_text()
+          old = '''    if re.search(r"\\b(owner_auth_required|owner authorization required|auth_required)\\b", text):\n        return "OWNER_AUTH_REQUIRED"\n    if "missing_completion_contract" in text:\n'''
+          new = '''    if (\n        re.search(r"\\b(owner_auth_required|owner authorization required|auth_required)\\b", text)\n        or "protected_action missing/invalid repository authorization" in text\n        or "protected ai-control-plane change lost trusted issue author" in text\n        or "protected ai-control-plane change lacks ai_team_protected_change=yes" in text\n        or "issue author association no longer trusted" in text\n        or "claude_auth_required" in text\n    ):\n        return "OWNER_AUTH_REQUIRED"\n    if "missing_completion_contract" in text:\n'''
+          if old not in s:
+              raise SystemExit('classifier patch refused: expected block not found')
+          s = s.replace(old, new, 1)
+
+          old = '''            try:\n                self.gh.remove_label(number, self.cfg["labels"]["blocked"])\n                self.runtime.event(\n'''
+          new = '''            try:\n                # A quarantined internal failure must not be accidentally reclaimed from\n                # a stale GitHub ready/queued label. Recovery is driven by the durable ledger.\n                self.gh.remove_label(number, self.cfg["labels"]["blocked"])\n                self.gh.remove_label(number, self.cfg["labels"]["ready"])\n                self.gh.remove_label(number, self.cfg["labels"]["queued"])\n                self.gh.add_labels(number, [self.cfg["labels"]["pending"]])\n                self.runtime.event(\n'''
+          if old not in s:
+              raise SystemExit('quarantine label patch refused: expected block not found')
+          p.write_text(s.replace(old, new, 1))
+
+          p = Path('tests/test_ai_team_orchestrator.py')
+          s = p.read_text()
+          old = '''    assert task["status"] == "BLOCKED"\n    assert "verification failed" in task["last_error"]\n'''
+          new = '''    assert task["status"] == "STALE"\n    assert task["failure_class"] != "OWNER_AUTH_REQUIRED"\n    assert "verification failed" in task["last_error"]\n'''
+          if old not in s:
+              raise SystemExit('acceptance test patch refused: expected assertion not found')
+          p.write_text(s.replace(old, new, 1))
+          PY
+          python3 -m py_compile scripts/ai_team_orchestrator.py
+          ruff check scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py tests/test_ai_team_remediation_behaviors.py
+          pytest -q tests/test_ai_team_orchestrator.py tests/test_ai_team_remediation_behaviors.py
+          pytest -q
+      - name: Commit repaired invariant
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'AI Team Supervisor'
+          git config user.email 'ai-team@localhost'
+          git add scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
+          git commit -m 'P0 #238: restore owner-block and internal quarantine invariants'
+          git push origin HEAD:main
+      - name: Deploy exact repaired orchestrator
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo install -m 0755 scripts/ai_team_orchestrator.py /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py
+          sudo python3 -m py_compile /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py
+          sudo systemctl start hyperliquid-ai-external-supervisor.service
+          sudo systemctl is-active --quiet hyperliquid-ai-external-supervisor.timer
+          sudo tail -n 30 /var/lib/hyperliquid-ai-team/external-supervisor/supervisor.log
