@@ -1,0 +1,32 @@
+name: p0-orchestrator-contract-diagnose
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/p0-orchestrator-contract-diagnose.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Show completion-contract escape context
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo git -C /root/hyperliquid-copy-engine fetch origin main
+          sudo git -C /root/hyperliquid-copy-engine reset --hard origin/main
+          echo '=== SOURCE CONTEXT ==='
+          sudo grep -n -B 18 -A 30 'MISSING_COMPLETION_CONTRACT' /root/hyperliquid-copy-engine/scripts/ai_team_orchestrator.py || true
+          echo '=== SERVICE JOURNAL ==='
+          sudo journalctl -u hyperliquid-ai-team-orchestrator.service -n 120 --no-pager -o cat || true
+          echo '=== RUNTIME STATUS ==='
+          sudo -H /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py --status || true
