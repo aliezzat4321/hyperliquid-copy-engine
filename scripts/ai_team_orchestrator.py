@@ -1804,7 +1804,21 @@ class Orchestrator:
                 issue = self.gh.issue(number)
                 if str(issue.get("state") or "open").lower() != "open":
                     continue
-                task = self.enqueue_acceptance(issue, parent_id=None)
+                # Rollout reconciliation resumes acceptance after implementation has
+                # already merged.  Preserve that exact merge identity so a phase
+                # runner can produce evidence which the verifier is able to bind to
+                # code.  A null target creates an impossible assignment: even a
+                # canonical trusted artifact must fail with MISSING_EXACT_MERGED_SHA.
+                merged_sha = self.ledger.latest_merged_sha(number)
+                if merged_sha is None:
+                    self.runtime.event(
+                        "ROLLOUT_ACCEPTANCE_MERGE_SHA_MISSING", issue=number,
+                        status="WAITING_MERGE_PROVENANCE",
+                    )
+                    continue
+                task = self.enqueue_acceptance(
+                    issue, parent_id=None, merged_sha=merged_sha
+                )
                 if task:
                     self.gh.add_labels(number, [self.cfg["labels"]["pending"]])
                     self.runtime.event("ROLLOUT_ACCEPTANCE_RECONCILED", issue=number,
