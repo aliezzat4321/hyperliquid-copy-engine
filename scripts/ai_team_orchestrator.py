@@ -2503,10 +2503,10 @@ TASK_CLASS={task["task_class"]}
         pr = self.gh.pr(int(task["pr_number"]))
         if str(pr.get("state") or "open").lower() != "open" and not pr.get("merged_at"):
             self.ledger.update(task["id"], status="STALE", retry_at=None,
-                               last_error="PR is no longer open", systemd_unit=None)
+                               last_error=None, systemd_unit=None)
             self.runtime.event(
                 "OBSOLETE_REVIEW_DROPPED", assignment_id=task["id"], pr=task["pr_number"],
-                target_sha=task["target_sha"],
+                target_sha=task["target_sha"], reason="PR is no longer open",
             )
             return
         current_sha = str(pr["head"]["sha"])

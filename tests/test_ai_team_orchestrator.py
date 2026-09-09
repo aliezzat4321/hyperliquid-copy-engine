@@ -278,6 +278,42 @@ def test_red_ci_parks_assigned_claude_and_routes_exact_sha_to_codex(tmp_path):
     assert captured[0]["requested_action"]["reproducer"] == "ruff check ."
 
 
+def test_closed_pr_obsoletes_review_without_reporting_review_failure(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    sha = "a" * 40
+    task_id = ledger.create_task(
+        issue_number=203, pr_number=204, task_type="REVIEW", agent="CODEX_REVIEWER",
+        model_class="CODEX_DEFAULT", task_class="ROUTINE", target_sha=sha,
+    )
+
+    class GH:
+        def pr(self, number):
+            return {"state": "closed", "merged_at": None, "head": {"sha": sha}}
+
+    events = []
+    team = object.__new__(orch.Orchestrator)
+    team.ledger, team.gh = ledger, GH()
+    team.runtime = type(
+        "Runtime", (), {"event": lambda self, name, **fields: events.append((name, fields))}
+    )()
+    team.handle_review(ledger.get(task_id))
+
+    obsolete = ledger.get(task_id)
+    assert obsolete["status"] == "STALE"
+    assert obsolete["last_error"] is None
+    assert events == [
+        (
+            "OBSOLETE_REVIEW_DROPPED",
+            {
+                "assignment_id": task_id,
+                "pr": 204,
+                "target_sha": sha,
+                "reason": "PR is no longer open",
+            },
+        )
+    ]
+
+
 def test_machine_assignment_contains_exact_sha_and_model():
     sha = "a" * 40
     text = orch.assignment_marker(
