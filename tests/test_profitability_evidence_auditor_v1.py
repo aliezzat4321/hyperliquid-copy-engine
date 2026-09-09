@@ -155,6 +155,22 @@ def test_lane3_normalizer_preserves_independent_population_baseline() -> None:
     assert "POPULATION_UNRECONCILED" in _codes(report)
 
 
+def test_lane3_normalizer_never_invents_population_baseline() -> None:
+    rows = [
+        {
+            "type": "shadow_opened",
+            "ts": "2026-01-02T00:00:03Z",
+            "signal": {"sourceBaseId": "p1", "sourceTimeMs": 1767312000000},
+        }
+    ]
+    manifest = _valid_bundle()
+    del manifest["positions"]
+    del manifest["population"]
+    report = audit_evidence(lane3_bundle(rows, manifest))
+    assert report["status"] == "FAIL"
+    assert "POPULATION_BASELINE_MISSING" in _codes(report)
+
+
 def test_missing_outcome_cannot_disappear_from_closed_and_unresolved() -> None:
     bundle = _valid_bundle()
     bundle["positions"][0]["status"] = ""
@@ -196,3 +212,50 @@ def test_lane3_incomplete_ledger_allows_diagnostics_but_fails_closed() -> None:
     assert report["counts"]["unresolved"] == 1
     assert "UNRESOLVED_MTM_MISSING" in _codes(report)
     assert report["validated_profitability_allowed"] is False
+
+
+def test_positive_unresolved_mtm_requires_complete_execution_and_funding_costs() -> None:
+    bundle = _valid_bundle()
+    position = bundle["positions"][0]
+    position["status"] = "unresolved"
+    position["timestamps"].pop("close")
+    position["economics"] = {"unresolved_mtm": "100"}
+    bundle["economics_totals"] = {"final_net": "100"}
+
+    report = audit_evidence(bundle)
+
+    assert report["status"] == "FAIL"
+    assert report["economics"]["final_net"] is None
+    assert report["economics_state"] == "UNKNOWN_MISSING_EVIDENCE"
+    assert report["promotion_eligible"] is False
+    assert {
+        "FEES_EVIDENCE_MISSING",
+        "SPREAD_EVIDENCE_MISSING",
+        "DEPTH_EVIDENCE_MISSING",
+        "SLIPPAGE_EVIDENCE_MISSING",
+        "IMPACT_EVIDENCE_MISSING",
+        "FUNDING_COVERAGE_MISSING",
+    } <= _codes(report)
+
+
+def test_unresolved_mtm_reconciles_only_after_costs_and_funding() -> None:
+    bundle = _valid_bundle()
+    position = bundle["positions"][0]
+    position["status"] = "unresolved"
+    position["timestamps"].pop("close")
+    position["economics"] = {
+        "unresolved_mtm": "21",
+        "fees": _cost(),
+        "spread": _cost(),
+        "depth": _cost(),
+        "slippage": _cost(),
+        "impact": _cost(),
+        "funding": {"amount": "1", "coverage": "complete"},
+    }
+    bundle["economics_totals"] = {"final_net": "15"}
+
+    report = audit_evidence(bundle)
+
+    assert report["status"] == "PASS"
+    assert report["economics"]["final_net"] == "15"
+    assert report["promotion_eligible"] is True

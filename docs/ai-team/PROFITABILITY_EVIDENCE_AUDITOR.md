@@ -21,7 +21,8 @@ Each position has a stable `position_id`, an explicit `closed`, `open`, `unresol
 or `quarantined` status, and signal-to-position lifecycle timestamps. Closed positions
 must include gross PnL and labelled `measured` or `assumption` amounts for fees, spread,
 depth, slippage, and impact. Complete funding coverage is required when applicable.
-Every non-closed position requires unresolved MTM. The declared final net must equal:
+Every non-closed position requires unresolved MTM plus the same labelled execution-cost
+and applicable funding evidence as a closed position. The declared final net must equal:
 
 `gross - fees - spread - depth - slippage - impact - funding + unresolved MTM`
 
@@ -50,9 +51,10 @@ python -m hlcopy.profitability.evidence_audit_cli \
 
 The manifest supplies version/provenance/window metadata, the independent population
 baseline, and any per-position cost or MTM evidence under `position_economics`.
-`lane3_bundle()` preserves a supplied population baseline instead of replacing it with
-the number of rows it happened to reconstruct, so unexplained population loss remains
-detectable. Existing gross-only Lane 3 ledgers remain diagnosable but fail closed on the
-missing material evidence. A failing audit exits 2. Passing this integrity audit does
-not authorize real trading and does not by itself satisfy the separate promotion-policy
-thresholds.
+`lane3_bundle()` requires the manifest's independent population baseline and never
+derives it from the rows it happened to reconstruct, so unexplained population loss
+remains detectable. Unresolved MTM cannot improve reconciled net economics unless its
+execution and applicable funding costs are complete. Existing gross-only Lane 3 ledgers
+remain diagnosable but fail closed on the missing material evidence. A failing audit
+exits 2. Passing this integrity audit does not authorize real trading and does not by
+itself satisfy the separate promotion-policy thresholds.

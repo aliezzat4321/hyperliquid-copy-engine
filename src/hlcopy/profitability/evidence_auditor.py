@@ -198,6 +198,44 @@ def audit_evidence(bundle: dict[str, Any]) -> dict[str, Any]:
     closed = unresolved = missing_outcomes = orphan_count = malformed_close_count = 0
     trading_days: set[str] = set()
 
+    def collect_cost_evidence(
+        economics: dict[str, Any], position_id: object, population: str
+    ) -> None:
+        nonlocal economics_complete
+        for cost in MATERIAL_COSTS:
+            item = economics.get(cost)
+            if (
+                not isinstance(item, dict)
+                or item.get("basis") not in {"measured", "assumption"}
+                or _decimal(item.get("amount")) is None
+            ):
+                economics_complete = False
+                block(
+                    f"{cost.upper()}_EVIDENCE_MISSING",
+                    "MISSING_EVIDENCE",
+                    f"{population} position {position_id} lacks labelled {cost}",
+                )
+            else:
+                if item["basis"] == "assumption":
+                    assumed_cost_components.add(cost)
+                totals[cost] += _decimal(item["amount"]) or Decimal(0)
+
+        if bundle.get("funding_applicable"):
+            funding = economics.get("funding")
+            if (
+                not isinstance(funding, dict)
+                or funding.get("coverage") != "complete"
+                or _decimal(funding.get("amount")) is None
+            ):
+                economics_complete = False
+                block(
+                    "FUNDING_COVERAGE_MISSING",
+                    "MISSING_EVIDENCE",
+                    f"{population} position {position_id} lacks funding coverage",
+                )
+            else:
+                totals["funding"] += _decimal(funding["amount"]) or Decimal(0)
+
     for row in positions:
         status = str(row.get("status") or "").lower()
         if status not in VALID_STATUSES:
@@ -271,38 +309,7 @@ def audit_evidence(bundle: dict[str, Any]) -> dict[str, Any]:
                 )
             else:
                 totals["gross_pnl"] += _decimal(economics["gross_pnl"]) or Decimal(0)
-            for cost in MATERIAL_COSTS:
-                item = economics.get(cost)
-                if (
-                    not isinstance(item, dict)
-                    or item.get("basis") not in {"measured", "assumption"}
-                    or _decimal(item.get("amount")) is None
-                ):
-                    economics_complete = False
-                    block(
-                        f"{cost.upper()}_EVIDENCE_MISSING",
-                        "MISSING_EVIDENCE",
-                        f"closed position {row.get('position_id')} lacks labelled {cost}",
-                    )
-                else:
-                    if item["basis"] == "assumption":
-                        assumed_cost_components.add(cost)
-                    totals[cost] += _decimal(item["amount"]) or Decimal(0)
-            funding = economics.get("funding")
-            if bundle.get("funding_applicable"):
-                if (
-                    not isinstance(funding, dict)
-                    or funding.get("coverage") != "complete"
-                    or _decimal(funding.get("amount")) is None
-                ):
-                    economics_complete = False
-                    block(
-                        "FUNDING_COVERAGE_MISSING",
-                        "MISSING_EVIDENCE",
-                        f"closed position {row.get('position_id')} lacks funding coverage",
-                    )
-                else:
-                    totals["funding"] += _decimal(funding["amount"]) or Decimal(0)
+            collect_cost_evidence(economics, row.get("position_id"), "closed")
         elif status in {"open", "unresolved", "quarantined"}:
             unresolved += 1
             mtm = _decimal(economics.get("unresolved_mtm"))
@@ -315,6 +322,7 @@ def audit_evidence(bundle: dict[str, Any]) -> dict[str, Any]:
                 )
             else:
                 totals["unresolved_mtm"] += mtm
+            collect_cost_evidence(economics, row.get("position_id"), "unresolved")
 
     if orphan_count:
         block(
@@ -494,10 +502,7 @@ def lane3_bundle(rows: list[dict[str, Any]], manifest: dict[str, Any]) -> dict[s
                 "economics": supplied,
             }
         )
-    population = manifest.get("population")
-    if not isinstance(population, dict) or "input_count" not in population:
-        population = {"input_count": len(positions)}
-    return {**manifest, "positions": positions, "population": population}
+    return {**manifest, "positions": positions}
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
