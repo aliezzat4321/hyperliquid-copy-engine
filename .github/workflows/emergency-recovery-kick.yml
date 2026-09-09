@@ -1,0 +1,26 @@
+name: emergency-recovery-kick
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/emergency-recovery-kick.yml
+
+permissions:
+  contents: read
+
+jobs:
+  kick-recovery:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 15
+    steps:
+      - name: Run bounded recovery cycles
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in 1 2 3 4 5 6; do
+            sudo /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py --once || true
+            sleep 2
+          done
+          sudo /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py --status
