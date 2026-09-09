@@ -1,0 +1,76 @@
+name: p0-control-plane-source-repair
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p0-control-plane-source-repair.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Patch source-level autonomy invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('scripts/ai_team_orchestrator.py')
+          text = path.read_text()
+
+          # #130 is a heartbeat, not merely a state-delta mirror.  If runtime state is
+          # unchanged, the issue must still move so freshness accurately proves liveness.
+          old = '''            body = self.runtime.handoff(\n                main_head=str(main.get("sha") or "UNKNOWN"),\n                active_priorities=priorities,\n                pending_owner_action=pending_owner_action,\n            )\n            status_issue = self.gh.issue(RUNTIME_STATUS_ISSUE)\n'''
+          new = '''            body = self.runtime.handoff(\n                main_head=str(main.get("sha") or "UNKNOWN"),\n                active_priorities=priorities,\n                pending_owner_action=pending_owner_action,\n            )\n            # #130 freshness is a control-plane heartbeat. Force a material body delta\n            # on every checkpoint even when the semantic runtime state is unchanged.\n            body = body.rstrip() + f"\\n<!-- AI_TEAM_HEARTBEAT={utcnow()} -->\\n"\n            status_issue = self.gh.issue(RUNTIME_STATUS_ISSUE)\n'''
+          if old not in text:
+              raise SystemExit('heartbeat patch refused: expected sync block not found')
+          text = text.replace(old, new, 1)
+
+          # An exhausted/no-progress repair is an internal quarantine condition, never
+          # an owner BLOCKED state.  The recovery scheduler may continue unrelated work.
+          old = '''                self.block(current, "unchanged CODE_CHANGE fingerprint after one completed action")\n                self.finish_runtime_run(\n                    run_id, str(task["id"]), stdout=cp.stdout, stderr=cp.stderr,\n                    exit_code=1, session_id=session_id, usage=usage, result=result,\n                    error=error, status="BLOCKED",\n                )\n                return\n'''
+          new = '''                quarantine_error = (\n                    "unchanged CODE_CHANGE fingerprint after one completed action; "\n                    "task-local quarantine"\n                )\n                self.ledger.update(\n                    current["id"], status="STALE", retry_at=None, systemd_unit=None,\n                    last_error=quarantine_error, failure_class="CODE_CHANGE",\n                    next_action="recovery scheduler must reroute or dead-letter this fingerprint",\n                )\n                self.runtime.event(\n                    "TASK_QUARANTINED", assignment_id=current["id"],\n                    issue=current["issue_number"], pr=current["pr_number"],\n                    failure_class="CODE_CHANGE", status="QUARANTINED",\n                    unrelated_work_continuing=True,\n                )\n                self.finish_runtime_run(\n                    run_id, str(task["id"]), stdout=cp.stdout, stderr=cp.stderr,\n                    exit_code=1, session_id=session_id, usage=usage, result=result,\n                    error=quarantine_error, status="STALE",\n                )\n                return\n'''
+          if old not in text:
+              raise SystemExit('quarantine patch refused: expected no-progress block not found')
+          text = text.replace(old, new, 1)
+
+          path.write_text(text)
+          PY
+
+          python3 -m py_compile scripts/ai_team_orchestrator.py
+          git diff --check
+          git diff -- scripts/ai_team_orchestrator.py
+
+      - name: Commit permanent source repair
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name 'AI Team Supervisor'
+          git config user.email 'ai-team@localhost'
+          git add scripts/ai_team_orchestrator.py
+          git commit -m 'P0 #238: make heartbeat durable and quarantine no-progress repairs'
+          git push origin HEAD:main
+
+      - name: Deploy repaired orchestrator source immediately
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo install -m 0755 scripts/ai_team_orchestrator.py /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py
+          sudo python3 -m py_compile /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py
+          sudo systemctl start hyperliquid-ai-external-supervisor.service || true
+          sleep 3
+          sudo systemctl is-active --quiet hyperliquid-ai-external-supervisor.timer
+          sudo tail -n 60 /var/lib/hyperliquid-ai-team/external-supervisor/supervisor.log || true
