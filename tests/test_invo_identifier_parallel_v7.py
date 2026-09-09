@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from argparse import Namespace
+from contextlib import contextmanager
 from decimal import Decimal
 from pathlib import Path
 
@@ -24,6 +25,15 @@ class _FakeClient:
 
     async def __aexit__(self, *_: object) -> None:
         return None
+
+    @contextmanager
+    def track_requests(self, metrics: dict[str, object]):
+        metrics.update(
+            api_query_count=2,
+            api_query_latency_ms=3.5,
+            api_retry_count=0,
+        )
+        yield
 
 
 def _result(wallet: str) -> WalletIdentificationResult:
@@ -112,6 +122,12 @@ def test_identifier_runs_portfolios_concurrently_but_bounded(
     assert result["time_to_first_candidate_ms"]["p99"] is not None
     assert result["time_to_verified_identity_ms"]["p90"] is not None
     assert result["verified_yield"] == 1.0
+    assert len(result["per_trader_api"]) == 6
+    assert {row["portfolio_id"] for row in result["per_trader_api"]} == {
+        f"portfolio-{index}" for index in range(6)
+    }
+    assert all(row["query_count"] == 2 for row in result["per_trader_api"])
+    assert sum(row["query_count"] for row in result["per_trader_api"]) == 12
 
 
 def test_production_identifier_uses_wide_bounded_batch() -> None:

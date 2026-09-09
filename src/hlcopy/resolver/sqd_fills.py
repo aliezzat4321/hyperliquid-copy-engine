@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import math
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -229,6 +231,30 @@ class SqdHyperliquidFillsClient:
         self.request_count = 0
         self.request_latency_ms = 0.0
         self.retry_count = 0
+        self._request_metrics: contextvars.ContextVar[dict[str, float | int] | None] = (
+            contextvars.ContextVar("sqd_request_metrics", default=None)
+        )
+
+    @contextmanager
+    def track_requests(self, metrics: dict[str, Any]):
+        """Attribute shared-client API work to the current async task."""
+        metrics.update(api_query_count=0, api_query_latency_ms=0.0, api_retry_count=0)
+        token = self._request_metrics.set(metrics)
+        try:
+            yield
+        finally:
+            self._request_metrics.reset(token)
+
+    def _record_request(self, *, latency_ms: float = 0.0, retry: bool = False) -> None:
+        metrics = self._request_metrics.get()
+        if metrics is None:
+            return
+        if latency_ms:
+            metrics["api_query_latency_ms"] = (
+                float(metrics["api_query_latency_ms"]) + latency_ms
+            )
+        if retry:
+            metrics["api_retry_count"] = int(metrics["api_retry_count"]) + 1
 
     async def __aenter__(self) -> SqdHyperliquidFillsClient:
         return self
@@ -249,24 +275,33 @@ class SqdHyperliquidFillsClient:
             started = time.perf_counter()
             try:
                 self.request_count += 1
+                metrics = self._request_metrics.get()
+                if metrics is not None:
+                    metrics["api_query_count"] = int(metrics["api_query_count"]) + 1
                 response = await self._client.request(method, url, json=payload)
-                self.request_latency_ms += (time.perf_counter() - started) * 1000
+                latency_ms = (time.perf_counter() - started) * 1000
+                self.request_latency_ms += latency_ms
+                self._record_request(latency_ms=latency_ms)
                 if response.status_code in {429, 521, 522, 523, 529} or response.status_code >= 500:
                     if attempt == retries:
                         response.raise_for_status()
                     await asyncio.sleep(min(8.0, 0.4 * (2**attempt)))
                     self.retry_count += 1
+                    self._record_request(retry=True)
                     continue
                 if response.status_code == 204:
                     return response
                 response.raise_for_status()
                 return response
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                self.request_latency_ms += (time.perf_counter() - started) * 1000
+                latency_ms = (time.perf_counter() - started) * 1000
+                self.request_latency_ms += latency_ms
+                self._record_request(latency_ms=latency_ms)
                 if attempt == retries:
                     raise SqdPortalError(f"SQD request failed after retries: {url}") from exc
                 await asyncio.sleep(min(8.0, 0.4 * (2**attempt)))
                 self.retry_count += 1
+                self._record_request(retry=True)
         raise AssertionError("unreachable")
 
     async def _stream(self, payload: dict[str, Any]) -> list[dict[str, Any]]:

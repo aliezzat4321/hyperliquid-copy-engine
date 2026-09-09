@@ -7,6 +7,7 @@ import json
 import os
 import time
 from collections.abc import Mapping, Sequence
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -189,14 +190,19 @@ async def _identify_one(
         report_key = hashlib.sha256(portfolio_id.encode("utf-8")).hexdigest()[:16]
         telemetry: dict[str, Any] = {}
         try:
-            result = await identify_wallet_from_csv(
-                evidence_path,
-                output_dir=reports_dir / report_key,
-                client=client,
-                snapshot=snapshot,
-                expected_source_identity=portfolio_id,
-                telemetry=telemetry,
+            track_requests = getattr(client, "track_requests", None)
+            request_scope = (
+                track_requests(telemetry) if callable(track_requests) else nullcontext()
             )
+            with request_scope:
+                result = await identify_wallet_from_csv(
+                    evidence_path,
+                    output_dir=reports_dir / report_key,
+                    client=client,
+                    snapshot=snapshot,
+                    expected_source_identity=portfolio_id,
+                    telemetry=telemetry,
+                )
             latency_ms = (time.perf_counter() - started) * 1000
             return row, snapshot, attempted_at, result, None, latency_ms, telemetry
         except Exception as exc:
@@ -550,6 +556,20 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
         else {"query_count": 0, "query_latency_ms": 0.0, "retry_count": 0},
         "verification_window_query_bound_per_trader": 80,
         "cache_reuse": "shared_batch_sqd_coverage_and_header_cache",
+        "per_trader_api": [
+            {
+                "portfolio_id": str(outcome[0]["portfolio_id"]),
+                "username": outcome[0].get("username"),
+                "query_count": int(outcome[6].get("api_query_count", 0)),
+                "query_latency_ms": round(
+                    float(outcome[6].get("api_query_latency_ms", 0.0)), 3
+                ),
+                "retry_count": int(outcome[6].get("api_retry_count", 0)),
+            }
+            for outcome in outcomes
+        ]
+        if selected
+        else [],
     }
     if errors > 0:
         raise PortfolioResolutionBatchError(

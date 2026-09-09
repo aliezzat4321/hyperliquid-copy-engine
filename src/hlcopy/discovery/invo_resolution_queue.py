@@ -194,6 +194,22 @@ def _materialize_grouped(
     min_trades: int,
 ) -> dict[str, object]:
     generated_at = datetime.now(tz=UTC).isoformat()
+    previous_ready_at: dict[str, str] = {}
+    queue_path = output_dir / "resolution_queue.json"
+    if queue_path.is_file():
+        try:
+            previous_payload = json.loads(queue_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            previous_payload = {}
+        previous_rows = previous_payload.get("queue", [])
+        if isinstance(previous_rows, list):
+            for previous in previous_rows:
+                if not isinstance(previous, Mapping):
+                    continue
+                portfolio_id = str(previous.get("portfolio_id") or "")
+                ready_at = str(previous.get("resolution_ready_at") or "")
+                if portfolio_id and ready_at:
+                    previous_ready_at[portfolio_id] = ready_at
     metadata = {
         str(row.get("portfolio_id") or ""): row
         for row in portfolios
@@ -229,7 +245,12 @@ def _materialize_grouped(
                 "distinct_coin_count": len(coins),
                 "resolver_csv": str(csv_path),
                 "status": "READY_FOR_WALLET_RESOLUTION",
-                "resolution_ready_at": generated_at,
+                # Preserve arrival provenance while a portfolio remains continuously
+                # resolution-ready. If it falls out of the queue and later returns,
+                # it correctly receives a new timestamp.
+                "resolution_ready_at": previous_ready_at.get(
+                    portfolio_id, generated_at
+                ),
             }
         )
 
@@ -247,7 +268,7 @@ def _materialize_grouped(
         "generated_at": generated_at,
         "queue": queue,
     }
-    path = output_dir / "resolution_queue.json"
+    path = queue_path
     temporary = path.with_suffix(".json.tmp")
     rendered = json.dumps(payload, indent=2, sort_keys=True) + "\n"
     temporary.write_text(rendered, encoding="utf-8")

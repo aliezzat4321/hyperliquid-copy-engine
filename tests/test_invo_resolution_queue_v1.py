@@ -78,6 +78,15 @@ def test_resolution_queue_requires_independent_trades_and_deduplicates_trade_id(
     assert len(generic.signals) == 12
     assert generic.rejected_rows == ()
 
+    first_ready_at = item["resolution_ready_at"]
+    rematerialized = materialize_resolution_queue(
+        evidence_path=evidence_path,
+        output_dir=tmp_path / "queue",
+        portfolios=[],
+        min_trades=12,
+    )
+    assert rematerialized["queue"][0]["resolution_ready_at"] == first_ready_at
+
 
 def test_resolution_queue_waits_for_minimum_evidence(tmp_path: Path) -> None:
     evidence_path = tmp_path / "closed.ndjson"
