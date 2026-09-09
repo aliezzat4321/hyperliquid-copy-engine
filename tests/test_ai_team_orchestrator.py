@@ -116,6 +116,29 @@ def test_legacy_self_attested_rows_never_become_proven(tmp_path):
     assert ledger.proven_requirements(1) == set()
 
 
+def test_persisted_all_true_flags_are_reverified_from_artifact(tmp_path):
+    root, payload, evidence = _artifact(tmp_path, result={"status": "FAIL"})
+    ledger = _ledger(tmp_path / "ledger.sqlite3", root)
+    ledger.record_merged_code(issue_number=1, code_sha="a" * 40, pr_number=2,
+                              observed_at=orch.utcnow())
+    evidence_id, predicate = ledger.record_acceptance_evidence(
+        issue_number=1, requirement="RUNTIME_PROOF",
+        phase="PRODUCTION_VALIDATION", evidence=evidence,
+    )
+    assert predicate is False
+    ledger.db.execute(
+        "UPDATE acceptance_evidence SET predicate_result=1,machine_verified=1 "
+        "WHERE evidence_id=?", (evidence_id,),
+    )
+    ledger.db.commit()
+    assert ledger.proven_requirements(1) == set()
+    assert not ledger.phase_is_proven(1, "RUNTIME_PROOF", "PRODUCTION_VALIDATION")
+
+    payload["result"] = {"status": "PASS"}
+    Path(evidence["artifact_path"]).write_text(json.dumps(payload, sort_keys=True))
+    assert ledger.proven_requirements(1) == set()
+
+
 @pytest.mark.parametrize("requirement,phase,producer,result,extra", [
     (requirement, phase, next(iter(orch.PHASE_EVIDENCE_SPECS[phase]["producers"])),
      {orch.PHASE_EVIDENCE_SPECS[phase]["field"]: orch.PHASE_EVIDENCE_SPECS[phase]["value"]},

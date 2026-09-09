@@ -533,6 +533,10 @@ class Ledger:
                 "ALTER TABLE acceptance_evidence ADD COLUMN machine_verified "
                 "INTEGER NOT NULL DEFAULT 0"
             )
+        if "artifact_path" not in evidence_columns:
+            self.db.execute("ALTER TABLE acceptance_evidence ADD COLUMN artifact_path TEXT")
+        if "artifact_hash" not in evidence_columns:
+            self.db.execute("ALTER TABLE acceptance_evidence ADD COLUMN artifact_hash TEXT")
         self.db.commit()
 
     def observe_remediation(self, blocker: dict[str, Any], *, issue_number: int,
@@ -829,6 +833,8 @@ class Ledger:
     def record_acceptance_evidence(self, *, issue_number: int, requirement: str,
                                    phase: str, evidence: dict[str, Any]) -> tuple[str, bool]:
         """Verify immutable machine output and independently recompute its predicate."""
+        if phase not in COMPLETION_REQUIREMENTS.get(requirement, ()):
+            raise ValueError("EVIDENCE_PHASE_NOT_IN_REQUIREMENT")
         artifact, digest = self._verified_acceptance_artifact(
             requirement=requirement, phase=phase, evidence=evidence
         )
@@ -845,37 +851,70 @@ class Ledger:
             "INSERT OR IGNORE INTO acceptance_evidence("
             "evidence_id,issue_number,requirement,phase,source,observed_at,window_start,"
             "window_end,code_sha,data_hash,manifests_json,measured_result_json,"
-            "predicate_result,created_at,machine_verified) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)",
+            "predicate_result,created_at,machine_verified,artifact_path,artifact_hash) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)",
             (evidence_id, issue_number, requirement, phase, str(artifact["producer"]),
              str(artifact["observed_at"]), artifact.get("window_start"),
              artifact.get("window_end"), artifact["code_sha"], artifact["data_hash"],
              canonical_json(artifact["manifests"]), canonical_json(artifact["result"]),
-             int(predicate), utcnow()),
+             int(predicate), utcnow(), str(evidence["artifact_path"]), digest),
         )
         self.db.commit()
         return evidence_id, predicate
 
     def proven_requirements(self, issue_number: int) -> set[str]:
         rows = self.db.execute(
-            "SELECT e.requirement,e.phase FROM acceptance_evidence e JOIN merged_code m "
-            "ON m.issue_number=e.issue_number AND m.code_sha=e.code_sha "
-            "WHERE e.issue_number=? AND e.predicate_result=1 AND e.machine_verified=1",
+            "SELECT e.*,m.code_sha AS merged_sha FROM acceptance_evidence e "
+            "JOIN merged_code m ON m.issue_number=e.issue_number "
+            "WHERE e.issue_number=?",
             (issue_number,),
         ).fetchall()
         observed: dict[str, set[str]] = {}
-        for requirement, phase in rows:
-            observed.setdefault(str(requirement), set()).add(str(phase))
+        for row in rows:
+            requirement, phase = str(row["requirement"]), str(row["phase"])
+            if phase not in COMPLETION_REQUIREMENTS.get(requirement, ()):
+                continue
+            try:
+                artifact, digest = self._verified_acceptance_artifact(
+                    requirement=requirement,
+                    phase=phase,
+                    evidence={"artifact_path": row["artifact_path"],
+                              "artifact_hash": row["artifact_hash"]},
+                )
+            except (OSError, TypeError, ValueError):
+                continue
+            spec = PHASE_EVIDENCE_SPECS[phase]
+            if (digest != row["artifact_hash"] or artifact["code_sha"] != row["merged_sha"]
+                    or artifact["result"].get(spec["field"]) != spec["value"]):
+                continue
+            observed.setdefault(requirement, set()).add(phase)
         return {requirement for requirement, phases in COMPLETION_REQUIREMENTS.items()
                 if set(phases).issubset(observed.get(requirement, set()))}
 
     def phase_is_proven(self, issue_number: int, requirement: str, phase: str) -> bool:
-        return bool(self.db.execute(
-            "SELECT 1 FROM acceptance_evidence e JOIN merged_code m "
-            "ON m.issue_number=e.issue_number "
-            "AND m.code_sha=e.code_sha WHERE e.issue_number=? AND e.requirement=? "
-            "AND e.phase=? AND e.predicate_result=1 AND e.machine_verified=1 LIMIT 1",
+        if phase not in COMPLETION_REQUIREMENTS.get(requirement, ()):
+            return False
+        rows = self.db.execute(
+            "SELECT e.*,m.code_sha AS merged_sha FROM acceptance_evidence e "
+            "JOIN merged_code m ON m.issue_number=e.issue_number "
+            "WHERE e.issue_number=? AND e.requirement=? AND e.phase=?",
             (issue_number, requirement, phase),
-        ).fetchone())
+        ).fetchall()
+        spec = PHASE_EVIDENCE_SPECS[phase]
+        for row in rows:
+            try:
+                artifact, digest = self._verified_acceptance_artifact(
+                    requirement=requirement,
+                    phase=phase,
+                    evidence={"artifact_path": row["artifact_path"],
+                              "artifact_hash": row["artifact_hash"]},
+                )
+            except (OSError, TypeError, ValueError):
+                continue
+            if (digest == row["artifact_hash"] and artifact["code_sha"] == row["merged_sha"]
+                    and artifact["result"].get(spec["field"]) == spec["value"]):
+                return True
+        return False
 
     def meta_get(self, key: str) -> str | None:
         row = self.db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
