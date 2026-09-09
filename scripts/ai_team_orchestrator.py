@@ -3748,7 +3748,30 @@ that non-code work needs a CODE_CHANGE. Unknown or contradictory evidence is TER
                 "Auto-merge withheld by model-routing/risk policy.",
             )
             return
-        merged = self.gh.merge(int(task["pr_number"]), target)
+        try:
+            merged = self.gh.merge(int(task["pr_number"]), target)
+        except RuntimeError as exc:
+            error = str(exc)
+            normalized = error.lower()
+            if not any(marker in normalized for marker in (
+                "http 405", "not mergeable", "merge conflicts", "merge conflict"
+            )):
+                raise
+            # Base drift / merge conflicts are task-local lifecycle failures. Never let
+            # them terminate the scheduler or suppress unrelated lane collection.
+            self.ledger.update(
+                task["id"], status="STALE", retry_at=None, systemd_unit=None,
+                last_error=f"merge no longer applicable: {error[-700:]}",
+                failure_class="CODE_CHANGE",
+                next_action="refresh/rebase the scoped PR on current main and re-run exact-SHA review/CI",
+            )
+            self.runtime.event(
+                "MERGE_TASK_STALE", assignment_id=task["id"],
+                issue=task["issue_number"], pr=task["pr_number"],
+                target_sha=target, error=error[-700:],
+                status="QUARANTINED", unrelated_work_continuing=True,
+            )
+            return
         if not merged or not merged.get("merged"):
             # Merge/API rejection can be transient; retry this stage only.
             retry_at = retry_at_after(max(60, int(self.cfg["poll_seconds"])))
