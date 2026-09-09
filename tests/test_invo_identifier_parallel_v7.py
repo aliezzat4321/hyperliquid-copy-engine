@@ -239,9 +239,53 @@ def test_durable_wrapper_publishes_after_partial_portfolio_failure(
         (tmp_path / "lane2_measurements" / "latest.json").read_text(encoding="utf-8")
     )
     assert latest["schema"] == "hlcopy-lane2-resolution-measurement/v1"
+    assert latest["status"] == "COMPLETED"
+    assert latest["run_id"]
+    assert latest["started_at"] <= latest["completed_at"]
     assert latest["identifier"]["partial_failure"] is True
     assert latest["real_trading_enabled"] is False
     history = (tmp_path / "lane2_measurements" / "runs.ndjson").read_text(
         encoding="utf-8"
     )
     assert len(history.splitlines()) == 1
+
+
+def test_durable_wrapper_records_fatal_failure_without_generic_runner(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    args = Namespace(state_dir=tmp_path)
+    started_run_id = ""
+
+    async def failed_run(_: Namespace) -> dict[str, object]:
+        nonlocal started_run_id
+        started = json.loads(
+            (tmp_path / "lane2_measurements" / "latest.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert started["status"] == "STARTED"
+        started_run_id = str(started["run_id"])
+        raise ValueError("corrupt queue")
+
+    monkeypatch.setattr(invo_identifier_durable_job, "_parse_args", lambda: args)
+    monkeypatch.setattr(invo_identifier_durable_job, "run_once", failed_run)
+
+    try:
+        asyncio.run(invo_identifier_durable_job._main())
+    except ValueError as exc:
+        assert str(exc) == "corrupt queue"
+    else:
+        raise AssertionError("fatal resolver failure was not propagated")
+
+    latest = json.loads(
+        (tmp_path / "lane2_measurements" / "latest.json").read_text(encoding="utf-8")
+    )
+    assert latest["status"] == "FAILED"
+    assert latest["run_id"] == started_run_id
+    assert latest["error"] == {"type": "ValueError", "message": "corrupt queue"}
+    assert latest["real_trading_enabled"] is False
+    history = (tmp_path / "lane2_measurements" / "runs.ndjson").read_text(
+        encoding="utf-8"
+    )
+    assert json.loads(history)["run_id"] == latest["run_id"]
