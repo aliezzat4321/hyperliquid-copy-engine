@@ -184,6 +184,7 @@ def test_production_router_has_no_undispatchable_protected_workflow_mapping():
         (Path(__file__).resolve().parents[1] / "config" / "ai_team_router.json").read_text()
     )
     assert cfg["remediation"]["protected_actions"] == {}
+    assert orch.DEFAULT_CONFIG["remediation"]["protected_actions"] == {}
 
 
 def test_deterministic_ci_failure_becomes_code_change_not_terminal(monkeypatch):

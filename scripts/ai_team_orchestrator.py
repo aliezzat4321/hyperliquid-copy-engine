@@ -93,11 +93,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "budgets": {"CODE_CHANGE": 1, "PR_METADATA": 3, "PROTECTED_ACTION": 1,
                     "CI_RETRY": 3, "REVIEW_RERUN": 0, "POLICY_RECONCILIATION": 3,
                     "TERMINAL": 0},
-        "protected_actions": {
-            "DEPLOY_REVIEWED_CONTROL_PLANE": {
-                "workflow_id": "deploy-ai-team-orchestrator.yml", "ref": "main"
-            }
-        },
+        # Protected actions require an explicitly reviewed repository mapping.
+        # The safe fallback authorizes none.
+        "protected_actions": {},
     },
     "legacy_remediation_migration": {"version": 1, "issues": [166, 168, 170],
                                      "supersede_issue": 170, "release_issue": 120},
