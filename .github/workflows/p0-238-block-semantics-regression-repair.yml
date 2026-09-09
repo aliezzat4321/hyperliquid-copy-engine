@@ -44,8 +44,8 @@ jobs:
 
           p = Path('tests/test_ai_team_orchestrator.py')
           s = p.read_text()
-          old = '''    assert task["status"] == "BLOCKED"\n    assert "verification failed" in task["last_error"]\n'''
-          new = '''    assert task["status"] == "STALE"\n    assert task["failure_class"] != "OWNER_AUTH_REQUIRED"\n    assert "verification failed" in task["last_error"]\n'''
+          old = '''    assert task["status"] == "BLOCKED"\n    assert "MISSING_EXACT_MERGED_SHA" in task["last_error"]\n'''
+          new = '''    assert task["status"] == "STALE"\n    assert task["failure_class"] != "OWNER_AUTH_REQUIRED"\n    assert "MISSING_EXACT_MERGED_SHA" in task["last_error"]\n'''
           if old not in s:
               raise SystemExit('acceptance test patch refused: expected assertion not found')
           p.write_text(s.replace(old, new, 1))
