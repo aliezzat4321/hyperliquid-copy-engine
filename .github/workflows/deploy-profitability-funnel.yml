@@ -1,5 +1,6 @@
 name: deploy-profitability-funnel
 
+# EMERGENCY_REDEPLOY_2026_09_09_LANE1
 on:
   push:
     branches:
