@@ -7,6 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import httpx
+import pytest
 
 from hlcopy.discovery import invo_identifier_durable_job, invo_identifier_job
 from hlcopy.resolver.identifier import WalletIdentificationResult
@@ -239,9 +240,42 @@ def test_durable_wrapper_publishes_after_partial_portfolio_failure(
         (tmp_path / "lane2_measurements" / "latest.json").read_text(encoding="utf-8")
     )
     assert latest["schema"] == "hlcopy-lane2-resolution-measurement/v1"
+    assert latest["status"] == "PARTIAL_FAILURE"
+    assert latest["run_started_at"] <= latest["observed_at"]
     assert latest["identifier"]["partial_failure"] is True
     assert latest["real_trading_enabled"] is False
     history = (tmp_path / "lane2_measurements" / "runs.ndjson").read_text(
         encoding="utf-8"
     )
     assert len(history.splitlines()) == 1
+
+
+def test_durable_wrapper_records_runtime_blocker_before_failing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    args = Namespace(state_dir=tmp_path)
+
+    async def broken_run_once(_: Namespace) -> dict[str, object]:
+        raise ValueError("resolution queue is corrupt")
+
+    monkeypatch.setattr(invo_identifier_durable_job, "_parse_args", lambda: args)
+    monkeypatch.setattr(invo_identifier_durable_job, "run_once", broken_run_once)
+
+    with pytest.raises(ValueError, match="resolution queue is corrupt"):
+        asyncio.run(invo_identifier_durable_job._main())
+
+    latest = json.loads(
+        (tmp_path / "lane2_measurements" / "latest.json").read_text(encoding="utf-8")
+    )
+    assert latest["status"] == "RUNTIME_BLOCKED"
+    assert latest["runtime_blocker"] == {
+        "type": "ValueError",
+        "message": "resolution queue is corrupt",
+    }
+    assert latest["real_trading_enabled"] is False
+    assert latest["run_started_at"] <= latest["observed_at"]
+    history = (tmp_path / "lane2_measurements" / "runs.ndjson").read_text(
+        encoding="utf-8"
+    )
+    assert json.loads(history)["status"] == "RUNTIME_BLOCKED"

@@ -34,17 +34,40 @@ def _persist_measurement(*, state_dir: Path, payload: dict[str, object]) -> None
 
 async def _main() -> int:
     args = _parse_args()
+    started_at = datetime.now(tz=UTC)
     try:
-        result = await run_once(args)
-    except PortfolioResolutionBatchError as exc:
-        # Individual portfolio failures are already persisted as ERROR and are never
-        # published as identities. Do not hold successful verified portfolios back
-        # from the durable scoring/shadow handoff.
-        result = exc.summary
-    publication = publish_durable_verified_identities(state_dir=args.state_dir)
+        try:
+            result = await run_once(args)
+        except PortfolioResolutionBatchError as exc:
+            # Individual portfolio failures are already persisted as ERROR and are
+            # never published as identities. Do not hold successful verified
+            # portfolios back from the durable scoring/shadow handoff.
+            result = exc.summary
+        publication = publish_durable_verified_identities(state_dir=args.state_dir)
+    except Exception as exc:
+        # The lane-specific runner is also the operational evidence source. Persist a
+        # precise blocker before failing the service so a broken queue, publication,
+        # or dependency cannot degrade into an unobservable generic-runner timeout.
+        failed: dict[str, object] = {
+            "schema": "hlcopy-lane2-resolution-measurement/v1",
+            "run_started_at": started_at.isoformat(),
+            "observed_at": datetime.now(tz=UTC).isoformat(),
+            "status": "RUNTIME_BLOCKED",
+            "runtime_blocker": {
+                "type": type(exc).__name__,
+                "message": str(exc),
+            },
+            "real_trading_enabled": False,
+        }
+        _persist_measurement(state_dir=args.state_dir, payload=failed)
+        print(json.dumps(failed, sort_keys=True))
+        raise
+
     measurement: dict[str, object] = {
         "schema": "hlcopy-lane2-resolution-measurement/v1",
+        "run_started_at": started_at.isoformat(),
         "observed_at": datetime.now(tz=UTC).isoformat(),
+        "status": "PARTIAL_FAILURE" if result.get("partial_failure") else "COMPLETE",
         "identifier": result,
         "durable_verified_count": publication["verified_count"],
         "durable_identity_usernames": [
