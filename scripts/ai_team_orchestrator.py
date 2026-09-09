@@ -226,7 +226,14 @@ def classify_recovery_failure(task: sqlite3.Row | dict[str, Any]) -> str:
         return str(row["failure_class"])
     text = str(row.get("last_error") or "").lower()
     task_type = str(row.get("task_type") or "")
-    if re.search(r"\b(owner_auth_required|owner authorization required|auth_required)\b", text):
+    if (
+        re.search(r"\b(owner_auth_required|owner authorization required|auth_required)\b", text)
+        or "protected_action missing/invalid repository authorization" in text
+        or "protected ai-control-plane change lost trusted issue author" in text
+        or "protected ai-control-plane change lacks ai_team_protected_change=yes" in text
+        or "issue author association no longer trusted" in text
+        or "claude_auth_required" in text
+    ):
         return "OWNER_AUTH_REQUIRED"
     if "missing_completion_contract" in text:
         return "MISSING_COMPLETION_CONTRACT"
@@ -3827,7 +3834,12 @@ that non-code work needs a CODE_CHANGE. Unknown or contradictory evidence is TER
                 next_action="automatic recovery/reroute required; unrelated work continues",
             )
             try:
+                # A quarantined internal failure must not be accidentally reclaimed from
+                # a stale GitHub ready/queued label. Recovery is driven by the durable ledger.
                 self.gh.remove_label(number, self.cfg["labels"]["blocked"])
+                self.gh.remove_label(number, self.cfg["labels"]["ready"])
+                self.gh.remove_label(number, self.cfg["labels"]["queued"])
+                self.gh.add_labels(number, [self.cfg["labels"]["pending"]])
                 self.runtime.event(
                     "TASK_QUARANTINED", assignment_id=task["id"],
                     issue=task["issue_number"], pr=task["pr_number"],

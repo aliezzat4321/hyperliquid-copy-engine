@@ -1287,7 +1287,8 @@ def test_cycle_blocks_only_invalid_acceptance_evidence_task(tmp_path):
     team.cycle()
 
     task = ledger.get(task_id)
-    assert task["status"] == "BLOCKED"
+    assert task["status"] == "STALE"
+    assert task["failure_class"] != "OWNER_AUTH_REQUIRED"
     assert "MISSING_EXACT_MERGED_SHA" in task["last_error"]
 
 
