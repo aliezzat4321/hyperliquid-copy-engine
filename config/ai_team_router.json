@@ -56,6 +56,13 @@
     "CAPITAL_SENSITIVE_METHODOLOGY"
   ],
   "max_attempts": 3,
+  "recovery": {
+    "max_attempts": 3,
+    "no_progress_seconds": 3600,
+    "diagnostic_retry_seconds": 300,
+    "evidence_runner_liveness_polls": 3,
+    "evidence_runner_heartbeat_seconds": 300
+  },
   "poll_seconds": 60,
   "default_rate_limit_retry_seconds": 3600,
   "claude_readiness_probe_seconds": 300,

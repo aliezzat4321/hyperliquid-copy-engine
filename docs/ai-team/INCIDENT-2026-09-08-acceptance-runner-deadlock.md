@@ -4,6 +4,18 @@ Status: OPEN
 Severity: P0 control-plane liveness
 Real trading: disabled
 
+## Repair implementation
+
+The orchestrator now persists a per-phase missing-runner poll count, accepts only the
+phase's registered runner identity as a healthy heartbeat, and escalates to a scoped
+autonomous `REPAIR` after three missing/stale polls. A declared future evidence window
+uses `WAITING_EVIDENCE_WINDOW` until its exact timestamp. Runtime events include runner
+identity, heartbeat, attempt count, next retry, repair assignment, and confirmation that
+unrelated scheduling continues.
+
+This incident remains open until the repaired manager code is deployed and observed
+producing durable Lane 3 evidence or the bounded repair transition in runtime.
+
 ## Symptom
 
 Issue #197 entered `POST_MERGE_EVIDENCE` and the orchestrator has emitted `ACCEPTANCE_PHASE_READY` once per minute for hours with `last_error=awaiting deterministic phase runner evidence`. The task never advances, blocks unrelated queued work, and consumes scheduler cycles.

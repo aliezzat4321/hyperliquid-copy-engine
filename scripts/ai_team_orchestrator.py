@@ -170,7 +170,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     ],
     "max_attempts": 3,
     "recovery": {"max_attempts": 3, "no_progress_seconds": 3600,
-                 "diagnostic_retry_seconds": 300},
+                 "diagnostic_retry_seconds": 300,
+                 "evidence_runner_liveness_polls": 3,
+                 "evidence_runner_heartbeat_seconds": 300},
     "poll_seconds": 60,
     "default_rate_limit_retry_seconds": 3600,
     "claude_readiness_probe_seconds": 300,
@@ -1924,6 +1926,118 @@ class Orchestrator:
         self.finalize_proven_issue(issue, self.ledger.get(str(task["id"])))
         return None
 
+    def wait_for_acceptance_runner(self, task: sqlite3.Row,
+                                   payload: dict[str, Any]) -> None:
+        """Bound a missing phase runner without manufacturing acceptance evidence."""
+        phase = str(task["task_type"])
+        expected_runner = PHASE_EVIDENCE_SCHEMAS[phase][0]
+        runner = payload.get("runner") if isinstance(payload.get("runner"), dict) else {}
+        runner_identity = str(runner.get("identity") or "MISSING")
+        heartbeat_at = parse_utc(str(runner.get("heartbeat_at") or ""))
+        next_eligible_at = parse_utc(str(runner.get("next_eligible_at") or ""))
+        now = dt.datetime.now(dt.timezone.utc)
+
+        if next_eligible_at and next_eligible_at > now:
+            retry_at = next_eligible_at.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            self.ledger.update(
+                task["id"], status="WAITING_EVIDENCE_WINDOW", retry_at=retry_at,
+                failure_class="EVIDENCE_WINDOW_WAIT",
+                last_error="waiting for predeclared prospective evidence window",
+                next_action=f"resume deterministic {phase.lower()} runner at {retry_at}",
+            )
+            self.runtime.event(
+                "ACCEPTANCE_WINDOW_WAIT", assignment_id=task["id"],
+                issue=task["issue_number"], task_type=phase,
+                runner_identity=runner_identity,
+                runner_last_heartbeat=runner.get("heartbeat_at"),
+                liveness_attempts=int(payload.get("runner_liveness_attempts", 0)),
+                next_retry=retry_at, escalation_task=None,
+                unrelated_work_continuing=True,
+            )
+            return
+
+        runner_cfg = self.cfg.get("recovery", {})
+        heartbeat_seconds = int(runner_cfg.get("evidence_runner_heartbeat_seconds", 300))
+        heartbeat_fresh = (
+            runner_identity == expected_runner and heartbeat_at is not None
+            and heartbeat_at <= now
+            and now - heartbeat_at <= dt.timedelta(seconds=heartbeat_seconds)
+        )
+        if heartbeat_fresh:
+            retry_at = retry_at_after(max(60, int(self.cfg["poll_seconds"])))
+            self.ledger.update(
+                task["id"], status="RETRY", retry_at=retry_at,
+                last_error="deterministic phase runner active; awaiting evidence",
+                next_action=f"await {expected_runner} durable evidence",
+            )
+            self.runtime.event(
+                "ACCEPTANCE_RUNNER_HEARTBEAT", assignment_id=task["id"],
+                issue=task["issue_number"], task_type=phase,
+                runner_identity=runner_identity,
+                runner_last_heartbeat=runner.get("heartbeat_at"),
+                liveness_attempts=int(payload.get("runner_liveness_attempts", 0)),
+                next_retry=retry_at, escalation_task=None,
+                unrelated_work_continuing=True,
+            )
+            return
+
+        attempts = int(payload.get("runner_liveness_attempts", 0)) + 1
+        payload["runner_liveness_attempts"] = attempts
+        payload["runner"] = {**runner, "identity": runner_identity}
+        max_polls = int(runner_cfg.get("evidence_runner_liveness_polls", 3))
+        error = f"acceptance phase runner produced no durable evidence after {attempts} polls"
+        if attempts < max_polls:
+            retry_at = retry_at_after(max(60, int(self.cfg["poll_seconds"])))
+            self.ledger.update(
+                task["id"], status="RETRY", retry_at=retry_at,
+                evidence_json=canonical_json(payload), last_error=error,
+                failure_class="RUNNER_FAILURE",
+                next_action=f"await or restart deterministic {expected_runner}",
+            )
+            self.runtime.event(
+                "ACCEPTANCE_RUNNER_MISSING", assignment_id=task["id"],
+                issue=task["issue_number"], task_type=phase,
+                runner_identity=runner_identity,
+                runner_last_heartbeat=runner.get("heartbeat_at"),
+                liveness_attempts=attempts, next_retry=retry_at,
+                escalation_task=None, unrelated_work_continuing=True,
+            )
+            return
+
+        error = f"{error}; autonomous runner repair required"
+        fingerprint = recovery_fingerprint({**dict(task), "last_error": error}, "RUNNER_FAILURE")
+        context = {
+            "failure_class": "RUNNER_FAILURE", "fingerprint": fingerprint,
+            "failed_assignment": task["id"], "previous_attempt": attempts,
+            "previous_task_type": phase, "exact_error": error,
+            "target_sha": task["target_sha"], "pr_number": task["pr_number"],
+            "runner_identity": runner_identity,
+        }
+        repair_id = self.ledger.create_task(
+            issue_number=int(task["issue_number"]), pr_number=task["pr_number"],
+            task_type="REPAIR", agent="CODEX_CHATGPT", model_class="CODEX_DEFAULT",
+            task_class=str(task["task_class"]), status="PENDING",
+            target_sha=task["target_sha"], parent_id=str(task["id"]),
+            lifecycle_phase="REPAIR", blockers=[context], failure_class="RUNNER_FAILURE",
+            recovery_fingerprint=fingerprint, recovery_attempt=1,
+            next_action=f"repair deterministic {expected_runner} and resume {phase}",
+            evidence={"recovery_context": context},
+        )
+        self.ledger.update(
+            task["id"], status="RECOVERY_PENDING", retry_at=None,
+            evidence_json=canonical_json(payload), last_error=error,
+            failure_class="RUNNER_FAILURE", recovery_fingerprint=fingerprint,
+            next_action=f"repair assigned as {repair_id}",
+        )
+        self.runtime.event(
+            "ACCEPTANCE_RUNNER_ESCALATED", assignment_id=task["id"],
+            issue=task["issue_number"], task_type=phase,
+            runner_identity=runner_identity,
+            runner_last_heartbeat=runner.get("heartbeat_at"),
+            liveness_attempts=attempts, next_retry=None,
+            escalation_task=repair_id, unrelated_work_continuing=True,
+        )
+
     def sync_runtime_checkpoint(self) -> None:
         """Project SQLite runtime state and mirror a compact chat-independent handoff."""
         try:
@@ -2362,16 +2476,7 @@ class Orchestrator:
                     if isinstance(payload.get("result"), dict):
                         self.complete_acceptance_phase(task, payload["result"])
                     else:
-                        retry_at = retry_at_after(max(60, int(self.cfg["poll_seconds"])))
-                        self.ledger.update(
-                            task["id"], status="RETRY", retry_at=retry_at,
-                            last_error="awaiting deterministic phase runner evidence",
-                        )
-                        self.runtime.event(
-                            "ACCEPTANCE_PHASE_READY", assignment_id=task["id"],
-                            issue=task["issue_number"], task_type=task["task_type"],
-                            status="RETRY", retry_after=retry_at,
-                        )
+                        self.wait_for_acceptance_runner(task, payload)
                 except ValueError as exc:
                     self.block(task, f"acceptance evidence verification failed: {exc}")
             elif task["task_type"] in {"BUILD", "REPAIR"}:
