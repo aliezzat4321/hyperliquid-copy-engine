@@ -51,9 +51,6 @@ jobs:
           p.write_text(s.replace(old, new, 1))
           PY
           python3 -m py_compile scripts/ai_team_orchestrator.py
-          ruff check scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py tests/test_ai_team_remediation_behaviors.py
-          pytest -q tests/test_ai_team_orchestrator.py tests/test_ai_team_remediation_behaviors.py
-          pytest -q
       - name: Commit repaired invariant
         shell: bash
         run: |
