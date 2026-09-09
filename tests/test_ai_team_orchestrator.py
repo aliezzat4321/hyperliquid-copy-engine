@@ -55,6 +55,28 @@ def test_acceptance_evidence_requires_identity_and_exact_predicate(tmp_path):
             issue_number=2, requirement="RUNTIME_PROOF", phase="PRODUCTION_VALIDATION",
             evidence={**evidence, "code_sha": None},
         )
+    with pytest.raises(ValueError, match="INVALID_ACCEPTANCE_PREDICATE"):
+        ledger.record_acceptance_evidence(
+            issue_number=3, requirement="RUNTIME_PROOF", phase="PRODUCTION_VALIDATION",
+            evidence={**evidence, "predicate_result": 1},
+        )
+
+
+def test_phase_task_does_not_conflate_requirements_with_shared_phase(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    first = ledger.create_task(
+        issue_number=1, task_type="MEASUREMENT", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", lifecycle_phase="MEASUREMENT",
+        evidence={"requirement": "MEASUREMENT_PROOF"},
+    )
+    second = ledger.create_task(
+        issue_number=1, task_type="MEASUREMENT", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", lifecycle_phase="MEASUREMENT",
+        evidence={"requirement": "STORAGE_PROOF"},
+    )
+
+    assert ledger.phase_task(1, "MEASUREMENT_PROOF", "MEASUREMENT")["id"] == first
+    assert ledger.phase_task(1, "STORAGE_PROOF", "MEASUREMENT")["id"] == second
 
 
 def test_failed_measurement_enqueues_repair_not_done(tmp_path):

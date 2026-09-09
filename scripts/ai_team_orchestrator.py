@@ -601,11 +601,17 @@ class Ledger:
         sql += " ORDER BY created_at LIMIT 1"
         return self.db.execute(sql, params).fetchone()
 
-    def phase_task(self, issue_number: int, requirement: str) -> sqlite3.Row | None:
-        return self.db.execute(
+    def phase_task(self, issue_number: int, requirement: str,
+                   phase: str) -> sqlite3.Row | None:
+        rows = self.db.execute(
             "SELECT * FROM tasks WHERE issue_number=? AND lifecycle_phase=? "
-            "ORDER BY created_at DESC LIMIT 1", (issue_number, requirement)
-        ).fetchone()
+            "ORDER BY created_at DESC", (issue_number, phase)
+        ).fetchall()
+        for row in rows:
+            evidence = json.loads(row["evidence_json"] or "{}")
+            if evidence.get("requirement") == requirement:
+                return row
+        return None
 
     def handoff_candidates(self) -> list[sqlite3.Row]:
         return self.db.execute(
@@ -696,7 +702,7 @@ class Ledger:
         required = ("source", "observed_at", "measured_result", "predicate_result")
         if any(key not in evidence for key in required):
             raise ValueError("INCOMPLETE_ACCEPTANCE_EVIDENCE")
-        if evidence["predicate_result"] not in (True, False):
+        if not isinstance(evidence["predicate_result"], bool):
             raise ValueError("INVALID_ACCEPTANCE_PREDICATE")
         if not parse_utc(str(evidence["observed_at"])):
             raise ValueError("INVALID_ACCEPTANCE_TIMESTAMP")
@@ -1474,7 +1480,7 @@ class Orchestrator:
             if requirement in proven:
                 continue
             for phase in COMPLETION_REQUIREMENTS[requirement]:
-                existing = self.ledger.phase_task(number, phase)
+                existing = self.ledger.phase_task(number, requirement, phase)
                 if existing:
                     if str(existing["status"]) in ACTIVE_STATUSES:
                         return existing
