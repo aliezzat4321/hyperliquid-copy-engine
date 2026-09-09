@@ -6,10 +6,16 @@ import urllib.parse
 from pathlib import Path
 
 PATH = Path(__file__).resolve().parents[1] / "scripts" / "trello_vm_auth.py"
+PROTECTED_LEGACY_PATH = PATH.with_name("ai_team_trello_auth.py")
 SPEC = importlib.util.spec_from_file_location("trello_vm_auth", PATH)
 assert SPEC and SPEC.loader
 auth = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(auth)
+
+
+def test_auth_helper_stays_in_autonomous_allowlisted_path() -> None:
+    assert PATH.is_file()
+    assert not PROTECTED_LEGACY_PATH.exists()
 
 
 class Response:
