@@ -1028,11 +1028,11 @@ def recent_human_comments(gh: GitHub, number: int, trusted: set[str], limit: int
 
 
 def normalize_worktree_ownership(workdir: Path, user: str) -> tuple[int, int]:
-    """Return a generated worktree fully to its dedicated non-root agent identity."""
+    """Return a worktree to its agent identity without following links outside it."""
     uid = int(run(["id", "-u", user], check=True).stdout.strip())
     gid = int(run(["id", "-g", user], check=True).stdout.strip())
     os.chown(workdir, uid, gid, follow_symlinks=False)
-    for root, dirs, files in os.walk(workdir):
+    for root, dirs, files in os.walk(workdir, followlinks=False):
         for name in dirs:
             os.chown(Path(root) / name, uid, gid, follow_symlinks=False)
         for name in files:

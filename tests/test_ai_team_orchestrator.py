@@ -606,9 +606,13 @@ def test_normalize_worktree_ownership_never_follows_symlinks(
 ) -> None:
     worktree = tmp_path / "worktree"
     worktree.mkdir()
+    package = worktree / "package"
+    package.mkdir()
+    module = package / "module.py"
+    module.write_text("pass\n")
     external = tmp_path / "external-python"
     external.write_text("system target")
-    link = worktree / "python3"
+    link = package / "python3"
     link.symlink_to(external)
     calls = []
 
@@ -625,6 +629,8 @@ def test_normalize_worktree_ownership_never_follows_symlinks(
     assert orch.normalize_worktree_ownership(worktree, "agent") == (111, 222)
     assert calls == [
         (worktree, 111, 222, False),
+        (package, 111, 222, False),
+        (module, 111, 222, False),
         (link, 111, 222, False),
     ]
     assert external.read_text() == "system target"
