@@ -940,6 +940,56 @@ def test_parent_finalizer_metadata_is_explicit_and_unambiguous():
     ) is None
 
 
+def test_supersession_metadata_is_explicit_and_unambiguous():
+    assert orch.superseded_by("AI_TEAM_SUPERSEDED_BY=215") == 215
+    assert orch.superseded_by("AI_TEAM_SUPERSEDED_BY=#215") == 215
+    assert orch.superseded_by("AI_TEAM_SUPERSEDED_BY=0") is None
+    assert orch.superseded_by(
+        "AI_TEAM_SUPERSEDED_BY=215\nAI_TEAM_SUPERSEDED_BY=223"
+    ) is None
+
+
+@pytest.mark.parametrize("stage", ["review", "ci"])
+def test_superseded_protected_assignment_is_stale_before_model_or_merge(tmp_path, stage):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    task_id = ledger.create_task(
+        issue_number=205, pr_number=209, target_sha="f" * 40,
+        task_type="REVIEW", agent="CODEX_REVIEWER", model_class="CODEX_DEFAULT",
+        task_class="ROUTINE", status="WAITING_CI" if stage == "ci" else "PENDING",
+    )
+
+    class GH:
+        def issue(self, number):
+            return {
+                "body": "AI_TASK_CLASS=ROUTINE\nAI_TEAM_SUPERSEDED_BY=215",
+                "author_association": "OWNER",
+            }
+
+        def __getattr__(self, name):
+            raise AssertionError(f"superseded assignment reached GitHub {name}")
+
+    class Runtime:
+        def __init__(self):
+            self.events = []
+
+        def event(self, kind, **payload):
+            self.events.append((kind, payload))
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.gh = orch.DEFAULT_CONFIG, ledger, GH()
+    team.runtime, team.trusted = Runtime(), {"OWNER"}
+    task = ledger.get(task_id)
+    if stage == "review":
+        team.handle_review(task)
+    else:
+        team.handle_ci(task)
+
+    updated = ledger.get(task_id)
+    assert updated["status"] == "STALE"
+    assert updated["last_error"] == "superseded by Issue #215"
+    assert team.runtime.events[0][0] == "SUPERSEDED_ASSIGNMENT_DROPPED"
+
+
 def test_parent_finalization_requires_canonical_child_success_and_is_idempotent(tmp_path):
     ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
     task_id = ledger.create_task(

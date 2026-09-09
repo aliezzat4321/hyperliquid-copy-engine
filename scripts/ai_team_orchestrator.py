@@ -1245,6 +1245,17 @@ def finalizes_parent(body: str) -> int | None:
     return parent if parent > 0 else None
 
 
+def superseded_by(body: str) -> int | None:
+    """Parse one explicit successor marker; ambiguous metadata has no authority."""
+    matches = re.findall(
+        r"(?mi)^\s*AI_TEAM_SUPERSEDED_BY\s*=\s*#?(\d+)\s*$", body or ""
+    )
+    if len(matches) != 1:
+        return None
+    successor = int(matches[0])
+    return successor if successor > 0 else None
+
+
 def retry_at_after(seconds: int) -> str:
     value = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=seconds)
     return value.replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -2574,6 +2585,19 @@ TASK_CLASS={task["task_class"]}
         if not task["pr_number"] or not task["target_sha"]:
             self.block(task, "review missing PR/SHA")
             return
+        issue = self.gh.issue(int(task["issue_number"]))
+        successor = superseded_by(str(issue.get("body") or ""))
+        if successor is not None:
+            self.ledger.update(
+                task["id"], status="STALE", retry_at=None,
+                last_error=f"superseded by Issue #{successor}", systemd_unit=None,
+            )
+            self.runtime.event(
+                "SUPERSEDED_ASSIGNMENT_DROPPED", assignment_id=task["id"],
+                issue=task["issue_number"], successor_issue=successor,
+                pr=task["pr_number"], target_sha=task["target_sha"],
+            )
+            return
         pr = self.gh.pr(int(task["pr_number"]))
         if str(pr.get("state") or "open").lower() != "open" and not pr.get("merged_at"):
             self.ledger.update(task["id"], status="STALE", retry_at=None,
@@ -3300,6 +3324,19 @@ that non-code work needs a CODE_CHANGE. Unknown or contradictory evidence is TER
     def handle_ci(self, task: sqlite3.Row) -> None:
         if not task["pr_number"] or not task["target_sha"]:
             self.block(task, "CI wait missing PR/SHA")
+            return
+        issue = self.gh.issue(int(task["issue_number"]))
+        successor = superseded_by(str(issue.get("body") or ""))
+        if successor is not None:
+            self.ledger.update(
+                task["id"], status="STALE", retry_at=None,
+                last_error=f"superseded by Issue #{successor}", systemd_unit=None,
+            )
+            self.runtime.event(
+                "SUPERSEDED_ASSIGNMENT_DROPPED", assignment_id=task["id"],
+                issue=task["issue_number"], successor_issue=successor,
+                pr=task["pr_number"], target_sha=task["target_sha"],
+            )
             return
         pr = self.gh.pr(int(task["pr_number"]))
         target = str(task["target_sha"])
