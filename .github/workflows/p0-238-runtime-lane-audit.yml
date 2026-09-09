@@ -1,0 +1,57 @@
+name: p0-238-runtime-lane-audit
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/p0-238-runtime-lane-audit.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  audit:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Audit autonomous runtime and all three lane evidence surfaces
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '=== SAFETY ==='
+          printf 'REAL_TRADING_ENABLED=%s\n' "${REAL_TRADING_ENABLED:-NO}"
+          test "${REAL_TRADING_ENABLED:-NO}" != YES
+          echo '=== SUPERVISOR ==='
+          sudo systemctl is-active hyperliquid-ai-external-supervisor.timer
+          sudo systemctl status hyperliquid-ai-external-supervisor.timer --no-pager -l || true
+          sudo tail -n 80 /var/lib/hyperliquid-ai-team/external-supervisor/supervisor.log || true
+          echo '=== ORCHESTRATOR STATUS ==='
+          sudo -H /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py --status || true
+          echo '=== HYPERLIQUID UNITS ==='
+          sudo systemctl list-unit-files --no-pager | grep -Ei 'hyperliquid|invo|resolver|prospective|leaderboard|shadow' || true
+          echo '=== ACTIVE/FAILED UNITS ==='
+          sudo systemctl --failed --no-pager || true
+          sudo systemctl list-units --all --no-pager | grep -Ei 'hyperliquid|invo|resolver|prospective|leaderboard|shadow' || true
+          echo '=== LANE1 KNOWN ARTIFACTS ==='
+          sudo ls -lah /root/hyperliquid-audit/funnel /root/hyperliquid-audit/prospective-champions 2>/dev/null || true
+          for f in /root/hyperliquid-audit/funnel/challenger_queue.json /root/hyperliquid-audit/prospective-champions/report.json; do
+            if sudo test -f "$f"; then echo "--- $f"; sudo stat -c 'mtime=%y size=%s' "$f"; sudo head -c 12000 "$f"; echo; fi
+          done
+          echo '=== LANE2/LANE3 DISCOVERY ==='
+          sudo find /var/lib/hyperliquid-copy-engine /var/lib/hyperliquid-ai-team /root/hyperliquid-audit \
+            -maxdepth 6 -type f \
+            \( -iname '*resolver*' -o -iname '*invo*' -o -iname '*lane2*' -o -iname '*lane3*' -o -iname '*measurement*' -o -iname '*acceptance*' -o -iname '*shadow*' \) \
+            -printf '%TY-%Tm-%TdT%TH:%TM:%TSZ %s %p\n' 2>/dev/null | sort -r | head -n 250 || true
+          echo '=== LANE3 KNOWN ARTIFACTS ==='
+          for f in \
+            /var/lib/hyperliquid-copy-engine/invo-notification-executor/lane3-runtime-acceptance-latest.json \
+            /var/lib/hyperliquid-copy-engine/invo-notification-executor/trader-population.json \
+            /var/lib/hyperliquid-copy-engine/invo-notification-executor/audit.jsonl; do
+            if sudo test -f "$f"; then echo "--- $f"; sudo stat -c 'mtime=%y size=%s' "$f"; sudo tail -c 12000 "$f"; echo; fi
+          done
+          echo '=== CANONICAL #130 ==='
+          sudo -H gh api repos/aliezzat4321/hyperliquid-copy-engine/issues/130 --jq '{updated_at,body}'
