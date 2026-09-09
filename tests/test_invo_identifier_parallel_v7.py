@@ -90,12 +90,26 @@ def test_identifier_runs_portfolios_concurrently_but_bounded(
     active = 0
     peak = 0
 
-    async def fake_identify(path: Path, **_: object) -> WalletIdentificationResult:
+    async def fake_identify(
+        path: Path, **options: object
+    ) -> WalletIdentificationResult:
         nonlocal active, peak
         active += 1
         peak = max(peak, active)
         await asyncio.sleep(0.02)
         active -= 1
+        telemetry = options["telemetry"]
+        telemetry.update(
+            {
+                "candidate_generation_ms": 5.0,
+                "candidate_fanout": 6,
+                "candidates_after_discovery_proof": 2,
+                "verification_ms": 10.0,
+                "verification_candidates": 2,
+                "candidates_after_historical_proof": 1,
+                "verified_identities": 1,
+            }
+        )
         index = int(path.stem.split("-")[-1])
         return _result("0x" + f"{index + 1:040x}")
 
@@ -129,6 +143,15 @@ def test_identifier_runs_portfolios_concurrently_but_bounded(
     assert result["time_to_first_candidate_ms"]["p99"] is not None
     assert result["time_to_verified_identity_ms"]["p90"] is not None
     assert result["verified_yield"] == 1.0
+    assert result["proof_stages_by_portfolio"]["portfolio-0"] == {
+        "input_trades": 20,
+        "discovery_anchors": 8,
+        "candidate_fanout": 6,
+        "after_discovery_proof": 2,
+        "verification_candidates": 2,
+        "after_historical_proof": 1,
+        "verified_identities": 1,
+    }
 
 
 def test_sqd_request_metrics_are_attributed_across_concurrent_portfolios() -> None:
@@ -212,3 +235,13 @@ def test_durable_wrapper_publishes_after_partial_portfolio_failure(
 
     assert asyncio.run(invo_identifier_durable_job._main()) == 0
     assert publication_calls == 1
+    latest = json.loads(
+        (tmp_path / "lane2_measurements" / "latest.json").read_text(encoding="utf-8")
+    )
+    assert latest["schema"] == "hlcopy-lane2-resolution-measurement/v1"
+    assert latest["identifier"]["partial_failure"] is True
+    assert latest["real_trading_enabled"] is False
+    history = (tmp_path / "lane2_measurements" / "runs.ndjson").read_text(
+        encoding="utf-8"
+    )
+    assert len(history.splitlines()) == 1

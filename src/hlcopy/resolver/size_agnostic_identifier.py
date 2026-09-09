@@ -661,6 +661,13 @@ async def identify_wallet_from_csv_size_aware(
                     time.perf_counter() - started
                 ) * 1000
                 telemetry["candidate_fanout"] = len(discovered.ranked)
+                telemetry["candidates_after_discovery_proof"] = sum(
+                    1
+                    for candidate in discovered.ranked
+                    if candidate.matched_anchors >= SIZE_AGNOSTIC_MIN_DISCOVERY_MATCHES
+                    and candidate.clock_offset_mad_ms <= SIZE_AGNOSTIC_MAX_CLOCK_MAD_MS
+                    and candidate.median_price_bps <= SIZE_AGNOSTIC_MAX_MEDIAN_PRICE_BPS
+                )
             verified = await _verify_shortlist_without_size(
                 ranked=discovered.ranked,
                 signals=signals,
@@ -681,6 +688,16 @@ async def identify_wallet_from_csv_size_aware(
                 min_ratio=SIZE_AGNOSTIC_MIN_HISTORICAL_RATIO,
                 min_match_gap=SIZE_AGNOSTIC_MIN_WINNER_MATCH_GAP,
             )
+            if telemetry is not None:
+                telemetry["candidates_after_historical_proof"] = sum(
+                    1
+                    for candidate in verified
+                    if candidate.verification.matched
+                    >= SIZE_AGNOSTIC_MIN_HISTORICAL_MATCHES
+                    and candidate.verification.ratio
+                    >= SIZE_AGNOSTIC_MIN_HISTORICAL_RATIO
+                )
+                telemetry["verified_identities"] = int(selected is not None)
             return discovered, verified, selected
 
         if client is None:

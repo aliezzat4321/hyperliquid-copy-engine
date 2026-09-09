@@ -368,6 +368,16 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
                     }
                     for row, _, _ in selected
                 },
+                "cache": {
+                    "coverage_hits": int(getattr(client, "coverage_cache_hits", 0)),
+                    "coverage_misses": int(
+                        getattr(client, "coverage_cache_misses", 0)
+                    ),
+                    "header_hits": int(getattr(client, "header_cache_hits", 0)),
+                    "header_misses": int(
+                        getattr(client, "header_cache_misses", 0)
+                    ),
+                },
             }
 
         # Network work is concurrent, but all durable state publication remains
@@ -543,6 +553,52 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
         "verified_yield": round(verified / attempted, 6) if attempted else 0.0,
         "ambiguity_count": unresolved,
         "contradiction_count": errors,
+        "candidate_outcome_counts": {
+            "verified": verified,
+            "ambiguous_or_insufficient_proof": sum(
+                1
+                for outcome in outcomes
+                if outcome[3] is not None
+                and outcome[3].status == "UNRESOLVED"
+                and outcome[3].candidate is not None
+            )
+            if selected
+            else 0,
+            "no_candidate": sum(
+                1
+                for outcome in outcomes
+                if outcome[3] is not None and outcome[3].candidate is None
+            )
+            if selected
+            else 0,
+            "contradiction_or_error": errors,
+        },
+        "proof_stages_by_portfolio": {
+            str(outcome[0]["portfolio_id"]): {
+                "input_trades": (
+                    outcome[3].input_trades if outcome[3] is not None else 0
+                ),
+                "discovery_anchors": (
+                    outcome[3].discovery_anchors if outcome[3] is not None else 0
+                ),
+                "candidate_fanout": int(outcome[6].get("candidate_fanout", 0)),
+                "after_discovery_proof": int(
+                    outcome[6].get("candidates_after_discovery_proof", 0)
+                ),
+                "verification_candidates": int(
+                    outcome[6].get("verification_candidates", 0)
+                ),
+                "after_historical_proof": int(
+                    outcome[6].get("candidates_after_historical_proof", 0)
+                ),
+                "verified_identities": int(
+                    outcome[6].get("verified_identities", 0)
+                ),
+            }
+            for outcome in outcomes
+        }
+        if selected
+        else {},
         "proof_stage_totals": {
             "input_trades": sum(
                 outcome[3].input_trades for outcome in outcomes if outcome[3] is not None
@@ -573,6 +629,12 @@ async def run_once(args: argparse.Namespace) -> dict[str, object]:
             "query_latency_ms": 0.0,
             "retry_count": 0,
             "by_portfolio": {},
+            "cache": {
+                "coverage_hits": 0,
+                "coverage_misses": 0,
+                "header_hits": 0,
+                "header_misses": 0,
+            },
         },
         "verification_window_query_bound_per_trader": 80,
         "cache_reuse": "shared_batch_sqd_coverage_and_header_cache",

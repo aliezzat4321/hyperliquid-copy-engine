@@ -235,6 +235,10 @@ class SqdHyperliquidFillsClient:
         self.request_latency_ms = 0.0
         self.retry_count = 0
         self.request_metrics_by_owner: dict[str, dict[str, float | int]] = {}
+        self.coverage_cache_hits = 0
+        self.coverage_cache_misses = 0
+        self.header_cache_hits = 0
+        self.header_cache_misses = 0
 
     @contextmanager
     def request_scope(self, owner: str):
@@ -332,7 +336,9 @@ class SqdHyperliquidFillsClient:
     async def _header_timestamp(self, block_number: int) -> int:
         cached = self._headers.get(block_number)
         if cached is not None:
+            self.header_cache_hits += 1
             return cached
+        self.header_cache_misses += 1
         payload = {
             "type": "hyperliquidFills",
             "fromBlock": block_number,
@@ -353,10 +359,13 @@ class SqdHyperliquidFillsClient:
 
     async def _coverage_bounds(self) -> tuple[tuple[int, int], tuple[int, int]]:
         if self._bounds is not None:
+            self.coverage_cache_hits += 1
             return self._bounds
         async with self._bounds_lock:
             if self._bounds is not None:
+                self.coverage_cache_hits += 1
                 return self._bounds
+            self.coverage_cache_misses += 1
             metadata_response = await self._request("GET", "metadata")
             head_response = await self._request("GET", "finalized-head")
             metadata = metadata_response.json()
