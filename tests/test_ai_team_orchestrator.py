@@ -1162,6 +1162,7 @@ def test_parent_finalization_requires_canonical_child_success_and_is_idempotent(
     class Runtime:
         def __init__(self):
             self.events = []
+
         def event(self, kind, **payload):
             self.events.append((kind, payload))
 
@@ -1289,6 +1290,94 @@ def test_cycle_blocks_only_invalid_acceptance_evidence_task(tmp_path):
     task = ledger.get(task_id)
     assert task["status"] == "BLOCKED"
     assert "MISSING_EXACT_MERGED_SHA" in task["last_error"]
+
+
+def test_missing_acceptance_runner_escalates_after_durable_bounded_polls(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    task_id = ledger.create_task(
+        issue_number=91, task_type="POST_MERGE_EVIDENCE", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", task_class="ROUTINE", status="PENDING",
+        lifecycle_phase="POST_MERGE_EVIDENCE", target_sha="a" * 40,
+        evidence={"requirement": "PROSPECTIVE_EVIDENCE"},
+    )
+
+    class Runtime:
+        def __init__(self):
+            self.events = []
+        def event(self, kind, **payload):
+            self.events.append((kind, payload))
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.runtime = orch.DEFAULT_CONFIG, ledger, Runtime()
+    for expected in (1, 2, 3):
+        task = ledger.get(task_id)
+        payload = json.loads(task["evidence_json"])
+        team.wait_for_acceptance_runner(task, payload)
+        task = ledger.get(task_id)
+        assert json.loads(task["evidence_json"])["runner_liveness_attempts"] == expected
+
+    assert task["status"] == "RECOVERY_PENDING"
+    repair = ledger.child(task_id, "REPAIR", "a" * 40)
+    assert repair is not None and repair["status"] == "PENDING"
+    assert repair["failure_class"] == "RUNNER_FAILURE"
+    kind, event = team.runtime.events[-1]
+    assert kind == "ACCEPTANCE_RUNNER_ESCALATED"
+    assert event["runner_identity"] == "MISSING"
+    assert event["liveness_attempts"] == 3
+    assert event["escalation_task"] == repair["id"]
+    assert event["unrelated_work_continuing"] is True
+
+
+def test_healthy_acceptance_runner_heartbeat_does_not_consume_liveness_budget(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    task_id = ledger.create_task(
+        issue_number=91, task_type="POST_MERGE_EVIDENCE", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", task_class="ROUTINE",
+        lifecycle_phase="POST_MERGE_EVIDENCE", target_sha="a" * 40,
+        evidence={"requirement": "PROSPECTIVE_EVIDENCE", "runner_liveness_attempts": 1},
+    )
+
+    class Runtime:
+        def event(self, *args, **kwargs):
+            pass
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.runtime = orch.DEFAULT_CONFIG, ledger, Runtime()
+    payload = json.loads(ledger.get(task_id)["evidence_json"])
+    payload["runner"] = {"identity": "prospective-runner", "heartbeat_at": orch.utcnow()}
+    team.wait_for_acceptance_runner(ledger.get(task_id), payload)
+
+    task = ledger.get(task_id)
+    assert task["status"] == "RETRY"
+    assert json.loads(task["evidence_json"])["runner_liveness_attempts"] == 1
+
+
+def test_future_acceptance_window_waits_until_declared_time(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    future = "2099-01-01T00:00:00Z"
+    task_id = ledger.create_task(
+        issue_number=91, task_type="POST_MERGE_EVIDENCE", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", task_class="ROUTINE",
+        lifecycle_phase="POST_MERGE_EVIDENCE", target_sha="a" * 40,
+        evidence={"requirement": "PROSPECTIVE_EVIDENCE"},
+    )
+
+    class Runtime:
+        def event(self, *args, **kwargs):
+            pass
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.runtime = orch.DEFAULT_CONFIG, ledger, Runtime()
+    team.wait_for_acceptance_runner(
+        ledger.get(task_id),
+        {"requirement": "PROSPECTIVE_EVIDENCE",
+         "runner": {"identity": "prospective-runner", "next_eligible_at": future}},
+    )
+
+    task = ledger.get(task_id)
+    assert task["status"] == "WAITING_EVIDENCE_WINDOW"
+    assert task["retry_at"] == future
+    assert task["failure_class"] == "EVIDENCE_WINDOW_WAIT"
 
 
 def test_untrusted_or_noncanonical_child_cannot_finalize_parent(tmp_path):
