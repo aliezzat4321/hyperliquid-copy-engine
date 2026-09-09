@@ -384,11 +384,9 @@ def audit_promotion_report(
     output = dict(report)
     audit = validate_evidence(report, registry=registry)
     output["experiment_audit"] = audit.to_dict()
-    supplied_economic_audit = (
-        economic_evidence_audit
-        if economic_evidence_audit is not None
-        else report.get("economic_evidence_audit")
-    )
+    # Do not accept an audit embedded by the candidate report itself.  The
+    # integration boundary must supply the independent downstream verdict.
+    supplied_economic_audit = economic_evidence_audit
     evaluations = report.get("evaluations")
     latest_evaluation = (
         evaluations[-1]

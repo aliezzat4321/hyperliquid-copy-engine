@@ -217,6 +217,17 @@ def test_clean_prospective_window_without_economic_results_is_non_promotable():
     assert "DOWNSTREAM_ECONOMIC_AUDIT_MISSING" in result["promotion_gate"]["blockers"]
 
 
+def test_candidate_report_cannot_supply_its_own_downstream_audit():
+    candidate = report()
+    candidate["economic_evidence_audit"] = economic_audit(candidate)
+    result = audit_promotion_report(
+        candidate, registry=registry_for(candidate["frozen_contract"])
+    )
+    assert result["experiment_audit"]["prospective_contract_valid"] is True
+    assert result["promotion_eligible"] is False
+    assert "DOWNSTREAM_ECONOMIC_AUDIT_MISSING" in result["promotion_gate"]["blockers"]
+
+
 @pytest.mark.parametrize(
     "failed_check",
     [
