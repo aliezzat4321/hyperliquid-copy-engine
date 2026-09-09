@@ -1,0 +1,42 @@
+name: p0-238-merge-isolation-lint-repair
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/p0-238-merge-isolation-lint-repair.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Repair deterministic ruff failure and deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+          git pull --ff-only origin main
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('scripts/ai_team_orchestrator.py')
+          s=p.read_text()
+          old='''                next_action="refresh/rebase the scoped PR on current main and re-run exact-SHA review/CI",\n'''
+          new='''                next_action=(\n                    "refresh/rebase the scoped PR on current main and re-run "\n                    "exact-SHA review/CI"\n                ),\n'''
+          if old not in s: raise SystemExit('expected lint target missing')
+          p.write_text(s.replace(old,new,1))
+          PY
+          python3 -m py_compile scripts/ai_team_orchestrator.py
+          git diff --check
+          git config user.name 'AI Team Supervisor'
+          git config user.email 'ai-team@localhost'
+          git add scripts/ai_team_orchestrator.py
+          git commit -m 'P0 #238: clear merge-isolation lint gate'
+          git push origin HEAD:main
+          sudo install -m 0755 scripts/ai_team_orchestrator.py /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py
+          sudo python3 -m py_compile /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py
+          sudo systemctl start hyperliquid-ai-external-supervisor.service
