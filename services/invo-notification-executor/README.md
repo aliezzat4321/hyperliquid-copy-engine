@@ -50,6 +50,13 @@ notification-producing, sufficiently observed, and shadow-assessable). `GET /tra
 adds each trader's identity aliases, source surfaces, event count, symbols, freshness,
 observation days, lifecycle, and missing/failed reasons.
 
+The service also writes an atomic `lane3-runtime-evidence.json` and a 15-minute
+append-only `lane3-runtime-evidence.jsonl` beside its other state. This lane-owned
+prospective record continues independently of the generic acceptance runner and
+captures funnel deltas, per-surface polling, causal decision/reject counts, the full
+trader view, assessment queue, and unresolved shadow exposure. It is deliberately
+shadow-only and is disabled in live mode.
+
 A notification is only a **wake-up hint**. Notification text can never directly place an order; every candidate is hydrated from authenticated Invo API data first.
 
 ## Default gates

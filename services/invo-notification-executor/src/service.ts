@@ -9,6 +9,7 @@ import { extractNotificationHints, hintsMatchSignal, InvoSignal, NotificationHin
 import { ManagedPosition, NotificationState } from './notification-state.js';
 import { TraderTracker } from './trader-tracker.js';
 import { liveScopeSkipReason } from './live-scope.js';
+import { Lane3RuntimeEvidence } from './runtime-evidence.js';
 
 if (INVO_TOKEN) invo.setToken(INVO_TOKEN);
 if (INVO_REFRESH_TOKEN) invo.setRefreshToken(INVO_REFRESH_TOKEN);
@@ -61,6 +62,9 @@ function loadConfig() {
     statePath: resolve(process.env.NOTIFICATION_TRADER_STATE_PATH ?? 'data/notification-trader-state.json'),
     auditPath: resolve(process.env.NOTIFICATION_TRADER_AUDIT_PATH ?? 'data/notification-trader-audit.jsonl'),
     trackerPath: resolve(process.env.NOTIFICATION_TRADER_TRACKER_PATH ?? 'data/notification-trader-population.json'),
+    runtimeEvidencePath: resolve(process.env.NOTIFICATION_TRADER_RUNTIME_EVIDENCE_PATH ?? 'data/lane3-runtime-evidence.json'),
+    runtimeEvidenceHistoryPath: resolve(process.env.NOTIFICATION_TRADER_RUNTIME_EVIDENCE_HISTORY_PATH ?? 'data/lane3-runtime-evidence.jsonl'),
+    runtimeEvidenceIntervalMs: Math.max(60_000, n('NOTIFICATION_TRADER_RUNTIME_EVIDENCE_INTERVAL_MS', 15 * 60 * 1000)),
     minEvidenceEvents: Math.max(1, Math.trunc(n('NOTIFICATION_TRADER_MIN_EVIDENCE_EVENTS', 20))),
     minObservationDays: Math.max(1, Math.trunc(n('NOTIFICATION_TRADER_MIN_OBSERVATION_DAYS', 7))),
     staleAfterMs: Math.max(60_000, n('NOTIFICATION_TRADER_STALE_AFTER_MS', 3 * 24 * 60 * 60 * 1000)),
@@ -85,6 +89,13 @@ const tracker = new TraderTracker(cfg.trackerPath, {
   staleAfterMs: cfg.staleAfterMs,
   inactiveAfterMs: cfg.inactiveAfterMs,
 });
+const runtimeEvidence = new Lane3RuntimeEvidence({
+  latestPath: cfg.runtimeEvidencePath,
+  historyPath: cfg.runtimeEvidenceHistoryPath,
+  historyIntervalMs: cfg.runtimeEvidenceIntervalMs,
+  live: cfg.live,
+  discoverySurfaces: cfg.discoverySurfaces,
+});
 const inFlight = new Set<string>();
 let initialized = false;
 let hydrating = false;
@@ -98,6 +109,7 @@ function log(event: Record<string, unknown>) {
   console.log(JSON.stringify(row));
   mkdirSync(dirname(cfg.auditPath), { recursive: true });
   appendFileSync(cfg.auditPath, `${JSON.stringify(row)}\n`);
+  runtimeEvidence.recordAuditEvent(row);
   const signal = event.signal as InvoSignal | undefined;
   if (signal && (event.type === 'skip' || event.type === 'execution_error')) {
     tracker.recordFailure(`invo-user:${signal.ownerId}`, String(event.reason ?? event.type));
@@ -666,6 +678,7 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
     lastSuccessPollMs = Date.now();
     log({ type: 'baseline_indexed', posts: posts.length, recoverableCloses: recoverableCloses.length, live: cfg.live, feedFilter, feedLimit: cfg.feedLimit, traderFunnel: tracker.report().funnel });
     for (const signal of recoverableCloses) await execute(signal, 'startup_recovery', receivedAtMs, feedFilter);
+    runtimeEvidence.recordPoll(feedFilter, true, tracker.report(), state.managedCount(), lastSuccessPollMs);
     return recoverableCloses.length;
   }
 
@@ -685,6 +698,7 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
     await Promise.all(ordered.map(signal => execute(signal, source, receivedAtMs, feedFilter)));
   }
   lastSuccessPollMs = Date.now();
+  runtimeEvidence.recordPoll(feedFilter, true, tracker.report(), state.managedCount(), lastSuccessPollMs);
   return ordered.length;
 }
 
@@ -710,6 +724,7 @@ async function wake(source: string, hints?: NotificationHints, receivedAtMs = Da
         const status = err?.status;
         if (status === 429) backoffMs = Math.min(Math.max(backoffMs * 2, 2000), 30_000);
         log({ type: 'hydrate_error', source: current.source, status, backoffMs, error: err instanceof Error ? err.message : String(err) });
+        runtimeEvidence.recordPoll(current.feedFilter ?? cfg.feedFilter, false, tracker.report(), state.managedCount());
       }
     }
   } finally {
@@ -756,6 +771,7 @@ function startServer() {
         traderFunnel: population.funnel,
         evidencePolicy: population.policy,
         assessmentQueue: population.assessmentQueue,
+        runtimeEvidence: runtimeEvidence.snapshot(),
       });
     }
 
