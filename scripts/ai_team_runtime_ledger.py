@@ -509,7 +509,7 @@ class RuntimeLedgerFiles:
                 try:
                     observed = dt.datetime.fromisoformat(oldest.replace("Z", "+00:00"))
                     oldest_age_seconds = max(0, int(
-                        (dt.datetime.now(dt.timezone.utc) - observed).total_seconds()
+                        (dt.datetime.now(dt.timezone.utc) - observed).total_seconds()  # noqa: UP017 - VM supports Python 3.10
                     ))
                 except ValueError:
                     pass

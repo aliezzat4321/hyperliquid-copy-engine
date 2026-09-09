@@ -1937,7 +1937,6 @@ class Orchestrator:
                 if not title.upper().startswith(("P0", "P1")):
                     continue
                 priorities.append({"issue": int(row["number"]), "title": title[:160]})
-            snap = self.ledger.status_snapshot()
             pending_owner_action = self.ledger.pending_owner_action()
             body = self.runtime.handoff(
                 main_head=str(main.get("sha") or "UNKNOWN"),
