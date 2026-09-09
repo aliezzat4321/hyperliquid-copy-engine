@@ -84,6 +84,7 @@ Update this file only when a component moves, is added, or is retired.
 | Wide evidence | `/mnt/HC_Volume_106576526/hyperliquid/shadow/wide-enriched-live` | JSONL public-fill evidence |
 | Wallet registry | `/mnt/HC_Volume_106576526/hyperliquid/shadow/wallets.json` | Stage machine state |
 | Invo durable state | `/var/lib/hyperliquid-copy-engine/invo/` | `archive.sqlite3`, `resolution_queue/`, `identified_wallets.json` |
+| Lane 2 resolver measurements | `/var/lib/hyperliquid-copy-engine/invo/lane2_measurements/` | Atomic latest funnel plus append-only per-run timing/yield evidence |
 | Lane 3 ledger | `/var/lib/hyperliquid-copy-engine/invo-notification-executor/audit.jsonl` | Append-only decision stream |
 | Frozen champion report | `/root/hyperliquid-audit/prospective-champions/report.json` | Lane 1 frozen window |
 
