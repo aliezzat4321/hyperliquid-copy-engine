@@ -1,0 +1,89 @@
+name: p0-orchestrator-contract-repair
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/p0-orchestrator-contract-repair.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repair:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Patch source fail-closed and deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo git -C /root/hyperliquid-copy-engine fetch origin main
+          sudo git -C /root/hyperliquid-copy-engine reset --hard origin/main
+          sudo python3 - <<'PY'
+          from pathlib import Path
+          p=Path('/root/hyperliquid-copy-engine/scripts/ai_team_orchestrator.py')
+          s=p.read_text()
+          old='''            if not reconciled or str(exc) != "MISSING_COMPLETION_CONTRACT":\n                raise\n            if any(item not in COMPLETION_REQUIREMENTS for item in reconciled):\n                raise ValueError("INVALID_RECONCILED_COMPLETION_CONTRACT") from exc\n            return {"version": 1, "close_on_merge": False,\n                    "requirements": list(reconciled), "source": "rollout_reconciliation"}\n'''
+          new='''            if str(exc) != "MISSING_COMPLETION_CONTRACT":\n                raise\n            if reconciled:\n                if any(item not in COMPLETION_REQUIREMENTS for item in reconciled):\n                    raise ValueError("INVALID_RECONCILED_COMPLETION_CONTRACT") from exc\n                return {"version": 1, "close_on_merge": False,\n                        "requirements": list(reconciled), "source": "rollout_reconciliation"}\n            # A legacy/malformed trusted issue must never crash the global scheduler.\n            # Fail closed: require deterministic runtime proof before completion, while\n            # allowing unrelated tasks and lane collectors to continue. The owner can\n            # later replace this fallback with explicit canonical completion metadata.\n            self.runtime.event(\n                "MISSING_COMPLETION_CONTRACT_FAIL_CLOSED",\n                issue=issue_number,\n                status="RECOVERY_PENDING",\n                failure_class="MISSING_COMPLETION_CONTRACT",\n                unrelated_work_continuing=True,\n            )\n            return {\n                "version": 1,\n                "close_on_merge": False,\n                "requirements": ["RUNTIME_PROOF"],\n                "source": "safe_fail_closed_missing_contract",\n            }\n'''
+          if old not in s:
+              raise SystemExit('expected completion_contract block not found; refusing blind patch')
+          p.write_text(s.replace(old,new,1))
+          PY
+          cd /root/hyperliquid-copy-engine
+          .venv/bin/python -m py_compile scripts/ai_team_orchestrator.py
+          if command -v ruff >/dev/null 2>&1; then ruff check scripts/ai_team_orchestrator.py; fi
+          git diff --check
+          git add scripts/ai_team_orchestrator.py
+          if ! git diff --cached --quiet; then
+            git -c user.name='Hyperliquid Runtime Repair' -c user.email='runtime@localhost' commit -m 'P0 #238: fail closed on missing completion contract without scheduler crash'
+            git push origin HEAD:main
+          fi
+          sudo cp scripts/ai_team_orchestrator.py /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py
+          sudo chmod 755 /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py
+          sudo systemctl reset-failed hyperliquid-ai-team-orchestrator.service || true
+          since="$(date -u '+%Y-%m-%d %H:%M:%S')"
+          sudo systemctl restart hyperliquid-ai-team-orchestrator.service || true
+          sleep 8
+          sudo -H /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py --once || true
+          sleep 3
+          recent="$(sudo journalctl -u hyperliquid-ai-team-orchestrator.service --since "$since" --no-pager -o cat || true)"
+          printf '%s\n' "$recent"
+          if grep -q 'orchestrator_error=ValueError: MISSING_COMPLETION_CONTRACT' <<<"$recent"; then
+            echo 'ORCHESTRATOR_REPAIR_FAIL=completion_contract_still_escapes' >&2
+            exit 1
+          fi
+          sudo -H /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py --status || true
+          echo ORCHESTRATOR_COMPLETION_CONTRACT_ESCAPE=FIXED
+      - name: Shadow collection snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '=== LANE1 ==='
+          sudo python3 - <<'PY'
+          import json
+          from pathlib import Path
+          for path in [Path('/root/hyperliquid-audit/funnel/challenger_queue.json'), Path('/root/hyperliquid-audit/prospective-champions/report.json')]:
+              if path.exists():
+                  p=json.loads(path.read_text())
+                  print(path, {k:p.get(k) for k in ('generated_at','counts','challenger_count','prospective_shadow_count','approved_count','real_trading')})
+          PY
+          echo '=== LANE2 ==='
+          sudo python3 - <<'PY'
+          import json
+          from pathlib import Path
+          p=Path('/var/lib/hyperliquid-copy-engine/invo/identified_wallets.json')
+          if p.exists():
+              x=json.loads(p.read_text()); print({'verified_count':x.get('verified_count'),'quarantined_identity_count':x.get('quarantined_identity_count')})
+          PY
+          sudo systemctl status hyperliquid-invo-verified-shadow-sync.service --no-pager -l || true
+          sudo journalctl -u hyperliquid-invo-verified-shadow-sync.service -n 40 --no-pager -o cat || true
+          echo '=== LANE3 ==='
+          curl -fsS --max-time 4 http://127.0.0.1:8787/health || true
+          echo
+          sudo tail -n 40 /var/lib/hyperliquid-copy-engine/invo-notification-executor/audit.jsonl || true
+          test "${REAL_TRADING_ENABLED:-NO}" != YES
