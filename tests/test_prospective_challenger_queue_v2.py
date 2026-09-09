@@ -55,6 +55,23 @@ def test_load_frozen_targets_uses_only_selective_challengers(tmp_path: Path) -> 
     ]
 
 
+def test_load_challenger_queue_preserves_runtime_handoff_diagnostics(tmp_path: Path) -> None:
+    queue = tmp_path / "queue.json"
+    payload = {
+        "generated_at": "2026-09-09T08:00:00+00:00",
+        "counts": {"robust": 2, "challenger": 0, "rejected": 1, "demoted": 1},
+        "candidates": [],
+        "rejections": [{"reason": "UNIVERSE_STATE_STALE"}],
+        "demoted": [{"candidate_key": "lane1-selective-v1|wallet|BTC|1000"}],
+    }
+    queue.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded, targets = MODULE.load_challenger_queue(queue)
+
+    assert loaded == payload
+    assert targets == []
+
+
 def test_prospective_script_has_no_hard_coded_wallet_targets() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
     assert "TARGETS=" not in source
