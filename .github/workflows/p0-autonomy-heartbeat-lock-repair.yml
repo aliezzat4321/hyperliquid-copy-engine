@@ -1,0 +1,135 @@
+name: p0-autonomy-heartbeat-lock-repair
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p0-autonomy-heartbeat-lock-repair.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Patch heartbeat and internal-failure semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          git pull --ff-only origin main
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/ai_team_orchestrator.py')
+          s = p.read_text()
+
+          old = '''    def sync_runtime_checkpoint(self) -> None:\n        """Project SQLite runtime state and mirror a compact chat-independent handoff."""\n        try:\n'''
+          new = '''    def sync_runtime_checkpoint(self) -> bool:\n        """Project SQLite runtime state and mirror a compact chat-independent handoff.\n\n        This is deliberately callable outside the scheduler lock so status freshness is\n        independent of a long-running model turn.\n        """\n        try:\n'''
+          if old not in s:
+              raise SystemExit('sync signature patch refused')
+          s = s.replace(old, new, 1)
+
+          old = '''            if str(status_issue.get("body") or "") != body:\n                self.gh.api(\n                    "PATCH",\n                    f"repos/{REPO}/issues/{RUNTIME_STATUS_ISSUE}",\n                    {"body": body},\n                )\n        except Exception as exc:\n            self.runtime.event("CHECKPOINT_MIRROR_FAILED", error=str(exc))\n'''
+          new = '''            if str(status_issue.get("body") or "") != body:\n                self.gh.api(\n                    "PATCH",\n                    f"repos/{REPO}/issues/{RUNTIME_STATUS_ISSUE}",\n                    {"body": body},\n                )\n            return True\n        except Exception as exc:\n            self.runtime.event("CHECKPOINT_MIRROR_FAILED", error=str(exc))\n            return False\n'''
+          if old not in s:
+              raise SystemExit('sync return patch refused')
+          s = s.replace(old, new, 1)
+
+          old = '''    def block(self, task: sqlite3.Row, error: str) -> None:\n        self.ledger.update(\n            task["id"], status="BLOCKED", retry_at=None,\n            last_error=error[:1500], systemd_unit=None,\n        )\n        number = int(task["issue_number"])\n        try:\n            self.gh.add_labels(number, [self.cfg["labels"]["blocked"]])\n            self.gh.remove_label(number, self.cfg["labels"]["pending"])\n            self.gh.remove_label(number, self.cfg["labels"]["ready"])\n            self.gh.remove_label(number, self.cfg["labels"]["queued"])\n            self.gh.comment(\n                number,\n                f"<!-- AI_TEAM_BLOCKED_V1\\nASSIGNMENT_ID={task['id']}\\n"\n                f"ERROR={error[:1000].replace(chr(10), ' ')}\\n-->\\n"\n                f"Autonomous task blocked: {error[:1200]}",\n            )\n        except Exception:\n            pass\n        try:\n            self.runtime.event(\n                "TASK_BLOCKED",\n                assignment_id=task["id"],\n                issue=task["issue_number"],\n                pr=task["pr_number"],\n                agent=task["agent"],\n                error=error,\n            )\n            self.sync_runtime_checkpoint()\n        except Exception:\n            pass\n'''
+          new = '''    def block(self, task: sqlite3.Row, error: str) -> None:\n        """Reserve BLOCKED for genuine owner authorization; quarantine internal faults."""\n        context = dict(task)\n        context["last_error"] = error\n        failure_class = classify_recovery_failure(context)\n        number = int(task["issue_number"])\n        if failure_class != "OWNER_AUTH_REQUIRED":\n            self.ledger.update(\n                task["id"], status="STALE", retry_at=None, last_error=error[:1500],\n                systemd_unit=None, failure_class=failure_class,\n                next_action="automatic recovery/reroute required; unrelated work continues",\n            )\n            try:\n                self.gh.remove_label(number, self.cfg["labels"]["blocked"])\n                self.runtime.event(\n                    "TASK_QUARANTINED", assignment_id=task["id"],\n                    issue=task["issue_number"], pr=task["pr_number"],\n                    agent=task["agent"], error=error, failure_class=failure_class,\n                    status="QUARANTINED", unrelated_work_continuing=True,\n                )\n                self.sync_runtime_checkpoint()\n            except Exception:\n                pass\n            return\n        self.ledger.update(\n            task["id"], status="BLOCKED", retry_at=None, last_error=error[:1500],\n            systemd_unit=None, failure_class=failure_class,\n            next_action="await explicit owner authorization",\n        )\n        try:\n            self.gh.add_labels(number, [self.cfg["labels"]["blocked"]])\n            self.gh.remove_label(number, self.cfg["labels"]["pending"])\n            self.gh.remove_label(number, self.cfg["labels"]["ready"])\n            self.gh.remove_label(number, self.cfg["labels"]["queued"])\n            self.gh.comment(\n                number,\n                f"<!-- AI_TEAM_BLOCKED_V1\\nASSIGNMENT_ID={task['id']}\\n"\n                f"ERROR={error[:1000].replace(chr(10), ' ')}\\n-->\\n"\n                f"Owner authorization required: {error[:1200]}",\n            )\n            self.runtime.event(\n                "TASK_BLOCKED", assignment_id=task["id"], issue=task["issue_number"],\n                pr=task["pr_number"], agent=task["agent"], error=error,\n                failure_class=failure_class,\n            )\n            self.sync_runtime_checkpoint()\n        except Exception:\n            pass\n'''
+          if old not in s:
+              raise SystemExit('block semantics patch refused')
+          s = s.replace(old, new, 1)
+
+          old = '''    parser.add_argument("--once", action="store_true")\n    parser.add_argument("--status", action="store_true")\n    parser.add_argument("--init-db", action="store_true")\n'''
+          new = '''    parser.add_argument("--once", action="store_true")\n    parser.add_argument("--status", action="store_true")\n    parser.add_argument("--checkpoint", action="store_true")\n    parser.add_argument("--init-db", action="store_true")\n'''
+          if old not in s:
+              raise SystemExit('parser patch refused')
+          s = s.replace(old, new, 1)
+
+          old = '''    if args.status:\n        print_status(ledger)\n        return 0\n    if args.init_db and not args.once:\n        return 0\n    lockf = LOCK_PATH.open("a+")\n'''
+          new = '''    if args.status:\n        print_status(ledger)\n        return 0\n    if args.checkpoint:\n        # Heartbeat publication must not depend on acquiring the scheduler/model lock.\n        return 0 if Orchestrator().sync_runtime_checkpoint() else 1\n    if args.init_db and not args.once:\n        return 0\n    lockf = LOCK_PATH.open("a+")\n'''
+          if old not in s:
+              raise SystemExit('checkpoint mode patch refused')
+          s = s.replace(old, new, 1)
+
+          p.write_text(s)
+          PY
+          python3 -m py_compile scripts/ai_team_orchestrator.py
+          git diff --check
+
+      - name: Commit source repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'AI Team Supervisor'
+          git config user.email 'ai-team@localhost'
+          git add scripts/ai_team_orchestrator.py
+          git commit -m 'P0 #238: decouple heartbeat and reserve BLOCKED for owner action'
+          git push origin HEAD:main
+
+      - name: Deploy source and upgrade host supervisor
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo install -m 0755 scripts/ai_team_orchestrator.py /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py
+          sudo python3 -m py_compile /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py
+
+          sudo tee /usr/local/sbin/hyperliquid-ai-external-supervisor >/dev/null <<'SH'
+          #!/usr/bin/env bash
+          set -uo pipefail
+          ORCH=/opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py
+          LOCK=/run/hyperliquid-ai-team/external-supervisor.lock
+          STATE=/var/lib/hyperliquid-ai-team/external-supervisor
+          mkdir -p "$(dirname "$LOCK")" "$STATE"
+          exec 9>"$LOCK"
+          flock -n 9 || exit 0
+          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          printf '%s start\n' "$now" >> "$STATE/supervisor.log"
+          if [ ! -x "$ORCH" ]; then
+            printf '%s preflight_fail orchestrator_missing\n' "$now" >> "$STATE/supervisor.log"
+            exit 2
+          fi
+
+          # Publish heartbeat independently of the scheduler/model lock.
+          if ! timeout 45 "$ORCH" --checkpoint >>"$STATE/supervisor.log" 2>&1; then
+            printf '%s checkpoint_failed\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$STATE/supervisor.log"
+            exit 3
+          fi
+          date -u +%Y-%m-%dT%H:%M:%SZ > "$STATE/last_checkpoint_at"
+
+          # Give the scheduler a chance to progress. Lock contention is harmless because
+          # heartbeat publication above already proves the external supervisor is alive.
+          timeout 90 "$ORCH" --once >>"$STATE/supervisor.log" 2>&1 || true
+
+          # Publish the post-cycle state too, regardless of whether a long model turn owns lock.
+          if timeout 45 "$ORCH" --checkpoint >>"$STATE/supervisor.log" 2>&1; then
+            date -u +%Y-%m-%dT%H:%M:%SZ > "$STATE/last_success_at"
+            timeout 30 "$ORCH" --status > "$STATE/last_status.txt" 2>&1 || true
+            printf '%s tick_ok\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$STATE/supervisor.log"
+            exit 0
+          fi
+          printf '%s post_checkpoint_failed\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$STATE/supervisor.log"
+          exit 4
+          SH
+          sudo chmod 0755 /usr/local/sbin/hyperliquid-ai-external-supervisor
+          sudo systemctl daemon-reload
+          sudo systemctl restart hyperliquid-ai-external-supervisor.timer
+          sudo systemctl start hyperliquid-ai-external-supervisor.service
+          sleep 3
+          sudo systemctl is-active --quiet hyperliquid-ai-external-supervisor.timer
+          sudo tail -n 80 /var/lib/hyperliquid-ai-team/external-supervisor/supervisor.log
+
+      - name: Verify canonical heartbeat moved
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q '^20' /var/lib/hyperliquid-ai-team/external-supervisor/last_checkpoint_at
+          sudo systemctl is-enabled --quiet hyperliquid-ai-external-supervisor.timer
+          sudo systemctl is-active --quiet hyperliquid-ai-external-supervisor.timer
