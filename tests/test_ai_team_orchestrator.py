@@ -150,6 +150,26 @@ def test_configured_profile_lattice_itself_fails_closed_if_weakened():
         orch.parse_review_profile("", cfg, "QUANT_PROFITABILITY")
 
 
+@pytest.mark.parametrize(
+    "task_class",
+    [
+        "QUANT_PROFITABILITY",
+        "STATISTICAL_METHODOLOGY",
+        "CAPITAL_SENSITIVE_METHODOLOGY",
+        "MAJOR_ARCHITECTURE",
+        "DESTRUCTIVE",
+    ],
+)
+def test_persisted_task_profile_cannot_bypass_task_class_floor(tmp_path, task_class):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    task_id = ledger.create_task(
+        issue_number=223, task_type="REVIEW", agent="CODEX_REVIEWER",
+        model_class="CODEX_DEFAULT", task_class=task_class, review_profile="ROUTINE",
+    )
+    with pytest.raises(RuntimeError, match="REVIEW_PROFILE_BELOW_FLOOR"):
+        orch.task_review_profile(orch.DEFAULT_CONFIG, ledger.get(task_id))
+
+
 def test_protected_v2_bootstrap_retains_fresh_claude_challenge():
     body = "AI_TASK_CLASS=ROUTINE\nAI_TEAM_PROTECTED_CHANGE=YES"
     profile = orch.parse_review_profile(body, orch.DEFAULT_CONFIG, "ROUTINE")

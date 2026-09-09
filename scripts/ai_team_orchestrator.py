@@ -1049,6 +1049,20 @@ def task_review_profile(cfg: dict[str, Any], task: sqlite3.Row) -> list[str]:
     if explicit:
         if explicit not in cfg["review_profiles"]:
             raise RuntimeError(f"INVALID_REVIEW_PROFILE: {explicit}")
+        if explicit not in REVIEW_PROFILE_STRENGTH:
+            raise RuntimeError(f"INVALID_REVIEW_PROFILE_ORDER: {explicit}")
+        task_class = str(task["task_class"])
+        try:
+            floor = required_review_profile("", cfg, task_class)
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
+        if (
+            REVIEW_PROFILE_STRENGTH.index(explicit)
+            < REVIEW_PROFILE_STRENGTH.index(floor)
+        ):
+            raise RuntimeError(
+                f"REVIEW_PROFILE_BELOW_FLOOR: requested {explicit}, required {floor}"
+            )
         return list(cfg["review_profiles"][explicit])
     return review_profile(cfg, str(task["task_class"]))
 
