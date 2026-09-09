@@ -1,0 +1,59 @@
+name: p0-238-merge-405-isolation-repair
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/p0-238-merge-405-isolation-repair.yml']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: p0-238-merge-405-isolation-repair
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Patch merge conflicts into task-local recovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          git pull --ff-only origin main
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/ai_team_orchestrator.py')
+          s = p.read_text()
+          old = '''        merged = self.gh.merge(int(task["pr_number"]), target)\n        if not merged or not merged.get("merged"):\n'''
+          new = '''        try:\n            merged = self.gh.merge(int(task["pr_number"]), target)\n        except RuntimeError as exc:\n            error = str(exc)\n            normalized = error.lower()\n            if not any(marker in normalized for marker in (\n                "http 405", "not mergeable", "merge conflicts", "merge conflict"\n            )):\n                raise\n            # Base drift / merge conflicts are task-local lifecycle failures. Never let\n            # them terminate the scheduler or suppress unrelated lane collection.\n            self.ledger.update(\n                task["id"], status="STALE", retry_at=None, systemd_unit=None,\n                last_error=f"merge no longer applicable: {error[-700:]}",\n                failure_class="CODE_CHANGE",\n                next_action="refresh/rebase the scoped PR on current main and re-run exact-SHA review/CI",\n            )\n            self.runtime.event(\n                "MERGE_TASK_STALE", assignment_id=task["id"],\n                issue=task["issue_number"], pr=task["pr_number"],\n                target_sha=target, error=error[-700:],\n                status="QUARANTINED", unrelated_work_continuing=True,\n            )\n            return\n        if not merged or not merged.get("merged"):\n'''
+          if old not in s:
+              raise SystemExit('merge isolation patch refused: expected merge block not found')
+          p.write_text(s.replace(old, new, 1))
+          PY
+          python3 -m py_compile scripts/ai_team_orchestrator.py
+          git diff --check
+      - name: Commit source repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'AI Team Supervisor'
+          git config user.email 'ai-team@localhost'
+          git add scripts/ai_team_orchestrator.py
+          git commit -m 'P0 #238: isolate merge-conflict 405 failures task-locally'
+          git push origin HEAD:main
+      - name: Deploy and prove supervisor survives merge lifecycle failures
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo install -m 0755 scripts/ai_team_orchestrator.py /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py
+          sudo python3 -m py_compile /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py
+          before="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          sudo systemctl start hyperliquid-ai-external-supervisor.service
+          sudo systemctl is-active --quiet hyperliquid-ai-external-supervisor.timer
+          printf 'verification_started=%s\n' "$before"
+          sudo tail -n 50 /var/lib/hyperliquid-ai-team/external-supervisor/supervisor.log
