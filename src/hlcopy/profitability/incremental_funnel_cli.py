@@ -9,7 +9,10 @@ from decimal import Decimal
 from pathlib import Path
 
 from hlcopy.profitability.causal_book import CausalParquetL2BookProvider
-from hlcopy.profitability.lane1_handoff import build_challenger_queue
+from hlcopy.profitability.lane1_handoff import (
+    LANE1_SELECTION_CONTRACT_V1,
+    build_challenger_queue,
+)
 from hlcopy.profitability.portfolio_position_copy import simulate_copy_with_portfolio_capital
 from hlcopy.profitability.position_copy import CopyFillEvent, load_wide_events
 from hlcopy.profitability.position_live_cli import NOTIONALS, SCENARIOS, _summary
@@ -18,6 +21,9 @@ D = Decimal
 ZERO = D("0")
 SCREEN_SCENARIO = SCENARIOS[2]  # LIVE_500MS
 SCREEN_NOTIONAL = D("5000")
+DEFAULT_UNIVERSE_STATE = Path(
+    "/mnt/HC_Volume_106576526/hyperliquid/discovery/universe_state.json"
+)
 
 
 def _append_jsonl(path: Path, row: dict[str, object]) -> None:
@@ -103,7 +109,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--taker-fee-bps", type=Decimal, default=D("4.5"))
     parser.add_argument("--max-slippage-bps", type=Decimal, default=D("20"))
     parser.add_argument("--max-book-forward-ms", type=int, default=750)
-    parser.add_argument("--universe-state", type=Path)
+    parser.add_argument("--universe-state", type=Path, default=DEFAULT_UNIVERSE_STATE)
     parser.add_argument("--max-universe-age-hours", type=float, default=6.0)
     return parser
 
@@ -308,7 +314,8 @@ def main() -> None:
     }
     args.output_dir.mkdir(parents=True, exist_ok=True)
     queue = build_challenger_queue(
-        robust[:100],
+        robust,
+        selection_contract_version=LANE1_SELECTION_CONTRACT_V1,
         output_path=args.output_dir / "challenger_queue.json",
         universe_state_path=args.universe_state,
         max_universe_age_hours=max(0.0, args.max_universe_age_hours),
