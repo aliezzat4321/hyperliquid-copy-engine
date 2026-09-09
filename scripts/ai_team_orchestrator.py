@@ -3763,7 +3763,10 @@ that non-code work needs a CODE_CHANGE. Unknown or contradictory evidence is TER
                 task["id"], status="STALE", retry_at=None, systemd_unit=None,
                 last_error=f"merge no longer applicable: {error[-700:]}",
                 failure_class="CODE_CHANGE",
-                next_action="refresh/rebase the scoped PR on current main and re-run exact-SHA review/CI",
+                next_action=(
+                    "refresh/rebase the scoped PR on current main and re-run "
+                    "exact-SHA review/CI"
+                ),
             )
             self.runtime.event(
                 "MERGE_TASK_STALE", assignment_id=task["id"],
