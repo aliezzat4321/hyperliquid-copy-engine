@@ -294,6 +294,7 @@ def test_non_limit_probe_failure_consumes_budget_and_leaves_wait_state(tmp_path,
     assert "ordinary failure" in row["last_error"]
     assert row["limit_text"] is None
 
+
 def test_watchdog_requeues_same_review_checkpoint(tmp_path):
     ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
     task_id = ledger.create_task(
