@@ -119,6 +119,10 @@ Otherwise runtime Issue #130 and Trello show `code_merged_but_not_complete`
 (`CODE_MERGED_BUT_NOT_COMPLETE` in the ledger) in Review / CI,
 distinct from Done / Proven. A child with `AI_TEAM_FINALIZES_PARENT` cannot close its
 parent unless the parent's own explicit completion predicate passes.
+Rollout also performs a one-shot, idempotent reconciliation of the incident-audited
+issues (#120, #93, #196, #197, #91, #92, and #150): absent a satisfied explicit
+close-on-merge predicate, a closed issue is reopened and any Done label is removed.
+The migration is finite so it does not blindly reopen unrelated historical work.
 
 For an Issue that truly requires Opus, use an explicit trusted Issue field, for example:
 

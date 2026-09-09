@@ -847,6 +847,41 @@ def test_completion_policy_is_explicit_and_fail_closed():
     )[0] is False
 
 
+def test_completion_semantics_migration_reopens_only_unmet_audited_issues(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    labels = orch.DEFAULT_CONFIG["labels"]
+    issues = {
+        number: {
+            "number": number, "state": "closed",
+            "body": "AI_TEAM_COMPLETION_REQUIRES=RUNTIME_PROOF",
+            "labels": [{"name": labels["done"]}],
+        }
+        for number in orch._COMPLETION_SEMANTICS_MIGRATION_ISSUES
+    }
+    pure = orch._COMPLETION_SEMANTICS_MIGRATION_ISSUES[-1]
+    issues[pure]["body"] = "AI_TEAM_CLOSE_ON_MERGE=YES"
+    actions = []
+
+    class GH:
+        def issue(self, number): return issues[number]
+        def remove_label(self, number, label): actions.append(("remove", number, label))
+        def reopen_issue(self, number): actions.append(("reopen", number))
+
+    class Runtime:
+        def event(self, kind, **payload): actions.append((kind, payload))
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.gh = orch.DEFAULT_CONFIG, ledger, GH()
+    team.runtime = Runtime()
+    assert team.reconcile_completion_semantics_migration() is True
+    reopened = {action[1] for action in actions if action[0] == "reopen"}
+    assert reopened == set(orch._COMPLETION_SEMANTICS_MIGRATION_ISSUES) - {pure}
+    assert ledger.meta_get("completion_semantics_migration_v1") == "DONE"
+    actions.clear()
+    assert team.reconcile_completion_semantics_migration() is False
+    assert actions == []
+
+
 def test_merged_evidence_task_stays_open_and_projects_distinct_state(tmp_path):
     ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
     task_id = ledger.create_task(

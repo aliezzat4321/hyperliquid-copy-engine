@@ -378,6 +378,9 @@ class GitHub:
     def close_issue(self, number: int) -> None:
         self.api("PATCH", f"repos/{self.repo}/issues/{number}", {"state": "closed"})
 
+    def reopen_issue(self, number: int) -> None:
+        self.api("PATCH", f"repos/{self.repo}/issues/{number}", {"state": "open"})
+
 
 class Ledger:
     def __init__(self, path: Path) -> None:
@@ -1078,6 +1081,10 @@ _POST_MERGE_REQUIREMENTS = {
     "OWNER_AUTHORIZED_ACTION",
 }
 
+# Incident-audited issues whose contracts require post-merge evidence. Keep this
+# migration deliberately finite so rollout does not guess about unrelated history.
+_COMPLETION_SEMANTICS_MIGRATION_ISSUES = (120, 93, 196, 197, 91, 92, 150)
+
 
 def completion_policy(body: str, task_class: str = "ROUTINE") -> tuple[bool, str]:
     """Evaluate merge-time completion from explicit metadata; ambiguity fails closed."""
@@ -1540,6 +1547,44 @@ class Orchestrator:
             self.kick_trello_reconciliation()
         return changed
 
+    def reconcile_completion_semantics_migration(self) -> bool:
+        """One-shot, idempotent repair of the incident-audited issue states."""
+        key = "completion_semantics_migration_v1"
+        if self.ledger.meta_get(key) == "DONE":
+            return False
+        changed = False
+        complete = True
+        for number in _COMPLETION_SEMANTICS_MIGRATION_ISSUES:
+            try:
+                issue = self.gh.issue(number)
+            except Exception as exc:
+                complete = False
+                self.runtime.event(
+                    "COMPLETION_SEMANTICS_MIGRATION_RETRY", issue=number,
+                    error=str(exc),
+                )
+                continue
+            body = str(issue.get("body") or "")
+            may_close, predicate = completion_policy(body, parse_task_class(body)[0])
+            if may_close:
+                continue
+            labels = {str(x.get("name")) for x in issue.get("labels", [])}
+            if self.cfg["labels"]["done"] in labels:
+                self.gh.remove_label(number, self.cfg["labels"]["done"])
+                changed = True
+            if str(issue.get("state") or "open").lower() == "closed":
+                self.gh.reopen_issue(number)
+                changed = True
+            self.runtime.event(
+                "CODE_MERGED_BUT_NOT_COMPLETE", issue=number,
+                status="CODE_MERGED_BUT_NOT_COMPLETE",
+                completion_state="code_merged_but_not_complete", result=predicate,
+                next_action="collect deterministic closure evidence",
+            )
+        if complete:
+            self.ledger.meta_set(key, "DONE")
+        return changed
+
     def _reconcile_parent_finalizer(self, child: dict[str, Any]) -> bool:
         labels = self.cfg["labels"]
         child_number = int(child["number"])
@@ -1742,6 +1787,7 @@ class Orchestrator:
                 target_sha=stale["target_sha"], session_id=stale["session_id"],
             )
         self.migrate_legacy_remediation()
+        self.reconcile_completion_semantics_migration()
         self.reconcile_handoffs()
         if self.ledger.due() is not None:
             self.reconcile_parent_finalizers()
