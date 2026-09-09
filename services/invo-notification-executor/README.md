@@ -50,6 +50,14 @@ notification-producing, sufficiently observed, and shadow-assessable). `GET /tra
 adds each trader's identity aliases, source surfaces, event count, symbols, freshness,
 observation days, lifecycle, and missing/failed reasons.
 
+The service also writes an atomic `lane3-runtime-acceptance-latest.json` and an
+append-only `lane3-runtime-acceptance.jsonl` every 15 minutes. This predeclared,
+lane-local window survives a broken generic acceptance runner. It reports only
+`RUNTIME_ACTIVITY_PROVEN` when the population grows, fresh causal shadow decisions
+exist, and every canonical signal in the window has a decision or explicit
+reject/gap record. Its promotion verdict is always `NOT_EVALUATED`; execution-cost
+and profitability gates remain separate and fail closed.
+
 A notification is only a **wake-up hint**. Notification text can never directly place an order; every candidate is hydrated from authenticated Invo API data first.
 
 ## Default gates
