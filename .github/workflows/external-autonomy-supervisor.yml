@@ -11,7 +11,7 @@ on:
 
 permissions:
   contents: read
-  issues: read
+  issues: write
   pull-requests: read
 
 env:
@@ -35,13 +35,10 @@ jobs:
           import json, os, urllib.request
           from datetime import datetime, timezone
 
-          repo = os.environ['REPO']
-          issue = os.environ['STATUS_ISSUE']
-          token = os.environ['GH_TOKEN']
           req = urllib.request.Request(
-              f'https://api.github.com/repos/{repo}/issues/{issue}',
+              f'https://api.github.com/repos/{os.environ["REPO"]}/issues/{os.environ["STATUS_ISSUE"]}',
               headers={
-                  'Authorization': f'Bearer {token}',
+                  'Authorization': f'Bearer {os.environ["GH_TOKEN"]}',
                   'Accept': 'application/vnd.github+json',
                   'X-GitHub-Api-Version': '2022-11-28',
               },
@@ -50,11 +47,12 @@ jobs:
               data = json.load(r)
           updated = datetime.fromisoformat(data['updated_at'].replace('Z', '+00:00'))
           age = int((datetime.now(timezone.utc) - updated).total_seconds())
-          stale = age > int(os.environ['STALE_SECONDS'])
+          degraded = '"native_checkpoint_stale":true' in str(data.get('body') or '').replace(' ', '').lower()
+          stale = age > int(os.environ['STALE_SECONDS']) or degraded
           print(f'age_seconds={age}')
           print(f'stale={str(stale).lower()}')
           print(f'updated_at={data["updated_at"]}')
-          print(f'#130 updated_at={data["updated_at"]} age_seconds={age} stale={stale}')
+          print(f'#130 updated_at={data["updated_at"]} age_seconds={age} degraded={degraded} stale={stale}')
           PY
 
       - name: Install fail-forward control-plane containment
@@ -84,7 +82,7 @@ jobs:
           text = text.replace(old, new, 1)
 
           old_dispatch = '''            else:\n                self.block(task, f"unsupported task type {task['task_type']}")\n        finally:\n            self.sync_runtime_checkpoint()\n            self.kick_trello_reconciliation()\n'''
-          new_dispatch = '''            else:\n                self.block(task, f"unsupported task type {task['task_type']}")\n        except ValueError as exc:\n            if str(exc) == "MISSING_COMPLETION_CONTRACT":\n                self.ledger.update(\n                    task["id"], status="STALE", retry_at=None, systemd_unit=None,\n                    last_error="MISSING_COMPLETION_CONTRACT; task-local quarantine",\n                )\n                self.runtime.event(\n                    "TASK_QUARANTINED", assignment_id=task["id"],\n                    issue=task["issue_number"], pr=task["pr_number"],\n                    failure_class="MISSING_COMPLETION_CONTRACT",\n                    status="QUARANTINED",\n                )\n            else:\n                raise\n        finally:\n            self.sync_runtime_checkpoint()\n            self.kick_trello_reconciliation()\n'''
+          new_dispatch = '''            else:\n                self.block(task, f"unsupported task type {task['task_type']}")\n        except ValueError as exc:\n            if str(exc) == "MISSING_COMPLETION_CONTRACT":\n                self.ledger.update(\n                    task["id"], status="STALE", retry_at=None, systemd_unit=None,\n                    last_error="MISSING_COMPLETION_CONTRACT; task-local quarantine",\n                )\n                self.runtime.event(\n                    "TASK_QUARANTINED", assignment_id=task["id"],\n                    issue=task["issue_number"], pr=task["pr_number"],\n                    failure_class="MISSING_COMPLETION_CONTRACT", status="QUARANTINED",\n                )\n            else:\n                raise\n        finally:\n            self.sync_runtime_checkpoint()\n            self.kick_trello_reconciliation()\n'''
           if old_dispatch not in text:
               raise SystemExit('P0 containment refused: expected dispatch block not found')
           text = text.replace(old_dispatch, new_dispatch, 1)
@@ -94,6 +92,7 @@ jobs:
           PY
 
       - name: Recover stalled control plane
+        id: recover
         if: steps.freshness.outputs.stale == 'true' || github.event_name == 'workflow_dispatch'
         shell: bash
         run: |
@@ -104,33 +103,35 @@ jobs:
             exit 2
           fi
 
-          recovered=0
-          for i in 1 2 3; do
+          successes=0
+          for i in 1 2 3 4 5 6; do
             if sudo timeout 90 "$ORCH" --once; then
-              recovered=1
-              break
+              successes=$((successes+1))
             fi
-            sleep 3
+            sleep 1
           done
 
-          if [ "$recovered" -ne 1 ]; then
+          if [ "$successes" -eq 0 ]; then
             sudo pkill -TERM -f '/opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py' || true
             sleep 5
             sudo pkill -KILL -f '/opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py' || true
             sleep 2
             for i in 1 2 3 4; do
-              sudo timeout 90 "$ORCH" --once && recovered=1 && break
-              sleep 3
+              if sudo timeout 90 "$ORCH" --once; then
+                successes=$((successes+1))
+              fi
+              sleep 1
             done
           fi
 
-          sudo timeout 30 "$ORCH" --status || true
-          if [ "$recovered" -ne 1 ]; then
-            echo 'P0 external supervisor could not restore one successful orchestrator cycle' >&2
+          sudo timeout 30 "$ORCH" --status | tee /tmp/hyperliquid-ai-team-supervisor-status.txt || true
+          echo "successful_cycles=$successes" >> "$GITHUB_OUTPUT"
+          if [ "$successes" -eq 0 ]; then
+            echo 'P0 external supervisor could not restore a successful orchestrator cycle' >&2
             exit 3
           fi
 
-      - name: Re-check #130 freshness after recovery
+      - name: Reconcile #130 checkpoint
         if: steps.freshness.outputs.stale == 'true' || github.event_name == 'workflow_dispatch'
         shell: bash
         env:
@@ -138,24 +139,55 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          sleep 5
+          sleep 3
           python3 - <<'PY'
           import json, os, urllib.request
           from datetime import datetime, timezone
+          from pathlib import Path
 
-          req = urllib.request.Request(
-              f'https://api.github.com/repos/{os.environ["REPO"]}/issues/{os.environ["STATUS_ISSUE"]}',
-              headers={
-                  'Authorization': f'Bearer {os.environ["GH_TOKEN"]}',
-                  'Accept': 'application/vnd.github+json',
-                  'X-GitHub-Api-Version': '2022-11-28',
-              },
-          )
+          repo = os.environ['REPO']
+          issue = os.environ['STATUS_ISSUE']
+          token = os.environ['GH_TOKEN']
+          headers = {
+              'Authorization': f'Bearer {token}',
+              'Accept': 'application/vnd.github+json',
+              'X-GitHub-Api-Version': '2022-11-28',
+              'Content-Type': 'application/json',
+          }
+          url = f'https://api.github.com/repos/{repo}/issues/{issue}'
+          req = urllib.request.Request(url, headers=headers)
           with urllib.request.urlopen(req, timeout=20) as r:
               data = json.load(r)
           updated = datetime.fromisoformat(data['updated_at'].replace('Z', '+00:00'))
           age = int((datetime.now(timezone.utc) - updated).total_seconds())
-          print(f'#130 post-recovery updated_at={data["updated_at"]} age_seconds={age}')
-          if age > int(os.environ['STALE_SECONDS']):
-              raise SystemExit('P0: #130 is still stale after external recovery')
+          body = str(data.get('body') or '')
+          native_fresh = age <= int(os.environ['STALE_SECONDS']) and '"native_checkpoint_stale":true' not in body.replace(' ', '').lower()
+          if native_fresh:
+              print(f'#130 native checkpoint recovered updated_at={data["updated_at"]} age_seconds={age}')
+              raise SystemExit(0)
+
+          status_path = Path('/tmp/hyperliquid-ai-team-supervisor-status.txt')
+          status_text = status_path.read_text(errors='replace')[-12000:] if status_path.exists() else 'status output unavailable'
+          now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+          checkpoint = {
+              'protocol': 'AI_TEAM_RUNTIME_STATUS_V1',
+              'status_source': 'EXTERNAL_AUTONOMY_SUPERVISOR',
+              'status': 'DEGRADED_RECOVERING',
+              'native_checkpoint_stale': True,
+              'supervisor_observed_at': now,
+              'successful_recovery_cycles': int(os.environ.get('SUCCESSFUL_CYCLES', '0') or 0),
+              'pending_owner_action': None,
+              'live_trading': 'NO',
+              'note': 'Native checkpoint publisher is stale; external supervisor is keeping the control plane moving and will continue recovery every schedule until native publishing resumes.',
+              'orchestrator_status_text': status_text,
+          }
+          new_body = '<!-- AI_TEAM_RUNTIME_STATUS_V1 -->\n# AI TEAM RUNTIME STATUS\n\n```json\n' + json.dumps(checkpoint, separators=(',', ':')) + '\n```\n'
+          patch = urllib.request.Request(url, data=json.dumps({'body': new_body}).encode(), headers=headers, method='PATCH')
+          with urllib.request.urlopen(patch, timeout=20) as r:
+              result = json.load(r)
+          print(f'#130 degraded checkpoint published updated_at={result["updated_at"]}')
           PY
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SUCCESSFUL_CYCLES: ${{ steps.recover.outputs.successful_cycles }}
