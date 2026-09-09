@@ -1,0 +1,103 @@
+name: p0-lane-runtime-repair
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/p0-lane-runtime-repair.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: p0-lane-runtime-repair
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Repair Lane 3 executor persistence and invalid discovery surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          git pull --ff-only origin main
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('scripts/deploy_invo_notification_executor_self_hosted.sh')
+          s=p.read_text()
+          anchor='''set_env NOTIFICATION_TRADER_STATE_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/state.json\nset_env NOTIFICATION_TRADER_AUDIT_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/audit.jsonl\n'''
+          repl='''set_env NOTIFICATION_TRADER_STATE_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/state.json\nset_env NOTIFICATION_TRADER_AUDIT_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/audit.jsonl\nset_env NOTIFICATION_TRADER_TRACKER_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/trader-population.json\n# Current Invo feed API accepts following/trending; `all` returns HTTP 500 Invalid feed type.\n# Keep discovery broad across valid surfaces without flooding the executor with known-bad requests.\nset_env NOTIFICATION_TRADER_DISCOVERY_SURFACES following,trending\n'''
+          if anchor not in s: raise SystemExit('Lane3 deploy anchor not found')
+          p.write_text(s.replace(anchor,repl,1))
+          PY
+          bash -n scripts/deploy_invo_notification_executor_self_hosted.sh
+          git diff --check
+          git config user.name 'AI Team Supervisor'
+          git config user.email 'ai-team@localhost'
+          git add scripts/deploy_invo_notification_executor_self_hosted.sh
+          git commit -m 'P0 Lane3: repair executor persistence and invalid Invo feed surface'
+          git push origin HEAD:main
+          sudo bash scripts/deploy_invo_notification_executor_self_hosted.sh
+          sleep 5
+          sudo systemctl is-active --quiet hyperliquid-invo-notification-executor.service
+          health="$(curl -fsS --max-time 4 http://127.0.0.1:8787/health)"
+          echo "LANE3_HEALTH=$health"
+          sudo test -f /var/lib/hyperliquid-copy-engine/invo-notification-executor/trader-population.json
+          if sudo tail -n 80 /var/lib/hyperliquid-copy-engine/invo-notification-executor/audit.jsonl | grep -q "Invalid feed type"; then
+            echo 'Lane3 invalid feed error still present in fresh tail' >&2
+            exit 1
+          fi
+          if sudo tail -n 80 /var/lib/hyperliquid-copy-engine/invo-notification-executor/audit.jsonl | grep -q "no such file or directory, mkdir '/root/hyperliquid-copy-engine/services/invo-notification-executor/data'"; then
+            echo 'Lane3 relative tracker path error still present in fresh tail' >&2
+            exit 1
+          fi
+      - name: Diagnose and restart Lane 1 producer chain without weakening gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          for unit in hyperliquid-universe-scout.service hyperliquid-wallet-research.service hyperliquid-selective-shadow.service hyperliquid-prospective-champions.service; do
+            echo "=== $unit status ==="
+            sudo systemctl status "$unit" --no-pager -l || true
+            sudo journalctl -u "$unit" -n 80 --no-pager -l || true
+          done
+          # Restart the upstream producer chain in dependency order. Each service is allowed
+          # to fail independently; capture all evidence before deciding acceptance.
+          for unit in hyperliquid-universe-scout.service hyperliquid-wallet-research.service hyperliquid-selective-shadow.service hyperliquid-prospective-champions.service; do
+            sudo systemctl reset-failed "$unit" || true
+            sudo systemctl start "$unit" || true
+          done
+          sleep 5
+          sudo stat -c 'LANE1_QUEUE_MTIME=%Y %y' /root/hyperliquid-audit/funnel/challenger_queue.json || true
+          sudo stat -c 'LANE1_REPORT_MTIME=%Y %y' /root/hyperliquid-audit/prospective-champions/report.json || true
+          sudo head -c 12000 /root/hyperliquid-audit/funnel/challenger_queue.json || true
+          echo
+          sudo cat /root/hyperliquid-audit/prospective-champions/report.json || true
+      - name: Diagnose Lane 2 resolver chain and restart task-locally
+        shell: bash
+        run: |
+          set -euo pipefail
+          for unit in hyperliquid-external-coverage.service hyperliquid-external-resolver.service hyperliquid-invo-wallet-identifier.service hyperliquid-invo-verified-shadow-sync.service; do
+            echo "=== $unit status ==="
+            sudo systemctl status "$unit" --no-pager -l || true
+            sudo journalctl -u "$unit" -n 100 --no-pager -l || true
+            sudo systemctl reset-failed "$unit" || true
+            sudo systemctl start "$unit" || true
+          done
+          sleep 5
+          for unit in hyperliquid-external-coverage.service hyperliquid-external-resolver.service hyperliquid-invo-wallet-identifier.service hyperliquid-invo-verified-shadow-sync.service; do
+            sudo systemctl status "$unit" --no-pager -l || true
+          done
+      - name: Final safety and supervisor proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${REAL_TRADING_ENABLED:-NO}" != YES
+          sudo systemctl is-active --quiet hyperliquid-ai-external-supervisor.timer
+          sudo systemctl start hyperliquid-ai-external-supervisor.service
+          sudo tail -n 40 /var/lib/hyperliquid-ai-team/external-supervisor/supervisor.log
+          sudo -H /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py --status || true
