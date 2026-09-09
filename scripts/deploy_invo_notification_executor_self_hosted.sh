@@ -79,6 +79,10 @@ set_env NOTIFICATION_TRADER_HOST 127.0.0.1
 set_env NOTIFICATION_TRADER_PORT 8787
 set_env NOTIFICATION_TRADER_STATE_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/state.json
 set_env NOTIFICATION_TRADER_AUDIT_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/audit.jsonl
+set_env NOTIFICATION_TRADER_TRACKER_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/trader-population.json
+set_env NOTIFICATION_TRADER_ACCEPTANCE_LATEST_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/lane3-runtime-acceptance-latest.json
+set_env NOTIFICATION_TRADER_ACCEPTANCE_JOURNAL_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/lane3-runtime-acceptance.jsonl
+set_env NOTIFICATION_TRADER_ACCEPTANCE_INTERVAL_MS 900000
 
 # Remove the obsolete artificial leverage cap; source leverage is used directly.
 sed -i '/^NOTIFICATION_TRADER_MAX_LEVERAGE=/d' "$EXEC_ENV"

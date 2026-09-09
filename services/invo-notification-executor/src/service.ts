@@ -9,6 +9,7 @@ import { extractNotificationHints, hintsMatchSignal, InvoSignal, NotificationHin
 import { ManagedPosition, NotificationState } from './notification-state.js';
 import { TraderTracker } from './trader-tracker.js';
 import { liveScopeSkipReason } from './live-scope.js';
+import { Lane3AcceptanceEvidence } from './acceptance-evidence.js';
 
 if (INVO_TOKEN) invo.setToken(INVO_TOKEN);
 if (INVO_REFRESH_TOKEN) invo.setRefreshToken(INVO_REFRESH_TOKEN);
@@ -61,6 +62,9 @@ function loadConfig() {
     statePath: resolve(process.env.NOTIFICATION_TRADER_STATE_PATH ?? 'data/notification-trader-state.json'),
     auditPath: resolve(process.env.NOTIFICATION_TRADER_AUDIT_PATH ?? 'data/notification-trader-audit.jsonl'),
     trackerPath: resolve(process.env.NOTIFICATION_TRADER_TRACKER_PATH ?? 'data/notification-trader-population.json'),
+    acceptanceLatestPath: resolve(process.env.NOTIFICATION_TRADER_ACCEPTANCE_LATEST_PATH ?? 'data/lane3-runtime-acceptance-latest.json'),
+    acceptanceJournalPath: resolve(process.env.NOTIFICATION_TRADER_ACCEPTANCE_JOURNAL_PATH ?? 'data/lane3-runtime-acceptance.jsonl'),
+    acceptanceIntervalMs: Math.max(60_000, n('NOTIFICATION_TRADER_ACCEPTANCE_INTERVAL_MS', 15 * 60 * 1000)),
     minEvidenceEvents: Math.max(1, Math.trunc(n('NOTIFICATION_TRADER_MIN_EVIDENCE_EVENTS', 20))),
     minObservationDays: Math.max(1, Math.trunc(n('NOTIFICATION_TRADER_MIN_OBSERVATION_DAYS', 7))),
     staleAfterMs: Math.max(60_000, n('NOTIFICATION_TRADER_STALE_AFTER_MS', 3 * 24 * 60 * 60 * 1000)),
@@ -85,6 +89,7 @@ const tracker = new TraderTracker(cfg.trackerPath, {
   staleAfterMs: cfg.staleAfterMs,
   inactiveAfterMs: cfg.inactiveAfterMs,
 });
+const acceptanceEvidence = new Lane3AcceptanceEvidence(cfg.acceptanceLatestPath, cfg.acceptanceJournalPath, cfg.auditPath, cfg.acceptanceIntervalMs);
 const inFlight = new Set<string>();
 let initialized = false;
 let hydrating = false;
@@ -685,6 +690,7 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
     await Promise.all(ordered.map(signal => execute(signal, source, receivedAtMs, feedFilter)));
   }
   lastSuccessPollMs = Date.now();
+  if (!cfg.live) acceptanceEvidence.record(tracker.report(), false, lastSuccessPollMs);
   return ordered.length;
 }
 
@@ -809,6 +815,7 @@ async function main() {
     await invo.checkAccountReady();
   }
   await wake('startup_baseline', undefined, Date.now());
+  if (!cfg.live) acceptanceEvidence.record(tracker.report(), false, Date.now(), true);
   startServer();
   log({
     type: 'service_started',
