@@ -139,8 +139,6 @@ def runtime_material(payload: dict[str, Any]) -> dict[str, Any]:
                 "status",
                 "task_type",
                 "target_sha",
-                "retry_after",
-                "updated_at",
                 "last_progress",
                 "blocker",
             )
@@ -160,10 +158,12 @@ def runtime_material(payload: dict[str, Any]) -> dict[str, Any]:
             for key in (
                 "assignment_id",
                 "issue",
+                "pr",
                 "status",
+                "target_sha",
                 "failure_class",
                 "recovery_fingerprint",
-                "updated_at",
+                "last_progress",
             )
         },
     }
