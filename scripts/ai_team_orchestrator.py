@@ -54,7 +54,9 @@ RUNTIME_STATUS_ISSUE = 130
 GIT_PUSH_REMOTE = f"git@github.com:{REPO}.git"
 MACHINE_ASSIGNMENT = "AI_TEAM_ASSIGNMENT_V1"
 MACHINE_RESULT = "AI_TEAM_RESULT_V1"
-ACTIVE_STATUSES = {"PENDING", "RETRY", "WAITING_RATE_LIMIT", "WAITING_CI", "RUNNING"}
+ACTIVE_STATUSES = {
+    "PENDING", "EVIDENCE_PENDING", "RETRY", "WAITING_RATE_LIMIT", "WAITING_CI", "RUNNING",
+}
 TERMINAL_STATUSES = {
     "DONE", "FAILED", "BLOCKED", "STALE", "CODE_MERGED_BUT_NOT_COMPLETE",
 }
@@ -605,7 +607,9 @@ class Ledger:
             """
             SELECT *
               FROM tasks
-             WHERE status IN ('PENDING','RETRY','WAITING_RATE_LIMIT','WAITING_CI')
+             WHERE status IN (
+                   'PENDING','EVIDENCE_PENDING','RETRY','WAITING_RATE_LIMIT','WAITING_CI'
+             )
                AND (retry_at IS NULL OR retry_at <= ?)
              ORDER BY CASE status WHEN 'WAITING_CI' THEN 0 ELSE 1 END, created_at
              LIMIT 1
@@ -1575,6 +1579,7 @@ class Orchestrator:
             if str(issue.get("state") or "open").lower() == "closed":
                 self.gh.reopen_issue(number)
                 changed = True
+            changed = self._enqueue_evidence_phase(issue, predicate=predicate) or changed
             self.runtime.event(
                 "CODE_MERGED_BUT_NOT_COMPLETE", issue=number,
                 status="CODE_MERGED_BUT_NOT_COMPLETE",
@@ -1584,6 +1589,39 @@ class Orchestrator:
         if complete:
             self.ledger.meta_set(key, "DONE")
         return changed
+
+    def _enqueue_evidence_phase(
+        self,
+        issue: dict[str, Any],
+        *,
+        predicate: str,
+        parent_id: str | None = None,
+    ) -> bool:
+        """Create one executable post-merge assignment for unmet closure evidence."""
+        number = int(issue["number"])
+        if self.ledger.active_for_issue(number):
+            return False
+        route = parse_initial_route(str(issue.get("body") or ""), self.cfg)
+        task_id = self.ledger.create_task(
+            issue_number=number,
+            task_type=route["task_type"],
+            agent=route["agent"],
+            model_class=route["model_class"],
+            task_class=route["task_class"],
+            status="EVIDENCE_PENDING",
+            parent_id=parent_id,
+            last_error=f"post-merge closure evidence required: {predicate}",
+        )
+        self.gh.add_labels(number, [self.cfg["labels"]["pending"]])
+        self.runtime.event(
+            "EVIDENCE_PHASE_ENQUEUED",
+            assignment_id=task_id,
+            issue=number,
+            status="EVIDENCE_PENDING",
+            result=predicate,
+            next_action="collect deterministic closure evidence",
+        )
+        return True
 
     def _reconcile_parent_finalizer(self, child: dict[str, Any]) -> bool:
         labels = self.cfg["labels"]
@@ -1608,13 +1646,14 @@ class Orchestrator:
             parse_task_class(str(parent.get("body") or ""))[0],
         )
         if not parent_close:
+            enqueued = self._enqueue_evidence_phase(parent, predicate=predicate)
             self.runtime.event(
                 "CODE_MERGED_BUT_NOT_COMPLETE", issue=parent_number,
                 child_issue=child_number, status="CODE_MERGED_BUT_NOT_COMPLETE",
                 completion_state="code_merged_but_not_complete", result=predicate,
                 next_action="collect parent closure evidence",
             )
-            return False
+            return enqueued
         parent_labels = {str(x.get("name")) for x in parent.get("labels", [])}
         self.gh.comment(
             parent_number,
@@ -3190,6 +3229,11 @@ that non-code work needs a CODE_CHANGE. Unknown or contradictory evidence is TER
             self.gh.close_issue(int(task["issue_number"]))
             self.emit_terminal_projection(task, target)
         else:
+            self._enqueue_evidence_phase(
+                {**issue, "number": int(task["issue_number"])},
+                predicate=predicate,
+                parent_id=str(task["id"]),
+            )
             self.runtime.event(
                 "CODE_MERGED_BUT_NOT_COMPLETE", assignment_id=task["id"],
                 issue=task["issue_number"], pr=task["pr_number"], target_sha=target,

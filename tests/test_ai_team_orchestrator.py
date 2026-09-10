@@ -853,7 +853,7 @@ def test_completion_semantics_migration_reopens_only_unmet_audited_issues(tmp_pa
     issues = {
         number: {
             "number": number, "state": "closed",
-            "body": "AI_TEAM_COMPLETION_REQUIRES=RUNTIME_PROOF",
+            "body": "AI_TASK_CLASS=ROUTINE\nAI_TEAM_COMPLETION_REQUIRES=RUNTIME_PROOF",
             "labels": [{"name": labels["done"]}],
         }
         for number in orch._COMPLETION_SEMANTICS_MIGRATION_ISSUES
@@ -866,6 +866,7 @@ def test_completion_semantics_migration_reopens_only_unmet_audited_issues(tmp_pa
         def issue(self, number): return issues[number]
         def remove_label(self, number, label): actions.append(("remove", number, label))
         def reopen_issue(self, number): actions.append(("reopen", number))
+        def add_labels(self, number, values): actions.append(("add", number, values))
 
     class Runtime:
         def event(self, kind, **payload): actions.append((kind, payload))
@@ -876,6 +877,13 @@ def test_completion_semantics_migration_reopens_only_unmet_audited_issues(tmp_pa
     assert team.reconcile_completion_semantics_migration() is True
     reopened = {action[1] for action in actions if action[0] == "reopen"}
     assert reopened == set(orch._COMPLETION_SEMANTICS_MIGRATION_ISSUES) - {pure}
+    evidence = ledger.db.execute(
+        "SELECT issue_number,status FROM tasks ORDER BY issue_number"
+    ).fetchall()
+    assert {(row["issue_number"], row["status"]) for row in evidence} == {
+        (number, "EVIDENCE_PENDING")
+        for number in orch._COMPLETION_SEMANTICS_MIGRATION_ISSUES if number != pure
+    }
     assert ledger.meta_get("completion_semantics_migration_v1") == "DONE"
     actions.clear()
     assert team.reconcile_completion_semantics_migration() is False
@@ -896,7 +904,8 @@ def test_merged_evidence_task_stays_open_and_projects_distinct_state(tmp_path):
         def check_state(self, sha): return "PASS", "green"
         def changed_files(self, number): return []
         def issue(self, number):
-            return {"author_association": "OWNER", "body":
+            return {"number": number, "author_association": "OWNER", "body":
+                    "AI_TASK_CLASS=ROUTINE\n"
                     "AI_TEAM_COMPLETION_REQUIRES=STORAGE_RECLAIM,RUNTIME_PROOF"}
         def merge(self, number, sha): return {"merged": True}
         def remove_label(self, *args): actions.append("remove_label")
@@ -913,8 +922,24 @@ def test_merged_evidence_task_stays_open_and_projects_distinct_state(tmp_path):
     team.handle_ci(ledger.get(task_id))
     assert ledger.get(task_id)["status"] == "CODE_MERGED_BUT_NOT_COMPLETE"
     assert "close_issue" not in actions
-    assert "add_labels" not in actions
+    evidence = ledger.due()
+    assert evidence is not None
+    assert evidence["status"] == "EVIDENCE_PENDING"
+    assert evidence["issue_number"] == 120
+    assert ledger.active_for_issue(120)
+    assert "add_labels" in actions
     assert actions[-1][0] == "CODE_MERGED_BUT_NOT_COMPLETE"
+
+    progressed = []
+    team.migrate_legacy_remediation = lambda: None
+    team.reconcile_completion_semantics_migration = lambda: False
+    team.reconcile_handoffs = lambda: None
+    team.reconcile_parent_finalizers = lambda: False
+    team.sync_runtime_checkpoint = lambda: None
+    team.kick_trello_reconciliation = lambda: None
+    team.handle_codex = lambda row: progressed.append((row["issue_number"], row["status"]))
+    team.cycle()
+    assert progressed == [(120, "EVIDENCE_PENDING")]
 
 
 def test_generated_pr_reference_never_uses_stale_closing_keyword():
@@ -966,8 +991,10 @@ def test_child_success_cannot_finalize_parent_with_unmet_predicate(tmp_path):
         def finalizer_issues(self, done_label): return [child]
         def issue(self, number):
             return {"number": 154, "state": "open", "body":
-                    "AI_TEAM_COMPLETION_REQUIRES=RUNTIME_PROOF", "labels": []}
+                    "AI_TASK_CLASS=ROUTINE\nAI_TEAM_COMPLETION_REQUIRES=RUNTIME_PROOF",
+                    "labels": []}
         def close_issue(self, number): actions.append("closed")
+        def add_labels(self, number, values): actions.append(("add", number, values))
 
     class Runtime:
         def event(self, kind, **payload): actions.append((kind, payload))
@@ -977,9 +1004,14 @@ def test_child_success_cannot_finalize_parent_with_unmet_predicate(tmp_path):
     team.runtime, team.trusted = Runtime(), {"OWNER"}
     team.sync_runtime_checkpoint = lambda: None
     team.kick_trello_reconciliation = lambda: None
-    assert team.reconcile_parent_finalizers() is False
+    assert team.reconcile_parent_finalizers() is True
     assert "closed" not in actions
     assert actions[-1][0] == "CODE_MERGED_BUT_NOT_COMPLETE"
+    evidence = ledger.due()
+    assert evidence is not None
+    assert evidence["issue_number"] == 154
+    assert evidence["status"] == "EVIDENCE_PENDING"
+    assert team.reconcile_parent_finalizers() is False
 
 
 def test_queue_promotes_smallest_satisfied_priority_and_claims_once(tmp_path):
