@@ -42,7 +42,12 @@ def test_keep_decision_fails_closed_without_graphify(monkeypatch) -> None:
         "graphify_probe",
         lambda: {"status": "UNAVAILABLE", "reason": "test"},
     )
-    result = BENCHMARK.run()
+    files = {
+        required: f"def {task['id'].replace('-', '_')}():\n    pass\n"
+        for task in BENCHMARK.WORKLOADS
+        for required in task["required"]
+    }
+    result = BENCHMARK.run(repository_files=files, repository_sha="a" * 40)
     assert result["decision"]["keep_added_layer"] is False
     assert result["safety"] == {
         "canonical_source": "git",
@@ -51,3 +56,16 @@ def test_keep_decision_fails_closed_without_graphify(monkeypatch) -> None:
     }
     assert result["baseline"]["summary"]["required_file_recall"] == 1.0
     assert result["graphify"]["status"] == "UNAVAILABLE"
+
+
+def test_local_index_rejects_an_explicit_stale_repository_sha() -> None:
+    try:
+        BENCHMARK.local_index(
+            {"example.py": "def example():\n    pass\n"},
+            "a" * 40,
+            repository_sha="b" * 40,
+        )
+    except RuntimeError as exc:
+        assert "stale" in str(exc)
+    else:
+        raise AssertionError("stale index was accepted")
