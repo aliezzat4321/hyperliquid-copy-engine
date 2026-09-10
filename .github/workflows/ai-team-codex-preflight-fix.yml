@@ -1,4 +1,4 @@
-name: p0-238-harden-external-supervisor-v4
+name: p0-238-supervisor-python310
 
 on:
   push:
@@ -20,83 +20,55 @@ jobs:
           persist-credentials: true
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.10"
       - name: Install test dependencies
         run: |
           python -m pip install -U pip
           pip install -e '.[dev]'
-      - name: Apply compound-failure hardening
+      - name: Apply Python 3.10 compatibility repair
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "0d5dfc5c3a801d05ea933053c6c0b0047c564e68"
+          test "$(git rev-parse HEAD)" = "23411b89bb93b78f50de2cc6c23fd97ac76e1f3f"
           python - <<'PY'
           from pathlib import Path
 
-          path = Path('scripts/ai_team_external_supervisor.py')
-          text = path.read_text()
-
-          old_run = '''def run(cmd: list[str], *, timeout: int = 30) -> subprocess.CompletedProcess[str]:\n    return subprocess.run(\n        cmd,\n        check=False,\n        capture_output=True,\n        text=True,\n        timeout=timeout,\n    )\n'''
-          new_run = '''def run(cmd: list[str], *, timeout: int = 30) -> subprocess.CompletedProcess[str]:\n    try:\n        return subprocess.run(\n            cmd,\n            check=False,\n            capture_output=True,\n            text=True,\n            timeout=timeout,\n        )\n    except subprocess.TimeoutExpired as exc:\n        stdout = (\n            exc.stdout.decode(errors="replace")\n            if isinstance(exc.stdout, bytes)\n            else (exc.stdout or "")\n        )\n        stderr = (\n            exc.stderr.decode(errors="replace")\n            if isinstance(exc.stderr, bytes)\n            else (exc.stderr or "")\n        )\n        return subprocess.CompletedProcess(cmd, 124, stdout, stderr or "command timed out")\n'''
-          if old_run not in text:
-              raise SystemExit('run anchor missing')
-          text = text.replace(old_run, new_run, 1)
-
-          marker = 'def determine_fault(\n'
-          helper = '''def local_control_fault(systemd: dict[str, Any]) -> tuple[str | None, str | None]:\n    if not systemd["timer_enabled"] or not systemd["timer_active"]:\n        return "ORCHESTRATOR_TIMER_DOWN", "orchestrator timer is not enabled+active"\n    if systemd["service_active"] and systemd["service_age_seconds"] > SERVICE_HANG_SECONDS:\n        return (\n            "ORCHESTRATOR_SERVICE_HUNG",\n            f"orchestrator service active for {systemd['service_age_seconds']:.0f}s",\n        )\n    return None, None\n\n\n'''
-          if marker not in text:
-              raise SystemExit('determine anchor missing')
-          text = text.replace(marker, helper + marker, 1)
-
-          old_local = '''    if not systemd["timer_enabled"] or not systemd["timer_active"]:\n        return "ORCHESTRATOR_TIMER_DOWN", "orchestrator timer is not enabled+active"\n\n    if systemd["service_active"] and systemd["service_age_seconds"] > SERVICE_HANG_SECONDS:\n        return (\n            "ORCHESTRATOR_SERVICE_HUNG",\n            f"orchestrator service active for {systemd['service_age_seconds']:.0f}s",\n        )\n\n'''
-          new_local = '''    local_fault, local_detail = local_control_fault(systemd)\n    if local_fault is not None:\n        return local_fault, local_detail\n\n'''
-          if old_local not in text:
-              raise SystemExit('local checks anchor missing')
-          text = text.replace(old_local, new_local, 1)
-
-          old_start = '''    cp = run(["systemctl", "start", SERVICE], timeout=180)\n    if cp.returncode != 0:\n        return "FAILED", f"orchestrator start failed: {(cp.stderr or cp.stdout)[-1200:]}"\n    actions.append("orchestrator-cycle-started")\n'''
-          new_start = '''    cp = run(["systemctl", "start", "--no-block", SERVICE], timeout=30)\n    if cp.returncode != 0:\n        return "FAILED", f"orchestrator start failed: {(cp.stderr or cp.stdout)[-1200:]}"\n    actions.append("orchestrator-cycle-queued")\n'''
-          if old_start not in text:
-              raise SystemExit('start anchor missing')
-          text = text.replace(old_start, new_start, 1)
-
-          old_main = '''        body, error = fetch_runtime_issue()\n        systemd = service_snapshot(now)\n        state["last_systemd"] = systemd\n        if error or body is None:\n            state["last_error"] = f"runtime status fetch failed: {error}"\n            save_state(state)\n            print("SUPERVISOR_STATE=DEPENDENCY_WAIT")\n            print("GITHUB_STATUS_FETCH=FAILED")\n            return 0\n\n        parsed = parse_runtime_body(body)\n'''
-          new_main = '''        systemd = service_snapshot(now)\n        state["last_systemd"] = systemd\n        local_fault, local_detail = local_control_fault(systemd)\n        if local_fault is not None:\n            parsed = {"heartbeat": None, "payload": {}}\n            fault, detail = local_fault, local_detail\n        else:\n            body, error = fetch_runtime_issue()\n            if error or body is None:\n                state["last_error"] = f"runtime status fetch failed: {error}"\n                save_state(state)\n                print("SUPERVISOR_STATE=DEPENDENCY_WAIT")\n                print("GITHUB_STATUS_FETCH=FAILED")\n                return 0\n            parsed = parse_runtime_body(body)\n            fault, detail = determine_fault(\n                state=state, parsed=parsed, systemd=systemd, now=now\n            )\n\n'''
-          if old_main not in text:
-              raise SystemExit('main fetch anchor missing')
-          text = text.replace(old_main, new_main, 1)
-
-          old_follow = '''        heartbeat = parsed.get("heartbeat")\n        state["last_runtime_heartbeat"] = (\n            iso(heartbeat) if isinstance(heartbeat, dt.datetime) else None\n        )\n        fault, detail = determine_fault(state=state, parsed=parsed, systemd=systemd, now=now)\n        if fault is None:\n'''
-          new_follow = '''        heartbeat = parsed.get("heartbeat")\n        state["last_runtime_heartbeat"] = (\n            iso(heartbeat) if isinstance(heartbeat, dt.datetime) else None\n        )\n        if fault is None:\n'''
-          if old_follow not in text:
-              raise SystemExit('main determine anchor missing')
-          text = text.replace(old_follow, new_follow, 1)
-          path.write_text(text)
+          src = Path('scripts/ai_team_external_supervisor.py')
+          text = src.read_text()
+          anchor = 'from typing import Any\n\n'
+          if anchor not in text:
+              raise SystemExit('typing import anchor missing')
+          text = text.replace(anchor, anchor + 'UTC = dt.timezone.utc  # noqa: UP017 -- production VM is Python 3.10\n\n', 1)
+          if 'dt.UTC' not in text:
+              raise SystemExit('expected dt.UTC usages missing')
+          text = text.replace('dt.UTC', 'UTC')
+          src.write_text(text)
 
           tests = Path('tests/test_ai_team_external_supervisor.py')
           t = tests.read_text()
-          if 'test_local_control_fault_does_not_require_github_payload' not in t:
-              t += '''\n\ndef test_local_control_fault_does_not_require_github_payload():\n    systemd = healthy_systemd()\n    systemd["timer_active"] = False\n    fault, detail = sup.local_control_fault(systemd)\n    assert fault == "ORCHESTRATOR_TIMER_DOWN"\n    assert "timer" in detail\n\n\ndef test_timeout_is_converted_to_bounded_failed_command(monkeypatch):\n    import subprocess\n\n    def boom(*args, **kwargs):\n        raise subprocess.TimeoutExpired(cmd=["systemctl"], timeout=1, stderr="late")\n\n    monkeypatch.setattr(sup.subprocess, "run", boom)\n    cp = sup.run(["systemctl", "start", "x"], timeout=1)\n    assert cp.returncode == 124\n    assert "late" in cp.stderr\n'''
-          tests.write_text(t)
+          if 'dt.UTC' not in t:
+              raise SystemExit('expected test dt.UTC usages missing')
+          tests.write_text(t.replace('dt.UTC', 'sup.UTC'))
           PY
-      - name: Validate bounded repair
+      - name: Validate on production Python version
         shell: bash
         run: |
           set -euo pipefail
-          ruff format scripts/ai_team_external_supervisor.py tests/test_ai_team_external_supervisor.py
+          python --version
           python -m py_compile scripts/ai_team_external_supervisor.py
           pytest tests/test_ai_team_external_supervisor.py -q
           ruff check scripts/ai_team_external_supervisor.py tests/test_ai_team_external_supervisor.py
+          ruff format --check scripts/ai_team_external_supervisor.py tests/test_ai_team_external_supervisor.py
           git diff --check
           changed="$(git diff --name-only)"
           test "$changed" = $'scripts/ai_team_external_supervisor.py\ntests/test_ai_team_external_supervisor.py'
           ! git diff | grep -E 'REAL_TRADING_ENABLED[[:space:]]*=[[:space:]]*(YES|TRUE|1)|LIVE_TRADING_ENABLED[[:space:]]*=[[:space:]]*(YES|TRUE|1)'
-      - name: Commit hardened supervisor head
+      - name: Commit Python 3.10 repair
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'hyperliquid-ai-team'
           git config user.email 'hyperliquid-ai-team@users.noreply.github.com'
           git add scripts/ai_team_external_supervisor.py tests/test_ai_team_external_supervisor.py
-          git commit -m 'P0 #238: harden compound supervisor recovery'
+          git commit -m 'P0 #238: support production Python 3.10 supervisor runtime'
           git push origin HEAD:manager/238-external-supervisor
