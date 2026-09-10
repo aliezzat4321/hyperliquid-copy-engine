@@ -22,6 +22,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+UTC = dt.timezone.utc  # noqa: UP017 -- production VM is Python 3.10
+
 REPO = "aliezzat4321/hyperliquid-copy-engine"
 STATUS_ISSUE = 130
 SERVICE = "hyperliquid-ai-team-orchestrator.service"
@@ -52,11 +54,11 @@ ACTIVE_PROGRESS_STATUSES = {
 
 
 def utcnow() -> dt.datetime:
-    return dt.datetime.now(dt.UTC)
+    return dt.datetime.now(UTC)
 
 
 def iso(ts: dt.datetime) -> str:
-    return ts.astimezone(dt.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return ts.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def parse_time(value: Any) -> dt.datetime | None:
@@ -64,7 +66,7 @@ def parse_time(value: Any) -> dt.datetime | None:
         return None
     text = str(value).strip()
     try:
-        return dt.datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(dt.UTC)
+        return dt.datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(UTC)
     except ValueError:
         return None
 

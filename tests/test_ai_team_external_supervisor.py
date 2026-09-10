@@ -43,12 +43,12 @@ def healthy_systemd():
 
 def test_parse_runtime_body_extracts_payload_and_heartbeat():
     parsed = sup.parse_runtime_body(body("2026-09-10T15:00:00Z"))
-    assert parsed["heartbeat"] == dt.datetime(2026, 9, 10, 15, 0, tzinfo=dt.UTC)
+    assert parsed["heartbeat"] == dt.datetime(2026, 9, 10, 15, 0, tzinfo=sup.UTC)
     assert parsed["payload"]["codex"]["issue"] == 93
 
 
 def test_stale_runtime_status_is_fault_even_when_timer_is_alive():
-    now = dt.datetime(2026, 9, 10, 15, 10, tzinfo=dt.UTC)
+    now = dt.datetime(2026, 9, 10, 15, 10, tzinfo=sup.UTC)
     parsed = sup.parse_runtime_body(body("2026-09-10T15:00:00Z"))
     fault, detail = sup.determine_fault(state={}, parsed=parsed, systemd=healthy_systemd(), now=now)
     assert fault == "RUNTIME_STATUS_STALE"
@@ -56,7 +56,7 @@ def test_stale_runtime_status_is_fault_even_when_timer_is_alive():
 
 
 def test_timer_down_is_recovered_before_status_logic():
-    now = dt.datetime(2026, 9, 10, 15, 0, tzinfo=dt.UTC)
+    now = dt.datetime(2026, 9, 10, 15, 0, tzinfo=sup.UTC)
     parsed = sup.parse_runtime_body(body("2026-09-10T15:00:00Z"))
     systemd = healthy_systemd()
     systemd["timer_active"] = False
@@ -66,7 +66,7 @@ def test_timer_down_is_recovered_before_status_logic():
 
 def test_hung_service_is_detected_independently_of_fresh_status(monkeypatch):
     monkeypatch.setattr(sup, "SERVICE_HANG_SECONDS", 100)
-    now = dt.datetime(2026, 9, 10, 15, 0, tzinfo=dt.UTC)
+    now = dt.datetime(2026, 9, 10, 15, 0, tzinfo=sup.UTC)
     parsed = sup.parse_runtime_body(body("2026-09-10T15:00:00Z"))
     systemd = healthy_systemd()
     systemd.update(service_active=True, service_age_seconds=101.0)
@@ -76,7 +76,7 @@ def test_hung_service_is_detected_independently_of_fresh_status(monkeypatch):
 
 def test_actionable_no_progress_uses_supervisor_owned_material_clock(monkeypatch):
     monkeypatch.setattr(sup, "NO_PROGRESS_SECONDS", 60)
-    now = dt.datetime(2026, 9, 10, 15, 2, tzinfo=dt.UTC)
+    now = dt.datetime(2026, 9, 10, 15, 2, tzinfo=sup.UTC)
     parsed = sup.parse_runtime_body(body("2026-09-10T15:02:00Z"))
     fp = sup.fingerprint_material(parsed["payload"])
     state = {
@@ -92,7 +92,7 @@ def test_actionable_no_progress_uses_supervisor_owned_material_clock(monkeypatch
 
 def test_future_rate_limit_wait_is_not_treated_as_stuck(monkeypatch):
     monkeypatch.setattr(sup, "NO_PROGRESS_SECONDS", 60)
-    now = dt.datetime(2026, 9, 10, 15, 2, tzinfo=dt.UTC)
+    now = dt.datetime(2026, 9, 10, 15, 2, tzinfo=sup.UTC)
     parsed = sup.parse_runtime_body(
         body(
             "2026-09-10T15:02:00Z",
@@ -115,7 +115,7 @@ def test_future_rate_limit_wait_is_not_treated_as_stuck(monkeypatch):
 def test_recovery_budget_and_cooldown_are_durable(monkeypatch):
     monkeypatch.setattr(sup, "RECOVERY_COOLDOWN_SECONDS", 180)
     monkeypatch.setattr(sup, "MAX_RECOVERY_ATTEMPTS", 3)
-    now = dt.datetime(2026, 9, 10, 15, 0, tzinfo=dt.UTC)
+    now = dt.datetime(2026, 9, 10, 15, 0, tzinfo=sup.UTC)
     state = {
         "incident": {
             "fingerprint": "same",
@@ -135,7 +135,7 @@ def test_recovery_budget_and_cooldown_are_durable(monkeypatch):
 
 
 def test_new_material_resets_no_progress_clock():
-    now = dt.datetime(2026, 9, 10, 15, 0, tzinfo=dt.UTC)
+    now = dt.datetime(2026, 9, 10, 15, 0, tzinfo=sup.UTC)
     parsed = sup.parse_runtime_body(body("2026-09-10T15:00:00Z"))
     state = {
         "material_fingerprint": "old",
@@ -164,7 +164,7 @@ def test_incident_fingerprint_ignores_heartbeat_and_transient_service_state():
 
 
 def test_deferred_recovery_does_not_burn_budget():
-    now = dt.datetime(2026, 9, 10, 15, 0, tzinfo=dt.UTC)
+    now = dt.datetime(2026, 9, 10, 15, 0, tzinfo=sup.UTC)
     incident = {"attempts": 2}
     state = {}
     sup.record_recovery_outcome(
