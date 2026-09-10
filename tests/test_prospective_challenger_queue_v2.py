@@ -65,3 +65,16 @@ def test_funnel_does_not_truncate_robust_candidates_before_challenger_handoff() 
     source = FUNNEL.read_text(encoding="utf-8")
     assert "build_challenger_queue(\n        robust," in source
     assert "build_challenger_queue(\n        robust[:100]," not in source
+
+
+def test_prospective_report_exposes_runtime_acceptance_counts_and_timestamp() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    for field in (
+        "observed_at",
+        "shadow_decision_count",
+        "shadow_execution_count",
+        "shadow_reject_count",
+    ):
+        assert field in source
+    assert "lane1_runtime_acceptance.py" in source
+    assert "runtime_acceptance.json" in source
