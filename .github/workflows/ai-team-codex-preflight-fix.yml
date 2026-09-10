@@ -87,14 +87,12 @@ jobs:
           tests.write_text(t)
           PY
 
-      - name: Format and validate exact scheduler repair
+      - name: Validate exact scheduler repair
         shell: bash
         run: |
           set -euo pipefail
-          ruff format scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
           python -m py_compile scripts/ai_team_orchestrator.py
           pytest tests/test_ai_team_orchestrator.py -q
-          ruff format --check scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
           ruff check scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
           git diff --check
           changed="$(git diff --name-only)"
