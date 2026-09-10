@@ -67,46 +67,6 @@ jobs:
           test -x /usr/local/bin/codex-code-mode-host
           test -x /usr/local/bin/bwrap
           test -x /usr/local/sbin/hl-ai-team-auth-codex
-
-          # P0 bootstrap: stale/non-mergeable PRs are task-local state, never a
-          # process-wide fatal. Patch only the installed runtime copy; #233 owns
-          # the durable tested source-level fix. Fail closed if source shape moves.
-          python3 - /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py <<'PY'
-          from pathlib import Path
-          import sys
-
-          path = Path(sys.argv[1])
-          text = path.read_text()
-          old = '        merged = self.gh.merge(int(task["pr_number"]), target)\n'
-          new = (
-              '        try:\n'
-              '            merged = self.gh.merge(int(task["pr_number"]), target)\n'
-              '        except RuntimeError as exc:\n'
-              '            error = str(exc)\n'
-              '            if "HTTP 405" not in error and "not mergeable" not in error and "merge conflicts" not in error:\n'
-              '                raise\n'
-              '            self.ledger.update(\n'
-              '                task["id"],\n'
-              '                status="STALE",\n'
-              '                retry_at=None,\n'
-              '                last_error=f"merge no longer applicable: {error[-500:]}",\n'
-              '            )\n'
-              '            self.runtime.event(\n'
-              '                "MERGE_TASK_STALE",\n'
-              '                assignment_id=task["id"],\n'
-              '                issue=task["issue_number"],\n'
-              '                pr=task["pr_number"],\n'
-              '                target_sha=target,\n'
-              '                error=error[-500:],\n'
-              '            )\n'
-              '            return\n'
-          )
-          count = text.count(old)
-          if count != 1:
-              raise SystemExit(f"expected exactly one merge call, found {count}")
-          path.write_text(text.replace(old, new))
-          print("AI_TEAM_MERGE_405_ISOLATION_HOTFIX=APPLIED")
-          PY
           python3 -m py_compile /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py
 
           if ! systemctl start hyperliquid-ai-team-orchestrator.service; then
