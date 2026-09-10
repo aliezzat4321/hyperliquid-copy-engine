@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from hlcopy.discovery.invo_durable_identity import publish_durable_verified_identities
 
 BONES = "0x7a5973ca24c3d36cea16632711ac7a6cff684789"
@@ -130,17 +128,24 @@ def test_disappearing_source_identity_is_not_published(tmp_path: Path) -> None:
     assert second["verified_count"] == 0
 
 
-def test_conflicting_verified_wallets_for_same_identity_fail_closed(tmp_path: Path) -> None:
+def test_conflicting_verified_wallets_for_same_identity_are_quarantined(tmp_path: Path) -> None:
     _queue(tmp_path)
-    _verified_report(tmp_path, wallet=BONES, suffix="20260825T213437Z")
-    _verified_report(tmp_path, wallet=OTHER, suffix="20260826T010000Z")
+    first = _verified_report(tmp_path, wallet=BONES, suffix="20260825T213437Z")
+    second = _verified_report(tmp_path, wallet=OTHER, suffix="20260826T010000Z")
 
-    with pytest.raises(ValueError, match="conflicting verified Hyperliquid wallets"):
-        publish_durable_verified_identities(state_dir=tmp_path)
+    publication = publish_durable_verified_identities(state_dir=tmp_path)
 
-    publication = json.loads((tmp_path / "identified_wallets.json").read_text())
     assert publication["verified_count"] == 0
     assert publication["identities"] == []
+    assert publication["quarantined_identity_count"] == 1
+    assert publication["identity_conflicts"] == [
+        {
+            "portfolio_ids": ["bones-portfolio"],
+            "wallets": sorted([BONES, OTHER]),
+            "status": "QUARANTINED_CONFLICTING_VERIFIED_PROOFS",
+            "proof_reports": [str(first), str(second)],
+        }
+    ]
 
 
 def test_same_wallet_for_two_current_traders_is_quarantined_without_blocking_others(
