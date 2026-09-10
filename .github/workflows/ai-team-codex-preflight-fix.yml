@@ -1,4 +1,4 @@
-name: p0-238-supervisor-python310
+name: p0-238-supervisor-python310-v2
 
 on:
   push:
@@ -21,10 +21,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-      - name: Install test dependencies
+      - name: Install focused test tools only
         run: |
           python -m pip install -U pip
-          pip install -e '.[dev]'
+          python -m pip install pytest ruff
       - name: Apply Python 3.10 compatibility repair
         shell: bash
         run: |
@@ -38,11 +38,14 @@ jobs:
           anchor = 'from typing import Any\n\n'
           if anchor not in text:
               raise SystemExit('typing import anchor missing')
-          text = text.replace(anchor, anchor + 'UTC = dt.timezone.utc  # noqa: UP017 -- production VM is Python 3.10\n\n', 1)
+          text = text.replace(
+              anchor,
+              anchor + 'UTC = dt.timezone.utc  # noqa: UP017 -- production VM is Python 3.10\n\n',
+              1,
+          )
           if 'dt.UTC' not in text:
               raise SystemExit('expected dt.UTC usages missing')
-          text = text.replace('dt.UTC', 'UTC')
-          src.write_text(text)
+          src.write_text(text.replace('dt.UTC', 'UTC'))
 
           tests = Path('tests/test_ai_team_external_supervisor.py')
           t = tests.read_text()
