@@ -1,4 +1,4 @@
-name: manual-review-279-85686109-v2
+name: manual-review-282-deploy-hotfix-removal
 
 on:
   push:
@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: manual-review-279-85686109-v2
+  group: manual-review-282-deploy-hotfix-removal
   cancel-in-progress: false
 
 jobs:
@@ -19,34 +19,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 856861095dad1a863c77a048a457e5cdd9fb382d
+          ref: 9ff31adb8b0b5b1ac31dafe5a9f4c0ec5303a875
           fetch-depth: 0
           persist-credentials: false
-      - name: Independent exact-SHA Claude Sonnet re-review
+      - name: Independent exact-SHA Claude Sonnet review
         shell: bash
         run: |
           set -euo pipefail
-          TARGET=856861095dad1a863c77a048a457e5cdd9fb382d
+          TARGET=9ff31adb8b0b5b1ac31dafe5a9f4c0ec5303a875
+          BASE=17b5f88719012cf5d0da1446dc2c6dc5a734ad94
           HOME_DIR=/var/lib/hyperliquid-ai-team/agents/claude/home
-          WORKDIR=/var/lib/hyperliquid-ai-team/agents/claude/worktrees/review-pr279-85686109-v2
+          WORKDIR=/var/lib/hyperliquid-ai-team/agents/claude/worktrees/review-pr282
           sudo rm -rf "$WORKDIR" && sudo mkdir -p "$WORKDIR"
           sudo rsync -a --delete "$GITHUB_WORKSPACE/" "$WORKDIR/"
           sudo chown -R hl-claude-agent:hl-claude-agent "$WORKDIR"
           cat > "$WORKDIR/.review_prompt" <<'PROMPT'
-          Independently re-review Hyperliquid PR #279 at exact SHA 856861095dad1a863c77a048a457e5cdd9fb382d with Sonnet.
+          Independently review Hyperliquid PR #282 at exact SHA 9ff31adb8b0b5b1ac31dafe5a9f4c0ec5303a875 with Sonnet.
 
-          REAL TRADING MUST REMAIN DISABLED. Do not use credentials, place orders, change capital/risk authorization, or discuss Polymarket. You have no GitHub write authority.
+          REAL TRADING MUST REMAIN DISABLED. Do not use credentials, place orders, change capital/risk authorization, or inspect/discuss Polymarket. You have no GitHub write authority.
 
-          Prior reviewed SHA b534a0869502789458164b74b491aa7f46996f99 failed for one blocker: sustained READY arrivals could starve older PENDING tasks because priority was not durable and newest PENDING won.
+          Review ONLY the diff:
+          git diff 17b5f88719012cf5d0da1446dc2c6dc5a734ad94..9ff31adb8b0b5b1ac31dafe5a9f4c0ec5303a875 -- .github/workflows/deploy-ai-team-orchestrator.yml
+          plus minimum adjacent source context needed.
 
-          Review ONLY:
-          git diff b534a0869502789458164b74b491aa7f46996f99..856861095dad1a863c77a048a457e5cdd9fb382d -- scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
-          plus the minimum adjacent lines necessary to verify the changed calls. Do not run tests or inspect unrelated files; repository CI handles tests.
-
-          Falsify these claims: queue_priority is safely added/migrated on old SQLite ledgers; initial queued issue priority is persisted; PENDING selection is priority-first then oldest-first; same-priority old PENDING cannot starve under sustained new arrivals; PENDING still outranks stale RETRY #146-like work; no unsafe concurrency/safety regression.
+          Objective: remove the now-obsolete deploy-time merge-405 source injection because #279 made that behavior durable in source. Verify the deletion does not remove required install, compile, service start, timer/status, Hyperliquid-only, or real-trading-off gates; verify it cannot reintroduce stale-PR process-wide fatal behavior because the durable source implementation exists at the reviewed base/main.
 
           End with exactly:
-          REVIEWED_SHA=856861095dad1a863c77a048a457e5cdd9fb382d
+          REVIEWED_SHA=9ff31adb8b0b5b1ac31dafe5a9f4c0ec5303a875
           VERDICT=PASS
           BLOCKERS_JSON=[]
           Or VERDICT=FAIL with concrete blocker JSON if any merge-blocking defect exists.
@@ -55,7 +54,7 @@ jobs:
           PROMPT_TEXT="$(cat "$WORKDIR/.review_prompt")"
           set +e
           timeout 900 sudo systemd-run --pipe --wait --collect --quiet \
-            --unit=hl-ai-claude-review-pr279-85686109-v2 \
+            --unit=hl-ai-claude-review-pr282 \
             --uid=hl-claude-agent --gid=hl-claude-agent \
             --working-directory="$WORKDIR" \
             --property=NoNewPrivileges=yes --property=PrivateTmp=yes \
@@ -64,37 +63,32 @@ jobs:
             --property="ReadWritePaths=$WORKDIR $HOME_DIR" \
             --setenv="HOME=$HOME_DIR" --setenv="CLAUDE_CONFIG_DIR=$HOME_DIR/.claude" \
             /usr/bin/claude -p --model sonnet --output-format json \
-            --permission-mode dontAsk --allowedTools Read,Glob,Grep,Bash --max-turns 20 \
-            "$PROMPT_TEXT" > /tmp/pr279-85686109-v2.json 2>/tmp/pr279-85686109-v2.err
+            --permission-mode dontAsk --allowedTools Read,Glob,Grep,Bash --max-turns 12 \
+            "$PROMPT_TEXT" > /tmp/pr282-review.json 2>/tmp/pr282-review.err
           RC=$?
           set -e
-          echo "CLAUDE_RC=$RC OUT_BYTES=$(wc -c </tmp/pr279-85686109-v2.json) ERR_BYTES=$(wc -c </tmp/pr279-85686109-v2.err)"
-          if [[ -s /tmp/pr279-85686109-v2.err ]]; then tail -c 3000 /tmp/pr279-85686109-v2.err; fi
+          echo "CLAUDE_RC=$RC OUT_BYTES=$(wc -c </tmp/pr282-review.json) ERR_BYTES=$(wc -c </tmp/pr282-review.err)"
+          if [[ -s /tmp/pr282-review.err ]]; then tail -c 3000 /tmp/pr282-review.err; fi
           python3 - <<'PY'
           import json,re,sys
           from pathlib import Path
-          target='856861095dad1a863c77a048a457e5cdd9fb382d'
-          raw=Path('/tmp/pr279-85686109-v2.json').read_text(errors='replace')
+          target='9ff31adb8b0b5b1ac31dafe5a9f4c0ec5303a875'
+          raw=Path('/tmp/pr282-review.json').read_text(errors='replace')
           if not raw:
-              print('REVIEW_OUTPUT=EMPTY')
-              sys.exit(31)
+              print('REVIEW_OUTPUT=EMPTY'); sys.exit(31)
           try:
-              row=json.loads(raw)
-              result=row.get('result','')
+              row=json.loads(raw); result=row.get('result','')
               diag={k:v for k,v in row.items() if k not in {'result','usage','modelUsage'}}
-              print('CLAUDE_JSON_DIAGNOSTIC='+json.dumps(diag, sort_keys=True)[:5000])
+              print('CLAUDE_JSON_DIAGNOSTIC='+json.dumps(diag, sort_keys=True)[:4000])
           except Exception:
               result=raw
           print('=== REVIEW RESULT ===')
           print(str(result)[-10000:])
-          if not re.search(rf'(?m)^REVIEWED_SHA={target}\s*$',str(result)):
-              sys.exit(32)
+          if not re.search(rf'(?m)^REVIEWED_SHA={target}\s*$',str(result)): sys.exit(32)
           verdict=re.search(r'(?m)^VERDICT=(PASS|FAIL)\s*$',str(result))
           blockers=re.search(r'(?m)^BLOCKERS_JSON=(\[.*\])\s*$',str(result))
-          if not verdict or not blockers:
-              sys.exit(33)
+          if not verdict or not blockers: sys.exit(33)
           print('MACHINE_VERDICT='+verdict.group(1))
-          if verdict.group(1) != 'PASS':
-              sys.exit(34)
+          if verdict.group(1) != 'PASS': sys.exit(34)
           PY
           test "$RC" -eq 0
