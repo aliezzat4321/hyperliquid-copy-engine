@@ -8,7 +8,7 @@ import hashlib
 import json
 import os
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -30,9 +30,7 @@ def _time(value: object) -> datetime | None:
         parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except (TypeError, ValueError):
         return None
-    return parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(
-        tzinfo=timezone.utc
-    )
+    return parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 def _hash(path: Path) -> str | None:
@@ -62,7 +60,7 @@ def observe(
     prospective_path: Path, output_path: Path, max_age_minutes: float,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    observed = now or datetime.now(timezone.utc)
+    observed = now or datetime.now(UTC)
     blockers: list[str] = []
     universe = _load(universe_path, blockers)
     funnel = _load(funnel_path, blockers)

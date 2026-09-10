@@ -1,6 +1,6 @@
 import importlib.util
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 
@@ -16,7 +16,7 @@ def _write(path: Path, value: dict) -> None:
 
 
 def test_observer_persists_complete_current_boundary_counts(tmp_path: Path) -> None:
-    now = datetime(2026, 9, 10, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 9, 10, 12, tzinfo=UTC)
     stamp = now.isoformat()
     universe, funnel, queue, prospective = [tmp_path / name for name in ("u", "f", "q", "p")]
     _write(universe, {"generated_at": stamp, "real_trading": False})
@@ -44,7 +44,7 @@ def test_observer_writes_durable_failure_evidence_when_inputs_missing(tmp_path: 
     result = MODULE.observe(universe_path=tmp_path / "u", funnel_path=tmp_path / "f",
         queue_path=tmp_path / "q", prospective_path=tmp_path / "p",
         output_path=output, max_age_minutes=30,
-        now=datetime(2026, 9, 10, 12, tzinfo=timezone.utc))
+        now=datetime(2026, 9, 10, 12, tzinfo=UTC))
     assert result["runtime_healthy"] is False
     assert len(result["blockers"]) >= 4
     assert json.loads(output.read_text(encoding="utf-8")) == result

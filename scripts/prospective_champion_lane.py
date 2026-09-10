@@ -2,7 +2,7 @@
 from __future__ import annotations
 import argparse, json, os, subprocess, sys, time
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from hlcopy.profitability.position_copy import load_wide_events
@@ -60,7 +60,7 @@ def main():
    target['worst_primary_return_bps']=None; target['actions_floor']=0; target['approved']=False
   rows.append(target)
  rejections=[] if targets else [{'reason':'NO_ACTIVE_CHALLENGERS','timestamp_ns':time.time_ns()}]
- report={'mode':'AUTONOMOUS_CLEAN_PROSPECTIVE_LANE_V2','observed_at':datetime.now(timezone.utc).isoformat(),'cutoff_ns':cutoff,'age_hours':(time.time_ns()-cutoff)/3.6e12,'real_trading':False,'targets':rows,'challenger_count':len(targets),'prospective_shadow_count':sum(1 for r in rows if r['event_count']>0),'shadow_decision_count':sum(int(r['event_count']) for r in rows),'shadow_execution_count':sum(int(s['realized_actions']) for r in rows for s in r['scenarios']),'shadow_reject_count':len(rejections),'approved_count':sum(1 for r in rows if r['approved']),'rejections':rejections}
+ report={'mode':'AUTONOMOUS_CLEAN_PROSPECTIVE_LANE_V2','observed_at':datetime.now(UTC).isoformat(),'cutoff_ns':cutoff,'age_hours':(time.time_ns()-cutoff)/3.6e12,'real_trading':False,'targets':rows,'challenger_count':len(targets),'prospective_shadow_count':sum(1 for r in rows if r['event_count']>0),'shadow_decision_count':sum(int(r['event_count']) for r in rows),'shadow_execution_count':sum(int(s['realized_actions']) for r in rows for s in r['scenarios']),'shadow_reject_count':len(rejections),'approved_count':sum(1 for r in rows if r['approved']),'rejections':rejections}
  atomic(REPORT,report)
  observer=Path(__file__).with_name('lane1_runtime_acceptance.py')
  subprocess.run([sys.executable,str(observer),'--universe','/mnt/HC_Volume_106576526/hyperliquid/discovery/universe_state.json','--funnel','/root/hyperliquid-audit/funnel/funnel_report.json','--queue',str(args.challenger_queue),'--prospective',str(REPORT),'--output',str(BASE/'runtime_acceptance.json')],check=False)
