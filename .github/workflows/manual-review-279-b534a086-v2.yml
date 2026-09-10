@@ -15,51 +15,49 @@ concurrency:
 jobs:
   review:
     runs-on: [self-hosted, hyperliquid]
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
           ref: b534a0869502789458164b74b491aa7f46996f99
           fetch-depth: 0
           persist-credentials: false
-      - name: Diagnose Claude executable and auth path
+      - name: Independent exact-SHA Claude Sonnet review
         shell: bash
         run: |
           set -euo pipefail
-          echo "CLAUDE_LINK=$(readlink /usr/bin/claude || true)"
-          echo "CLAUDE_REALPATH=$(readlink -f /usr/bin/claude || true)"
-          ls -l /usr/bin/claude || true
-          test -x /usr/bin/claude
-          test -f /var/lib/hyperliquid-ai-team/agents/claude/home/.claude/.credentials.json
-          if test -s /etc/hyperliquid-ai-team/claude.env; then echo 'CLAUDE_ENV_FILE=PRESENT'; else echo 'CLAUDE_ENV_FILE=ABSENT'; fi
-          set +e
-          sudo -u hl-claude-agent env HOME=/var/lib/hyperliquid-ai-team/agents/claude/home CLAUDE_CONFIG_DIR=/var/lib/hyperliquid-ai-team/agents/claude/home/.claude /usr/bin/claude --version > /tmp/claude-version.out 2>&1
-          echo "VERSION_RC=$?"
-          cat /tmp/claude-version.out | tail -c 1000
-          set -e
-      - name: Compare direct and sandboxed Claude probes
-        shell: bash
-        run: |
-          set -euo pipefail
+          TARGET=b534a0869502789458164b74b491aa7f46996f99
+          BASE=e76ba0fde765cee70f73fb379bd701b6daf136e7
           HOME_DIR=/var/lib/hyperliquid-ai-team/agents/claude/home
-          WORKDIR=/var/lib/hyperliquid-ai-team/agents/claude/worktrees/diagnose-pr279
+          WORKDIR=/var/lib/hyperliquid-ai-team/agents/claude/worktrees/review-pr279-final
           sudo rm -rf "$WORKDIR" && sudo mkdir -p "$WORKDIR"
           sudo rsync -a --delete "$GITHUB_WORKSPACE/" "$WORKDIR/"
           sudo chown -R hl-claude-agent:hl-claude-agent "$WORKDIR"
+          cat > "$WORKDIR/.review_prompt" <<'PROMPT'
+          You are CLAUDE, the independent adversarial reviewer for the Hyperliquid project. Review exactly PR #279 at exact SHA b534a0869502789458164b74b491aa7f46996f99 using Sonnet.
 
+          Hard boundaries: REAL TRADING REMAINS DISABLED. Flag any attempt to enable live/real trading, add/use trading keys, place orders, change capital/risk authorization, or bypass LIVE_TRADING_GATE. Do not access or discuss Polymarket. You have no GitHub credentials and must not push, merge, or comment.
+
+          Read AGENTS.md and docs/ai-team/CURRENT_STATE.md. Review ONLY the bounded delta:
+          git diff e76ba0fde765cee70f73fb379bd701b6daf136e7..b534a0869502789458164b74b491aa7f46996f99 -- scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py tests/test_invo_durable_identity_attestation_v1.py
+          plus necessary adjacent context. Do not recursively audit the repository.
+
+          Objective: repair #277/#238 scheduler reconciliation so stale retries and false owner blocks cannot suppress unrelated lanes; retire closed-issue tasks; make wait/retry states task-local; preserve exact-SHA review, CI and safety gates. The Lane-2 test-only change aligns the regression with already-merged cf4b7a2 identity-local quarantine semantics.
+
+          Try to falsify these claims: genuine owner authorization failures still fail closed; historical protected-scope mismatch is not falsely published as owner action; closed #146-like tasks cannot execute; READY admission does not create duplicate active work or bypass review; scheduling avoids stale-retry starvation without unsafe worker concurrency; errored builders cannot create invalid review handoffs; Lane-2 conflicting proof test matches production semantics without weakening identity safety; no live-trading boundary changes.
+
+          Run only narrow relevant tests if useful. At the very end emit exactly these three machine-readable lines for a pass:
+          REVIEWED_SHA=b534a0869502789458164b74b491aa7f46996f99
+          VERDICT=PASS
+          BLOCKERS_JSON=[]
+          If any merge-blocking defect exists, use VERDICT=FAIL and put concrete blocker objects in BLOCKERS_JSON while preserving the exact REVIEWED_SHA.
+          PROMPT
+          sudo chown hl-claude-agent:hl-claude-agent "$WORKDIR/.review_prompt"
+
+          PROMPT_TEXT="$(cat "$WORKDIR/.review_prompt")"
           set +e
-          sudo -u hl-claude-agent env HOME="$HOME_DIR" CLAUDE_CONFIG_DIR="$HOME_DIR/.claude" timeout 45 /usr/bin/claude -p --model sonnet --output-format json 'Reply exactly: CLAUDE_DIRECT_OK' > /tmp/direct.out 2>/tmp/direct.err
-          DIRECT_RC=$?
-          echo "DIRECT_RC=$DIRECT_RC DIRECT_OUT_BYTES=$(wc -c </tmp/direct.out) DIRECT_ERR_BYTES=$(wc -c </tmp/direct.err)"
-          python3 - <<'PY'
-          from pathlib import Path
-          for p in ['/tmp/direct.out','/tmp/direct.err']:
-              s=Path(p).read_text(errors='replace')
-              print(Path(p).name+': '+s[-1500:].replace('\n',' ')[:1500])
-          PY
-
-          sudo systemd-run --pipe --wait --collect --quiet \
-            --unit=hl-ai-claude-diagnose-pr279 \
+          timeout 900 sudo systemd-run --pipe --wait --collect --quiet \
+            --unit=hl-ai-claude-review-pr279-final \
             --uid=hl-claude-agent --gid=hl-claude-agent \
             --working-directory="$WORKDIR" \
             --property=NoNewPrivileges=yes --property=PrivateTmp=yes \
@@ -67,23 +65,34 @@ jobs:
             --property=RestrictSUIDSGID=yes --property=InaccessiblePaths=/mnt \
             --property="ReadWritePaths=$WORKDIR $HOME_DIR" \
             --setenv="HOME=$HOME_DIR" --setenv="CLAUDE_CONFIG_DIR=$HOME_DIR/.claude" \
-            /usr/bin/claude -p --model sonnet --output-format json 'Reply exactly: CLAUDE_SANDBOX_OK' > /tmp/sandbox.out 2>/tmp/sandbox.err
-          SANDBOX_RC=$?
-          echo "SANDBOX_RC=$SANDBOX_RC SANDBOX_OUT_BYTES=$(wc -c </tmp/sandbox.out) SANDBOX_ERR_BYTES=$(wc -c </tmp/sandbox.err)"
-          python3 - <<'PY'
-          from pathlib import Path
-          for p in ['/tmp/sandbox.out','/tmp/sandbox.err']:
-              s=Path(p).read_text(errors='replace')
-              print(Path(p).name+': '+s[-1500:].replace('\n',' ')[:1500])
-          PY
+            /usr/bin/claude -p --model sonnet --output-format json \
+            --permission-mode dontAsk --allowedTools Read,Glob,Grep,Bash --max-turns 12 \
+            "$PROMPT_TEXT" > /tmp/pr279-final-review.json 2>/tmp/pr279-final-review.err
+          RC=$?
           set -e
-
-          if [[ "$DIRECT_RC" -eq 0 && "$SANDBOX_RC" -eq 0 ]]; then
-            echo 'CLAUDE_PROBE_CLASS=HEALTHY'
-          elif [[ "$DIRECT_RC" -eq 0 ]]; then
-            echo 'CLAUDE_PROBE_CLASS=SANDBOX_REGRESSION'
-            exit 21
-          else
-            echo 'CLAUDE_PROBE_CLASS=AUTH_OR_PROVIDER_OR_INSTALL'
-            exit 22
-          fi
+          echo "CLAUDE_RC=$RC OUT_BYTES=$(wc -c </tmp/pr279-final-review.json) ERR_BYTES=$(wc -c </tmp/pr279-final-review.err)"
+          if [[ -s /tmp/pr279-final-review.err ]]; then tail -c 3000 /tmp/pr279-final-review.err; fi
+          python3 - <<'PY'
+          import json,re,sys
+          from pathlib import Path
+          target='b534a0869502789458164b74b491aa7f46996f99'
+          raw=Path('/tmp/pr279-final-review.json').read_text(errors='replace')
+          if not raw:
+              print('REVIEW_OUTPUT=EMPTY')
+              sys.exit(31)
+          try:
+              row=json.loads(raw)
+              result=row.get('result','')
+          except Exception:
+              result=raw
+          print('=== REVIEW RESULT ===')
+          print(str(result)[-10000:])
+          if not re.search(rf'(?m)^REVIEWED_SHA={target}\s*$',str(result)):
+              sys.exit(32)
+          verdict=re.search(r'(?m)^VERDICT=(PASS|FAIL)\s*$',str(result))
+          blockers=re.search(r'(?m)^BLOCKERS_JSON=(\[.*\])\s*$',str(result))
+          if not verdict or not blockers:
+              sys.exit(33)
+          print('MACHINE_VERDICT='+verdict.group(1))
+          PY
+          test "$RC" -eq 0
