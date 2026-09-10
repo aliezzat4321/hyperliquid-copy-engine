@@ -1,4 +1,4 @@
-name: p0-238-tighten-external-supervisor
+name: p0-238-tighten-external-supervisor-v2
 
 on:
   push:
@@ -25,7 +25,7 @@ jobs:
         run: |
           python -m pip install -U pip
           pip install -e '.[dev]'
-      - name: Tighten incident fingerprint and deferred recovery semantics
+      - name: Apply bounded supervisor repair
         shell: bash
         run: |
           set -euo pipefail
@@ -35,28 +35,28 @@ jobs:
 
           path = Path('scripts/ai_team_external_supervisor.py')
           text = path.read_text()
+          text = text.replace('import subprocess\nimport sys\nimport time\n', 'import subprocess\nimport time\n', 1)
 
           old = '''def incident_fingerprint(kind: str, parsed: dict[str, Any], systemd: dict[str, Any]) -> str:\n    heartbeat = parsed.get("heartbeat")\n    payload = parsed.get("payload") if isinstance(parsed.get("payload"), dict) else {}\n    raw = {\n        "kind": kind,\n        "main_head": payload.get("main_head"),\n        "material": fingerprint_material(payload) if payload else "",\n        "timer_enabled": systemd.get("timer_enabled"),\n        "timer_active": systemd.get("timer_active"),\n        "service_active": systemd.get("service_active"),\n        "heartbeat": iso(heartbeat) if isinstance(heartbeat, dt.datetime) else None,\n    }\n    return hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest()\n'''
           new = '''def incident_fingerprint(kind: str, parsed: dict[str, Any], systemd: dict[str, Any]) -> str:\n    del systemd  # transient systemd/heartbeat changes must not reset the recovery budget\n    payload = parsed.get("payload") if isinstance(parsed.get("payload"), dict) else {}\n    raw = {\n        "kind": kind,\n        "main_head": payload.get("main_head"),\n        "material": fingerprint_material(payload) if payload else "",\n    }\n    return hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest()\n'''
           if old not in text:
-              raise SystemExit('incident_fingerprint anchor missing')
+              raise SystemExit('incident fingerprint anchor missing')
           text = text.replace(old, new, 1)
 
           start = text.index('def recover(systemd: dict[str, Any], *, kind: str) -> tuple[bool, str]:')
           end = text.index('\n\ndef healthy_state(', start)
-          new_recover = '''def recover(systemd: dict[str, Any], *, kind: str) -> tuple[str, str]:\n    actions: list[str] = []\n    if not systemd["timer_enabled"] or not systemd["timer_active"]:\n        cp = run(["systemctl", "enable", "--now", TIMER], timeout=30)\n        if cp.returncode != 0:\n            return "FAILED", f"enable timer failed: {(cp.stderr or cp.stdout)[-800:]}"\n        actions.append("timer-enabled")\n\n    if systemd["service_active"]:\n        if kind != "ORCHESTRATOR_SERVICE_HUNG":\n            return "DEFERRED", "service still active; defer recovery until hang threshold"\n        cp = run(["systemctl", "stop", SERVICE], timeout=30)\n        if cp.returncode != 0:\n            run(["systemctl", "kill", "--kill-who=main", SERVICE], timeout=10)\n            cp = run(["systemctl", "stop", SERVICE], timeout=30)\n            if cp.returncode != 0:\n                return "FAILED", (\n                    f"unable to stop hung orchestrator: {(cp.stderr or cp.stdout)[-800:]}"\n                )\n        actions.append("hung-service-stopped")\n\n    run(["systemctl", "reset-failed", SERVICE], timeout=10)\n    cp = run(["systemctl", "start", SERVICE], timeout=180)\n    if cp.returncode != 0:\n        return "FAILED", f"orchestrator start failed: {(cp.stderr or cp.stdout)[-1200:]}"\n    actions.append("orchestrator-cycle-started")\n    return "TRIGGERED", ",".join(actions)\n\n\ndef record_recovery_outcome(\n    incident: dict[str, Any], state: dict[str, Any], *, outcome_state: str,\n    outcome: str, now: dt.datetime\n) -> None:\n    if outcome_state != "DEFERRED":\n        incident["attempts"] = int(incident.get("attempts") or 0) + 1\n        incident["last_recovery_at"] = iso(now)\n        incident["last_recovery_outcome"] = outcome\n    state["last_error"] = outcome if outcome_state == "FAILED" else None\n'''
-          text = text[:start] + new_recover + text[end:]
+          text = text[:start] + '''def recover(systemd: dict[str, Any], *, kind: str) -> tuple[str, str]:\n    actions: list[str] = []\n    if not systemd["timer_enabled"] or not systemd["timer_active"]:\n        cp = run(["systemctl", "enable", "--now", TIMER], timeout=30)\n        if cp.returncode != 0:\n            return "FAILED", f"enable timer failed: {(cp.stderr or cp.stdout)[-800:]}"\n        actions.append("timer-enabled")\n\n    if systemd["service_active"]:\n        if kind != "ORCHESTRATOR_SERVICE_HUNG":\n            return "DEFERRED", "service still active; defer recovery until hang threshold"\n        cp = run(["systemctl", "stop", SERVICE], timeout=30)\n        if cp.returncode != 0:\n            run(["systemctl", "kill", "--kill-who=main", SERVICE], timeout=10)\n            cp = run(["systemctl", "stop", SERVICE], timeout=30)\n            if cp.returncode != 0:\n                return "FAILED", (\n                    f"unable to stop hung orchestrator: {(cp.stderr or cp.stdout)[-800:]}"\n                )\n        actions.append("hung-service-stopped")\n\n    run(["systemctl", "reset-failed", SERVICE], timeout=10)\n    cp = run(["systemctl", "start", SERVICE], timeout=180)\n    if cp.returncode != 0:\n        return "FAILED", f"orchestrator start failed: {(cp.stderr or cp.stdout)[-1200:]}"\n    actions.append("orchestrator-cycle-started")\n    return "TRIGGERED", ",".join(actions)\n\n\ndef record_recovery_outcome(\n    incident: dict[str, Any], state: dict[str, Any], *, outcome_state: str,\n    outcome: str, now: dt.datetime\n) -> None:\n    if outcome_state != "DEFERRED":\n        incident["attempts"] = int(incident.get("attempts") or 0) + 1\n        incident["last_recovery_at"] = iso(now)\n        incident["last_recovery_outcome"] = outcome\n    state["last_error"] = outcome if outcome_state == "FAILED" else None\n''' + text[end:]
 
           old_main = '''        ok, outcome = recover(systemd, kind=fault)\n        incident["attempts"] = int(incident.get("attempts") or 0) + 1\n        incident["last_recovery_at"] = iso(now)\n        incident["last_recovery_outcome"] = outcome\n        state["last_error"] = None if ok else outcome\n        save_state(state)\n        print("SUPERVISOR_STATE=RECOVERY_TRIGGERED" if ok else "SUPERVISOR_STATE=RECOVERY_DEFERRED")\n        print(f"FAULT={fault}")\n        print(f"RECOVERY_OUTCOME={outcome}")\n        print("REAL_TRADING_CHANGE=NO")\n        print("POLYMARKET_TOUCHED=NO")\n        return 0 if ok else 1\n'''
           new_main = '''        outcome_state, outcome = recover(systemd, kind=fault)\n        record_recovery_outcome(\n            incident, state, outcome_state=outcome_state, outcome=outcome, now=now\n        )\n        save_state(state)\n        print(f"SUPERVISOR_STATE=RECOVERY_{outcome_state}")\n        print(f"FAULT={fault}")\n        print(f"RECOVERY_OUTCOME={outcome}")\n        print("REAL_TRADING_CHANGE=NO")\n        print("POLYMARKET_TOUCHED=NO")\n        return 0 if outcome_state in {"TRIGGERED", "DEFERRED"} else 1\n'''
           if old_main not in text:
               raise SystemExit('main recovery anchor missing')
-          text = text.replace(old_main, new_main, 1)
-          path.write_text(text)
+          path.write_text(text.replace(old_main, new_main, 1))
 
           tests = Path('tests/test_ai_team_external_supervisor.py')
           t = tests.read_text()
-          t += '''\n\ndef test_incident_fingerprint_ignores_heartbeat_and_transient_service_state():\n    first_text = body("2026-09-10T15:00:00Z")\n    second_text = first_text.replace(\n        "AI_TEAM_HEARTBEAT=2026-09-10T15:00:00Z",\n        "AI_TEAM_HEARTBEAT=2026-09-10T15:01:00Z",\n    )\n    first = sup.parse_runtime_body(first_text)\n    second = sup.parse_runtime_body(second_text)\n    a = healthy_systemd()\n    b = healthy_systemd()\n    b["service_active"] = True\n    assert sup.incident_fingerprint("ACTIONABLE_NO_PROGRESS", first, a) == sup.incident_fingerprint(\n        "ACTIONABLE_NO_PROGRESS", second, b\n    )\n\n\ndef test_deferred_recovery_does_not_burn_budget():\n    now = dt.datetime(2026, 9, 10, 15, 0, tzinfo=dt.UTC)\n    incident = {"attempts": 2}\n    state = {}\n    sup.record_recovery_outcome(\n        incident, state, outcome_state="DEFERRED", outcome="service active", now=now\n    )\n    assert incident["attempts"] == 2\n    assert "last_recovery_at" not in incident\n    assert state["last_error"] is None\n'''
+          if 'test_incident_fingerprint_ignores_heartbeat_and_transient_service_state' not in t:
+              t += '''\n\ndef test_incident_fingerprint_ignores_heartbeat_and_transient_service_state():\n    first_text = body("2026-09-10T15:00:00Z")\n    second_text = first_text.replace(\n        "AI_TEAM_HEARTBEAT=2026-09-10T15:00:00Z",\n        "AI_TEAM_HEARTBEAT=2026-09-10T15:01:00Z",\n    )\n    first = sup.parse_runtime_body(first_text)\n    second = sup.parse_runtime_body(second_text)\n    a = healthy_systemd()\n    b = healthy_systemd()\n    b["service_active"] = True\n    assert sup.incident_fingerprint("ACTIONABLE_NO_PROGRESS", first, a) == sup.incident_fingerprint(\n        "ACTIONABLE_NO_PROGRESS", second, b\n    )\n\n\ndef test_deferred_recovery_does_not_burn_budget():\n    now = dt.datetime(2026, 9, 10, 15, 0, tzinfo=dt.UTC)\n    incident = {"attempts": 2}\n    state = {}\n    sup.record_recovery_outcome(\n        incident, state, outcome_state="DEFERRED", outcome="service active", now=now\n    )\n    assert incident["attempts"] == 2\n    assert "last_recovery_at" not in incident\n    assert state["last_error"] is None\n'''
           tests.write_text(t)
           PY
       - name: Validate bounded repair
