@@ -1,4 +1,4 @@
-name: p0-277-runtime-start-and-proof
+name: p0-277-proactive-closed-task-reconciliation
 
 on:
   push:
@@ -6,42 +6,79 @@ on:
     paths: [".github/workflows/ai-team-codex-preflight-fix.yml"]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  prove:
-    runs-on: [self-hosted, hyperliquid]
-    timeout-minutes: 10
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 17b5f88719012cf5d0da1446dc2c6dc5a734ad94
-          fetch-depth: 1
-          persist-credentials: false
-      - name: Install, start and prove reviewed runtime
+          ref: manager/277-proactive-closed-reconcile
+          fetch-depth: 0
+          persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: |
+          python -m pip install -U pip
+          pip install -e '.[dev]'
+      - name: Apply proactive reconciliation repair
         shell: bash
         run: |
           set -euo pipefail
-          test "$GITHUB_REPOSITORY" = "aliezzat4321/hyperliquid-copy-engine"
           test "$(git rev-parse HEAD)" = "17b5f88719012cf5d0da1446dc2c6dc5a734ad94"
-          test "$(id -u)" = 0
-          ! grep -RE 'REAL_TRADING_ENABLED[[:space:]]*=[[:space:]]*(YES|TRUE|1)|LIVE_TRADING_ENABLED[[:space:]]*=[[:space:]]*(YES|TRUE|1)' scripts config deploy/systemd
-          bash scripts/install_ai_team_orchestrator.sh
-          python3 -m py_compile /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py
-          set +e
-          systemctl start hyperliquid-ai-team-orchestrator.service
-          START_RC=$?
-          set -e
-          echo "START_RC=$START_RC"
-          if [[ "$START_RC" -ne 0 ]]; then
-            systemctl status hyperliquid-ai-team-orchestrator.service --no-pager -l || true
-            journalctl -u hyperliquid-ai-team-orchestrator.service -n 160 --no-pager -l || true
-            exit "$START_RC"
-          fi
-          systemctl is-enabled hyperliquid-ai-team-orchestrator.timer
-          systemctl is-active hyperliquid-ai-team-orchestrator.timer
-          echo '=== RUNTIME STATUS ==='
-          hl-ai-team-status
-          echo 'DEPLOYED_MAIN_SHA=17b5f88719012cf5d0da1446dc2c6dc5a734ad94'
-          echo 'POLYMARKET_TOUCHED=NO'
-          echo 'REAL_TRADING_TOUCHED=NO'
+          python - <<'PY'
+          from pathlib import Path
+
+          src = Path('scripts/ai_team_orchestrator.py')
+          text = src.read_text()
+
+          old_active = 'ACTIVE_STATUSES = {"PENDING", "RETRY", "WAITING_RATE_LIMIT", "WAITING_CI", "RUNNING"}\n'
+          new_active = 'ACTIVE_STATUSES = {"PENDING", "RETRY", "WAITING_RATE_LIMIT", "WAITING_CI", "WAITING_EVIDENCE_WINDOW", "RUNNING"}\n'
+          if old_active not in text:
+              raise SystemExit('ACTIVE_STATUSES anchor missing')
+          text = text.replace(old_active, new_active, 1)
+
+          anchor = '    def cycle(self) -> None:\n'
+          if anchor not in text:
+              raise SystemExit('cycle anchor missing')
+          method = '''    def reconcile_closed_issue_tasks(self) -> int:\n        """Retire active work whose canonical GitHub issue is already closed.\n\n        This runs before dispatch so a closed RETRY/wait task cannot linger forever\n        behind higher-priority PENDING work or remain projected as current runtime state.\n        GitHub lookup failures are fail-safe: defer that issue and continue unrelated work.\n        """\n        placeholders = ",".join("?" for _ in ACTIVE_STATUSES)\n        rows = self.ledger.db.execute(\n            f"SELECT * FROM tasks WHERE status IN ({placeholders}) "\n            "ORDER BY updated_at ASC LIMIT 100",\n            tuple(ACTIVE_STATUSES),\n        ).fetchall()\n        issue_states: dict[int, str] = {}\n        retired = 0\n        for task in rows:\n            number = int(task["issue_number"])\n            if number not in issue_states:\n                try:\n                    issue = self.gh.issue(number)\n                except Exception as exc:\n                    issue_states[number] = "unknown"\n                    self.runtime.event(\n                        "CLOSED_TASK_RECONCILIATION_DEFERRED",\n                        issue=number, error=str(exc)[:500],\n                    )\n                    continue\n                issue_states[number] = str(issue.get("state") or "open").lower()\n            if issue_states[number] != "closed":\n                continue\n            self.reap_stale_child(task)\n            self.ledger.update(\n                task["id"], status="DONE", retry_at=None, systemd_unit=None,\n                last_error="OBSOLETE_CLOSED_ISSUE", failure_class=None,\n                lifecycle_phase="OBSOLETE",\n                next_action="retired because canonical GitHub issue is closed",\n            )\n            self.runtime.event(\n                "OBSOLETE_CLOSED_TASK_RETIRED", assignment_id=task["id"],\n                issue=number, pr=task["pr_number"], status="OBSOLETE",\n                unrelated_work_continuing=True,\n            )\n            retired += 1\n        return retired\n\n'''
+          text = text.replace(anchor, method + anchor, 1)
+
+          old_cycle = '        self.reconcile_recovery()\n        self.reconcile_completion_rollout()\n'
+          new_cycle = '        self.reconcile_recovery()\n        self.reconcile_closed_issue_tasks()\n        self.reconcile_completion_rollout()\n'
+          if old_cycle not in text:
+              raise SystemExit('cycle reconciliation anchor missing')
+          text = text.replace(old_cycle, new_cycle, 1)
+          src.write_text(text)
+
+          tests = Path('tests/test_ai_team_orchestrator.py')
+          t = tests.read_text()
+          if 'test_waiting_evidence_window_counts_as_active_work' not in t:
+              t += '''\n\ndef test_waiting_evidence_window_counts_as_active_work(tmp_path):\n    ledger = orch.Ledger(tmp_path / "evidence-active.sqlite3")\n    task_id = ledger.create_task(\n        issue_number=9801, task_type="POST_MERGE_EVIDENCE",\n        agent="CODEX_CHATGPT", model_class="CODEX_DEFAULT",\n    )\n    ledger.update(\n        task_id, status="WAITING_EVIDENCE_WINDOW",\n        retry_at=(dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1))\n        .replace(microsecond=0).isoformat().replace("+00:00", "Z"),\n    )\n    assert ledger.active_for_issue(9801)\n    assert ledger.has_active_work()\n\n\ndef test_reconcile_closed_issue_tasks_retires_stale_retry_before_due_selection(tmp_path):\n    ledger = orch.Ledger(tmp_path / "closed-reconcile.sqlite3")\n    closed_id = ledger.create_task(\n        issue_number=146, task_type="PRODUCTION_VALIDATION",\n        agent="CODEX_CHATGPT", model_class="CODEX_DEFAULT",\n        status="RETRY", queue_priority=0,\n    )\n    open_id = ledger.create_task(\n        issue_number=277, task_type="BUILD", agent="CODEX_CHATGPT",\n        model_class="CODEX_DEFAULT", status="PENDING", queue_priority=-100,\n    )\n    assert ledger.due()["id"] == open_id\n\n    class GH:\n        def issue(self, number):\n            return {"number": number, "state": "closed" if number == 146 else "open"}\n\n    class Runtime:\n        def __init__(self):\n            self.events = []\n        def event(self, name, **kwargs):\n            self.events.append((name, kwargs))\n\n    team = object.__new__(orch.Orchestrator)\n    team.ledger, team.gh, team.runtime = ledger, GH(), Runtime()\n    team.reap_stale_child = lambda task: None\n\n    assert team.reconcile_closed_issue_tasks() == 1\n    closed = ledger.get(closed_id)\n    assert closed["status"] == "DONE"\n    assert closed["last_error"] == "OBSOLETE_CLOSED_ISSUE"\n    assert closed["lifecycle_phase"] == "OBSOLETE"\n    assert ledger.get(open_id)["status"] == "PENDING"\n    assert ledger.due()["id"] == open_id\n    assert any(name == "OBSOLETE_CLOSED_TASK_RETIRED" for name, _ in team.runtime.events)\n'''
+          tests.write_text(t)
+          PY
+      - name: Validate bounded repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m py_compile scripts/ai_team_orchestrator.py
+          pytest tests/test_ai_team_orchestrator.py -q
+          ruff check scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
+          git diff --check
+          changed="$(git diff --name-only)"
+          printf '%s\n' "$changed"
+          test "$changed" = $'scripts/ai_team_orchestrator.py\ntests/test_ai_team_orchestrator.py'
+          ! git diff | grep -E 'REAL_TRADING_ENABLED[[:space:]]*=[[:space:]]*(YES|TRUE|1)|LIVE_TRADING_ENABLED[[:space:]]*=[[:space:]]*(YES|TRUE|1)'
+      - name: Commit repaired PR head
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'hyperliquid-ai-team'
+          git config user.email 'hyperliquid-ai-team@users.noreply.github.com'
+          git add scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
+          git commit -m 'P0 #277: proactively retire closed active tasks'
+          git push origin HEAD:manager/277-proactive-closed-reconcile
