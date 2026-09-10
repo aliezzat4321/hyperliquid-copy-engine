@@ -1,4 +1,4 @@
-name: p0-277-scheduler-starvation-repair
+name: p0-277-emergency-reviewed-deploy
 
 on:
   push:
@@ -6,106 +6,42 @@ on:
     paths: [".github/workflows/ai-team-codex-preflight-fix.yml"]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  repair:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+  deploy:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: manager/277-scheduler-reconciliation-clean
-          fetch-depth: 0
-          persist-credentials: true
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install test dependencies
-        run: |
-          python -m pip install -U pip
-          pip install -e '.[dev]'
+          ref: 17b5f88719012cf5d0da1446dc2c6dc5a734ad94
+          fetch-depth: 1
+          persist-credentials: false
 
-      - name: Apply starvation-safe durable priority repair
+      - name: Assert reviewed merge and hard boundaries
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "b534a0869502789458164b74b491aa7f46996f99"
-          python - <<'PY'
-          from pathlib import Path
+          test "$GITHUB_REPOSITORY" = "aliezzat4321/hyperliquid-copy-engine"
+          test "$(git rev-parse HEAD)" = "17b5f88719012cf5d0da1446dc2c6dc5a734ad94"
+          test "$(id -u)" = 0
+          python3 -m py_compile scripts/ai_team_orchestrator.py scripts/ai_team_runtime_ledger.py
+          ! grep -RE 'REAL_TRADING_ENABLED[[:space:]]*=[[:space:]]*(YES|TRUE|1)|LIVE_TRADING_ENABLED[[:space:]]*=[[:space:]]*(YES|TRUE|1)' scripts config deploy/systemd
+          echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
+          echo 'POLYMARKET_INSPECTION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
 
-          path = Path("scripts/ai_team_orchestrator.py")
-          text = path.read_text()
-          replacements = [
-              (
-                  '              task_class TEXT NOT NULL,\n              status TEXT NOT NULL,\n',
-                  '              task_class TEXT NOT NULL,\n              queue_priority INTEGER NOT NULL DEFAULT 0,\n              status TEXT NOT NULL,\n',
-              ),
-              (
-                  '        self.db.commit()\n\n    def observe_remediation',
-                  '        if "queue_priority" not in columns:\n            self.db.execute(\n                "ALTER TABLE tasks ADD COLUMN queue_priority INTEGER NOT NULL DEFAULT 0"\n            )\n        self.db.commit()\n\n    def observe_remediation',
-              ),
-              (
-                  '            "task_class": kw.get("task_class", "ROUTINE"),\n            "status": kw.get("status", "PENDING"),\n',
-                  '            "task_class": kw.get("task_class", "ROUTINE"),\n            "queue_priority": int(kw.get("queue_priority", 0)),\n            "status": kw.get("status", "PENDING"),\n',
-              ),
-              (
-                  "               CASE WHEN status='PENDING' THEN updated_at END DESC,\n               CASE WHEN status!='PENDING' THEN COALESCE(retry_at,updated_at,created_at) END ASC,\n               created_at DESC\n",
-                  "               CASE WHEN status='PENDING' THEN COALESCE(queue_priority, 0) END ASC,\n               CASE WHEN status='PENDING' THEN created_at END ASC,\n               CASE WHEN status!='PENDING' THEN COALESCE(retry_at,updated_at,created_at) END ASC,\n               created_at ASC\n",
-              ),
-              (
-                  '            body = str(issue.get("body") or "")\n            try:\n                route = parse_initial_route(body, self.cfg)\n',
-                  '            body = str(issue.get("body") or "")\n            metadata = queue_metadata(body)\n            queue_priority = metadata[0] if metadata else 0\n            try:\n                route = parse_initial_route(body, self.cfg)\n',
-              ),
-              (
-                  '                task_class=task_class,\n                lifecycle_phase="IMPLEMENTING",\n',
-                  '                task_class=task_class,\n                queue_priority=queue_priority,\n                lifecycle_phase="IMPLEMENTING",\n',
-              ),
-          ]
-          for old, new in replacements:
-              if old not in text:
-                  raise SystemExit(f"source anchor missing: {old[:80]!r}")
-              text = text.replace(old, new, 1)
-          path.write_text(text)
-
-          tests = Path("tests/test_ai_team_orchestrator.py")
-          t = tests.read_text()
-          stale = "test_due_retry_dispatches_before_pending_from_newer_issue"
-          if stale in t:
-              start = t.index("def " + stale)
-              end = t.find("\ndef test_", start + 4)
-              if end < 0:
-                  end = len(t)
-              block = t[start:end]
-              if 'assert row["issue_number"] == 146' not in block:
-                  raise SystemExit("stale scheduler assertion anchor missing")
-              block = block.replace(stale, "test_due_pending_dispatches_before_stale_retry", 1)
-              block = block.replace('assert row["issue_number"] == 146', 'assert row["issue_number"] == 277', 1)
-              t = t[:start] + block + t[end:]
-          if "test_due_pending_priority_is_durable_and_starvation_safe" not in t:
-              t += '''\n\ndef test_due_pending_priority_is_durable_and_starvation_safe(tmp_path):\n    ledger = orch.Ledger(tmp_path / "priority.sqlite3")\n    low = ledger.create_task(\n        issue_number=9101, task_type="BUILD", agent="CODEX_CHATGPT",\n        model_class="CODEX_DEFAULT", queue_priority=10,\n    )\n    high = ledger.create_task(\n        issue_number=9102, task_type="BUILD", agent="CODEX_CHATGPT",\n        model_class="CODEX_DEFAULT", queue_priority=-100,\n    )\n    ledger.update(low, created_at="2026-09-10T00:00:00Z")\n    ledger.update(high, created_at="2026-09-10T00:00:01Z")\n    observed = []\n    for i in range(6):\n        ledger.create_task(\n            issue_number=9200 + i, task_type="BUILD", agent="CODEX_CHATGPT",\n            model_class="CODEX_DEFAULT", queue_priority=50,\n        )\n        due = ledger.due()\n        assert due is not None\n        observed.append(str(due["id"]))\n        ledger.update(str(due["id"]), status="DONE")\n    assert observed[0] == high\n    assert observed[1] == low\n\n\ndef test_due_pending_same_priority_uses_oldest_admission(tmp_path):\n    ledger = orch.Ledger(tmp_path / "age.sqlite3")\n    older = ledger.create_task(\n        issue_number=9301, task_type="BUILD", agent="CODEX_CHATGPT",\n        model_class="CODEX_DEFAULT", queue_priority=-20,\n    )\n    newer = ledger.create_task(\n        issue_number=9302, task_type="BUILD", agent="CODEX_CHATGPT",\n        model_class="CODEX_DEFAULT", queue_priority=-20,\n    )\n    ledger.update(older, created_at="2026-09-10T00:00:00Z")\n    ledger.update(newer, created_at="2026-09-10T00:00:01Z")\n    assert ledger.due()["id"] == older\n'''
-          tests.write_text(t)
-          PY
-
-      - name: Validate exact scheduler repair
+      - name: Install exact merged source without obsolete runtime hotfix
         shell: bash
         run: |
           set -euo pipefail
-          python -m py_compile scripts/ai_team_orchestrator.py
-          pytest tests/test_ai_team_orchestrator.py -q
-          ruff check scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
-          git diff --check
-          changed="$(git diff --name-only)"
-          printf '%s\n' "$changed"
-          test "$changed" = $'scripts/ai_team_orchestrator.py\ntests/test_ai_team_orchestrator.py'
-          ! git diff | grep -E 'REAL_TRADING_ENABLED[[:space:]]*=[[:space:]]*(YES|TRUE|1)|LIVE_TRADING_ENABLED[[:space:]]*=[[:space:]]*(YES|TRUE|1)'
-
-      - name: Commit repaired PR head
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name 'hyperliquid-ai-team'
-          git config user.email 'hyperliquid-ai-team@users.noreply.github.com'
-          git add scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
-          git commit -m 'P0 #277: make pending scheduling starvation-safe'
-          git push origin HEAD:manager/277-scheduler-reconciliation-clean
+          bash scripts/install_ai_team_orchestrator.sh
+          python3 -m py_compile /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py
+          cmp -s scripts/ai_team_orchestrator.py /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py
+          systemctl start hyperliquid-ai-team-orchestrator.service
+          systemctl is-enabled hyperliquid-ai-team-orchestrator.timer
+          hl-ai-team-status
+          echo 'DEPLOYED_MAIN_SHA=17b5f88719012cf5d0da1446dc2c6dc5a734ad94'
+          echo 'POLYMARKET_TOUCHED=NO'
+          echo 'REAL_TRADING_TOUCHED=NO'
