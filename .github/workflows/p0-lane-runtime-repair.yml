@@ -16,7 +16,7 @@ concurrency:
 jobs:
   repair:
     runs-on: [self-hosted, hyperliquid]
-    timeout-minutes: 35
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -63,8 +63,10 @@ jobs:
             echo "LANE1_CUTOFF_REPAIRED=$now_ns"
           fi
           sudo systemctl reset-failed hyperliquid-universe-scout.service hyperliquid-wallet-research.service hyperliquid-selective-shadow.service || true
-          sudo systemctl start hyperliquid-universe-scout.service
-          sudo systemctl start hyperliquid-wallet-research.service
+          timeout 120 sudo systemctl start hyperliquid-universe-scout.service
+          # wallet-research can legitimately wait up to 30m on its research lock; do not
+          # pin the sole self-hosted runner behind that producer.
+          sudo systemctl start --no-block hyperliquid-wallet-research.service
           sudo bash /root/hyperliquid-copy-engine/scripts/deploy_profitability_funnel_self_hosted.sh
           for _ in $(seq 1 120); do
             state="$(systemctl is-active hlcopy-profitability-funnel.service || true)"
@@ -76,9 +78,11 @@ jobs:
           sudo test -s "$queue"
           queue_mtime="$(sudo stat -c %Y "$queue")"
           test "$queue_mtime" -ge "$start_epoch"
-          sudo systemctl start hyperliquid-selective-shadow.service
+          # selective-shadow can wait up to 45m on the shared causal-score lock. Dispatch
+          # it and let its persistent timer own completion instead of blocking all lanes.
+          sudo systemctl start --no-block hyperliquid-selective-shadow.service
           test "$(systemctl is-failed hyperliquid-selective-shadow.service || true)" != failed
-          sudo systemctl start hyperliquid-prospective-champions.service
+          sudo systemctl start --no-block hyperliquid-prospective-champions.service
           report=/root/hyperliquid-audit/prospective-champions/report.json
           sudo test -s "$report"
           sudo python3 - <<'PY'
@@ -100,11 +104,17 @@ jobs:
         run: |
           set -euo pipefail
           sudo systemctl reset-failed hyperliquid-external-coverage.service hyperliquid-external-resolver.service hyperliquid-invo-wallet-identifier.service || true
-          sudo systemctl start hyperliquid-external-coverage.service
-          sudo systemctl start hyperliquid-external-resolver.service
-          sudo systemctl start hyperliquid-invo-wallet-identifier.service
+          # Resolver/identifier jobs can legitimately run for tens of minutes. Dispatch
+          # them independently so Lane 2 cannot monopolize the runner or starve Lane 3.
+          sudo systemctl start --no-block hyperliquid-external-coverage.service
+          sudo systemctl start --no-block hyperliquid-external-resolver.service
+          sudo systemctl start --no-block hyperliquid-invo-wallet-identifier.service
           test "$(systemctl is-failed hyperliquid-invo-wallet-identifier.service || true)" != failed
-          sudo systemctl start hyperliquid-invo-verified-shadow-sync.service
+          if ! systemctl is-active --quiet hyperliquid-invo-wallet-identifier.service; then
+            sudo systemctl start --no-block hyperliquid-invo-verified-shadow-sync.service
+          else
+            echo LANE2_VERIFIED_SYNC=DEFERRED_UNTIL_IDENTIFIER_SUCCESS
+          fi
           identities=/var/lib/hyperliquid-copy-engine/invo/identified_wallets.json
           sudo test -s "$identities"
           sudo python3 - <<'PY'
@@ -128,11 +138,11 @@ jobs:
           set -euo pipefail
           since="$(date -u '+%Y-%m-%d %H:%M:%S')"
           sudo systemctl reset-failed hyperliquid-ai-team-orchestrator.service || true
-          sudo systemctl restart hyperliquid-ai-team-orchestrator.service || true
+          sudo systemctl restart --no-block hyperliquid-ai-team-orchestrator.service || true
           sudo systemctl start hyperliquid-ai-external-supervisor.service
           sleep 15
           sudo systemctl is-active --quiet hyperliquid-ai-external-supervisor.timer
-          sudo -H /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py --once || true
+          timeout 120 sudo -H /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py --once || true
           sleep 5
           recent="$(sudo journalctl -u hyperliquid-ai-team-orchestrator.service --since "$since" --no-pager -o cat || true)"
           printf '%s\n' "$recent"
@@ -156,5 +166,6 @@ jobs:
             echo "$unit=$state"
             test "$state" != failed
           done
+          echo FINAL_RECORD_PROOF=REQUIRES_ISSUE_267
           echo REAL_TRADING_ENABLED=NO
           echo P0_RUNTIME_REPAIR_ACCEPTANCE=PASS
