@@ -323,6 +323,54 @@ def test_quant_opus_is_behind_prospective_evidence_state(tmp_path):
     assert ledger.db.execute("SELECT 1 FROM tasks WHERE model_class='OPUS'").fetchone() is None
 
 
+def test_destructive_sonnet_pass_routes_directly_to_final_opus(tmp_path, monkeypatch):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    target_sha = "a" * 40
+    task_id = ledger.create_task(
+        issue_number=223, pr_number=216, task_type="CHALLENGE", agent="CLAUDE",
+        model_class="SONNET", task_class="DESTRUCTIVE", review_profile="DESTRUCTIVE",
+        target_sha=target_sha, workdir=str(tmp_path),
+    )
+
+    class GH:
+        def pr(self, number):
+            return {"state": "open", "head": {"sha": target_sha}}
+
+        def check_state(self, sha):
+            return "PASS", "green"
+
+        def issue(self, number):
+            return {"body": "AI_TASK_CLASS=DESTRUCTIVE"}
+
+        def changed_files(self, number):
+            return ["scripts/storage_controller.py"]
+
+        def comment(self, *args):
+            pass
+
+    result = (
+        f"REVIEWED_SHA={target_sha}\nVERDICT=PASS\nBLOCKERS_JSON=[]\n"
+        "Destructive review passed."
+    )
+    output = json.dumps({"session_id": "session-1", "result": result})
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.gh = orch.DEFAULT_CONFIG, ledger, GH()
+    team.trusted = set()
+    team.runtime = type("Runtime", (), {"run_started": lambda *args, **kwargs: None})()
+    team.review_prompt = lambda *args: "review"
+    team.invoke_claude = lambda *args: subprocess.CompletedProcess(args, 0, output, "")
+    team.sync_runtime_checkpoint = lambda: None
+    team.finish_runtime_run = lambda *args, **kwargs: None
+    monkeypatch.setattr(orch, "claude_runtime_preflight", lambda: None)
+    monkeypatch.setattr(orch, "recent_human_comments", lambda *args: [])
+    monkeypatch.setattr(orch, "CLAUDE_LOG", tmp_path / "logs")
+
+    team.handle_review(ledger.get(task_id))
+
+    assert ledger.child(task_id, "FINAL_REVIEW", target_sha) is not None
+    assert ledger.child(task_id, "PROSPECTIVE_EVIDENCE", target_sha) is None
+
+
 def test_explicit_engine_profile_on_routine_task_is_persisted_for_sonnet(tmp_path):
     ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
     parent_id = ledger.create_task(

@@ -2970,7 +2970,10 @@ not run on re-review because previous_sha is then populated.
                     and "OPUS_FINAL" in profile):
                 self.ledger.update(task["id"], status="DONE", blockers_json="[]",
                                    session_id=session_id, last_error=None, systemd_unit=None)
-                self.enqueue_prospective_evidence(task)
+                if "PROSPECTIVE_EVIDENCE" in profile:
+                    self.enqueue_prospective_evidence(task)
+                else:
+                    self.enqueue_specialist_review(task, "OPUS", "FINAL_REVIEW")
                 self.finish_runtime_run(
                     run_id, str(task["id"]), stdout=cp.stdout, stderr=cp.stderr,
                     exit_code=0, session_id=session_id, usage=usage, result=result,
