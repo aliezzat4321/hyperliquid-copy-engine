@@ -1,4 +1,4 @@
-name: manual-review-283-closed-task-reconciliation
+name: manual-review-283-closed-task-reconciliation-v2
 
 on:
   push:
@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: manual-review-283-closed-task-reconciliation
+  group: manual-review-283-closed-task-reconciliation-v2
   cancel-in-progress: false
 
 jobs:
@@ -22,51 +22,38 @@ jobs:
           ref: 01a228ad8ad802c08fe429003ad8d3a93843e462
           fetch-depth: 0
           persist-credentials: false
-      - name: Independent exact-SHA Claude Sonnet review
+      - name: Independent exact-SHA Claude Sonnet re-review
         shell: bash
         run: |
           set -euo pipefail
           TARGET=01a228ad8ad802c08fe429003ad8d3a93843e462
-          BASE=dcf72f6fbd44983d5b8615c4d97b5514267a4044
           HOME_DIR=/var/lib/hyperliquid-ai-team/agents/claude/home
-          WORKDIR=/var/lib/hyperliquid-ai-team/agents/claude/worktrees/review-pr283
+          WORKDIR=/var/lib/hyperliquid-ai-team/agents/claude/worktrees/review-pr283-v2
           sudo rm -rf "$WORKDIR" && sudo mkdir -p "$WORKDIR"
           sudo rsync -a --delete "$GITHUB_WORKSPACE/" "$WORKDIR/"
           sudo chown -R hl-claude-agent:hl-claude-agent "$WORKDIR"
           cat > "$WORKDIR/.review_prompt" <<'PROMPT'
-          Independently review Hyperliquid PR #283 at exact SHA 01a228ad8ad802c08fe429003ad8d3a93843e462 with Sonnet.
+          Review Hyperliquid PR #283 at EXACT SHA 01a228ad8ad802c08fe429003ad8d3a93843e462. This is independent Sonnet review. REAL TRADING remains disabled. Do not use credentials, place orders, change capital/risk, or inspect Polymarket. No GitHub writes.
 
-          REAL TRADING MUST REMAIN DISABLED. Do not use credentials, place orders, change capital/risk authorization, or inspect/discuss Polymarket. You have no GitHub write authority.
-
-          Review ONLY:
+          Do NOT run tests; CI is already green. Do NOT inspect unrelated files. Spend your turns only on the bounded diff and direct call-sites:
           git diff dcf72f6fbd44983d5b8615c4d97b5514267a4044..01a228ad8ad802c08fe429003ad8d3a93843e462 -- scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
-          plus minimum adjacent context necessary.
 
-          Runtime problem to falsify: #279 retires a closed task only after due() selects it. Because valid PENDING work ranks above RETRY, a closed RETRY such as issue #146 can linger indefinitely in active runtime projection even though it no longer blocks unrelated work. Also due() recognizes WAITING_EVIDENCE_WINDOW while ACTIVE_STATUSES did not, risking false inactivity/duplicate admission.
+          Decide whether these changes safely fix the two runtime defects:
+          1) closed active tasks (specifically closed RETRY #146) must be proactively retired before admission/due dispatch, even if PENDING work always outranks RETRY;
+          2) WAITING_EVIDENCE_WINDOW must count as active because due() already treats it as schedulable.
 
-          Verify specifically:
-          - every active task status, including WAITING_EVIDENCE_WINDOW, is included consistently without weakening safety;
-          - reconcile_closed_issue_tasks retires canonical closed issues before dispatch, clears runnable state, and cannot execute their model task;
-          - GitHub lookup failure remains fail-safe/task-local and does not incorrectly retire an unknown/open issue;
-          - open tasks remain untouched;
-          - shared issue-state caching cannot misclassify multiple tasks;
-          - the cycle placement occurs early enough to remove stale active projection before admission/due selection;
-          - no unsafe concurrency, review bypass, queue bypass, live-trading, capital, or credential behavior is introduced;
-          - existing #279 starvation protections remain intact.
+          Check only: closed vs open/unknown issue handling; row status/lifecycle clearing; ordering in cycle; duplicate/concurrency implications; ACTIVE_STATUSES consistency; no review/safety/live-trading bypass. The guarded full orchestrator tests, Ruff, compile and safety scan already passed; inspect code logic rather than repeating them.
 
-          Guarded pre-push validation already passed compile, full orchestrator regression tests, Ruff, diff check, and safety scan. Independently inspect rather than trusting that claim.
-
-          End with exactly:
+          You MUST finish with exactly three machine lines, even if uncertain. PASS only if no merge blocker; otherwise FAIL with concrete blocker JSON:
           REVIEWED_SHA=01a228ad8ad802c08fe429003ad8d3a93843e462
           VERDICT=PASS
           BLOCKERS_JSON=[]
-          Or VERDICT=FAIL with concrete blocker JSON if any merge-blocking defect exists.
           PROMPT
           sudo chown hl-claude-agent:hl-claude-agent "$WORKDIR/.review_prompt"
           PROMPT_TEXT="$(cat "$WORKDIR/.review_prompt")"
           set +e
           timeout 900 sudo systemd-run --pipe --wait --collect --quiet \
-            --unit=hl-ai-claude-review-pr283 \
+            --unit=hl-ai-claude-review-pr283-v2 \
             --uid=hl-claude-agent --gid=hl-claude-agent \
             --working-directory="$WORKDIR" \
             --property=NoNewPrivileges=yes --property=PrivateTmp=yes \
@@ -75,17 +62,17 @@ jobs:
             --property="ReadWritePaths=$WORKDIR $HOME_DIR" \
             --setenv="HOME=$HOME_DIR" --setenv="CLAUDE_CONFIG_DIR=$HOME_DIR/.claude" \
             /usr/bin/claude -p --model sonnet --output-format json \
-            --permission-mode dontAsk --allowedTools Read,Glob,Grep,Bash --max-turns 16 \
-            "$PROMPT_TEXT" > /tmp/pr283-review.json 2>/tmp/pr283-review.err
+            --permission-mode dontAsk --allowedTools Read,Glob,Grep,Bash --max-turns 32 \
+            "$PROMPT_TEXT" > /tmp/pr283-review-v2.json 2>/tmp/pr283-review-v2.err
           RC=$?
           set -e
-          echo "CLAUDE_RC=$RC OUT_BYTES=$(wc -c </tmp/pr283-review.json) ERR_BYTES=$(wc -c </tmp/pr283-review.err)"
-          if [[ -s /tmp/pr283-review.err ]]; then tail -c 3000 /tmp/pr283-review.err; fi
+          echo "CLAUDE_RC=$RC OUT_BYTES=$(wc -c </tmp/pr283-review-v2.json) ERR_BYTES=$(wc -c </tmp/pr283-review-v2.err)"
+          if [[ -s /tmp/pr283-review-v2.err ]]; then tail -c 3000 /tmp/pr283-review-v2.err; fi
           python3 - <<'PY'
           import json,re,sys
           from pathlib import Path
           target='01a228ad8ad802c08fe429003ad8d3a93843e462'
-          raw=Path('/tmp/pr283-review.json').read_text(errors='replace')
+          raw=Path('/tmp/pr283-review-v2.json').read_text(errors='replace')
           if not raw:
               print('REVIEW_OUTPUT=EMPTY'); sys.exit(31)
           try:
