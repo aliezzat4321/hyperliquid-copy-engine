@@ -1,4 +1,4 @@
-name: manual-review-282-deploy-hotfix-removal
+name: manual-review-283-closed-task-reconciliation
 
 on:
   push:
@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: manual-review-282-deploy-hotfix-removal
+  group: manual-review-283-closed-task-reconciliation
   cancel-in-progress: false
 
 jobs:
@@ -19,33 +19,45 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 9ff31adb8b0b5b1ac31dafe5a9f4c0ec5303a875
+          ref: 01a228ad8ad802c08fe429003ad8d3a93843e462
           fetch-depth: 0
           persist-credentials: false
       - name: Independent exact-SHA Claude Sonnet review
         shell: bash
         run: |
           set -euo pipefail
-          TARGET=9ff31adb8b0b5b1ac31dafe5a9f4c0ec5303a875
-          BASE=17b5f88719012cf5d0da1446dc2c6dc5a734ad94
+          TARGET=01a228ad8ad802c08fe429003ad8d3a93843e462
+          BASE=dcf72f6fbd44983d5b8615c4d97b5514267a4044
           HOME_DIR=/var/lib/hyperliquid-ai-team/agents/claude/home
-          WORKDIR=/var/lib/hyperliquid-ai-team/agents/claude/worktrees/review-pr282
+          WORKDIR=/var/lib/hyperliquid-ai-team/agents/claude/worktrees/review-pr283
           sudo rm -rf "$WORKDIR" && sudo mkdir -p "$WORKDIR"
           sudo rsync -a --delete "$GITHUB_WORKSPACE/" "$WORKDIR/"
           sudo chown -R hl-claude-agent:hl-claude-agent "$WORKDIR"
           cat > "$WORKDIR/.review_prompt" <<'PROMPT'
-          Independently review Hyperliquid PR #282 at exact SHA 9ff31adb8b0b5b1ac31dafe5a9f4c0ec5303a875 with Sonnet.
+          Independently review Hyperliquid PR #283 at exact SHA 01a228ad8ad802c08fe429003ad8d3a93843e462 with Sonnet.
 
           REAL TRADING MUST REMAIN DISABLED. Do not use credentials, place orders, change capital/risk authorization, or inspect/discuss Polymarket. You have no GitHub write authority.
 
-          Review ONLY the diff:
-          git diff 17b5f88719012cf5d0da1446dc2c6dc5a734ad94..9ff31adb8b0b5b1ac31dafe5a9f4c0ec5303a875 -- .github/workflows/deploy-ai-team-orchestrator.yml
-          plus minimum adjacent source context needed.
+          Review ONLY:
+          git diff dcf72f6fbd44983d5b8615c4d97b5514267a4044..01a228ad8ad802c08fe429003ad8d3a93843e462 -- scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
+          plus minimum adjacent context necessary.
 
-          Objective: remove the now-obsolete deploy-time merge-405 source injection because #279 made that behavior durable in source. Verify the deletion does not remove required install, compile, service start, timer/status, Hyperliquid-only, or real-trading-off gates; verify it cannot reintroduce stale-PR process-wide fatal behavior because the durable source implementation exists at the reviewed base/main.
+          Runtime problem to falsify: #279 retires a closed task only after due() selects it. Because valid PENDING work ranks above RETRY, a closed RETRY such as issue #146 can linger indefinitely in active runtime projection even though it no longer blocks unrelated work. Also due() recognizes WAITING_EVIDENCE_WINDOW while ACTIVE_STATUSES did not, risking false inactivity/duplicate admission.
+
+          Verify specifically:
+          - every active task status, including WAITING_EVIDENCE_WINDOW, is included consistently without weakening safety;
+          - reconcile_closed_issue_tasks retires canonical closed issues before dispatch, clears runnable state, and cannot execute their model task;
+          - GitHub lookup failure remains fail-safe/task-local and does not incorrectly retire an unknown/open issue;
+          - open tasks remain untouched;
+          - shared issue-state caching cannot misclassify multiple tasks;
+          - the cycle placement occurs early enough to remove stale active projection before admission/due selection;
+          - no unsafe concurrency, review bypass, queue bypass, live-trading, capital, or credential behavior is introduced;
+          - existing #279 starvation protections remain intact.
+
+          Guarded pre-push validation already passed compile, full orchestrator regression tests, Ruff, diff check, and safety scan. Independently inspect rather than trusting that claim.
 
           End with exactly:
-          REVIEWED_SHA=9ff31adb8b0b5b1ac31dafe5a9f4c0ec5303a875
+          REVIEWED_SHA=01a228ad8ad802c08fe429003ad8d3a93843e462
           VERDICT=PASS
           BLOCKERS_JSON=[]
           Or VERDICT=FAIL with concrete blocker JSON if any merge-blocking defect exists.
@@ -54,7 +66,7 @@ jobs:
           PROMPT_TEXT="$(cat "$WORKDIR/.review_prompt")"
           set +e
           timeout 900 sudo systemd-run --pipe --wait --collect --quiet \
-            --unit=hl-ai-claude-review-pr282 \
+            --unit=hl-ai-claude-review-pr283 \
             --uid=hl-claude-agent --gid=hl-claude-agent \
             --working-directory="$WORKDIR" \
             --property=NoNewPrivileges=yes --property=PrivateTmp=yes \
@@ -63,17 +75,17 @@ jobs:
             --property="ReadWritePaths=$WORKDIR $HOME_DIR" \
             --setenv="HOME=$HOME_DIR" --setenv="CLAUDE_CONFIG_DIR=$HOME_DIR/.claude" \
             /usr/bin/claude -p --model sonnet --output-format json \
-            --permission-mode dontAsk --allowedTools Read,Glob,Grep,Bash --max-turns 12 \
-            "$PROMPT_TEXT" > /tmp/pr282-review.json 2>/tmp/pr282-review.err
+            --permission-mode dontAsk --allowedTools Read,Glob,Grep,Bash --max-turns 16 \
+            "$PROMPT_TEXT" > /tmp/pr283-review.json 2>/tmp/pr283-review.err
           RC=$?
           set -e
-          echo "CLAUDE_RC=$RC OUT_BYTES=$(wc -c </tmp/pr282-review.json) ERR_BYTES=$(wc -c </tmp/pr282-review.err)"
-          if [[ -s /tmp/pr282-review.err ]]; then tail -c 3000 /tmp/pr282-review.err; fi
+          echo "CLAUDE_RC=$RC OUT_BYTES=$(wc -c </tmp/pr283-review.json) ERR_BYTES=$(wc -c </tmp/pr283-review.err)"
+          if [[ -s /tmp/pr283-review.err ]]; then tail -c 3000 /tmp/pr283-review.err; fi
           python3 - <<'PY'
           import json,re,sys
           from pathlib import Path
-          target='9ff31adb8b0b5b1ac31dafe5a9f4c0ec5303a875'
-          raw=Path('/tmp/pr282-review.json').read_text(errors='replace')
+          target='01a228ad8ad802c08fe429003ad8d3a93843e462'
+          raw=Path('/tmp/pr283-review.json').read_text(errors='replace')
           if not raw:
               print('REVIEW_OUTPUT=EMPTY'); sys.exit(31)
           try:
@@ -83,7 +95,7 @@ jobs:
           except Exception:
               result=raw
           print('=== REVIEW RESULT ===')
-          print(str(result)[-10000:])
+          print(str(result)[-12000:])
           if not re.search(rf'(?m)^REVIEWED_SHA={target}\s*$',str(result)): sys.exit(32)
           verdict=re.search(r'(?m)^VERDICT=(PASS|FAIL)\s*$',str(result))
           blockers=re.search(r'(?m)^BLOCKERS_JSON=(\[.*\])\s*$',str(result))
