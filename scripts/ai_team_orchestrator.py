@@ -3862,6 +3862,7 @@ that non-code work needs a CODE_CHANGE. Unknown or contradictory evidence is TER
                 self.gh.remove_label(number, self.cfg["labels"]["blocked"])
                 self.gh.remove_label(number, self.cfg["labels"]["ready"])
                 self.gh.remove_label(number, self.cfg["labels"]["queued"])
+                self.gh.remove_label(number, self.cfg["labels"]["running"])
                 self.gh.add_labels(number, [self.cfg["labels"]["pending"]])
                 self.runtime.event(
                     "TASK_QUARANTINED", assignment_id=task["id"],
