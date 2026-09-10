@@ -1,12 +1,4 @@
-import importlib.util
-from pathlib import Path
-
-
-SPEC = importlib.util.spec_from_file_location(
-    "repo_context_benchmark", Path(__file__).parents[1] / "scripts/repo_context_benchmark.py"
-)
-bench = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(bench)
+from scripts import repo_context_benchmark as bench
 
 
 def test_sha_index_is_bounded_and_stale_state_is_detectable(tmp_path, monkeypatch):
