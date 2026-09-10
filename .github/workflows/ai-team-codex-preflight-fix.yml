@@ -1,4 +1,4 @@
-name: p0-238-supervisor-python310-v2
+name: p0-238-lane1-runtime-restore
 
 on:
   push:
@@ -6,72 +6,172 @@ on:
     paths: [".github/workflows/ai-team-codex-preflight-fix.yml"]
 
 permissions:
-  contents: write
+  contents: read
+  issues: read
+
+concurrency:
+  group: p0-238-lane1-runtime-restore
+  cancel-in-progress: false
 
 jobs:
-  repair:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+  restore:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: manager/238-external-supervisor
-          fetch-depth: 0
-          persist-credentials: true
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-      - name: Install focused test tools only
-        run: |
-          python -m pip install -U pip
-          python -m pip install pytest ruff
-      - name: Apply Python 3.10 compatibility repair
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Sync production source and assert safety
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "23411b89bb93b78f50de2cc6c23fd97ac76e1f3f"
-          python - <<'PY'
+          test "${REAL_TRADING_ENABLED:-NO}" != YES
+          sudo git -C /root/hyperliquid-copy-engine fetch origin main
+          sudo git -C /root/hyperliquid-copy-engine reset --hard origin/main
+          echo "MAIN_HEAD=$(git rev-parse HEAD)"
+          test "$(git rev-parse HEAD)" = "$(sudo git -C /root/hyperliquid-copy-engine rev-parse HEAD)"
+          for unit in \
+            hyperliquid-shadow-validation.service \
+            hyperliquid-wide-trade-watch-live.service \
+            hyperliquid-wide-fill-enrichment-live.service \
+            hyperliquid-universe-scout.service \
+            hyperliquid-profitability.service \
+            hyperliquid-wallet-research.service \
+            hyperliquid-selective-shadow.service \
+            hyperliquid-wide-live-scoreboard.service; do
+            grep -q 'REAL_TRADING_ENABLED=NO' "deploy/systemd/$unit"
+          done
+          echo REAL_TRADING_ENABLED=NO
+          echo POLYMARKET_TOUCHED=NO
+
+      - name: Install and restore Lane 1 producer units
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /root/hyperliquid-copy-engine
+          services=(
+            hyperliquid-shadow-validation.service
+            hyperliquid-wide-trade-watch-live.service
+            hyperliquid-wide-fill-enrichment-live.service
+            hyperliquid-universe-scout.service
+            hyperliquid-profitability.service
+            hyperliquid-wallet-research.service
+            hyperliquid-selective-shadow.service
+            hyperliquid-wide-live-scoreboard.service
+          )
+          timers=(
+            hyperliquid-universe-scout.timer
+            hyperliquid-profitability.timer
+            hyperliquid-wallet-research.timer
+            hyperliquid-selective-shadow.timer
+            hyperliquid-wide-live-scoreboard.timer
+          )
+          for unit in "${services[@]}" "${timers[@]}"; do
+            sudo install -m 0644 "deploy/systemd/$unit" "/etc/systemd/system/$unit"
+          done
+          sudo systemctl daemon-reload
+          sudo systemctl reset-failed "${services[@]}" || true
+          sudo systemctl enable --now \
+            hyperliquid-shadow-validation.service \
+            hyperliquid-wide-trade-watch-live.service \
+            hyperliquid-wide-fill-enrichment-live.service
+          sudo systemctl enable --now "${timers[@]}"
+          sudo systemctl start hyperliquid-universe-scout.service
+          sudo systemctl start hyperliquid-selective-shadow.service
+          echo LANE1_UNIT_RESTORE=PASS
+
+      - name: Prove timers, daemons, exits and freshness
+        shell: bash
+        run: |
+          set -euo pipefail
+          sleep 12
+          for unit in \
+            hyperliquid-shadow-validation.service \
+            hyperliquid-wide-trade-watch-live.service \
+            hyperliquid-wide-fill-enrichment-live.service; do
+            state="$(systemctl is-active "$unit" || true)"
+            failed="$(systemctl is-failed "$unit" || true)"
+            echo "DAEMON $unit active=$state failed=$failed"
+            test "$state" = active
+            test "$failed" != failed
+          done
+          for timer in \
+            hyperliquid-universe-scout.timer \
+            hyperliquid-profitability.timer \
+            hyperliquid-wallet-research.timer \
+            hyperliquid-selective-shadow.timer \
+            hyperliquid-wide-live-scoreboard.timer; do
+            enabled="$(systemctl is-enabled "$timer" || true)"
+            active="$(systemctl is-active "$timer" || true)"
+            echo "TIMER $timer enabled=$enabled active=$active"
+            test "$enabled" = enabled
+            test "$active" = active
+          done
+          echo '=== TIMER SCHEDULE ==='
+          systemctl list-timers --all --no-pager | grep -E 'hyperliquid-(universe-scout|profitability|wallet-research|selective-shadow|wide-live-scoreboard)' || true
+          echo '=== LANE1 RECENT UNIT RESULTS ==='
+          for svc in hyperliquid-universe-scout.service hyperliquid-selective-shadow.service; do
+            echo "--- $svc"
+            systemctl show "$svc" -p Type -p Result -p ExecMainStatus -p ActiveEnterTimestamp -p InactiveEnterTimestamp --no-pager
+            sudo journalctl -u "$svc" -n 50 --no-pager -o cat || true
+            test "$(systemctl is-failed "$svc" || true)" != failed
+          done
+          echo '=== DATA FRESHNESS ==='
+          now="$(date +%s)"
+          for f in \
+            /mnt/HC_Volume_106576526/hyperliquid/discovery/universe_state.json \
+            /mnt/HC_Volume_106576526/hyperliquid/discovery/universe_events.json \
+            /mnt/HC_Volume_106576526/hyperliquid/shadow/wallets.json; do
+            if sudo test -s "$f"; then
+              m="$(sudo stat -c %Y "$f")"
+              age=$((now-m))
+              echo "FRESHNESS path=$f age_seconds=$age size=$(sudo stat -c %s "$f")"
+            else
+              echo "MISSING path=$f"
+              exit 1
+            fi
+          done
+          echo LANE1_COLLECTOR_LIVENESS=PASS
+
+      - name: Run deterministic Lane 1 handoff snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /root/hyperliquid-copy-engine
+          test "${REAL_TRADING_ENABLED:-NO}" != YES
+          if [ -x .venv/bin/python ]; then
+            sudo -H .venv/bin/python scripts/prospective_champion_lane.py
+          else
+            echo 'missing production venv' >&2
+            exit 1
+          fi
+          sudo python3 - <<'PY'
+          import json
           from pathlib import Path
 
-          src = Path('scripts/ai_team_external_supervisor.py')
-          text = src.read_text()
-          anchor = 'from typing import Any\n\n'
-          if anchor not in text:
-              raise SystemExit('typing import anchor missing')
-          text = text.replace(
-              anchor,
-              anchor + 'UTC = dt.timezone.utc  # noqa: UP017 -- production VM is Python 3.10\n\n',
-              1,
-          )
-          if 'dt.UTC' not in text:
-              raise SystemExit('expected dt.UTC usages missing')
-          src.write_text(text.replace('dt.UTC', 'UTC'))
-
-          tests = Path('tests/test_ai_team_external_supervisor.py')
-          t = tests.read_text()
-          if 'dt.UTC' not in t:
-              raise SystemExit('expected test dt.UTC usages missing')
-          tests.write_text(t.replace('dt.UTC', 'sup.UTC'))
+          queue = Path('/root/hyperliquid-audit/funnel/challenger_queue.json')
+          report = Path('/root/hyperliquid-audit/prospective-champions/report.json')
+          if not queue.is_file() or not report.is_file():
+              raise SystemExit('Lane1 handoff artifacts missing')
+          q = json.loads(queue.read_text())
+          r = json.loads(report.read_text())
+          print('LANE1_COUNTS', q.get('counts'))
+          print('LANE1_REPORT', {k: r.get(k) for k in ('challenger_count','prospective_shadow_count','approved_count','age_hours','real_trading')})
+          if q.get('real_trading') is not False or r.get('real_trading') is not False:
+              raise SystemExit('Lane1 safety flag invalid')
+          if q.get('counts', {}).get('challenger', 0) < 1:
+              raise SystemExit('Lane1 has no challenger to hand off')
           PY
-      - name: Validate on production Python version
+          echo LANE1_HANDOFF_SNAPSHOT=PASS
+
+      - name: Final safety proof
+        if: always()
         shell: bash
         run: |
           set -euo pipefail
-          python --version
-          python -m py_compile scripts/ai_team_external_supervisor.py
-          pytest tests/test_ai_team_external_supervisor.py -q
-          ruff check scripts/ai_team_external_supervisor.py tests/test_ai_team_external_supervisor.py
-          ruff format --check scripts/ai_team_external_supervisor.py tests/test_ai_team_external_supervisor.py
-          git diff --check
-          changed="$(git diff --name-only)"
-          test "$changed" = $'scripts/ai_team_external_supervisor.py\ntests/test_ai_team_external_supervisor.py'
-          ! git diff | grep -E 'REAL_TRADING_ENABLED[[:space:]]*=[[:space:]]*(YES|TRUE|1)|LIVE_TRADING_ENABLED[[:space:]]*=[[:space:]]*(YES|TRUE|1)'
-      - name: Commit Python 3.10 repair
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name 'hyperliquid-ai-team'
-          git config user.email 'hyperliquid-ai-team@users.noreply.github.com'
-          git add scripts/ai_team_external_supervisor.py tests/test_ai_team_external_supervisor.py
-          git commit -m 'P0 #238: support production Python 3.10 supervisor runtime'
-          git push origin HEAD:manager/238-external-supervisor
+          test "${REAL_TRADING_ENABLED:-NO}" != YES
+          echo REAL_TRADING_ENABLED=NO
+          echo POLYMARKET_TOUCHED=NO
