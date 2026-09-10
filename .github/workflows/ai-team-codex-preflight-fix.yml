@@ -42,8 +42,8 @@ jobs:
           p.write_text(s)
           PY
           python3 -m py_compile scripts/ai_team_external_supervisor.py
+          python3 -m pip install -q pytest ruff
           python3 -m pytest tests/test_ai_team_external_supervisor.py -q
-          python3 -m pip install -q ruff
           ruff check scripts/ai_team_external_supervisor.py tests/test_ai_team_external_supervisor.py
           git diff --check
           git diff -- scripts/ai_team_external_supervisor.py
