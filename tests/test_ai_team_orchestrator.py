@@ -1242,6 +1242,34 @@ def test_parent_finalization_continues_from_parent_merged_sha(tmp_path):
     ]
 
 
+def test_reopened_acceptance_binds_last_merged_sha(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    merged_sha = "d" * 40
+    ledger.create_task(
+        issue_number=93, task_type="REVIEW", agent="CLAUDE", model_class="SONNET",
+        task_class="ROUTINE", status="DONE", lifecycle_phase="MERGED",
+        target_sha=merged_sha, pr_number=213,
+    )
+    issue = {
+        "number": 93, "author_association": "OWNER",
+        "body": "AI_TEAM_COMPLETION_REQUIRES=RUNTIME_PROOF",
+    }
+
+    class Runtime:
+        def event(self, *args, **kwargs):
+            pass
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.runtime = orch.DEFAULT_CONFIG, ledger, Runtime()
+    team.trusted = {"OWNER"}
+
+    task = team.enqueue_acceptance(issue, parent_id=None)
+
+    assert task is not None
+    assert task["task_type"] == "PRODUCTION_VALIDATION"
+    assert task["target_sha"] == merged_sha
+
+
 def test_cycle_blocks_only_invalid_acceptance_evidence_task(tmp_path):
     root, evidence = trusted_artifact(
         tmp_path, issue=154, requirement="RUNTIME_PROOF",

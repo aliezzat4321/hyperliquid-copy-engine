@@ -1817,6 +1817,12 @@ class Orchestrator:
                            merged_sha: str | None = None) -> sqlite3.Row | None:
         """Create exactly the next unmet durable acceptance phase."""
         number = int(issue["number"])
+        # Reopened/reconciled issues enter here without a merge event in the current
+        # process. Bind their runtime proof to the last durable merged checkpoint;
+        # an unbound acceptance task can neither produce nor verify exact-code evidence.
+        evidence_sha = merged_sha or self.ledger.latest_merged_sha(number)
+        if not evidence_sha:
+            raise ValueError("ACCEPTANCE_REQUIRES_MERGED_SHA")
         contract = self.completion_contract(issue)
         proven = self.ledger.proven_requirements(number)
         for requirement in contract["requirements"]:
@@ -1837,13 +1843,13 @@ class Orchestrator:
                         "CLAUDE" if opus_phase else "CODEX_CHATGPT"),
                     model_class="NONE" if manager_phase else (
                         "OPUS" if opus_phase else "CODEX_DEFAULT"),
-                    task_class="ROUTINE", status="PENDING", target_sha=merged_sha,
+                    task_class="ROUTINE", status="PENDING", target_sha=evidence_sha,
                     parent_id=parent_id, lifecycle_phase=phase,
                     completion_contract=contract, evidence={"requirement": requirement},
                 )
                 self.runtime.event(
                     "POST_MERGE_PHASE_ENQUEUED", assignment_id=task_id, issue=number,
-                    target_sha=merged_sha, task_type=phase, lifecycle_phase=phase,
+                    target_sha=evidence_sha, task_type=phase, lifecycle_phase=phase,
                     requirement=requirement, status="PENDING",
                     next_action=f"execute {phase.lower()} and record deterministic proof",
                 )
