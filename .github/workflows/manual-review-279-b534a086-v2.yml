@@ -1,4 +1,4 @@
-name: manual-review-279-85686109
+name: manual-review-279-85686109-v2
 
 on:
   push:
@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: manual-review-279-85686109
+  group: manual-review-279-85686109-v2
   cancel-in-progress: false
 
 jobs:
@@ -27,43 +27,35 @@ jobs:
         run: |
           set -euo pipefail
           TARGET=856861095dad1a863c77a048a457e5cdd9fb382d
-          PREVIOUS=b534a0869502789458164b74b491aa7f46996f99
           HOME_DIR=/var/lib/hyperliquid-ai-team/agents/claude/home
-          WORKDIR=/var/lib/hyperliquid-ai-team/agents/claude/worktrees/review-pr279-85686109
+          WORKDIR=/var/lib/hyperliquid-ai-team/agents/claude/worktrees/review-pr279-85686109-v2
           sudo rm -rf "$WORKDIR" && sudo mkdir -p "$WORKDIR"
           sudo rsync -a --delete "$GITHUB_WORKSPACE/" "$WORKDIR/"
           sudo chown -R hl-claude-agent:hl-claude-agent "$WORKDIR"
           cat > "$WORKDIR/.review_prompt" <<'PROMPT'
-          You are CLAUDE SONNET, the independent adversarial reviewer for Hyperliquid PR #279. Review exact SHA 856861095dad1a863c77a048a457e5cdd9fb382d.
+          Independently re-review Hyperliquid PR #279 at exact SHA 856861095dad1a863c77a048a457e5cdd9fb382d with Sonnet.
 
-          Hard boundaries: REAL TRADING REMAINS DISABLED. Flag any attempt to enable live/real trading, add/use keys, place orders, change capital/risk authorization, or bypass LIVE_TRADING_GATE. Do not access or discuss Polymarket. You have no GitHub credentials and must not push, merge, or comment.
+          REAL TRADING MUST REMAIN DISABLED. Do not use credentials, place orders, change capital/risk authorization, or discuss Polymarket. You have no GitHub write authority.
 
-          This is a re-review after your prior exact-SHA FAIL at b534a0869502789458164b74b491aa7f46996f99. The prior blocker was deterministic PENDING starvation under sustained READY inflow because due() ordered newly admitted PENDING work newest-first and did not persist queue priority.
+          Prior reviewed SHA b534a0869502789458164b74b491aa7f46996f99 failed for one blocker: sustained READY arrivals could starve older PENDING tasks because priority was not durable and newest PENDING won.
 
-          Review the prior blocker plus ONLY this repair delta and necessary adjacent context:
+          Review ONLY:
           git diff b534a0869502789458164b74b491aa7f46996f99..856861095dad1a863c77a048a457e5cdd9fb382d -- scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
+          plus the minimum adjacent lines necessary to verify the changed calls. Do not run tests or inspect unrelated files; repository CI handles tests.
 
-          Verify specifically:
-          - queue priority is persisted durably and safely migrated for existing SQLite ledgers;
-          - PENDING selection is priority-first and starvation-safe for same-priority older admissions under sustained new arrivals;
-          - stale RETRY work such as closed #146 cannot suppress runnable PENDING work;
-          - the updated regression does not weaken intended retry/CI/provider semantics;
-          - no unsafe concurrent worker behavior is introduced;
-          - all previous #279 safety properties remain intact in necessary adjacent context.
+          Falsify these claims: queue_priority is safely added/migrated on old SQLite ledgers; initial queued issue priority is persisted; PENDING selection is priority-first then oldest-first; same-priority old PENDING cannot starve under sustained new arrivals; PENDING still outranks stale RETRY #146-like work; no unsafe concurrency/safety regression.
 
-          Narrow pre-push gate already passed the full tests/test_ai_team_orchestrator.py suite (131 passed), py_compile, ruff check and git diff safety scan. Independently try to falsify the implementation; do not trust that claim without inspection.
-
-          At the very end emit exactly these machine-readable lines for a pass:
+          End with exactly:
           REVIEWED_SHA=856861095dad1a863c77a048a457e5cdd9fb382d
           VERDICT=PASS
           BLOCKERS_JSON=[]
-          If a merge-blocking defect exists, use VERDICT=FAIL with concrete blocker objects and preserve exact REVIEWED_SHA.
+          Or VERDICT=FAIL with concrete blocker JSON if any merge-blocking defect exists.
           PROMPT
           sudo chown hl-claude-agent:hl-claude-agent "$WORKDIR/.review_prompt"
           PROMPT_TEXT="$(cat "$WORKDIR/.review_prompt")"
           set +e
           timeout 900 sudo systemd-run --pipe --wait --collect --quiet \
-            --unit=hl-ai-claude-review-pr279-85686109 \
+            --unit=hl-ai-claude-review-pr279-85686109-v2 \
             --uid=hl-claude-agent --gid=hl-claude-agent \
             --working-directory="$WORKDIR" \
             --property=NoNewPrivileges=yes --property=PrivateTmp=yes \
@@ -72,23 +64,25 @@ jobs:
             --property="ReadWritePaths=$WORKDIR $HOME_DIR" \
             --setenv="HOME=$HOME_DIR" --setenv="CLAUDE_CONFIG_DIR=$HOME_DIR/.claude" \
             /usr/bin/claude -p --model sonnet --output-format json \
-            --permission-mode dontAsk --allowedTools Read,Glob,Grep,Bash --max-turns 12 \
-            "$PROMPT_TEXT" > /tmp/pr279-85686109-review.json 2>/tmp/pr279-85686109-review.err
+            --permission-mode dontAsk --allowedTools Read,Glob,Grep,Bash --max-turns 20 \
+            "$PROMPT_TEXT" > /tmp/pr279-85686109-v2.json 2>/tmp/pr279-85686109-v2.err
           RC=$?
           set -e
-          echo "CLAUDE_RC=$RC OUT_BYTES=$(wc -c </tmp/pr279-85686109-review.json) ERR_BYTES=$(wc -c </tmp/pr279-85686109-review.err)"
-          if [[ -s /tmp/pr279-85686109-review.err ]]; then tail -c 3000 /tmp/pr279-85686109-review.err; fi
+          echo "CLAUDE_RC=$RC OUT_BYTES=$(wc -c </tmp/pr279-85686109-v2.json) ERR_BYTES=$(wc -c </tmp/pr279-85686109-v2.err)"
+          if [[ -s /tmp/pr279-85686109-v2.err ]]; then tail -c 3000 /tmp/pr279-85686109-v2.err; fi
           python3 - <<'PY'
           import json,re,sys
           from pathlib import Path
           target='856861095dad1a863c77a048a457e5cdd9fb382d'
-          raw=Path('/tmp/pr279-85686109-review.json').read_text(errors='replace')
+          raw=Path('/tmp/pr279-85686109-v2.json').read_text(errors='replace')
           if not raw:
               print('REVIEW_OUTPUT=EMPTY')
               sys.exit(31)
           try:
               row=json.loads(raw)
               result=row.get('result','')
+              diag={k:v for k,v in row.items() if k not in {'result','usage','modelUsage'}}
+              print('CLAUDE_JSON_DIAGNOSTIC='+json.dumps(diag, sort_keys=True)[:5000])
           except Exception:
               result=raw
           print('=== REVIEW RESULT ===')
