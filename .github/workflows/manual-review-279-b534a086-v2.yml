@@ -1,4 +1,4 @@
-name: manual-review-284-external-supervisor
+name: manual-review-284-external-supervisor-final
 
 on:
   push:
@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: manual-review-284-external-supervisor
+  group: manual-review-284-external-supervisor-final
   cancel-in-progress: false
 
 jobs:
@@ -19,40 +19,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 0d5dfc5c3a801d05ea933053c6c0b0047c564e68
+          ref: 23411b89bb93b78f50de2cc6c23fd97ac76e1f3f
           fetch-depth: 0
           persist-credentials: false
       - name: Independent exact-SHA Claude Sonnet review
         shell: bash
         run: |
           set -euo pipefail
-          TARGET=0d5dfc5c3a801d05ea933053c6c0b0047c564e68
+          TARGET=23411b89bb93b78f50de2cc6c23fd97ac76e1f3f
           BASE=dd21b0e88873ae88d9ed92aaa169e2c65d3ec413
           HOME_DIR=/var/lib/hyperliquid-ai-team/agents/claude/home
-          WORKDIR=/var/lib/hyperliquid-ai-team/agents/claude/worktrees/review-pr284
+          WORKDIR=/var/lib/hyperliquid-ai-team/agents/claude/worktrees/review-pr284-final
           sudo rm -rf "$WORKDIR" && sudo mkdir -p "$WORKDIR"
           sudo rsync -a --delete "$GITHUB_WORKSPACE/" "$WORKDIR/"
           sudo chown -R hl-claude-agent:hl-claude-agent "$WORKDIR"
           cat > "$WORKDIR/.review_prompt" <<'PROMPT'
-          Independently adversarially review Hyperliquid PR #284 at EXACT SHA 0d5dfc5c3a801d05ea933053c6c0b0047c564e68 against base dd21b0e88873ae88d9ed92aaa169e2c65d3ec413 with Claude Sonnet.
+          Independently adversarially review Hyperliquid PR #284 at EXACT SHA 23411b89bb93b78f50de2cc6c23fd97ac76e1f3f against base dd21b0e88873ae88d9ed92aaa169e2c65d3ec413 with Claude Sonnet.
 
           This is protected control-plane work authorized by owner issue #238. REAL TRADING MUST REMAIN DISABLED. Do not use credentials, place orders, alter capital/risk, or inspect/discuss Polymarket. You have no GitHub write authority.
 
-          Review the bounded PR diff and only necessary direct context. Do not run the full test suite; CI is separate. Try to falsify these invariants:
-          - supervisor is genuinely independent of the main orchestrator process/state machine and persists its own root-only state/fingerprint;
-          - stale #130, dead timer, hung orchestrator and actionable no-progress are detected correctly;
-          - legitimate future provider/rate-limit waits do not trigger false recovery;
-          - incident identity remains stable across changing heartbeats/transient service state, so cooldown/budget cannot be reset by noise;
-          - deferred recovery while the orchestrator is still legitimately active does not consume recovery attempts;
-          - bounded recovery cannot create restart storms or bypass review/evidence gates;
-          - installer + systemd unit + separate deploy workflow are practical, idempotent, and truly independent enough to recover the orchestrator when it stalls;
-          - service hardening still permits required `systemctl`/GitHub-read actions and state writes;
-          - no live-trading/order/key/capital authorization or Polymarket behavior is introduced.
+          Review only the bounded PR diff plus necessary direct context; CI runs separately. Try to falsify:
+          - true independence from main orchestrator and separate root-only state/fingerprint;
+          - correct stale #130/dead timer/hung service/actionable-no-progress detection;
+          - local timer/hang recovery works even if GitHub/#130 fetch is unavailable;
+          - future provider waits do not false-trigger;
+          - heartbeat/systemd noise cannot reset incident retry budget;
+          - deferred recovery cannot burn attempt budget;
+          - subprocess/systemctl timeouts are bounded and orchestrator restart is non-blocking;
+          - no restart storm, duplicate side effect, review/evidence bypass, or first-install/deploy deadlock;
+          - systemd hardening still allows the required supervisor actions and own state writes;
+          - no live-trading/order/key/capital authorization and no Polymarket behavior.
 
-          Pay special attention to runtime/systemd semantics, fingerprint/cooldown correctness, first-install deployment, and whether a fault can disable both orchestrator and supervisor through a shared dependency. If any merge-blocking defect exists, FAIL with concrete blockers.
-
-          Finish with exactly:
-          REVIEWED_SHA=0d5dfc5c3a801d05ea933053c6c0b0047c564e68
+          PASS only if there is no merge blocker. Finish with exactly:
+          REVIEWED_SHA=23411b89bb93b78f50de2cc6c23fd97ac76e1f3f
           VERDICT=PASS
           BLOCKERS_JSON=[]
           Or VERDICT=FAIL with concrete blocker JSON.
@@ -61,7 +60,7 @@ jobs:
           PROMPT_TEXT="$(cat "$WORKDIR/.review_prompt")"
           set +e
           timeout 900 sudo systemd-run --pipe --wait --collect --quiet \
-            --unit=hl-ai-claude-review-pr284 \
+            --unit=hl-ai-claude-review-pr284-final \
             --uid=hl-claude-agent --gid=hl-claude-agent \
             --working-directory="$WORKDIR" \
             --property=NoNewPrivileges=yes --property=PrivateTmp=yes \
@@ -71,16 +70,16 @@ jobs:
             --setenv="HOME=$HOME_DIR" --setenv="CLAUDE_CONFIG_DIR=$HOME_DIR/.claude" \
             /usr/bin/claude -p --model sonnet --output-format json \
             --permission-mode dontAsk --allowedTools Read,Glob,Grep,Bash --max-turns 32 \
-            "$PROMPT_TEXT" > /tmp/pr284-review.json 2>/tmp/pr284-review.err
+            "$PROMPT_TEXT" > /tmp/pr284-final-review.json 2>/tmp/pr284-final-review.err
           RC=$?
           set -e
-          echo "CLAUDE_RC=$RC OUT_BYTES=$(wc -c </tmp/pr284-review.json) ERR_BYTES=$(wc -c </tmp/pr284-review.err)"
-          if [[ -s /tmp/pr284-review.err ]]; then tail -c 3000 /tmp/pr284-review.err; fi
+          echo "CLAUDE_RC=$RC OUT_BYTES=$(wc -c </tmp/pr284-final-review.json) ERR_BYTES=$(wc -c </tmp/pr284-final-review.err)"
+          if [[ -s /tmp/pr284-final-review.err ]]; then tail -c 3000 /tmp/pr284-final-review.err; fi
           python3 - <<'PY'
           import json,re,sys
           from pathlib import Path
-          target='0d5dfc5c3a801d05ea933053c6c0b0047c564e68'
-          raw=Path('/tmp/pr284-review.json').read_text(errors='replace')
+          target='23411b89bb93b78f50de2cc6c23fd97ac76e1f3f'
+          raw=Path('/tmp/pr284-final-review.json').read_text(errors='replace')
           if not raw:
               print('REVIEW_OUTPUT=EMPTY'); sys.exit(31)
           try:
