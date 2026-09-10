@@ -20,7 +20,20 @@ def test_sha_index_is_bounded_and_stale_state_is_detectable(tmp_path):
     (tmp_path / "src/a.py").write_text("def alpha(): pass\n")
     (tmp_path / "src/b.py").write_text("def beta(): pass\n")
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-qm", "fixture"], cwd=tmp_path, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "commit.gpgSign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
     sha = bench.git(tmp_path, "rev-parse", "HEAD")
     index, _ = bench.build_local_index(tmp_path, sha, tmp_path / "indexes" / f"{sha}.json")
     assert bench.local_select(index, "repair src/a.py alpha", 1) == ["src/a.py"]
