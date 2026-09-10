@@ -1,4 +1,4 @@
-name: p0-238-lane23-runtime-restore
+name: p0-238-lane1-runtime-restore-bounded
 
 on:
   push:
@@ -10,13 +10,13 @@ permissions:
   issues: read
 
 concurrency:
-  group: p0-238-lane23-runtime-restore
-  cancel-in-progress: false
+  group: p0-238-lane1-runtime-restore
+  cancel-in-progress: true
 
 jobs:
   restore:
     runs-on: [self-hosted, hyperliquid]
-    timeout-minutes: 25
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
         with:
@@ -24,7 +24,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Sync production source and assert safety
+      - name: Sync current main and assert shadow-only safety
         shell: bash
         run: |
           set -euo pipefail
@@ -32,80 +32,109 @@ jobs:
           sudo git -C /root/hyperliquid-copy-engine fetch origin main
           sudo git -C /root/hyperliquid-copy-engine reset --hard origin/main
           test "$(git rev-parse HEAD)" = "$(sudo git -C /root/hyperliquid-copy-engine rev-parse HEAD)"
+          cd /root/hyperliquid-copy-engine
+          for unit in \
+            hyperliquid-shadow-validation.service \
+            hyperliquid-wide-trade-watch-live.service \
+            hyperliquid-wide-fill-enrichment-live.service \
+            hyperliquid-universe-scout.service \
+            hyperliquid-profitability.service \
+            hyperliquid-wallet-research.service \
+            hyperliquid-selective-shadow.service \
+            hyperliquid-wide-live-scoreboard.service; do
+            grep -q 'REAL_TRADING_ENABLED=NO' "deploy/systemd/$unit"
+          done
           echo "MAIN_HEAD=$(git rev-parse HEAD)"
           echo REAL_TRADING_ENABLED=NO
           echo POLYMARKET_TOUCHED=NO
 
-      - name: Repair and prove Lane 2 identity-to-shadow handoff
+      - name: Restore persistent Lane 1 producers without blocking on scorer lock
         shell: bash
         run: |
           set -euo pipefail
           cd /root/hyperliquid-copy-engine
-          for unit in hyperliquid-invo-wallet-identifier.service hyperliquid-invo-verified-shadow-sync.service; do
-            grep -q 'REAL_TRADING_ENABLED=NO' "deploy/systemd/$unit"
+          units=(
+            hyperliquid-shadow-validation.service
+            hyperliquid-wide-trade-watch-live.service
+            hyperliquid-wide-fill-enrichment-live.service
+            hyperliquid-universe-scout.service
+            hyperliquid-universe-scout.timer
+            hyperliquid-profitability.service
+            hyperliquid-profitability.timer
+            hyperliquid-wallet-research.service
+            hyperliquid-wallet-research.timer
+            hyperliquid-selective-shadow.service
+            hyperliquid-selective-shadow.timer
+            hyperliquid-wide-live-scoreboard.service
+            hyperliquid-wide-live-scoreboard.timer
+          )
+          for unit in "${units[@]}"; do
             sudo install -m 0644 "deploy/systemd/$unit" "/etc/systemd/system/$unit"
           done
           sudo systemctl daemon-reload
-          sudo systemctl reset-failed \
-            hyperliquid-external-coverage.service \
-            hyperliquid-external-resolver.service \
-            hyperliquid-invo-wallet-identifier.service \
-            hyperliquid-invo-verified-shadow-sync.service || true
-          sudo systemctl start hyperliquid-external-coverage.service
-          sudo systemctl start hyperliquid-external-resolver.service
-          sudo systemctl start hyperliquid-invo-wallet-identifier.service
-          test "$(systemctl is-failed hyperliquid-invo-wallet-identifier.service || true)" != failed
-          sudo systemctl start hyperliquid-invo-verified-shadow-sync.service
-          test "$(systemctl is-failed hyperliquid-invo-verified-shadow-sync.service || true)" != failed
-          identities=/var/lib/hyperliquid-copy-engine/invo/identified_wallets.json
-          sudo test -s "$identities"
-          sudo python3 - <<'PY'
-          import json
-          from pathlib import Path
-          p=json.loads(Path('/var/lib/hyperliquid-copy-engine/invo/identified_wallets.json').read_text())
-          print('LANE2_PUBLICATION', {k:p.get(k) for k in ('verified_count','quarantined_identity_count','identity_conflicts')})
-          if p.get('verified_count',0) < 1:
-              raise SystemExit('Lane2 has no unaffected verified identity')
-          if p.get('safety',{}).get('auto_trading_promotion') is not False:
-              raise SystemExit('Lane2 live-safety flag invalid')
-          conflicts=p.get('identity_conflicts') or []
-          if conflicts and not any(c.get('status')=='QUARANTINED_CONFLICTING_VERIFIED_PROOFS' for c in conflicts):
-              raise SystemExit('Lane2 conflicts exist without explicit quarantine')
-          PY
-          echo '=== LANE2 RECENT SHADOW SURFACES ==='
-          sudo find /var/lib/hyperliquid-copy-engine /mnt/HC_Volume_106576526/hyperliquid/shadow -maxdepth 6 -type f \
-            \( -iname '*verified*' -o -iname '*shadow*' -o -iname '*decision*' -o -iname '*execution*' -o -iname '*position*' -o -iname '*pnl*' \) \
-            -printf '%T@ %TY-%Tm-%TdT%TH:%TM:%TSZ %s %p\n' 2>/dev/null | sort -nr | head -n 80 || true
-          echo LANE2_HANDOFF=PASS
+          sudo systemctl reset-failed hyperliquid-shadow-validation.service hyperliquid-wide-trade-watch-live.service hyperliquid-wide-fill-enrichment-live.service hyperliquid-universe-scout.service hyperliquid-selective-shadow.service || true
+          sudo systemctl enable --now hyperliquid-shadow-validation.service hyperliquid-wide-trade-watch-live.service hyperliquid-wide-fill-enrichment-live.service
+          sudo systemctl enable --now hyperliquid-universe-scout.timer hyperliquid-profitability.timer hyperliquid-wallet-research.timer hyperliquid-selective-shadow.timer hyperliquid-wide-live-scoreboard.timer
+          timeout 120 sudo systemctl start hyperliquid-universe-scout.service
+          sudo systemctl start --no-block hyperliquid-selective-shadow.service
+          echo LANE1_RESTORE_DISPATCHED=PASS
 
-      - name: Repair and prove Lane 3 direct notification collector
+      - name: Prove persistent liveness and upstream freshness
+        shell: bash
+        run: |
+          set -euo pipefail
+          for unit in hyperliquid-shadow-validation.service hyperliquid-wide-trade-watch-live.service hyperliquid-wide-fill-enrichment-live.service; do
+            active="$(systemctl is-active "$unit" || true)"
+            failed="$(systemctl is-failed "$unit" || true)"
+            echo "DAEMON $unit active=$active failed=$failed"
+            test "$active" = active
+            test "$failed" != failed
+          done
+          for timer in hyperliquid-universe-scout.timer hyperliquid-profitability.timer hyperliquid-wallet-research.timer hyperliquid-selective-shadow.timer hyperliquid-wide-live-scoreboard.timer; do
+            enabled="$(systemctl is-enabled "$timer" || true)"
+            active="$(systemctl is-active "$timer" || true)"
+            echo "TIMER $timer enabled=$enabled active=$active"
+            test "$enabled" = enabled
+            test "$active" = active
+          done
+          echo '=== TIMER SCHEDULE ==='
+          systemctl list-timers --all --no-pager | grep -E 'hyperliquid-(universe-scout|profitability|wallet-research|selective-shadow|wide-live-scoreboard)' || true
+          echo '=== ONESHOT STATES ==='
+          for svc in hyperliquid-universe-scout.service hyperliquid-selective-shadow.service; do
+            systemctl show "$svc" -p Type -p ActiveState -p SubState -p Result -p ExecMainStatus --no-pager
+            test "$(systemctl is-failed "$svc" || true)" != failed
+          done
+          now="$(date +%s)"
+          for f in /mnt/HC_Volume_106576526/hyperliquid/discovery/universe_state.json /mnt/HC_Volume_106576526/hyperliquid/discovery/universe_events.json /mnt/HC_Volume_106576526/hyperliquid/shadow/wallets.json; do
+            sudo test -s "$f"
+            m="$(sudo stat -c %Y "$f")"
+            age=$((now-m))
+            echo "FRESHNESS path=$f age_seconds=$age size=$(sudo stat -c %s "$f")"
+            test "$age" -lt 1800
+          done
+          echo LANE1_PERSISTENT_LIVENESS=PASS
+
+      - name: Prove challenger-to-prospective handoff snapshot
         shell: bash
         run: |
           set -euo pipefail
           cd /root/hyperliquid-copy-engine
-          if ! curl -fsS --max-time 4 http://127.0.0.1:8787/health >/tmp/lane3-health.json 2>/dev/null; then
-            sudo bash scripts/deploy_invo_notification_executor_self_hosted.sh
-          fi
-          sudo systemctl restart hyperliquid-invo-notification-executor.service
-          sleep 8
-          health="$(curl -fsS --max-time 4 http://127.0.0.1:8787/health)"
-          echo "LANE3_HEALTH=$health"
-          echo "$health" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["ok"] and d["initialized"] and not d["live"]'
-          sudo systemctl is-active --quiet hyperliquid-invo-notification-executor.service
-          audit=/var/lib/hyperliquid-copy-engine/invo-notification-executor/audit.jsonl
-          population=/var/lib/hyperliquid-copy-engine/invo-notification-executor/trader-population.json
-          sudo test -s "$population"
-          echo '=== LANE3 POPULATION ==='
-          sudo tail -c 12000 "$population" || true
-          echo
-          echo '=== LANE3 AUDIT TAIL ==='
-          if sudo test -f "$audit"; then sudo tail -n 120 "$audit"; fi
-          echo '=== LANE3 RECENT SHADOW SURFACES ==='
-          sudo find /var/lib/hyperliquid-copy-engine/invo-notification-executor -maxdepth 6 -type f \
-            -printf '%T@ %TY-%Tm-%TdT%TH:%TM:%TSZ %s %p\n' 2>/dev/null | sort -nr | head -n 80 || true
-          echo LANE3_COLLECTOR=PASS
+          sudo -H .venv/bin/python scripts/prospective_champion_lane.py
+          sudo python3 - <<'PY'
+          import json
+          from pathlib import Path
+          q=json.loads(Path('/root/hyperliquid-audit/funnel/challenger_queue.json').read_text())
+          r=json.loads(Path('/root/hyperliquid-audit/prospective-champions/report.json').read_text())
+          print('LANE1_COUNTS', q.get('counts'))
+          print('LANE1_REPORT', {k:r.get(k) for k in ('challenger_count','prospective_shadow_count','approved_count','age_hours','real_trading')})
+          if q.get('real_trading') is not False or r.get('real_trading') is not False:
+              raise SystemExit('Lane1 safety flag invalid')
+          if q.get('counts',{}).get('challenger',0) < 1:
+              raise SystemExit('Lane1 has no challenger')
+          PY
+          echo LANE1_HANDOFF_SNAPSHOT=PASS
 
-      - name: Cross-lane safety and current runtime
+      - name: Final safety proof
         if: always()
         shell: bash
         run: |
@@ -113,4 +142,3 @@ jobs:
           test "${REAL_TRADING_ENABLED:-NO}" != YES
           echo REAL_TRADING_ENABLED=NO
           echo POLYMARKET_TOUCHED=NO
-          sudo -H /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py --status || true
