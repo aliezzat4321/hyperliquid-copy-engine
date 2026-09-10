@@ -1283,6 +1283,9 @@ def test_cycle_blocks_only_invalid_acceptance_evidence_task(tmp_path):
     team.reconcile_parent_finalizers = lambda: False
     team.sync_runtime_checkpoint = lambda: None
     team.kick_trello_reconciliation = lambda: None
+    # This test isolates acceptance-evidence failure semantics rather than queue admission.
+    team.claim_ready_issue = lambda: False
+    team.promote_queued_issue = lambda: False
 
     team.cycle()
 
@@ -1479,7 +1482,7 @@ def test_active_task_prevents_duplicate_queue_claim(tmp_path):
     ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
     ledger.create_task(
         issue_number=120, task_type="BUILD", agent="CODEX_CHATGPT",
-        model_class="CODEX_DEFAULT", task_class="ROUTINE",
+        model_class="CODEX_DEFAULT", task_class="ROUTINE", status="RUNNING",
     )
     team = object.__new__(orch.Orchestrator)
     team.ledger = ledger
@@ -1542,3 +1545,68 @@ def test_newly_blocked_task_clears_queue_state_and_is_not_reclaimed(tmp_path):
     assert task["failure_class"] != "OWNER_AUTH_REQUIRED"
     assert {x["name"] for x in issue["labels"]} == {labels["pending"]}
     assert team.promote_queued_issue() is False
+
+
+
+def test_p0_277_scheduler_reconciliation_regressions(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    false_owner = ledger.create_task(
+        issue_number=91, task_type="WAITING_CI", agent="MANAGER", model_class="NONE",
+        task_class="ROUTINE", status="BLOCKED", failure_class="OWNER_AUTH_REQUIRED",
+        last_error="protected AI-control-plane change lacks AI_TEAM_PROTECTED_CHANGE=YES",
+    )
+    assert orch.classify_recovery_failure(ledger.get(false_owner)) == "PROTECTED_PATH_ATTEMPT"
+    assert ledger.pending_owner_action() is None
+
+    retry = ledger.create_task(
+        issue_number=146, task_type="PRODUCTION_VALIDATION", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", task_class="ROUTINE", status="RETRY",
+        retry_at=orch.utcnow(), last_error="awaiting deterministic phase runner evidence",
+    )
+    pending = ledger.create_task(
+        issue_number=277, task_type="BUILD", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", task_class="ROUTINE", status="PENDING",
+    )
+    assert ledger.due()["id"] == pending
+    assert ledger.has_queue_claim_conflict() is False
+    ledger.update(pending, status="RUNNING")
+    assert ledger.has_queue_claim_conflict() is True
+    ledger.update(pending, status="DONE")
+    assert ledger.get(retry)["status"] == "RETRY"
+
+
+def test_p0_277_due_closed_issue_is_retired_without_execution(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    task_id = ledger.create_task(
+        issue_number=146, task_type="PRODUCTION_VALIDATION", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", task_class="ROUTINE", status="RETRY",
+        retry_at=orch.utcnow(), last_error="awaiting deterministic phase runner evidence",
+    )
+
+    class GH:
+        def issue(self, number):
+            assert number == 146
+            return {"number": 146, "state": "closed"}
+
+    class Runtime:
+        def event(self, *args, **kwargs):
+            pass
+
+    team = object.__new__(orch.Orchestrator)
+    team.ledger, team.gh, team.runtime = ledger, GH(), Runtime()
+    team.reap_stale_child = lambda task: None
+    team.sync_runtime_checkpoint = lambda: True
+    team.kick_trello_reconciliation = lambda: None
+    team.migrate_legacy_remediation = lambda: None
+    team.reconcile_recovery = lambda: None
+    team.reconcile_completion_rollout = lambda: None
+    team.reconcile_handoffs = lambda: None
+    team.reconcile_parent_finalizers = lambda: False
+    team.claim_ready_issue = lambda: False
+    team.promote_queued_issue = lambda: False
+    team.cycle()
+    retired = ledger.get(task_id)
+    assert retired["status"] == "DONE"
+    assert retired["last_error"] == "OBSOLETE_CLOSED_ISSUE"
+    assert retired["lifecycle_phase"] == "OBSOLETE"
+    assert ledger.due() is None
