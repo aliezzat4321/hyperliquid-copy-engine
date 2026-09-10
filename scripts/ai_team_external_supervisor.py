@@ -70,13 +70,26 @@ def parse_time(value: Any) -> dt.datetime | None:
 
 
 def run(cmd: list[str], *, timeout: int = 30) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        cmd,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    try:
+        return subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = (
+            exc.stdout.decode(errors="replace")
+            if isinstance(exc.stdout, bytes)
+            else (exc.stdout or "")
+        )
+        stderr = (
+            exc.stderr.decode(errors="replace")
+            if isinstance(exc.stderr, bytes)
+            else (exc.stderr or "")
+        )
+        return subprocess.CompletedProcess(cmd, 124, stdout, stderr or "command timed out")
 
 
 def load_state() -> dict[str, Any]:
@@ -238,6 +251,17 @@ def prerequisites() -> list[str]:
     return missing
 
 
+def local_control_fault(systemd: dict[str, Any]) -> tuple[str | None, str | None]:
+    if not systemd["timer_enabled"] or not systemd["timer_active"]:
+        return "ORCHESTRATOR_TIMER_DOWN", "orchestrator timer is not enabled+active"
+    if systemd["service_active"] and systemd["service_age_seconds"] > SERVICE_HANG_SECONDS:
+        return (
+            "ORCHESTRATOR_SERVICE_HUNG",
+            f"orchestrator service active for {systemd['service_age_seconds']:.0f}s",
+        )
+    return None, None
+
+
 def determine_fault(
     *,
     state: dict[str, Any],
@@ -245,14 +269,9 @@ def determine_fault(
     systemd: dict[str, Any],
     now: dt.datetime,
 ) -> tuple[str | None, str | None]:
-    if not systemd["timer_enabled"] or not systemd["timer_active"]:
-        return "ORCHESTRATOR_TIMER_DOWN", "orchestrator timer is not enabled+active"
-
-    if systemd["service_active"] and systemd["service_age_seconds"] > SERVICE_HANG_SECONDS:
-        return (
-            "ORCHESTRATOR_SERVICE_HUNG",
-            f"orchestrator service active for {systemd['service_age_seconds']:.0f}s",
-        )
+    local_fault, local_detail = local_control_fault(systemd)
+    if local_fault is not None:
+        return local_fault, local_detail
 
     heartbeat = parsed.get("heartbeat")
     if isinstance(heartbeat, dt.datetime):
@@ -342,16 +361,20 @@ def recover(systemd: dict[str, Any], *, kind: str) -> tuple[str, str]:
         actions.append("hung-service-stopped")
 
     run(["systemctl", "reset-failed", SERVICE], timeout=10)
-    cp = run(["systemctl", "start", SERVICE], timeout=180)
+    cp = run(["systemctl", "start", "--no-block", SERVICE], timeout=30)
     if cp.returncode != 0:
         return "FAILED", f"orchestrator start failed: {(cp.stderr or cp.stdout)[-1200:]}"
-    actions.append("orchestrator-cycle-started")
+    actions.append("orchestrator-cycle-queued")
     return "TRIGGERED", ",".join(actions)
 
 
 def record_recovery_outcome(
-    incident: dict[str, Any], state: dict[str, Any], *, outcome_state: str,
-    outcome: str, now: dt.datetime
+    incident: dict[str, Any],
+    state: dict[str, Any],
+    *,
+    outcome_state: str,
+    outcome: str,
+    now: dt.datetime,
 ) -> None:
     if outcome_state != "DEFERRED":
         incident["attempts"] = int(incident.get("attempts") or 0) + 1
@@ -396,22 +419,27 @@ def main(argv: list[str] | None = None) -> int:
             print("MISSING_PREREQUISITES=" + ",".join(missing))
             return 2
 
-        body, error = fetch_runtime_issue()
         systemd = service_snapshot(now)
         state["last_systemd"] = systemd
-        if error or body is None:
-            state["last_error"] = f"runtime status fetch failed: {error}"
-            save_state(state)
-            print("SUPERVISOR_STATE=DEPENDENCY_WAIT")
-            print("GITHUB_STATUS_FETCH=FAILED")
-            return 0
+        local_fault, local_detail = local_control_fault(systemd)
+        if local_fault is not None:
+            parsed = {"heartbeat": None, "payload": {}}
+            fault, detail = local_fault, local_detail
+        else:
+            body, error = fetch_runtime_issue()
+            if error or body is None:
+                state["last_error"] = f"runtime status fetch failed: {error}"
+                save_state(state)
+                print("SUPERVISOR_STATE=DEPENDENCY_WAIT")
+                print("GITHUB_STATUS_FETCH=FAILED")
+                return 0
+            parsed = parse_runtime_body(body)
+            fault, detail = determine_fault(state=state, parsed=parsed, systemd=systemd, now=now)
 
-        parsed = parse_runtime_body(body)
         heartbeat = parsed.get("heartbeat")
         state["last_runtime_heartbeat"] = (
             iso(heartbeat) if isinstance(heartbeat, dt.datetime) else None
         )
-        fault, detail = determine_fault(state=state, parsed=parsed, systemd=systemd, now=now)
         if fault is None:
             healthy_state(state, now, systemd)
             state["last_error"] = None

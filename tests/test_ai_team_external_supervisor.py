@@ -50,9 +50,7 @@ def test_parse_runtime_body_extracts_payload_and_heartbeat():
 def test_stale_runtime_status_is_fault_even_when_timer_is_alive():
     now = dt.datetime(2026, 9, 10, 15, 10, tzinfo=dt.UTC)
     parsed = sup.parse_runtime_body(body("2026-09-10T15:00:00Z"))
-    fault, detail = sup.determine_fault(
-        state={}, parsed=parsed, systemd=healthy_systemd(), now=now
-    )
+    fault, detail = sup.determine_fault(state={}, parsed=parsed, systemd=healthy_systemd(), now=now)
     assert fault == "RUNTIME_STATUS_STALE"
     assert "stale" in detail
 
@@ -160,9 +158,9 @@ def test_incident_fingerprint_ignores_heartbeat_and_transient_service_state():
     a = healthy_systemd()
     b = healthy_systemd()
     b["service_active"] = True
-    assert sup.incident_fingerprint(
-        "ACTIONABLE_NO_PROGRESS", first, a
-    ) == sup.incident_fingerprint("ACTIONABLE_NO_PROGRESS", second, b)
+    assert sup.incident_fingerprint("ACTIONABLE_NO_PROGRESS", first, a) == sup.incident_fingerprint(
+        "ACTIONABLE_NO_PROGRESS", second, b
+    )
 
 
 def test_deferred_recovery_does_not_burn_budget():
@@ -176,4 +174,25 @@ def test_deferred_recovery_does_not_burn_budget():
     assert "last_recovery_at" not in incident
     assert state["last_error"] is None
 
+
 # Regression coverage above intentionally keeps external recovery bounded and independent.
+
+
+def test_local_control_fault_does_not_require_github_payload():
+    systemd = healthy_systemd()
+    systemd["timer_active"] = False
+    fault, detail = sup.local_control_fault(systemd)
+    assert fault == "ORCHESTRATOR_TIMER_DOWN"
+    assert "timer" in detail
+
+
+def test_timeout_is_converted_to_bounded_failed_command(monkeypatch):
+    import subprocess
+
+    def boom(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=["systemctl"], timeout=1, stderr="late")
+
+    monkeypatch.setattr(sup.subprocess, "run", boom)
+    cp = sup.run(["systemctl", "start", "x"], timeout=1)
+    assert cp.returncode == 124
+    assert "late" in cp.stderr
