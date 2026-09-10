@@ -1,4 +1,4 @@
-name: ai-team-codex-preflight-fix
+name: p0-277-scheduler-starvation-repair
 
 on:
   push:
@@ -9,55 +9,95 @@ permissions:
   contents: write
 
 jobs:
-  patch:
+  repair:
     runs-on: [self-hosted, linux]
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: codex/126-ai-orchestrator
+          ref: manager/277-scheduler-reconciliation-clean
           fetch-depth: 0
-      - name: Add fail-fast Codex host preflight
+          persist-credentials: true
+
+      - name: Apply starvation-safe durable priority repair
         shell: bash
         run: |
           set -euo pipefail
+          test "$(git rev-parse HEAD)" = "b534a0869502789458164b74b491aa7f46996f99"
           python3 - <<'PY'
           from pathlib import Path
 
-          path = Path('scripts/ai_team_orchestrator.py')
+          path = Path("scripts/ai_team_orchestrator.py")
           text = path.read_text()
-          helper = '''\n\ndef codex_runtime_preflight(\n    codex_path: Path = Path("/usr/local/bin/codex"),\n) -> Path:\n    """Refuse a model call if Codex or its required Code Mode host is missing."""\n    if not codex_path.is_file() or not os.access(codex_path, os.X_OK):\n        raise RuntimeError(f"Codex CLI missing or not executable: {codex_path}")\n    host = codex_path.with_name("codex-code-mode-host")\n    if not host.is_file() or not os.access(host, os.X_OK):\n        raise RuntimeError(\n            "Codex Code Mode host missing or not executable; refusing model call: "\n            f"{host}"\n        )\n    return host\n'''
-          anchor = '\n\ndef parse_codex_stream('
-          if 'def codex_runtime_preflight(' not in text:
-              if text.count(anchor) != 1:
-                  raise SystemExit('parse_codex_stream anchor mismatch')
-              text = text.replace(anchor, helper + anchor, 1)
 
-          call = '''        try:\n            codex_runtime_preflight()\n        except RuntimeError as exc:\n            self.block(task, f"CODEX_RUNTIME_PREFLIGHT: {exc}")\n            return\n'''
-          handle_anchor = '''        if str(issue.get("author_association") or "") not in self.trusted:\n            self.block(task, "issue author association no longer trusted")\n            return\n'''
-          if 'CODEX_RUNTIME_PREFLIGHT:' not in text:
-              if text.count(handle_anchor) != 1:
-                  raise SystemExit('handle_codex trust anchor mismatch')
-              text = text.replace(handle_anchor, handle_anchor + call, 1)
+          old = '''              task_class TEXT NOT NULL,\n              status TEXT NOT NULL,\n'''
+          new = '''              task_class TEXT NOT NULL,\n              queue_priority INTEGER NOT NULL DEFAULT 0,\n              status TEXT NOT NULL,\n'''
+          if old not in text:
+              raise SystemExit("tasks schema anchor mismatch")
+          text = text.replace(old, new, 1)
+
+          old = '''        for name in ("limit_text", "systemd_unit", "lifecycle_phase",\n                     "completion_contract_json", "evidence_json", "failure_class",\n                     "recovery_fingerprint", "recovery_attempt", "last_progress_at",\n                     "next_action"):\n            if name not in columns:\n                self.db.execute(f"ALTER TABLE tasks ADD COLUMN {name} TEXT")\n        self.db.commit()\n'''
+          new = '''        for name in ("limit_text", "systemd_unit", "lifecycle_phase",\n                     "completion_contract_json", "evidence_json", "failure_class",\n                     "recovery_fingerprint", "recovery_attempt", "last_progress_at",\n                     "next_action"):\n            if name not in columns:\n                self.db.execute(f"ALTER TABLE tasks ADD COLUMN {name} TEXT")\n        if "queue_priority" not in columns:\n            self.db.execute(\n                "ALTER TABLE tasks ADD COLUMN queue_priority INTEGER NOT NULL DEFAULT 0"\n            )\n        self.db.commit()\n'''
+          if old not in text:
+              raise SystemExit("schema migration anchor mismatch")
+          text = text.replace(old, new, 1)
+
+          old = '''            "task_class": kw.get("task_class", "ROUTINE"),\n            "status": kw.get("status", "PENDING"),\n'''
+          new = '''            "task_class": kw.get("task_class", "ROUTINE"),\n            "queue_priority": int(kw.get("queue_priority", 0)),\n            "status": kw.get("status", "PENDING"),\n'''
+          if old not in text:
+              raise SystemExit("create_task anchor mismatch")
+          text = text.replace(old, new, 1)
+
+          old = '''               CASE WHEN status='PENDING' THEN updated_at END DESC,\n               CASE WHEN status!='PENDING' THEN COALESCE(retry_at,updated_at,created_at) END ASC,\n               created_at DESC\n'''
+          new = '''               CASE WHEN status='PENDING' THEN COALESCE(queue_priority, 0) END ASC,\n               CASE WHEN status='PENDING' THEN created_at END ASC,\n               CASE WHEN status!='PENDING' THEN COALESCE(retry_at,updated_at,created_at) END ASC,\n               created_at ASC\n'''
+          if old not in text:
+              raise SystemExit("due ordering anchor mismatch")
+          text = text.replace(old, new, 1)
+
+          old = '''            body = str(issue.get("body") or "")\n            try:\n                route = parse_initial_route(body, self.cfg)\n                completion_contract = self.completion_contract(issue)\n'''
+          new = '''            body = str(issue.get("body") or "")\n            metadata = queue_metadata(body)\n            queue_priority = metadata[0] if metadata else 0\n            try:\n                route = parse_initial_route(body, self.cfg)\n                completion_contract = self.completion_contract(issue)\n'''
+          if old not in text:
+              raise SystemExit("claim metadata anchor mismatch")
+          text = text.replace(old, new, 1)
+
+          old = '''                task_class=task_class,\n                lifecycle_phase="IMPLEMENTING",\n                completion_contract=completion_contract,\n'''
+          new = '''                task_class=task_class,\n                queue_priority=queue_priority,\n                lifecycle_phase="IMPLEMENTING",\n                completion_contract=completion_contract,\n'''
+          if old not in text:
+              raise SystemExit("claim create_task anchor mismatch")
+          text = text.replace(old, new, 1)
+
           path.write_text(text)
 
-          tests = Path('tests/test_ai_team_orchestrator.py')
+          tests = Path("tests/test_ai_team_orchestrator.py")
           t = tests.read_text()
-          if 'test_codex_runtime_preflight_requires_companion_host' not in t:
-              t += '''\n\ndef test_codex_runtime_preflight_requires_companion_host(tmp_path):\n    codex = tmp_path / "codex"\n    codex.write_text("#!/bin/sh\\n")\n    codex.chmod(0o755)\n    with pytest.raises(RuntimeError, match="Code Mode host missing"):\n        orch.codex_runtime_preflight(codex)\n\n    host = tmp_path / "codex-code-mode-host"\n    host.write_text("#!/bin/sh\\n")\n    host.chmod(0o755)\n    assert orch.codex_runtime_preflight(codex) == host\n'''
+          marker = "test_due_pending_priority_is_durable_and_starvation_safe"
+          if marker not in t:
+              t += '''\n\ndef test_due_pending_priority_is_durable_and_starvation_safe(tmp_path):\n    ledger = orch.Ledger(tmp_path / "priority.sqlite3")\n    low = ledger.create_task(\n        issue_number=9101, task_type="BUILD", agent="CODEX_CHATGPT",\n        model_class="CODEX_DEFAULT", queue_priority=10,\n    )\n    high = ledger.create_task(\n        issue_number=9102, task_type="BUILD", agent="CODEX_CHATGPT",\n        model_class="CODEX_DEFAULT", queue_priority=-100,\n    )\n    ledger.update(low, created_at="2026-09-10T00:00:00Z")\n    ledger.update(high, created_at="2026-09-10T00:00:01Z")\n\n    observed = []\n    for i in range(6):\n        ledger.create_task(\n            issue_number=9200 + i, task_type="BUILD", agent="CODEX_CHATGPT",\n            model_class="CODEX_DEFAULT", queue_priority=50,\n        )\n        due = ledger.due()\n        assert due is not None\n        observed.append(str(due["id"]))\n        ledger.update(str(due["id"]), status="DONE")\n\n    assert observed[0] == high\n    assert observed[1] == low\n\n\ndef test_due_pending_same_priority_uses_oldest_admission(tmp_path):\n    ledger = orch.Ledger(tmp_path / "age.sqlite3")\n    older = ledger.create_task(\n        issue_number=9301, task_type="BUILD", agent="CODEX_CHATGPT",\n        model_class="CODEX_DEFAULT", queue_priority=-20,\n    )\n    newer = ledger.create_task(\n        issue_number=9302, task_type="BUILD", agent="CODEX_CHATGPT",\n        model_class="CODEX_DEFAULT", queue_priority=-20,\n    )\n    ledger.update(older, created_at="2026-09-10T00:00:00Z")\n    ledger.update(newer, created_at="2026-09-10T00:00:01Z")\n    assert ledger.due()["id"] == older\n'''
               tests.write_text(t)
           PY
+
+      - name: Validate exact scheduler repair
+        shell: bash
+        run: |
+          set -euo pipefail
           python3 -m py_compile scripts/ai_team_orchestrator.py
+          python3 -m pytest tests/test_ai_team_orchestrator.py -q
           if command -v ruff >/dev/null 2>&1; then
-            ruff format scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
+            ruff format --check scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
             ruff check scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
           fi
-      - name: Commit patch
+          git diff --check
+          changed="$(git diff --name-only)"
+          printf '%s\n' "$changed"
+          test "$changed" = $'scripts/ai_team_orchestrator.py\ntests/test_ai_team_orchestrator.py'
+          ! git diff | grep -E 'REAL_TRADING_ENABLED[[:space:]]*=[[:space:]]*(YES|TRUE|1)|LIVE_TRADING_ENABLED[[:space:]]*=[[:space:]]*(YES|TRUE|1)'
+
+      - name: Commit repaired PR head
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'hyperliquid-ai-team'
           git config user.email 'hyperliquid-ai-team@users.noreply.github.com'
           git add scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
-          git commit -m 'Fail fast when Codex Code Mode host is unavailable'
-          git push origin HEAD:codex/126-ai-orchestrator
+          git commit -m 'P0 #277: make pending scheduling starvation-safe'
+          git push origin HEAD:manager/277-scheduler-reconciliation-clean
