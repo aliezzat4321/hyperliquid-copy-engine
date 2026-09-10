@@ -160,9 +160,9 @@ def test_incident_fingerprint_ignores_heartbeat_and_transient_service_state():
     a = healthy_systemd()
     b = healthy_systemd()
     b["service_active"] = True
-    assert sup.incident_fingerprint("ACTIONABLE_NO_PROGRESS", first, a) == sup.incident_fingerprint(
-        "ACTIONABLE_NO_PROGRESS", second, b
-    )
+    assert sup.incident_fingerprint(
+        "ACTIONABLE_NO_PROGRESS", first, a
+    ) == sup.incident_fingerprint("ACTIONABLE_NO_PROGRESS", second, b)
 
 
 def test_deferred_recovery_does_not_burn_budget():
@@ -175,3 +175,5 @@ def test_deferred_recovery_does_not_burn_budget():
     assert incident["attempts"] == 2
     assert "last_recovery_at" not in incident
     assert state["last_error"] is None
+
+# Regression coverage above intentionally keeps external recovery bounded and independent.
