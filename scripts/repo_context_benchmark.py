@@ -146,9 +146,7 @@ def safe_symbols(rel: str, text: str) -> set[str]:
     return result
 
 
-def local_index(
-    files: dict[str, str], sha: str, *, repository_sha: str | None = None
-) -> tuple[list[dict[str, Any]], int, float]:
+def local_index(files: dict[str, str], sha: str) -> tuple[list[dict[str, Any]], int, float]:
     started = time.perf_counter()
     index = {rel: safe_symbols(rel, text) for rel, text in files.items()}
     serialized = json.dumps(
@@ -156,8 +154,7 @@ def local_index(
         sort_keys=True,
     ).encode()
     build_ms = (time.perf_counter() - started) * 1000
-    current_sha = repository_sha if repository_sha is not None else _git("rev-parse", "HEAD")
-    if not index_is_current(sha, current_sha):
+    if not index_is_current(sha, _git("rev-parse", "HEAD")):
         raise RuntimeError("stale local context index")
     samples: list[dict[str, Any]] = []
     for task in WORKLOADS:
@@ -198,15 +195,11 @@ def graphify_probe() -> dict[str, Any]:
     }
 
 
-def run(
-    *, repository_files: dict[str, str] | None = None, repository_sha: str | None = None
-) -> dict[str, Any]:
-    sha = repository_sha if repository_sha is not None else _git("rev-parse", "HEAD")
-    files = repository_files if repository_files is not None else tracked_text()
+def run() -> dict[str, Any]:
+    sha = _git("rev-parse", "HEAD")
+    files = tracked_text()
     baseline_samples, baseline_bytes = baseline(files)
-    local_samples, index_bytes, build_ms = local_index(
-        files, sha, repository_sha=repository_sha
-    )
+    local_samples, index_bytes, build_ms = local_index(files, sha)
     baseline_summary = summarize(baseline_samples)
     local_summary = summarize(local_samples)
     reduction = 1 - (

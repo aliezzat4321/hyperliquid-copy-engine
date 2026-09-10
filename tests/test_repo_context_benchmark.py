@@ -47,7 +47,9 @@ def test_keep_decision_fails_closed_without_graphify(monkeypatch) -> None:
         for task in BENCHMARK.WORKLOADS
         for required in task["required"]
     }
-    result = BENCHMARK.run(repository_files=files, repository_sha="a" * 40)
+    monkeypatch.setattr(BENCHMARK, "tracked_text", lambda: files)
+    monkeypatch.setattr(BENCHMARK, "_git", lambda *args: "a" * 40)
+    result = BENCHMARK.run()
     assert result["decision"]["keep_added_layer"] is False
     assert result["safety"] == {
         "canonical_source": "git",
@@ -58,12 +60,12 @@ def test_keep_decision_fails_closed_without_graphify(monkeypatch) -> None:
     assert result["graphify"]["status"] == "UNAVAILABLE"
 
 
-def test_local_index_rejects_an_explicit_stale_repository_sha() -> None:
+def test_local_index_rejects_a_stale_repository_sha(monkeypatch) -> None:
+    monkeypatch.setattr(BENCHMARK, "_git", lambda *args: "b" * 40)
     try:
         BENCHMARK.local_index(
             {"example.py": "def example():\n    pass\n"},
             "a" * 40,
-            repository_sha="b" * 40,
         )
     except RuntimeError as exc:
         assert "stale" in str(exc)
