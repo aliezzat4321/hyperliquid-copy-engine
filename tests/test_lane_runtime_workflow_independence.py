@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 REPO = Path(__file__).resolve().parents[1]
 REPAIR = REPO / ".github/workflows/p0-lane-runtime-repair.yml"
 ACCEPT = REPO / ".github/workflows/p0-shadow-collection-acceptance.yml"
