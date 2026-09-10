@@ -1,0 +1,54 @@
+name: p0-277-scheduler-bootstrap-v2
+
+on:
+  push:
+    branches: [manager/277-scheduler-reconciliation-v1]
+    paths: ['.github/workflows/p0-277-scheduler-bootstrap-v2.yml']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: p0-277-scheduler-bootstrap-v2
+  cancel-in-progress: false
+
+jobs:
+  build-tested-repair:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: manager/277-scheduler-reconciliation-v1
+          fetch-depth: 0
+      - name: Apply deterministic source patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          test "$(git merge-base HEAD origin/main)" = "$(git rev-parse origin/main)"
+          python3 scripts/p0_277_bootstrap_patch.py
+          python3 -m py_compile scripts/ai_team_orchestrator.py
+          if command -v ruff >/dev/null 2>&1; then
+            ruff check scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
+          fi
+          if [[ -x /root/hyperliquid-copy-engine/.venv/bin/python ]]; then
+            /root/hyperliquid-copy-engine/.venv/bin/python -m pytest -q tests/test_ai_team_orchestrator.py
+          else
+            python3 -m pytest -q tests/test_ai_team_orchestrator.py
+          fi
+          git diff --check
+      - name: Commit only reviewed source and tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/p0-277-scheduler-bootstrap.yml
+          rm -f .github/workflows/p0-277-scheduler-bootstrap-v2.yml
+          rm -f scripts/p0_277_bootstrap_patch.py
+          git config user.name 'AI Team Supervisor'
+          git config user.email 'ai-team@localhost'
+          git add -A
+          git diff --cached --check
+          test "$(git diff --cached --name-only | sort | tr '\n' ' ')" = "scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py "
+          git commit -m 'P0 #277: fix scheduler routing and stale-state reconciliation'
+          git push origin HEAD:manager/277-scheduler-reconciliation-v1
