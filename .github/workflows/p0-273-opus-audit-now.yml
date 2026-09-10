@@ -1,18 +1,14 @@
 name: p0-273-opus-audit-now
 
-on:
+'on':
   push:
     paths:
-      - '.github/workflows/p0-273-opus-audit-now.yml'
+      - .github/workflows/p0-273-opus-audit-now.yml
   workflow_dispatch:
 
 permissions:
   contents: read
   issues: write
-
-concurrency:
-  group: p0-273-opus-audit
-  cancel-in-progress: false
 
 jobs:
   opus-audit:
@@ -23,13 +19,23 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Run Claude Opus independent audit for issue 273
+      - name: Run independent Claude Opus audit
         env:
           GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
           set -euo pipefail
           sudo git -C /root/hyperliquid-copy-engine fetch origin main
           sudo git -C /root/hyperliquid-copy-engine reset --hard origin/main
+          sudo tee /tmp/issue-273-prompt.txt >/dev/null <<'PROMPT'
+          You are Claude Opus acting as the independent senior quant and reliability auditor for Hyperliquid issue #273. Audit CURRENT main and CURRENT production runtime artifacts on this host. Do not modify code. Do not enable live trading. Do not trust stored summary metrics without independent recomputation.
+
+          Audit Lane 1 issue #93, Lane 2 issue #92, Lane 3 issue #91, and runtime collection issue #267 end-to-end. Verify no look-ahead or future-book leakage; causal timestamp semantics; point-in-time market-book correctness; explicit rejects for stale or missing depth; realistic fills, slippage, fees, funding, leverage, margin, partial fills and sizing; correct position lifecycle; independently recompute realized, unrealized and net PnL from raw inputs; dedupe and idempotency across retries/restarts; Lane 1 prospective_start_ns and challenger freeze; Lane 2 identity proof and conflict quarantine; Lane 3 notification provenance and causal decision/reject behavior; measurable data gaps and sample-bias risk; reproducible code/policy/raw-data provenance; aggregate accounting reconciliation; and real trading OFF.
+
+          Independently replay a representative stratified sample from EACH lane from raw source event plus market data through decision, fill and PnL. Any unexplained mismatch is FAIL. If fresh downstream records are insufficient, return INSUFFICIENT_EVIDENCE rather than inventing evidence.
+
+          For EACH lane return PASS, FAIL, or INSUFFICIENT_EVIDENCE; exact sampled record identifiers/paths; independent recomputations; discrepancies and severity; whether current shadow results are safe for profitability analysis; and exact scoped repairs required. Finish with an overall verdict and explicit confirmation that real trading is OFF.
+          PROMPT
           sudo bash -lc '
             set -euo pipefail
             set -a
@@ -38,18 +44,8 @@ jobs:
             cd /root/hyperliquid-copy-engine
             CLAUDE_BIN="$(command -v claude || true)"
             if [ -z "$CLAUDE_BIN" ] && [ -x /root/.local/bin/claude ]; then CLAUDE_BIN=/root/.local/bin/claude; fi
-            if [ -z "$CLAUDE_BIN" ]; then echo "Claude CLI not found" >&2; exit 2; fi
-            PROMPT=$(cat <<"EOF"
-You are the independent senior quant/reliability auditor for Hyperliquid issue #273. Work on CURRENT deployed main and CURRENT production runtime artifacts on this host. Do not modify code, do not enable live trading, and do not trust stored summary metrics without independent recomputation.
-
-Audit Lane 1 #93, Lane 2 #92, Lane 3 #91, and collection acceptance #267 end-to-end. Required checks: no look-ahead/future-book leakage/post-outcome selection; causal monotonic source/signal/receipt/decision/order-arrival timestamps; point-in-time book correctness with stale/missing depth becoming explicit rejects; realistic fills/slippage/fees/funding/leverage/margin/partial fills/sizing; position lifecycle across open/increase/reduce/close/restart; independent realized/unrealized/net PnL recomputation from raw inputs; dedupe/idempotency across restart/retry; Lane1 challenger freeze and prospective_start_ns; Lane2 identity proof and conflict quarantine correctness; Lane3 notification provenance and causal decision/reject behavior; measurable data gaps/sample-bias risk; reproducible policy/code/data provenance; aggregate accounting reconciliation; real trading OFF.
-
-Independently replay a representative stratified sample from each lane from raw source event + market data through decision/fill/PnL and compare to stored output. Any unexplained mismatch is FAIL.
-
-Return a concise but evidence-rich report with, for EACH lane separately: PASS / FAIL / INSUFFICIENT_EVIDENCE; exact sampled record identifiers/paths; independently recomputed values; discrepancies and severity; data-quality caveats; whether current shadow results may be used for profitability analysis. If a lane has insufficient fresh downstream records, say INSUFFICIENT_EVIDENCE rather than inventing evidence. Include a final overall verdict and exact scoped repairs required for every FAIL/INSUFFICIENT_EVIDENCE. Confirm REAL_TRADING_ENABLED remains OFF.
-EOF
-)
-            "$CLAUDE_BIN" -p --model opus --max-turns 40 "$PROMPT" | tee /tmp/issue-273-opus-audit.txt
+            test -n "$CLAUDE_BIN"
+            "$CLAUDE_BIN" -p --model opus --max-turns 40 "$(cat /tmp/issue-273-prompt.txt)" | tee /tmp/issue-273-opus-audit.txt
           '
           test -s /tmp/issue-273-opus-audit.txt
           gh issue comment 273 --repo aliezzat4321/hyperliquid-copy-engine --body-file /tmp/issue-273-opus-audit.txt
