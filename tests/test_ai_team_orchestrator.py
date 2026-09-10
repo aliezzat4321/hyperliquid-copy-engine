@@ -627,12 +627,15 @@ def test_normalize_worktree_ownership_never_follows_symlinks(
     monkeypatch.setattr(orch.os, "chown", fake_chown)
 
     assert orch.normalize_worktree_ownership(worktree, "agent") == (111, 222)
-    assert calls == [
-        (worktree, 111, 222, False),
-        (package, 111, 222, False),
-        (module, 111, 222, False),
-        (link, 111, 222, False),
-    ]
+    assert sorted(calls, key=str) == sorted(
+        [
+            (worktree, 111, 222, False),
+            (package, 111, 222, False),
+            (module, 111, 222, False),
+            (link, 111, 222, False),
+        ],
+        key=str,
+    )
     assert external.read_text() == "system target"
 
 
