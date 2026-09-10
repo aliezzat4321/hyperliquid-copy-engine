@@ -518,6 +518,7 @@ class Ledger:
               agent TEXT NOT NULL,
               model_class TEXT NOT NULL,
               task_class TEXT NOT NULL,
+              queue_priority INTEGER NOT NULL DEFAULT 0,
               status TEXT NOT NULL,
               branch TEXT,
               target_sha TEXT,
@@ -585,6 +586,10 @@ class Ledger:
                      "next_action"):
             if name not in columns:
                 self.db.execute(f"ALTER TABLE tasks ADD COLUMN {name} TEXT")
+        if "queue_priority" not in columns:
+            self.db.execute(
+                "ALTER TABLE tasks ADD COLUMN queue_priority INTEGER NOT NULL DEFAULT 0"
+            )
         self.db.commit()
 
     def observe_remediation(self, blocker: dict[str, Any], *, issue_number: int,
@@ -652,6 +657,7 @@ class Ledger:
             "agent": kw["agent"],
             "model_class": kw["model_class"],
             "task_class": kw.get("task_class", "ROUTINE"),
+            "queue_priority": int(kw.get("queue_priority", 0)),
             "status": kw.get("status", "PENDING"),
             "branch": kw.get("branch"),
             "target_sha": kw.get("target_sha"),
@@ -804,9 +810,10 @@ class Ledger:
                  WHEN 'WAITING_EVIDENCE_WINDOW' THEN 4
                  ELSE 5
                END,
-               CASE WHEN status='PENDING' THEN updated_at END DESC,
+               CASE WHEN status='PENDING' THEN COALESCE(queue_priority, 0) END ASC,
+               CASE WHEN status='PENDING' THEN created_at END ASC,
                CASE WHEN status!='PENDING' THEN COALESCE(retry_at,updated_at,created_at) END ASC,
-               created_at DESC
+               created_at ASC
              LIMIT 1
             """,
             (now,),
@@ -2068,6 +2075,8 @@ class Orchestrator:
             if str(issue.get("author_association") or "") not in self.trusted:
                 continue
             body = str(issue.get("body") or "")
+            metadata = queue_metadata(body)
+            queue_priority = metadata[0] if metadata else 0
             try:
                 route = parse_initial_route(body, self.cfg)
                 completion_contract = self.completion_contract(issue)
@@ -2091,6 +2100,7 @@ class Orchestrator:
                 agent=route["agent"],
                 model_class=route["model_class"],
                 task_class=task_class,
+                queue_priority=queue_priority,
                 lifecycle_phase="IMPLEMENTING",
                 completion_contract=completion_contract,
             )

@@ -1610,3 +1610,44 @@ def test_p0_277_due_closed_issue_is_retired_without_execution(tmp_path):
     assert retired["last_error"] == "OBSOLETE_CLOSED_ISSUE"
     assert retired["lifecycle_phase"] == "OBSOLETE"
     assert ledger.due() is None
+
+
+def test_due_pending_priority_is_durable_and_starvation_safe(tmp_path):
+    ledger = orch.Ledger(tmp_path / "priority.sqlite3")
+    low = ledger.create_task(
+        issue_number=9101, task_type="BUILD", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", queue_priority=10,
+    )
+    high = ledger.create_task(
+        issue_number=9102, task_type="BUILD", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", queue_priority=-100,
+    )
+    ledger.update(low, created_at="2026-09-10T00:00:00Z")
+    ledger.update(high, created_at="2026-09-10T00:00:01Z")
+    observed = []
+    for i in range(6):
+        ledger.create_task(
+            issue_number=9200 + i, task_type="BUILD", agent="CODEX_CHATGPT",
+            model_class="CODEX_DEFAULT", queue_priority=50,
+        )
+        due = ledger.due()
+        assert due is not None
+        observed.append(str(due["id"]))
+        ledger.update(str(due["id"]), status="DONE")
+    assert observed[0] == high
+    assert observed[1] == low
+
+
+def test_due_pending_same_priority_uses_oldest_admission(tmp_path):
+    ledger = orch.Ledger(tmp_path / "age.sqlite3")
+    older = ledger.create_task(
+        issue_number=9301, task_type="BUILD", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", queue_priority=-20,
+    )
+    newer = ledger.create_task(
+        issue_number=9302, task_type="BUILD", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", queue_priority=-20,
+    )
+    ledger.update(older, created_at="2026-09-10T00:00:00Z")
+    ledger.update(newer, created_at="2026-09-10T00:00:01Z")
+    assert ledger.due()["id"] == older
