@@ -1,4 +1,4 @@
-name: p0-238-harden-external-supervisor-v3
+name: p0-238-harden-external-supervisor-v4
 
 on:
   push:
@@ -37,12 +37,12 @@ jobs:
           text = path.read_text()
 
           old_run = '''def run(cmd: list[str], *, timeout: int = 30) -> subprocess.CompletedProcess[str]:\n    return subprocess.run(\n        cmd,\n        check=False,\n        capture_output=True,\n        text=True,\n        timeout=timeout,\n    )\n'''
-          new_run = '''def run(cmd: list[str], *, timeout: int = 30) -> subprocess.CompletedProcess[str]:\n    try:\n        return subprocess.run(\n            cmd,\n            check=False,\n            capture_output=True,\n            text=True,\n            timeout=timeout,\n        )\n    except subprocess.TimeoutExpired as exc:\n        stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")\n        stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")\n        return subprocess.CompletedProcess(cmd, 124, stdout, stderr or "command timed out")\n'''
+          new_run = '''def run(cmd: list[str], *, timeout: int = 30) -> subprocess.CompletedProcess[str]:\n    try:\n        return subprocess.run(\n            cmd,\n            check=False,\n            capture_output=True,\n            text=True,\n            timeout=timeout,\n        )\n    except subprocess.TimeoutExpired as exc:\n        stdout = (\n            exc.stdout.decode(errors="replace")\n            if isinstance(exc.stdout, bytes)\n            else (exc.stdout or "")\n        )\n        stderr = (\n            exc.stderr.decode(errors="replace")\n            if isinstance(exc.stderr, bytes)\n            else (exc.stderr or "")\n        )\n        return subprocess.CompletedProcess(cmd, 124, stdout, stderr or "command timed out")\n'''
           if old_run not in text:
               raise SystemExit('run anchor missing')
           text = text.replace(old_run, new_run, 1)
 
-          marker = '''def determine_fault(\n'''
+          marker = 'def determine_fault(\n'
           helper = '''def local_control_fault(systemd: dict[str, Any]) -> tuple[str | None, str | None]:\n    if not systemd["timer_enabled"] or not systemd["timer_active"]:\n        return "ORCHESTRATOR_TIMER_DOWN", "orchestrator timer is not enabled+active"\n    if systemd["service_active"] and systemd["service_age_seconds"] > SERVICE_HANG_SECONDS:\n        return (\n            "ORCHESTRATOR_SERVICE_HUNG",\n            f"orchestrator service active for {systemd['service_age_seconds']:.0f}s",\n        )\n    return None, None\n\n\n'''
           if marker not in text:
               raise SystemExit('determine anchor missing')
@@ -83,6 +83,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          ruff format scripts/ai_team_external_supervisor.py tests/test_ai_team_external_supervisor.py
           python -m py_compile scripts/ai_team_external_supervisor.py
           pytest tests/test_ai_team_external_supervisor.py -q
           ruff check scripts/ai_team_external_supervisor.py tests/test_ai_team_external_supervisor.py
