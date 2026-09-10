@@ -1162,6 +1162,7 @@ def test_parent_finalization_requires_canonical_child_success_and_is_idempotent(
     class Runtime:
         def __init__(self):
             self.events = []
+
         def event(self, kind, **payload):
             self.events.append((kind, payload))
 
@@ -1240,6 +1241,85 @@ def test_parent_finalization_continues_from_parent_merged_sha(tmp_path):
     assert [kind for kind, _ in team.runtime.events] == [
         "POST_MERGE_PHASE_ENQUEUED", "PARENT_ACCEPTANCE_CONTINUED"
     ]
+
+
+def test_quarantined_acceptance_phase_is_not_recreated_without_material_change(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    stale_id = ledger.create_task(
+        issue_number=93, task_type="PRODUCTION_VALIDATION", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", status="STALE", target_sha="a" * 40,
+        lifecycle_phase="PRODUCTION_VALIDATION",
+        completion_contract={"version": 1, "close_on_merge": False,
+                             "requirements": ["RUNTIME_PROOF"]},
+        evidence={"requirement": "RUNTIME_PROOF"},
+    )
+    issue = {
+        "number": 93, "author_association": "OWNER",
+        "body": "AI_TEAM_COMPLETION_REQUIRES=RUNTIME_PROOF",
+    }
+
+    class Runtime:
+        def __init__(self):
+            self.events = []
+        def event(self, kind, **payload):
+            self.events.append((kind, payload))
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.runtime = orch.DEFAULT_CONFIG, ledger, Runtime()
+    team.trusted = {"OWNER"}
+
+    assert team.enqueue_acceptance(issue, parent_id=None, merged_sha="a" * 40) is None
+    assert team.enqueue_acceptance(issue, parent_id=None, merged_sha="a" * 40) is None
+    tasks = ledger.db.execute(
+        "SELECT id FROM tasks WHERE issue_number=93 AND task_type='PRODUCTION_VALIDATION'"
+    ).fetchall()
+    assert [row["id"] for row in tasks] == [stale_id]
+    assert [kind for kind, _ in team.runtime.events] == [
+        "ACCEPTANCE_PHASE_QUARANTINE_PRESERVED",
+        "ACCEPTANCE_PHASE_QUARANTINE_PRESERVED",
+    ]
+
+
+def test_quarantined_acceptance_phase_retries_after_completed_scoped_repair(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    stale_id = ledger.create_task(
+        issue_number=93, task_type="PRODUCTION_VALIDATION", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", status="STALE", target_sha="a" * 40,
+        lifecycle_phase="PRODUCTION_VALIDATION",
+        evidence={"requirement": "RUNTIME_PROOF"},
+    )
+    ledger.create_task(
+        issue_number=238, task_type="REPAIR", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", status="DONE", parent_id=stale_id,
+    )
+    issue = {
+        "number": 93, "author_association": "OWNER",
+        "body": "AI_TEAM_COMPLETION_REQUIRES=RUNTIME_PROOF",
+    }
+
+    class Runtime:
+        def event(self, *args, **kwargs):
+            pass
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.runtime = orch.DEFAULT_CONFIG, ledger, Runtime()
+    team.trusted = {"OWNER"}
+
+    replacement = team.enqueue_acceptance(issue, parent_id=stale_id, merged_sha="a" * 40)
+    assert replacement is not None
+    assert replacement["id"] != stale_id
+    assert replacement["status"] == "PENDING"
+
+
+def test_future_evidence_window_counts_as_active_work(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    ledger.create_task(
+        issue_number=93, task_type="PRODUCTION_VALIDATION", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", status="WAITING_EVIDENCE_WINDOW",
+        lifecycle_phase="PRODUCTION_VALIDATION", retry_at="2099-01-01T00:00:00Z",
+    )
+    assert ledger.active_for_issue(93) is True
+    assert ledger.has_active_work() is True
 
 
 def test_cycle_blocks_only_invalid_acceptance_evidence_task(tmp_path):

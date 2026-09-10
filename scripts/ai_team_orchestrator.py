@@ -54,7 +54,10 @@ RUNTIME_STATUS_ISSUE = 130
 GIT_PUSH_REMOTE = f"git@github.com:{REPO}.git"
 MACHINE_ASSIGNMENT = "AI_TEAM_ASSIGNMENT_V1"
 MACHINE_RESULT = "AI_TEAM_RESULT_V1"
-ACTIVE_STATUSES = {"PENDING", "RETRY", "WAITING_RATE_LIMIT", "WAITING_CI", "RUNNING"}
+ACTIVE_STATUSES = {
+    "PENDING", "RETRY", "WAITING_RATE_LIMIT", "WAITING_CI", "RUNNING",
+    "WAITING_EVIDENCE_WINDOW",
+}
 TERMINAL_STATUSES = {"DONE", "FAILED", "BLOCKED", "STALE"}
 TRELLO_BRIDGE = Path("/opt/hyperliquid-ai-team/scripts/trello_team_bridge.py")
 
@@ -1854,6 +1857,23 @@ class Orchestrator:
                         return existing
                     if self.ledger.phase_is_proven(number, requirement, phase):
                         continue
+                    if str(existing["status"]) == "STALE":
+                        same_target = str(existing["target_sha"] or "") == str(
+                            merged_sha or ""
+                        )
+                        repaired = self.ledger.db.execute(
+                            "SELECT 1 FROM tasks WHERE parent_id=? AND task_type='REPAIR' "
+                            "AND status='DONE' ORDER BY updated_at DESC LIMIT 1",
+                            (str(existing["id"]),),
+                        ).fetchone()
+                        if same_target and not repaired:
+                            self.runtime.event(
+                                "ACCEPTANCE_PHASE_QUARANTINE_PRESERVED",
+                                assignment_id=existing["id"], issue=number,
+                                target_sha=merged_sha, task_type=phase,
+                                status="STALE", unrelated_work_continuing=True,
+                            )
+                            return None
                 opus_phase = phase in {"DESTRUCTIVE_REVIEW", "EVIDENCE_AUDIT", "FINAL_VERDICT"}
                 manager_phase = phase == "AUTHORIZED_APPLY"
                 task_id = self.ledger.create_task(
