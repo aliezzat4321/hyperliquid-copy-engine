@@ -1651,3 +1651,55 @@ def test_due_pending_same_priority_uses_oldest_admission(tmp_path):
     ledger.update(older, created_at="2026-09-10T00:00:00Z")
     ledger.update(newer, created_at="2026-09-10T00:00:01Z")
     assert ledger.due()["id"] == older
+
+
+def test_waiting_evidence_window_counts_as_active_work(tmp_path):
+    ledger = orch.Ledger(tmp_path / "evidence-active.sqlite3")
+    task_id = ledger.create_task(
+        issue_number=9801, task_type="POST_MERGE_EVIDENCE",
+        agent="CODEX_CHATGPT", model_class="CODEX_DEFAULT",
+    )
+    ledger.update(
+        task_id, status="WAITING_EVIDENCE_WINDOW",
+        retry_at=(dt.datetime.now(dt.UTC) + dt.timedelta(hours=1))
+        .replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+    )
+    assert ledger.active_for_issue(9801)
+    assert ledger.has_active_work()
+
+
+def test_reconcile_closed_issue_tasks_retires_stale_retry_before_due_selection(tmp_path):
+    ledger = orch.Ledger(tmp_path / "closed-reconcile.sqlite3")
+    closed_id = ledger.create_task(
+        issue_number=146, task_type="PRODUCTION_VALIDATION",
+        agent="CODEX_CHATGPT", model_class="CODEX_DEFAULT",
+        status="RETRY", queue_priority=0,
+    )
+    open_id = ledger.create_task(
+        issue_number=277, task_type="BUILD", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", status="PENDING", queue_priority=-100,
+    )
+    assert ledger.due()["id"] == open_id
+
+    class GH:
+        def issue(self, number):
+            return {"number": number, "state": "closed" if number == 146 else "open"}
+
+    class Runtime:
+        def __init__(self):
+            self.events = []
+        def event(self, name, **kwargs):
+            self.events.append((name, kwargs))
+
+    team = object.__new__(orch.Orchestrator)
+    team.ledger, team.gh, team.runtime = ledger, GH(), Runtime()
+    team.reap_stale_child = lambda task: None
+
+    assert team.reconcile_closed_issue_tasks() == 1
+    closed = ledger.get(closed_id)
+    assert closed["status"] == "DONE"
+    assert closed["last_error"] == "OBSOLETE_CLOSED_ISSUE"
+    assert closed["lifecycle_phase"] == "OBSOLETE"
+    assert ledger.get(open_id)["status"] == "PENDING"
+    assert ledger.due()["id"] == open_id
+    assert any(name == "OBSOLETE_CLOSED_TASK_RETIRED" for name, _ in team.runtime.events)
