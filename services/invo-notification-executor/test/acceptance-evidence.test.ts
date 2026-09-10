@@ -3,7 +3,8 @@ import test from 'node:test';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { Lane3AcceptanceEvidence, PopulationReport } from '../src/acceptance-evidence.js';
+import { Lane3AcceptanceEvidence } from '../src/acceptance-evidence.js';
+import type { PopulationReport } from '../src/acceptance-evidence.js';
 
 function population(discovered: number, receiving: number): PopulationReport {
   return {
