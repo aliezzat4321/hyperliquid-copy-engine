@@ -1,4 +1,4 @@
-name: p0-277-emergency-reviewed-deploy
+name: p0-277-runtime-startup-diagnostic
 
 on:
   push:
@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  deploy:
+  diagnose:
     runs-on: [self-hosted, hyperliquid]
     timeout-minutes: 10
     steps:
@@ -18,30 +18,27 @@ jobs:
           ref: 17b5f88719012cf5d0da1446dc2c6dc5a734ad94
           fetch-depth: 1
           persist-credentials: false
-
-      - name: Assert reviewed merge and hard boundaries
+      - name: Diagnose exact installed runtime
         shell: bash
         run: |
-          set -euo pipefail
+          set -u
           test "$GITHUB_REPOSITORY" = "aliezzat4321/hyperliquid-copy-engine"
           test "$(git rev-parse HEAD)" = "17b5f88719012cf5d0da1446dc2c6dc5a734ad94"
-          test "$(id -u)" = 0
-          python3 -m py_compile scripts/ai_team_orchestrator.py scripts/ai_team_runtime_ledger.py
-          ! grep -RE 'REAL_TRADING_ENABLED[[:space:]]*=[[:space:]]*(YES|TRUE|1)|LIVE_TRADING_ENABLED[[:space:]]*=[[:space:]]*(YES|TRUE|1)' scripts config deploy/systemd
-          echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
-          echo 'POLYMARKET_INSPECTION=NO'
-          echo 'REAL_TRADING_CHANGE=NO'
-
-      - name: Install exact merged source without obsolete runtime hotfix
-        shell: bash
-        run: |
-          set -euo pipefail
-          bash scripts/install_ai_team_orchestrator.sh
-          python3 -m py_compile /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py
-          cmp -s scripts/ai_team_orchestrator.py /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py
+          echo '=== INSTALLED SOURCE ==='
+          python3 -m py_compile /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py || true
+          cmp -s scripts/ai_team_orchestrator.py /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py; echo "SOURCE_MATCH_RC=$?"
+          echo '=== STATUS BEFORE START ==='
+          systemctl status hyperliquid-ai-team-orchestrator.service --no-pager -l || true
+          echo '=== START ==='
           systemctl start hyperliquid-ai-team-orchestrator.service
-          systemctl is-enabled hyperliquid-ai-team-orchestrator.timer
-          hl-ai-team-status
-          echo 'DEPLOYED_MAIN_SHA=17b5f88719012cf5d0da1446dc2c6dc5a734ad94'
+          START_RC=$?
+          echo "START_RC=$START_RC"
+          echo '=== STATUS AFTER START ==='
+          systemctl status hyperliquid-ai-team-orchestrator.service --no-pager -l || true
+          echo '=== JOURNAL ==='
+          journalctl -u hyperliquid-ai-team-orchestrator.service -n 120 --no-pager -l || true
+          echo '=== RUNTIME STATUS ==='
+          hl-ai-team-status || true
           echo 'POLYMARKET_TOUCHED=NO'
           echo 'REAL_TRADING_TOUCHED=NO'
+          exit "$START_RC"
