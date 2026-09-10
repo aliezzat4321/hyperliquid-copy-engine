@@ -196,3 +196,6 @@ def test_timeout_is_converted_to_bounded_failed_command(monkeypatch):
     cp = sup.run(["systemctl", "start", "x"], timeout=1)
     assert cp.returncode == 124
     assert "late" in cp.stderr
+
+
+# Compound local+GitHub failure coverage is part of the #238 external-supervisor gate.
