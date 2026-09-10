@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   repair:
-    runs-on: [self-hosted, linux]
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -18,13 +18,22 @@ jobs:
           ref: manager/277-scheduler-reconciliation-clean
           fetch-depth: 0
           persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -U pip
+          pip install -e '.[dev]'
 
       - name: Apply starvation-safe durable priority repair
         shell: bash
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "b534a0869502789458164b74b491aa7f46996f99"
-          python3 - <<'PY'
+          python - <<'PY'
           from pathlib import Path
 
           path = Path("scripts/ai_team_orchestrator.py")
@@ -80,12 +89,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 -m py_compile scripts/ai_team_orchestrator.py
-          python3 -m pytest tests/test_ai_team_orchestrator.py -q
-          if command -v ruff >/dev/null 2>&1; then
-            ruff format --check scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
-            ruff check scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
-          fi
+          python -m py_compile scripts/ai_team_orchestrator.py
+          pytest tests/test_ai_team_orchestrator.py -q
+          ruff format --check scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
+          ruff check scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
           git diff --check
           changed="$(git diff --name-only)"
           printf '%s\n' "$changed"
