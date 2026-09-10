@@ -1542,3 +1542,73 @@ def test_newly_blocked_task_clears_queue_state_and_is_not_reclaimed(tmp_path):
     assert task["failure_class"] != "OWNER_AUTH_REQUIRED"
     assert {x["name"] for x in issue["labels"]} == {labels["pending"]}
     assert team.promote_queued_issue() is False
+
+
+def test_failed_production_validation_is_task_local_and_other_shadow_work_promotes(
+    tmp_path,
+):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    failed_id = ledger.create_task(
+        issue_number=238, task_type="PRODUCTION_VALIDATION",
+        agent="CODEX_CHATGPT", model_class="CODEX_DEFAULT",
+        task_class="ROUTINE", status="RUNNING",
+    )
+    labels = orch.DEFAULT_CONFIG["labels"]
+    failed_issue = {
+        "number": 238,
+        "body": "AI_TEAM_AUTO_QUEUE=YES\nAI_TEAM_QUEUE_PRIORITY=-100",
+        "author_association": "OWNER",
+        "labels": [
+            {"name": labels["queued"]}, {"name": labels["ready"]},
+            {"name": labels["running"]},
+        ],
+    }
+    shadow_issue = {
+        "number": 93,
+        "body": "AI_TEAM_AUTO_QUEUE=YES\nAI_TEAM_QUEUE_PRIORITY=-59",
+        "author_association": "OWNER",
+        "labels": [{"name": labels["queued"]}],
+    }
+
+    class GH:
+        def pending_issues(self, label):
+            return [
+                issue for issue in (failed_issue, shadow_issue)
+                if any(item["name"] == label for item in issue["labels"])
+            ]
+
+        def add_labels(self, number, values):
+            issue = failed_issue if number == 238 else shadow_issue
+            issue["labels"].extend(
+                {"name": value} for value in values
+                if not any(item["name"] == value for item in issue["labels"])
+            )
+
+        def remove_label(self, number, label):
+            issue = failed_issue if number == 238 else shadow_issue
+            issue["labels"] = [item for item in issue["labels"] if item["name"] != label]
+
+    class Runtime:
+        def event(self, *args, **kwargs):
+            pass
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.gh = orch.DEFAULT_CONFIG, ledger, GH()
+    team.runtime, team.trusted = Runtime(), {"OWNER"}
+    team.sync_runtime_checkpoint = lambda: None
+    claimed = []
+    team.claim_ready_issue = lambda: claimed.append(93) or True
+
+    team.block(
+        ledger.get(failed_id),
+        "P0 #238 quarantine: broken generic acceptance wrapper evicted so "
+        "unrelated shadow work continues",
+    )
+
+    failed = ledger.get(failed_id)
+    assert failed["status"] == "STALE"
+    assert failed["failure_class"] == "SERVICE/DEPLOYMENT_FAILURE"
+    assert {item["name"] for item in failed_issue["labels"]} == {labels["pending"]}
+    assert team.promote_queued_issue() is True
+    assert claimed == [93]
+    assert labels["ready"] in {item["name"] for item in shadow_issue["labels"]}
