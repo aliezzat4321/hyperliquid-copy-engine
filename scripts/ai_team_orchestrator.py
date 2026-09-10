@@ -222,15 +222,24 @@ RECOVERY_CLASSES = {
 def classify_recovery_failure(task: sqlite3.Row | dict[str, Any]) -> str:
     """Classify stopped work from durable context; owner waits must be explicit."""
     row = dict(task)
-    if str(row.get("failure_class") or "") in RECOVERY_CLASSES:
-        return str(row["failure_class"])
+    persisted = str(row.get("failure_class") or "")
     text = str(row.get("last_error") or "").lower()
     task_type = str(row.get("task_type") or "")
+    protected_scope_mismatch = (
+        "protected ai-control-plane change lacks ai_team_protected_change=yes" in text
+    )
+    # Historical false owner classifications must self-correct from canonical error text.
+    # Missing protected-scope metadata is internal routing work, not owner authorization.
+    if persisted in RECOVERY_CLASSES and not (
+        persisted == "OWNER_AUTH_REQUIRED" and protected_scope_mismatch
+    ):
+        return persisted
+    if protected_scope_mismatch:
+        return "PROTECTED_PATH_ATTEMPT"
     if (
         re.search(r"\b(owner_auth_required|owner authorization required|auth_required)\b", text)
         or "protected_action missing/invalid repository authorization" in text
         or "protected ai-control-plane change lost trusted issue author" in text
-        or "protected ai-control-plane change lacks ai_team_protected_change=yes" in text
         or "issue author association no longer trusted" in text
         or "claude_auth_required" in text
     ):
@@ -509,6 +518,7 @@ class Ledger:
               agent TEXT NOT NULL,
               model_class TEXT NOT NULL,
               task_class TEXT NOT NULL,
+              queue_priority INTEGER NOT NULL DEFAULT 0,
               status TEXT NOT NULL,
               branch TEXT,
               target_sha TEXT,
@@ -576,6 +586,10 @@ class Ledger:
                      "next_action"):
             if name not in columns:
                 self.db.execute(f"ALTER TABLE tasks ADD COLUMN {name} TEXT")
+        if "queue_priority" not in columns:
+            self.db.execute(
+                "ALTER TABLE tasks ADD COLUMN queue_priority INTEGER NOT NULL DEFAULT 0"
+            )
         self.db.commit()
 
     def observe_remediation(self, blocker: dict[str, Any], *, issue_number: int,
@@ -643,6 +657,7 @@ class Ledger:
             "agent": kw["agent"],
             "model_class": kw["model_class"],
             "task_class": kw.get("task_class", "ROUTINE"),
+            "queue_priority": int(kw.get("queue_priority", 0)),
             "status": kw.get("status", "PENDING"),
             "branch": kw.get("branch"),
             "target_sha": kw.get("target_sha"),
@@ -720,11 +735,18 @@ class Ledger:
         ).fetchone()
 
     def pending_owner_action(self) -> str | None:
-        row = self.db.execute(
-            "SELECT last_error FROM tasks WHERE status='BLOCKED' "
-            "AND failure_class='OWNER_AUTH_REQUIRED' ORDER BY updated_at LIMIT 1"
-        ).fetchone()
-        return str(row["last_error"])[:500] if row else None
+        # Re-evaluate persisted owner blocks so old classifier bugs cannot keep
+        # publishing a false owner-action banner after routing rules are repaired.
+        rows = self.db.execute(
+            "SELECT * FROM tasks WHERE status='BLOCKED' "
+            "AND failure_class='OWNER_AUTH_REQUIRED' ORDER BY updated_at"
+        ).fetchall()
+        for row in rows:
+            probe = dict(row)
+            probe["failure_class"] = None
+            if classify_recovery_failure(probe) == "OWNER_AUTH_REQUIRED":
+                return str(row["last_error"] or "")[:500]
+        return None
 
     def child(
         self, parent_id: str, task_type: str, target_sha: str | None = None
@@ -752,6 +774,7 @@ class Ledger:
                 AND task_type IN ('BUILD','REPAIR')
                 AND pr_number IS NOT NULL
                 AND target_sha IS NOT NULL
+                AND last_error IS NULL
              ) OR (
                     status='DONE'
                 AND task_type='REVIEW'
@@ -778,7 +801,19 @@ class Ledger:
              WHERE status IN ('PENDING','RETRY','WAITING_RATE_LIMIT','WAITING_CI',
                               'WAITING_EVIDENCE_WINDOW')
                AND (retry_at IS NULL OR retry_at <= ?)
-             ORDER BY CASE status WHEN 'WAITING_CI' THEN 0 ELSE 1 END, created_at
+             ORDER BY
+               CASE status
+                 WHEN 'WAITING_CI' THEN 0
+                 WHEN 'PENDING' THEN 1
+                 WHEN 'RETRY' THEN 2
+                 WHEN 'WAITING_RATE_LIMIT' THEN 3
+                 WHEN 'WAITING_EVIDENCE_WINDOW' THEN 4
+                 ELSE 5
+               END,
+               CASE WHEN status='PENDING' THEN COALESCE(queue_priority, 0) END ASC,
+               CASE WHEN status='PENDING' THEN created_at END ASC,
+               CASE WHEN status!='PENDING' THEN COALESCE(retry_at,updated_at,created_at) END ASC,
+               created_at ASC
              LIMIT 1
             """,
             (now,),
@@ -807,13 +842,13 @@ class Ledger:
         return bool(row)
 
     def has_queue_claim_conflict(self) -> bool:
-        """Keep one active claim, except for a future provider-capacity wait."""
-        placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
+        """Only an actually running worker owns the execution claim.
+
+        Pending/retry/provider/CI/evidence waits are task-local durable states and must
+        never suppress promotion of unrelated ready lane work.
+        """
         row = self.db.execute(
-            f"SELECT 1 FROM tasks WHERE status IN ({placeholders}) "
-            "AND NOT (agent='CLAUDE' AND status='WAITING_RATE_LIMIT' "
-            "AND retry_at IS NOT NULL AND retry_at > ?) LIMIT 1",
-            (*ACTIVE_STATUSES, utcnow()),
+            "SELECT 1 FROM tasks WHERE status='RUNNING' LIMIT 1"
         ).fetchone()
         return bool(row)
 
@@ -1796,6 +1831,10 @@ class Orchestrator:
             )
             if str(exc) != "MISSING_COMPLETION_CONTRACT":
                 raise
+            # Without a canonical issue number there is nothing safe to reconcile or
+            # project. Preserve the original fail-closed parser error.
+            if issue_number is None:
+                raise
             if reconciled:
                 if any(item not in COMPLETION_REQUIREMENTS for item in reconciled):
                     raise ValueError("INVALID_RECONCILED_COMPLETION_CONTRACT") from exc
@@ -2022,13 +2061,22 @@ class Orchestrator:
 
     def claim_ready_issue(self) -> bool:
         label = self.cfg["labels"]["ready"]
-        for issue in self.gh.ready_issues(label):
+        ready = self.gh.ready_issues(label)
+
+        def ready_key(issue: dict[str, Any]) -> tuple[int, int]:
+            metadata = queue_metadata(str(issue.get("body") or ""))
+            priority = metadata[0] if metadata else 0
+            return priority, int(issue["number"])
+
+        for issue in sorted(ready, key=ready_key):
             number = int(issue["number"])
             if self.ledger.active_for_issue(number):
                 continue
             if str(issue.get("author_association") or "") not in self.trusted:
                 continue
             body = str(issue.get("body") or "")
+            metadata = queue_metadata(body)
+            queue_priority = metadata[0] if metadata else 0
             try:
                 route = parse_initial_route(body, self.cfg)
                 completion_contract = self.completion_contract(issue)
@@ -2052,6 +2100,7 @@ class Orchestrator:
                 agent=route["agent"],
                 model_class=route["model_class"],
                 task_class=task_class,
+                queue_priority=queue_priority,
                 lifecycle_phase="IMPLEMENTING",
                 completion_contract=completion_contract,
             )
@@ -2368,20 +2417,33 @@ class Orchestrator:
         self.reconcile_recovery()
         self.reconcile_completion_rollout()
         self.reconcile_handoffs()
-        if self.ledger.due() is not None:
-            self.reconcile_parent_finalizers()
+        self.reconcile_parent_finalizers()
         self.sync_runtime_checkpoint()
         self.kick_trello_reconciliation()
+        # Work-conserving invariant: waiting/retrying work never owns the global queue.
+        # Admit one READY/queued issue each cycle before choosing the next due action.
+        if not self.claim_ready_issue():
+            self.promote_queued_issue()
         task = self.ledger.due()
-        if task is None:
-            if not self.claim_ready_issue():
-                self.reconcile_parent_finalizers()
-                if not self.claim_ready_issue():
-                    self.promote_queued_issue()
-            task = self.ledger.due()
         if task is None:
             return
         try:
+            issue_state = self.gh.issue(int(task["issue_number"]))
+            if str(issue_state.get("state") or "open").lower() == "closed":
+                self.reap_stale_child(task)
+                self.ledger.update(
+                    task["id"], status="DONE", retry_at=None, systemd_unit=None,
+                    last_error="OBSOLETE_CLOSED_ISSUE", failure_class=None,
+                    lifecycle_phase="OBSOLETE",
+                    next_action="retired because canonical GitHub issue is closed",
+                )
+                self.runtime.event(
+                    "OBSOLETE_CLOSED_TASK_RETIRED", assignment_id=task["id"],
+                    issue=task["issue_number"], pr=task["pr_number"],
+                    task_type=task["task_type"], status="DONE",
+                    unrelated_work_continuing=True,
+                )
+                return
             if task["status"] == "WAITING_CI":
                 self.handle_ci(task)
             elif task["status"] == "WAITING_RATE_LIMIT" and task["agent"] == "CLAUDE":
@@ -3883,6 +3945,7 @@ that non-code work needs a CODE_CHANGE. Unknown or contradictory evidence is TER
                 self.gh.remove_label(number, self.cfg["labels"]["blocked"])
                 self.gh.remove_label(number, self.cfg["labels"]["ready"])
                 self.gh.remove_label(number, self.cfg["labels"]["queued"])
+                self.gh.remove_label(number, self.cfg["labels"]["running"])
                 self.gh.add_labels(number, [self.cfg["labels"]["pending"]])
                 self.runtime.event(
                     "TASK_QUARANTINED", assignment_id=task["id"],
@@ -3904,6 +3967,7 @@ that non-code work needs a CODE_CHANGE. Unknown or contradictory evidence is TER
             self.gh.remove_label(number, self.cfg["labels"]["pending"])
             self.gh.remove_label(number, self.cfg["labels"]["ready"])
             self.gh.remove_label(number, self.cfg["labels"]["queued"])
+            self.gh.remove_label(number, self.cfg["labels"]["running"])
             self.gh.comment(
                 number,
                 f"<!-- AI_TEAM_BLOCKED_V1\nASSIGNMENT_ID={task['id']}\n"
