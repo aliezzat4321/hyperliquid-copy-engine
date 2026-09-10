@@ -7,7 +7,7 @@ export interface RuntimeEvidenceOptions {
   historyIntervalMs: number;
   live: boolean;
   discoverySurfaces: string[];
-  evidencePolicy: unknown;
+  evidencePolicy?: unknown;
 }
 
 interface RuntimeCounters {
@@ -35,6 +35,7 @@ interface RuntimeEvidenceState {
   collectionMode: 'prospective-shadow';
   collectionIndependentOfAcceptance: true;
   discoverySurfaces: string[];
+  evidencePolicy: unknown;
   counters: RuntimeCounters;
   baselineFunnel: Record<string, number> | null;
   currentFunnel: Record<string, number> | null;
@@ -74,7 +75,7 @@ export class Lane3RuntimeEvidence {
       lastSuccessfulPollAt: null, lastHistoryAt: null, realTradingEnabled: false,
       collectionMode: 'prospective-shadow', collectionIndependentOfAcceptance: true,
       discoverySurfaces: [...new Set(options.discoverySurfaces)].sort(),
-      evidencePolicy: null,
+      evidencePolicy: options.evidencePolicy ?? null,
       counters: blankCounters(), baselineFunnel: null, currentFunnel: null,
       funnelDelta: null, assessmentQueue: [], traders: [], unresolvedExposureCount: 0,
     };
