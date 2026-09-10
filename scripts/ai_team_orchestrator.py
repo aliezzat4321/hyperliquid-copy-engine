@@ -54,7 +54,14 @@ RUNTIME_STATUS_ISSUE = 130
 GIT_PUSH_REMOTE = f"git@github.com:{REPO}.git"
 MACHINE_ASSIGNMENT = "AI_TEAM_ASSIGNMENT_V1"
 MACHINE_RESULT = "AI_TEAM_RESULT_V1"
-ACTIVE_STATUSES = {"PENDING", "RETRY", "WAITING_RATE_LIMIT", "WAITING_CI", "RUNNING"}
+ACTIVE_STATUSES = {
+    "PENDING",
+    "RETRY",
+    "WAITING_RATE_LIMIT",
+    "WAITING_CI",
+    "WAITING_EVIDENCE_WINDOW",
+    "RUNNING",
+}
 TERMINAL_STATUSES = {"DONE", "FAILED", "BLOCKED", "STALE"}
 TRELLO_BRIDGE = Path("/opt/hyperliquid-ai-team/scripts/trello_team_bridge.py")
 
@@ -2405,6 +2412,51 @@ class Orchestrator:
             return
         self.ledger.meta_set(key, "DONE")
 
+    def reconcile_closed_issue_tasks(self) -> int:
+        """Retire active work whose canonical GitHub issue is already closed.
+
+        This runs before dispatch so a closed RETRY/wait task cannot linger forever
+        behind higher-priority PENDING work or remain projected as current runtime state.
+        GitHub lookup failures are fail-safe: defer that issue and continue unrelated work.
+        """
+        placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
+        rows = self.ledger.db.execute(
+            f"SELECT * FROM tasks WHERE status IN ({placeholders}) "
+            "ORDER BY updated_at ASC LIMIT 100",
+            tuple(ACTIVE_STATUSES),
+        ).fetchall()
+        issue_states: dict[int, str] = {}
+        retired = 0
+        for task in rows:
+            number = int(task["issue_number"])
+            if number not in issue_states:
+                try:
+                    issue = self.gh.issue(number)
+                except Exception as exc:
+                    issue_states[number] = "unknown"
+                    self.runtime.event(
+                        "CLOSED_TASK_RECONCILIATION_DEFERRED",
+                        issue=number, error=str(exc)[:500],
+                    )
+                    continue
+                issue_states[number] = str(issue.get("state") or "open").lower()
+            if issue_states[number] != "closed":
+                continue
+            self.reap_stale_child(task)
+            self.ledger.update(
+                task["id"], status="DONE", retry_at=None, systemd_unit=None,
+                last_error="OBSOLETE_CLOSED_ISSUE", failure_class=None,
+                lifecycle_phase="OBSOLETE",
+                next_action="retired because canonical GitHub issue is closed",
+            )
+            self.runtime.event(
+                "OBSOLETE_CLOSED_TASK_RETIRED", assignment_id=task["id"],
+                issue=number, pr=task["pr_number"], status="OBSOLETE",
+                unrelated_work_continuing=True,
+            )
+            retired += 1
+        return retired
+
     def cycle(self) -> None:
         for stale in self.ledger.recover_interrupted():
             self.reap_stale_child(stale)
@@ -2415,6 +2467,7 @@ class Orchestrator:
             )
         self.migrate_legacy_remediation()
         self.reconcile_recovery()
+        self.reconcile_closed_issue_tasks()
         self.reconcile_completion_rollout()
         self.reconcile_handoffs()
         self.reconcile_parent_finalizers()
