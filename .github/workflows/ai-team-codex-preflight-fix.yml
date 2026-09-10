@@ -22,9 +22,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install test dependencies
-        shell: bash
         run: |
-          set -euo pipefail
           python -m pip install -U pip
           pip install -e '.[dev]'
 
@@ -38,72 +36,62 @@ jobs:
 
           path = Path("scripts/ai_team_orchestrator.py")
           text = path.read_text()
-
-          old = '''              task_class TEXT NOT NULL,\n              status TEXT NOT NULL,\n'''
-          new = '''              task_class TEXT NOT NULL,\n              queue_priority INTEGER NOT NULL DEFAULT 0,\n              status TEXT NOT NULL,\n'''
-          if old not in text:
-              raise SystemExit("tasks schema anchor mismatch")
-          text = text.replace(old, new, 1)
-
-          old = '''        for name in ("limit_text", "systemd_unit", "lifecycle_phase",\n                     "completion_contract_json", "evidence_json", "failure_class",\n                     "recovery_fingerprint", "recovery_attempt", "last_progress_at",\n                     "next_action"):\n            if name not in columns:\n                self.db.execute(f"ALTER TABLE tasks ADD COLUMN {name} TEXT")\n        self.db.commit()\n'''
-          new = '''        for name in ("limit_text", "systemd_unit", "lifecycle_phase",\n                     "completion_contract_json", "evidence_json", "failure_class",\n                     "recovery_fingerprint", "recovery_attempt", "last_progress_at",\n                     "next_action"):\n            if name not in columns:\n                self.db.execute(f"ALTER TABLE tasks ADD COLUMN {name} TEXT")\n        if "queue_priority" not in columns:\n            self.db.execute(\n                "ALTER TABLE tasks ADD COLUMN queue_priority INTEGER NOT NULL DEFAULT 0"\n            )\n        self.db.commit()\n'''
-          if old not in text:
-              raise SystemExit("schema migration anchor mismatch")
-          text = text.replace(old, new, 1)
-
-          old = '''            "task_class": kw.get("task_class", "ROUTINE"),\n            "status": kw.get("status", "PENDING"),\n'''
-          new = '''            "task_class": kw.get("task_class", "ROUTINE"),\n            "queue_priority": int(kw.get("queue_priority", 0)),\n            "status": kw.get("status", "PENDING"),\n'''
-          if old not in text:
-              raise SystemExit("create_task anchor mismatch")
-          text = text.replace(old, new, 1)
-
-          old = '''               CASE WHEN status='PENDING' THEN updated_at END DESC,\n               CASE WHEN status!='PENDING' THEN COALESCE(retry_at,updated_at,created_at) END ASC,\n               created_at DESC\n'''
-          new = '''               CASE WHEN status='PENDING' THEN COALESCE(queue_priority, 0) END ASC,\n               CASE WHEN status='PENDING' THEN created_at END ASC,\n               CASE WHEN status!='PENDING' THEN COALESCE(retry_at,updated_at,created_at) END ASC,\n               created_at ASC\n'''
-          if old not in text:
-              raise SystemExit("due ordering anchor mismatch")
-          text = text.replace(old, new, 1)
-
-          old = '''            body = str(issue.get("body") or "")\n            try:\n                route = parse_initial_route(body, self.cfg)\n                completion_contract = self.completion_contract(issue)\n'''
-          new = '''            body = str(issue.get("body") or "")\n            metadata = queue_metadata(body)\n            queue_priority = metadata[0] if metadata else 0\n            try:\n                route = parse_initial_route(body, self.cfg)\n                completion_contract = self.completion_contract(issue)\n'''
-          if old not in text:
-              raise SystemExit("claim metadata anchor mismatch")
-          text = text.replace(old, new, 1)
-
-          old = '''                task_class=task_class,\n                lifecycle_phase="IMPLEMENTING",\n                completion_contract=completion_contract,\n'''
-          new = '''                task_class=task_class,\n                queue_priority=queue_priority,\n                lifecycle_phase="IMPLEMENTING",\n                completion_contract=completion_contract,\n'''
-          if old not in text:
-              raise SystemExit("claim create_task anchor mismatch")
-          text = text.replace(old, new, 1)
+          replacements = [
+              (
+                  '              task_class TEXT NOT NULL,\n              status TEXT NOT NULL,\n',
+                  '              task_class TEXT NOT NULL,\n              queue_priority INTEGER NOT NULL DEFAULT 0,\n              status TEXT NOT NULL,\n',
+              ),
+              (
+                  '        self.db.commit()\n\n    def observe_remediation',
+                  '        if "queue_priority" not in columns:\n            self.db.execute(\n                "ALTER TABLE tasks ADD COLUMN queue_priority INTEGER NOT NULL DEFAULT 0"\n            )\n        self.db.commit()\n\n    def observe_remediation',
+              ),
+              (
+                  '            "task_class": kw.get("task_class", "ROUTINE"),\n            "status": kw.get("status", "PENDING"),\n',
+                  '            "task_class": kw.get("task_class", "ROUTINE"),\n            "queue_priority": int(kw.get("queue_priority", 0)),\n            "status": kw.get("status", "PENDING"),\n',
+              ),
+              (
+                  "               CASE WHEN status='PENDING' THEN updated_at END DESC,\n               CASE WHEN status!='PENDING' THEN COALESCE(retry_at,updated_at,created_at) END ASC,\n               created_at DESC\n",
+                  "               CASE WHEN status='PENDING' THEN COALESCE(queue_priority, 0) END ASC,\n               CASE WHEN status='PENDING' THEN created_at END ASC,\n               CASE WHEN status!='PENDING' THEN COALESCE(retry_at,updated_at,created_at) END ASC,\n               created_at ASC\n",
+              ),
+              (
+                  '            body = str(issue.get("body") or "")\n            try:\n                route = parse_initial_route(body, self.cfg)\n',
+                  '            body = str(issue.get("body") or "")\n            metadata = queue_metadata(body)\n            queue_priority = metadata[0] if metadata else 0\n            try:\n                route = parse_initial_route(body, self.cfg)\n',
+              ),
+              (
+                  '                task_class=task_class,\n                lifecycle_phase="IMPLEMENTING",\n',
+                  '                task_class=task_class,\n                queue_priority=queue_priority,\n                lifecycle_phase="IMPLEMENTING",\n',
+              ),
+          ]
+          for old, new in replacements:
+              if old not in text:
+                  raise SystemExit(f"source anchor missing: {old[:80]!r}")
+              text = text.replace(old, new, 1)
           path.write_text(text)
 
           tests = Path("tests/test_ai_team_orchestrator.py")
           t = tests.read_text()
-
-          stale_name = "test_due_retry_dispatches_before_pending_from_newer_issue"
-          new_name = "test_due_pending_dispatches_before_stale_retry"
-          if stale_name in t:
-              start = t.index("def " + stale_name)
+          stale = "test_due_retry_dispatches_before_pending_from_newer_issue"
+          if stale in t:
+              start = t.index("def " + stale)
               end = t.find("\ndef test_", start + 4)
               if end < 0:
                   end = len(t)
               block = t[start:end]
-              expected = 'assert row["issue_number"] == 146'
-              if expected not in block:
-                  raise SystemExit("stale due-order assertion anchor mismatch")
-              block = block.replace(stale_name, new_name, 1)
-              block = block.replace(expected, 'assert row["issue_number"] == 277', 1)
+              if 'assert row["issue_number"] == 146' not in block:
+                  raise SystemExit("stale scheduler assertion anchor missing")
+              block = block.replace(stale, "test_due_pending_dispatches_before_stale_retry", 1)
+              block = block.replace('assert row["issue_number"] == 146', 'assert row["issue_number"] == 277', 1)
               t = t[:start] + block + t[end:]
-
-          marker = "test_due_pending_priority_is_durable_and_starvation_safe"
-          if marker not in t:
-              t += '''\n\ndef test_due_pending_priority_is_durable_and_starvation_safe(tmp_path):\n    ledger = orch.Ledger(tmp_path / "priority.sqlite3")\n    low = ledger.create_task(\n        issue_number=9101, task_type="BUILD", agent="CODEX_CHATGPT",\n        model_class="CODEX_DEFAULT", queue_priority=10,\n    )\n    high = ledger.create_task(\n        issue_number=9102, task_type="BUILD", agent="CODEX_CHATGPT",\n        model_class="CODEX_DEFAULT", queue_priority=-100,\n    )\n    ledger.update(low, created_at="2026-09-10T00:00:00Z")\n    ledger.update(high, created_at="2026-09-10T00:00:01Z")\n\n    observed = []\n    for i in range(6):\n        ledger.create_task(\n            issue_number=9200 + i, task_type="BUILD", agent="CODEX_CHATGPT",\n            model_class="CODEX_DEFAULT", queue_priority=50,\n        )\n        due = ledger.due()\n        assert due is not None\n        observed.append(str(due["id"]))\n        ledger.update(str(due["id"]), status="DONE")\n\n    assert observed[0] == high\n    assert observed[1] == low\n\n\ndef test_due_pending_same_priority_uses_oldest_admission(tmp_path):\n    ledger = orch.Ledger(tmp_path / "age.sqlite3")\n    older = ledger.create_task(\n        issue_number=9301, task_type="BUILD", agent="CODEX_CHATGPT",\n        model_class="CODEX_DEFAULT", queue_priority=-20,\n    )\n    newer = ledger.create_task(\n        issue_number=9302, task_type="BUILD", agent="CODEX_CHATGPT",\n        model_class="CODEX_DEFAULT", queue_priority=-20,\n    )\n    ledger.update(older, created_at="2026-09-10T00:00:00Z")\n    ledger.update(newer, created_at="2026-09-10T00:00:01Z")\n    assert ledger.due()["id"] == older\n'''
+          if "test_due_pending_priority_is_durable_and_starvation_safe" not in t:
+              t += '''\n\ndef test_due_pending_priority_is_durable_and_starvation_safe(tmp_path):\n    ledger = orch.Ledger(tmp_path / "priority.sqlite3")\n    low = ledger.create_task(\n        issue_number=9101, task_type="BUILD", agent="CODEX_CHATGPT",\n        model_class="CODEX_DEFAULT", queue_priority=10,\n    )\n    high = ledger.create_task(\n        issue_number=9102, task_type="BUILD", agent="CODEX_CHATGPT",\n        model_class="CODEX_DEFAULT", queue_priority=-100,\n    )\n    ledger.update(low, created_at="2026-09-10T00:00:00Z")\n    ledger.update(high, created_at="2026-09-10T00:00:01Z")\n    observed = []\n    for i in range(6):\n        ledger.create_task(\n            issue_number=9200 + i, task_type="BUILD", agent="CODEX_CHATGPT",\n            model_class="CODEX_DEFAULT", queue_priority=50,\n        )\n        due = ledger.due()\n        assert due is not None\n        observed.append(str(due["id"]))\n        ledger.update(str(due["id"]), status="DONE")\n    assert observed[0] == high\n    assert observed[1] == low\n\n\ndef test_due_pending_same_priority_uses_oldest_admission(tmp_path):\n    ledger = orch.Ledger(tmp_path / "age.sqlite3")\n    older = ledger.create_task(\n        issue_number=9301, task_type="BUILD", agent="CODEX_CHATGPT",\n        model_class="CODEX_DEFAULT", queue_priority=-20,\n    )\n    newer = ledger.create_task(\n        issue_number=9302, task_type="BUILD", agent="CODEX_CHATGPT",\n        model_class="CODEX_DEFAULT", queue_priority=-20,\n    )\n    ledger.update(older, created_at="2026-09-10T00:00:00Z")\n    ledger.update(newer, created_at="2026-09-10T00:00:01Z")\n    assert ledger.due()["id"] == older\n'''
           tests.write_text(t)
           PY
 
-      - name: Validate exact scheduler repair
+      - name: Format and validate exact scheduler repair
         shell: bash
         run: |
           set -euo pipefail
+          ruff format scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
           python -m py_compile scripts/ai_team_orchestrator.py
           pytest tests/test_ai_team_orchestrator.py -q
           ruff format --check scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py
