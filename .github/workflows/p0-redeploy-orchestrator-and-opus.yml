@@ -1,0 +1,91 @@
+name: p0-redeploy-orchestrator-and-opus
+
+on:
+  push:
+    paths:
+      - '.github/workflows/p0-redeploy-orchestrator-and-opus.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: p0-orchestrator-redeploy-opus
+  cancel-in-progress: false
+
+jobs:
+  repair-and-audit:
+    runs-on: self-hosted
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate clean source before deploy
+        run: |
+          set -euo pipefail
+          python3 -m py_compile scripts/ai_team_orchestrator.py scripts/ai_team_runtime_ledger.py scripts/ai_team_contract.py
+          echo "SOURCE_SYNTAX=PASS"
+
+      - name: Replace malformed deployed orchestrator from canonical main
+        run: |
+          set -euo pipefail
+          sudo systemctl stop hyperliquid-ai-team-orchestrator.service || true
+          sudo install -m 0755 scripts/ai_team_orchestrator.py /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py
+          sudo install -m 0644 scripts/ai_team_runtime_ledger.py /opt/hyperliquid-ai-team/scripts/ai_team_runtime_ledger.py
+          sudo install -m 0644 scripts/ai_team_contract.py /opt/hyperliquid-ai-team/scripts/ai_team_contract.py
+          sudo python3 -m py_compile \
+            /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py \
+            /opt/hyperliquid-ai-team/scripts/ai_team_runtime_ledger.py \
+            /opt/hyperliquid-ai-team/scripts/ai_team_contract.py
+          sudo systemctl reset-failed hyperliquid-ai-team-orchestrator.service || true
+          echo "DEPLOYED_SOURCE_SYNTAX=PASS"
+
+      - name: Prove orchestrator executes and refresh canonical checkpoint
+        run: |
+          set -euo pipefail
+          ORCH=/opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py
+          sudo timeout 60 "$ORCH" --checkpoint
+          sudo timeout 120 "$ORCH" --once
+          sudo timeout 30 "$ORCH" --status | tee /tmp/orchestrator-status-after-repair.txt
+          sudo systemctl start hyperliquid-ai-team-orchestrator.service || true
+          sleep 3
+          if sudo journalctl -u hyperliquid-ai-team-orchestrator.service --since '-2 min' --no-pager | grep -Eq 'IndentationError|SyntaxError'; then
+            echo 'ORCHESTRATOR_REPAIR=FAIL syntax error remains' >&2
+            exit 3
+          fi
+          echo "ORCHESTRATOR_REPAIR=PASS"
+
+      - name: Run Claude Opus independent audit now
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sudo bash -lc '
+            set -euo pipefail
+            set -a
+            source /etc/hyperliquid-ai-team/claude.env
+            set +a
+            cd /root/hyperliquid-copy-engine
+            git fetch origin main
+            git reset --hard origin/main
+            CLAUDE_BIN="$(command -v claude || true)"
+            if [ -z "$CLAUDE_BIN" ] && [ -x /root/.local/bin/claude ]; then CLAUDE_BIN=/root/.local/bin/claude; fi
+            test -n "$CLAUDE_BIN" || { echo "Claude CLI not found" >&2; exit 2; }
+            PROMPT=$(cat <<"EOF"
+You are Claude Opus acting as the independent senior quant/reliability auditor for Hyperliquid issue #273. Audit CURRENT main and CURRENT production runtime artifacts on this host. Do not modify code and do not enable live trading.
+
+Audit Lane 1 #93, Lane 2 #92, Lane 3 #91, and runtime collection acceptance #267 end-to-end. Verify no look-ahead/future-book leakage/post-outcome selection; causal timestamp semantics; point-in-time book correctness; explicit reject/gap behavior for stale or missing depth; execution-realistic fill/slippage/fees/funding/leverage/margin/partial-fill/sizing models; correct position lifecycle; independently recompute realized/unrealized/net PnL from raw inputs; dedupe/idempotency across restart/retry; Lane1 prospective_start_ns/freeze correctness; Lane2 identity-proof/conflict quarantine correctness; Lane3 notification provenance and causal decision/reject behavior; measurable data gaps/sample-bias; policy/code/raw-data provenance; aggregate accounting reconciliation; and real trading OFF.
+
+Independently replay a representative stratified sample from EACH lane from raw source event + market data through decision/fill/PnL. Do not trust stored summary metrics. Any unexplained mismatch is FAIL. If fresh downstream records are insufficient, return INSUFFICIENT_EVIDENCE rather than inventing evidence.
+
+For EACH lane return PASS / FAIL / INSUFFICIENT_EVIDENCE, exact sampled record identifiers/paths, independent recomputations, discrepancies/severity, whether current shadow results are safe for profitability analysis, and exact scoped repairs required. Finish with an overall verdict and explicit confirmation that real trading is OFF.
+EOF
+)
+            "$CLAUDE_BIN" -p --model opus --max-turns 40 "$PROMPT" | tee /tmp/issue-273-opus-audit.txt
+          '
+          test -s /tmp/issue-273-opus-audit.txt
+          gh issue comment 273 --repo aliezzat4321/hyperliquid-copy-engine --body-file /tmp/issue-273-opus-audit.txt
+          echo "OPUS_AUDIT_POSTED=PASS"
