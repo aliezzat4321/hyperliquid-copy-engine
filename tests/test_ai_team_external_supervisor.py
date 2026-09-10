@@ -147,3 +147,31 @@ def test_new_material_resets_no_progress_clock():
     assert current != "old"
     assert since == now
     assert state["material_since"] == "2026-09-10T15:00:00Z"
+
+
+def test_incident_fingerprint_ignores_heartbeat_and_transient_service_state():
+    first_text = body("2026-09-10T15:00:00Z")
+    second_text = first_text.replace(
+        "AI_TEAM_HEARTBEAT=2026-09-10T15:00:00Z",
+        "AI_TEAM_HEARTBEAT=2026-09-10T15:01:00Z",
+    )
+    first = sup.parse_runtime_body(first_text)
+    second = sup.parse_runtime_body(second_text)
+    a = healthy_systemd()
+    b = healthy_systemd()
+    b["service_active"] = True
+    assert sup.incident_fingerprint("ACTIONABLE_NO_PROGRESS", first, a) == sup.incident_fingerprint(
+        "ACTIONABLE_NO_PROGRESS", second, b
+    )
+
+
+def test_deferred_recovery_does_not_burn_budget():
+    now = dt.datetime(2026, 9, 10, 15, 0, tzinfo=dt.UTC)
+    incident = {"attempts": 2}
+    state = {}
+    sup.record_recovery_outcome(
+        incident, state, outcome_state="DEFERRED", outcome="service active", now=now
+    )
+    assert incident["attempts"] == 2
+    assert "last_recovery_at" not in incident
+    assert state["last_error"] is None

@@ -18,7 +18,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -279,16 +278,12 @@ def determine_fault(
 
 
 def incident_fingerprint(kind: str, parsed: dict[str, Any], systemd: dict[str, Any]) -> str:
-    heartbeat = parsed.get("heartbeat")
+    del systemd  # transient systemd/heartbeat changes must not reset the recovery budget
     payload = parsed.get("payload") if isinstance(parsed.get("payload"), dict) else {}
     raw = {
         "kind": kind,
         "main_head": payload.get("main_head"),
         "material": fingerprint_material(payload) if payload else "",
-        "timer_enabled": systemd.get("timer_enabled"),
-        "timer_active": systemd.get("timer_active"),
-        "service_active": systemd.get("service_active"),
-        "heartbeat": iso(heartbeat) if isinstance(heartbeat, dt.datetime) else None,
     }
     return hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest()
 
@@ -325,31 +320,44 @@ def persist_incident(
     return incident
 
 
-def recover(systemd: dict[str, Any], *, kind: str) -> tuple[bool, str]:
+def recover(systemd: dict[str, Any], *, kind: str) -> tuple[str, str]:
     actions: list[str] = []
     if not systemd["timer_enabled"] or not systemd["timer_active"]:
         cp = run(["systemctl", "enable", "--now", TIMER], timeout=30)
         if cp.returncode != 0:
-            return False, f"enable timer failed: {(cp.stderr or cp.stdout)[-800:]}"
+            return "FAILED", f"enable timer failed: {(cp.stderr or cp.stdout)[-800:]}"
         actions.append("timer-enabled")
 
     if systemd["service_active"]:
         if kind != "ORCHESTRATOR_SERVICE_HUNG":
-            return False, "service still active; defer recovery until hang threshold"
+            return "DEFERRED", "service still active; defer recovery until hang threshold"
         cp = run(["systemctl", "stop", SERVICE], timeout=30)
         if cp.returncode != 0:
             run(["systemctl", "kill", "--kill-who=main", SERVICE], timeout=10)
             cp = run(["systemctl", "stop", SERVICE], timeout=30)
             if cp.returncode != 0:
-                return False, f"unable to stop hung orchestrator: {(cp.stderr or cp.stdout)[-800:]}"
+                return "FAILED", (
+                    f"unable to stop hung orchestrator: {(cp.stderr or cp.stdout)[-800:]}"
+                )
         actions.append("hung-service-stopped")
 
     run(["systemctl", "reset-failed", SERVICE], timeout=10)
     cp = run(["systemctl", "start", SERVICE], timeout=180)
     if cp.returncode != 0:
-        return False, f"orchestrator start failed: {(cp.stderr or cp.stdout)[-1200:]}"
+        return "FAILED", f"orchestrator start failed: {(cp.stderr or cp.stdout)[-1200:]}"
     actions.append("orchestrator-cycle-started")
-    return True, ",".join(actions)
+    return "TRIGGERED", ",".join(actions)
+
+
+def record_recovery_outcome(
+    incident: dict[str, Any], state: dict[str, Any], *, outcome_state: str,
+    outcome: str, now: dt.datetime
+) -> None:
+    if outcome_state != "DEFERRED":
+        incident["attempts"] = int(incident.get("attempts") or 0) + 1
+        incident["last_recovery_at"] = iso(now)
+        incident["last_recovery_outcome"] = outcome
+    state["last_error"] = outcome if outcome_state == "FAILED" else None
 
 
 def healthy_state(state: dict[str, Any], now: dt.datetime, systemd: dict[str, Any]) -> None:
@@ -434,18 +442,17 @@ def main(argv: list[str] | None = None) -> int:
             print(f"RECOVERY={why}")
             return 3 if incident.get("status") == "ESCALATED" else 0
 
-        ok, outcome = recover(systemd, kind=fault)
-        incident["attempts"] = int(incident.get("attempts") or 0) + 1
-        incident["last_recovery_at"] = iso(now)
-        incident["last_recovery_outcome"] = outcome
-        state["last_error"] = None if ok else outcome
+        outcome_state, outcome = recover(systemd, kind=fault)
+        record_recovery_outcome(
+            incident, state, outcome_state=outcome_state, outcome=outcome, now=now
+        )
         save_state(state)
-        print("SUPERVISOR_STATE=RECOVERY_TRIGGERED" if ok else "SUPERVISOR_STATE=RECOVERY_DEFERRED")
+        print(f"SUPERVISOR_STATE=RECOVERY_{outcome_state}")
         print(f"FAULT={fault}")
         print(f"RECOVERY_OUTCOME={outcome}")
         print("REAL_TRADING_CHANGE=NO")
         print("POLYMARKET_TOUCHED=NO")
-        return 0 if ok else 1
+        return 0 if outcome_state in {"TRIGGERED", "DEFERRED"} else 1
 
 
 if __name__ == "__main__":
