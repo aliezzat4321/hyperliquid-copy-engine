@@ -1,0 +1,70 @@
+{
+  "baseline": {
+    "cached_input_tokens": 0,
+    "index_overhead_bytes": 0,
+    "median_input_tokens": 65404,
+    "median_latency_ms": 0.0,
+    "p90_input_tokens": 65404,
+    "p90_latency_ms": 0.0,
+    "required_file_recall": 1.0,
+    "stale_context_errors": 0
+  },
+  "decision": {
+    "gate": "median warm input/context token reduction >=40% with no correctness or safety regression",
+    "keep_added_layer": false,
+    "reason": "Graphify is unavailable and the local candidate failed both the token-reduction and required-file-recall gates.",
+    "verdict": "INCONCLUSIVE_DO_NOT_KEEP"
+  },
+  "graphify": {
+    "available": false,
+    "metrics": null,
+    "reason": "graphify executable is not installed"
+  },
+  "local_sha_index": {
+    "cached_input_tokens": 54019,
+    "index_build_ms": 227.5879,
+    "index_overhead_bytes": 20432,
+    "median_input_tokens": 54019,
+    "median_latency_ms": 0.0784,
+    "median_token_reduction": 0.174072,
+    "p90_input_tokens": 59266,
+    "p90_latency_ms": 0.0949,
+    "required_file_recall": 0.8333333333333334,
+    "selections": [
+      {
+        "scenario": "review-routing",
+        "selected": [
+          "config/ai_team_router.json",
+          "docs/ai-team/AUTONOMOUS_TEAM.md",
+          "scripts/ai_team_orchestrator.py",
+          "tests/test_ai_team_orchestrator.py"
+        ]
+      },
+      {
+        "scenario": "review-prompt-bounds",
+        "selected": [
+          "docs/ai-team/AUTONOMOUS_TEAM.md",
+          "scripts/ai_team_orchestrator.py",
+          "scripts/ai_team_runtime_ledger.py",
+          "tests/test_ai_team_orchestrator.py"
+        ]
+      },
+      {
+        "scenario": "acceptance-evidence",
+        "selected": [
+          "scripts/ai_team_orchestrator.py",
+          "tests/test_ai_team_orchestrator.py"
+        ]
+      }
+    ],
+    "stale_context_errors": 0
+  },
+  "method": {
+    "input_tokens": "deterministic regex token count of serialized file context",
+    "runs": 3,
+    "warm_definition": "same exact-SHA index reused for each scenario"
+  },
+  "repository": "aliezzat4321/hyperliquid-copy-engine",
+  "schema": "repo-context-benchmark/v1",
+  "sha": "fcc5fe54175250037cccf8aa6ffc3e42fc207cb9"
+}
