@@ -35,6 +35,33 @@ def _atomic_json(path: Path, payload: dict[str, object]) -> None:
             os.unlink(temporary)
 
 
+def _merge_identity_evidence(
+    earlier: dict[str, object], later: dict[str, object]
+) -> dict[str, object]:
+    """Combine duplicate persisted projections without moving their frozen cutoff."""
+    merged = dict(earlier) | later
+    cutoffs = [
+        value
+        for value in (
+            earlier.get("prospective_start_ns"),
+            later.get("prospective_start_ns"),
+        )
+        if isinstance(value, int) and not isinstance(value, bool)
+    ]
+    if cutoffs:
+        merged["prospective_start_ns"] = min(cutoffs)
+
+    for field in ("history", "prospective_outcomes"):
+        combined: list[object] = []
+        for row in (earlier, later):
+            values = row.get(field, [])
+            if isinstance(values, list):
+                combined.extend(value for value in values if value not in combined)
+        if combined:
+            merged[field] = combined
+    return merged
+
+
 def build_challenger_queue(
     robust: list[dict[str, object]],
     *,
@@ -109,7 +136,12 @@ def build_challenger_queue(
                         }
                     )
                 row["history"] = history
-            previous[str(row["candidate_key"])] = row
+            key = str(row["candidate_key"])
+            previous[key] = (
+                _merge_identity_evidence(previous[key], row)
+                if key in previous
+                else row
+            )
         # Consumers historically annotate the active/demoted projections. Merge only
         # append-only outcome evidence back into the authoritative identity ledger.
         for projection in [*old.get("candidates", []), *old.get("demoted", [])]:

@@ -272,3 +272,56 @@ def test_changed_selection_contract_requires_new_identity(tmp_path: Path) -> Non
         LANE1_SELECTION_CONTRACT_V1,
         "lane1-selective-v2",
     }
+
+
+def test_legacy_duplicate_projections_keep_earliest_cutoff_and_all_outcomes(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 9, 3, 12, tzinfo=UTC)
+    universe = tmp_path / "universe.json"
+    queue = tmp_path / "queue.json"
+    _universe(universe, now, WALLET_A)
+    row = _robust(WALLET_A)
+    legacy_key = f"{WALLET_A}|BTC|1000"
+    queue.write_text(
+        json.dumps(
+            {
+                "generated_at": (now - timedelta(minutes=1)).isoformat(),
+                "candidates": [
+                    row
+                    | {
+                        "candidate_key": legacy_key,
+                        "status": "challenger",
+                        "prospective_start_ns": 101,
+                        "prospective_outcomes": [{"approved": False, "pnl_usd": -4}],
+                    }
+                ],
+                "demoted": [
+                    row
+                    | {
+                        "candidate_key": legacy_key,
+                        "status": "demoted",
+                        "prospective_start_ns": 202,
+                        "prospective_outcomes": [{"approved": False, "pnl_usd": -7}],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _build(
+        [row],
+        output_path=queue,
+        universe_state_path=universe,
+        max_universe_age_hours=6,
+        now=now,
+        clock_ns=lambda: 303,
+    )
+
+    candidate = result["candidates"][0]
+    assert candidate["prospective_start_ns"] == 101
+    assert candidate["prospective_outcomes"] == [
+        {"approved": False, "pnl_usd": -4},
+        {"approved": False, "pnl_usd": -7},
+    ]
