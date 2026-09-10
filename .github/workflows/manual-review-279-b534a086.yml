@@ -1,0 +1,112 @@
+name: manual-review-279-b534a086
+
+on:
+  push:
+    branches: [manager/review-279-b534a086]
+    paths: ['.github/workflows/manual-review-279-b534a086.yml']
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: manual-review-279-b534a086
+  cancel-in-progress: false
+
+jobs:
+  review:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: b534a0869502789458164b74b491aa7f46996f99
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Independent exact-SHA Claude review
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TARGET=b534a0869502789458164b74b491aa7f46996f99
+          BASE=e76ba0fde765cee70f73fb379bd701b6daf136e7
+          WORKDIR=/var/lib/hyperliquid-ai-team/agents/claude/worktrees/manual-pr279-b534a086
+          CLAUDE_HOME=/var/lib/hyperliquid-ai-team/agents/claude/home
+          sudo rm -rf "$WORKDIR"
+          sudo mkdir -p "$WORKDIR"
+          sudo rsync -a --delete "$GITHUB_WORKSPACE/" "$WORKDIR/"
+          sudo chown -R hl-claude-agent:hl-claude-agent "$WORKDIR"
+          cat > /tmp/pr279-review-prompt.txt <<'PROMPT'
+          You are CLAUDE, the independent adversarial reviewer for the Hyperliquid project.
+          Review exactly PR #279 at exact SHA b534a0869502789458164b74b491aa7f46996f99.
+          Model routing is SONNET.
+
+          Hard boundaries:
+          - REAL TRADING REMAINS DISABLED. Flag any attempt to enable it, add/use keys, place orders, change capital/risk authorization, or bypass LIVE_TRADING_GATE.
+          - Do not access or discuss Polymarket. /root and /mnt are inaccessible.
+          - You have no GitHub credentials and must not push, merge, or comment.
+          - Review independently and try to falsify the implementation and claimed evidence.
+
+          Context discipline:
+          1. Read AGENTS.md and docs/ai-team/CURRENT_STATE.md.
+          2. Review ONLY `git diff e76ba0fde765cee70f73fb379bd701b6daf136e7..b534a0869502789458164b74b491aa7f46996f99 -- scripts/ai_team_orchestrator.py tests/test_ai_team_orchestrator.py tests/test_invo_durable_identity_attestation_v1.py` and necessary adjacent context.
+          3. Do not recursively audit the repository.
+          4. Run narrow relevant tests if useful.
+
+          PR objective: repair #277/#238 scheduler reconciliation so stale retries and false owner blocks cannot suppress unrelated lanes; retire closed issue tasks; make waiting/retry states task-local; preserve review/safety gates. The third changed file is test-only alignment with already-merged Lane-2 commit cf4b7a2, which intentionally quarantines same-identity conflicting VERIFIED proofs rather than crashing publication globally.
+
+          Verify especially:
+          - genuine owner authorization failures still fail closed;
+          - the exact protected-scope mismatch is not falsely published as owner action;
+          - closed #146-like tasks cannot execute;
+          - queue admission cannot create duplicate active work or bypass review;
+          - scheduler ordering does not introduce starvation or unsafe concurrency;
+          - Lane-2 conflicting proof test matches production semantics without weakening identity safety;
+          - no live-trading or credential boundary changes.
+
+          At the very end emit EXACTLY:
+          REVIEWED_SHA=b534a0869502789458164b74b491aa7f46996f99
+          VERDICT=PASS
+          BLOCKERS_JSON=[]
+
+          If any merge-blocking defect exists, emit VERDICT=FAIL and BLOCKERS_JSON as a JSON array of concrete blocker objects, while keeping REVIEWED_SHA exact.
+          PROMPT
+          sudo systemd-run --pipe --wait --collect --quiet \
+            --unit=hl-ai-claude-manual-pr279-b534 \
+            --uid=hl-claude-agent --gid=hl-claude-agent \
+            --working-directory="$WORKDIR" \
+            --property=NoNewPrivileges=yes \
+            --property=PrivateTmp=yes \
+            --property=ProtectHome=yes \
+            --property=ProtectSystem=strict \
+            --property=RestrictSUIDSGID=yes \
+            --property=InaccessiblePaths=/mnt \
+            --property="ReadWritePaths=$WORKDIR $CLAUDE_HOME" \
+            --setenv="HOME=$CLAUDE_HOME" \
+            --setenv="CLAUDE_CONFIG_DIR=$CLAUDE_HOME/.claude" \
+            /usr/bin/claude -p --model sonnet --output-format json \
+            --permission-mode dontAsk --allowedTools Read,Glob,Grep,Bash --max-turns 12 \
+            < /tmp/pr279-review-prompt.txt > /tmp/pr279-review.json
+          python3 - <<'PY'
+          import json, re
+          from pathlib import Path
+          raw = Path('/tmp/pr279-review.json').read_text()
+          row = json.loads(raw)
+          result = row.get('result', '')
+          target = 'b534a0869502789458164b74b491aa7f46996f99'
+          if not isinstance(result, str) or f'REVIEWED_SHA={target}' not in result:
+              raise SystemExit('review omitted exact target SHA')
+          if not re.search(r'(?m)^VERDICT=(PASS|FAIL)\s*$', result):
+              raise SystemExit('review omitted verdict')
+          if not re.search(r'(?m)^BLOCKERS_JSON=\[.*\]\s*$', result):
+              raise SystemExit('review omitted blockers JSON')
+          Path('/tmp/pr279-review-comment.txt').write_text(
+              '<!-- MANUAL_ISOLATED_CLAUDE_REVIEW_V1 -->\n'
+              'REVIEWER=CLAUDE\nMODEL_CLASS=SONNET\n'
+              f'REVIEWED_SHA={target}\n\n' + result[:12000]
+          )
+          PY
+          gh api repos/aliezzat4321/hyperliquid-copy-engine/issues/279/comments \
+            -f body="$(cat /tmp/pr279-review-comment.txt)"
