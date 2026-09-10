@@ -184,7 +184,10 @@ def main() -> int:
                 "Graphify is unavailable and the local candidate failed both the "
                 "token-reduction and required-file-recall gates."
             ),
-            "gate": "median warm input/context token reduction >=40% with no correctness or safety regression",
+            "gate": (
+                "median warm input/context token reduction >=40% with no correctness "
+                "or safety regression"
+            ),
         },
     }
     rendered = json.dumps(result, indent=2, sort_keys=True) + "\n"
