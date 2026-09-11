@@ -64,12 +64,13 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
 | Fact | Value | Observed | Source |
 |---|---:|---|---|
+| last measured Hyperliquid data-volume usage | 100.0% | `2026-08-31T11:40:40Z` | run `33388075503` |
 | Lane 2 shadow-registry write blocked by ENOSPC | True | `2026-09-11T16:55:19Z` | run `34624217892` |
 | Lane 1 universe-scout runtime repair | FAILED_AFTER_STORAGE_PRESSURE | `2026-09-11T16:56:05Z` | run `34624217974` |
 | external autonomy supervisor timer active | True | `2026-09-11T16:55:28Z` | run `34624217892` |
 | real trading enabled | False | `2026-09-11T16:55:29Z` | run `34624217892` |
 
-**Blocker:** The Hyperliquid data volume has insufficient write headroom. This is now directly blocking Lane 2 registry persistence and a Lane 1 runtime repair path. Reclaim only data covered by the reviewed retention policy/manifest; no blind deletion.  
+**Blocker:** The last measured data-volume usage was 100%, and current production now confirms insufficient write headroom via ENOSPC. This is directly blocking Lane 2 registry persistence and a Lane 1 runtime repair path. Reclaim only data covered by the reviewed retention policy/manifest; no blind deletion.  
 **Next:** Issue #90.
 
 ## Update rule
