@@ -1,0 +1,177 @@
+name: p0-90-storage-recovery-plan
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - manager/90-safe-storage-recovery-v2
+    paths:
+      - "scripts/storage_retention_apply.py"
+      - "tests/test_storage_retention_bootstrap.py"
+      - ".github/workflows/p0-90-storage-recovery-plan.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p0-90-storage-recovery-plan
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    if: github.repository == 'aliezzat4321/hyperliquid-copy-engine'
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 35
+    steps:
+      - name: Checkout exact recovery SHA
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Safety preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${REAL_TRADING_ENABLED:-NO}" != YES
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test -d /mnt/HC_Volume_106576526/hyperliquid/market-shadow
+          echo "CODE_SHA=${GITHUB_SHA}"
+          echo "REAL_TRADING_ENABLED=NO"
+          echo "POLYMARKET_MUTATION=NO"
+          echo "POSTGRESQL_FILESYSTEM_DELETION=NO"
+          df -B1 /mnt/HC_Volume_106576526
+
+      - name: Generate fresh retention manifest
+        id: retention
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/p0-90-storage-plan-${GITHUB_SHA}"
+          rm -rf "$out"
+          mkdir -p "$out/retention"
+          python3 scripts/storage_retention_audit.py \
+            --output-dir "$out/retention" \
+            --recent-days 3 \
+            --max-delete-candidate-gib 6
+          manifest="$out/retention/storage_retention_manifest.json"
+          test -s "$manifest"
+          manifest_sha="$(sha256sum "$manifest" | awk '{print $1}')"
+          echo "out=$out" >> "$GITHUB_OUTPUT"
+          echo "manifest=$manifest" >> "$GITHUB_OUTPUT"
+          echo "manifest_sha=$manifest_sha" >> "$GITHUB_OUTPUT"
+          echo "RETENTION_MANIFEST_SHA256=$manifest_sha"
+
+      - name: Build bounded bootstrap plan without mutation
+        shell: bash
+        env:
+          OUT: ${{ steps.retention.outputs.out }}
+          MANIFEST: ${{ steps.retention.outputs.manifest }}
+          MANIFEST_SHA: ${{ steps.retention.outputs.manifest_sha }}
+        run: |
+          set -euo pipefail
+          python3 scripts/storage_retention_apply.py \
+            --manifest "$MANIFEST" \
+            --expected-manifest-sha256 "$MANIFEST_SHA" \
+            --bootstrap-free-bytes 2147483648 \
+            --max-manifest-age-minutes 30 \
+            --audit-log "$OUT/bootstrap-plan.json"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          p=Path(os.environ['OUT'])/'bootstrap-plan.json'
+          d=json.loads(p.read_text())
+          assert d['apply'] is False
+          assert d['final_exit_gate'] is False
+          assert d['postgresql_filesystem_deletion'] is False
+          assert d['polymarket_mutation'] is False
+          assert d['target_reached'] is True
+          print('BOOTSTRAP_PARTITIONS_PLANNED', d['partitions_processed'])
+          print('BOOTSTRAP_BYTES_PLANNED', d['planned_bytes_processed'])
+          print('BOOTSTRAP_AVAILABLE_BEFORE', d['before_available_bytes'])
+          print('BOOTSTRAP_AVAILABLE_SIMULATED_AFTER', d['after_available_bytes'])
+          for row in d['processed']:
+              print('BOOTSTRAP_CANDIDATE', row['planned_bytes'], row['path'])
+          PY
+          echo "BOOTSTRAP_PLAN_SHA256=$(sha256sum "$OUT/bootstrap-plan.json" | awk '{print $1}')"
+          echo "DELETION_PERFORMED=NO"
+
+      - name: Build lossless tape-compaction plan without mutation
+        shell: bash
+        env:
+          OUT: ${{ steps.retention.outputs.out }}
+        run: |
+          set -euo pipefail
+          python3 scripts/market_tape_lifecycle.py \
+            --hyperliquid-root /mnt/HC_Volume_106576526/hyperliquid/market-shadow \
+            --policy config/market_tape_lifecycle.json \
+            --manifest "$OUT/lifecycle-plan.json" \
+            > "$OUT/lifecycle-plan.stdout"
+          test -s "$OUT/lifecycle-plan.json"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          p=Path(os.environ['OUT'])/'lifecycle-plan.json'
+          d=json.loads(p.read_text())
+          assert d['mode'] == 'DRY_RUN_ONLY_NO_MUTATION'
+          print('LIFECYCLE_GROUPS', d['totals']['groups'])
+          print('LIFECYCLE_SOURCE_BYTES', d['totals']['source_bytes'])
+          PY
+          echo "LIFECYCLE_MANIFEST_SHA256=$(sha256sum "$OUT/lifecycle-plan.json" | awk '{print $1}')"
+          echo "COMPACTION_PERFORMED=NO"
+
+      - name: Freeze exact review binding
+        shell: bash
+        env:
+          OUT: ${{ steps.retention.outputs.out }}
+          RETENTION_MANIFEST_SHA: ${{ steps.retention.outputs.manifest_sha }}
+        run: |
+          set -euo pipefail
+          export CODE_SHA="${GITHUB_SHA}"
+          export BOOTSTRAP_PLAN_SHA="$(sha256sum "$OUT/bootstrap-plan.json" | awk '{print $1}')"
+          export LIFECYCLE_MANIFEST_SHA="$(sha256sum "$OUT/lifecycle-plan.json" | awk '{print $1}')"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          out=Path(os.environ['OUT'])
+          binding={
+              'code_sha': os.environ['CODE_SHA'],
+              'retention_manifest_sha256': os.environ['RETENTION_MANIFEST_SHA'],
+              'bootstrap_plan_sha256': os.environ['BOOTSTRAP_PLAN_SHA'],
+              'bootstrap_free_bytes': 2147483648,
+              'lifecycle_manifest_sha256': os.environ['LIFECYCLE_MANIFEST_SHA'],
+              'allowed_delete_root': '/mnt/HC_Volume_106576526/hyperliquid/market-shadow',
+              'postgresql_filesystem_deletion': False,
+              'polymarket_mutation': False,
+              'real_trading_changed': False,
+              'mutation_performed': False,
+          }
+          (out/'review-binding.json').write_text(json.dumps(binding, indent=2, sort_keys=True)+'\n')
+          print(json.dumps(binding, sort_keys=True))
+          PY
+          echo "REVIEW_BINDING_SHA256=$(sha256sum "$OUT/review-binding.json" | awk '{print $1}')"
+          echo "DELETION_PERFORMED=NO"
+          echo "COMPACTION_PERFORMED=NO"
+
+      - name: Upload immutable review bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: p0-90-storage-review-${{ github.sha }}
+          path: |
+            ${{ steps.retention.outputs.out }}/retention/storage_retention_manifest.json
+            ${{ steps.retention.outputs.out }}/bootstrap-plan.json
+            ${{ steps.retention.outputs.out }}/lifecycle-plan.json
+            ${{ steps.retention.outputs.out }}/lifecycle-plan.stdout
+            ${{ steps.retention.outputs.out }}/review-binding.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Final non-mutation attestation
+        shell: bash
+        run: |
+          echo "REAL_TRADING_ENABLED=NO"
+          echo "POSTGRESQL_FILESYSTEM_DELETION=NO"
+          echo "POLYMARKET_MUTATION=NO"
+          echo "DELETION_PERFORMED=NO"
+          echo "COMPACTION_PERFORMED=NO"
+          df -B1 /mnt/HC_Volume_106576526
