@@ -110,29 +110,75 @@ jobs:
           set -euo pipefail
           python -m pip install 'polars>=1.8,<2'
 
-      - name: Build lossless tape-compaction plan without mutation
+      - name: Build COMPRESS_CANDIDATE-only tape plan without mutation
         shell: bash
         env:
           OUT: ${{ steps.retention.outputs.out }}
+          MANIFEST: ${{ steps.retention.outputs.manifest }}
+          MANIFEST_SHA: ${{ steps.retention.outputs.manifest_sha }}
           PYTHONPATH: ${{ github.workspace }}/src
         run: |
           set -euo pipefail
           python scripts/market_tape_lifecycle.py \
             --hyperliquid-root /mnt/HC_Volume_106576526/hyperliquid/market-shadow \
             --policy config/market_tape_lifecycle.json \
-            --manifest "$OUT/lifecycle-plan.json" \
+            --manifest "$OUT/lifecycle-plan-unfiltered.json" \
             > "$OUT/lifecycle-plan.stdout"
-          test -s "$OUT/lifecycle-plan.json"
           python - <<'PY'
-          import json, os
+          import hashlib, json, os
           from pathlib import Path
-          p=Path(os.environ['OUT'])/'lifecycle-plan.json'
-          d=json.loads(p.read_text())
-          assert d['mode'] == 'DRY_RUN_ONLY_NO_MUTATION'
-          print('LIFECYCLE_GROUPS', d['totals']['groups'])
-          print('LIFECYCLE_SOURCE_BYTES', d['totals']['source_bytes'])
+
+          out = Path(os.environ['OUT'])
+          retention_path = Path(os.environ['MANIFEST'])
+          retention = json.loads(retention_path.read_text())
+          raw = json.loads((out/'lifecycle-plan-unfiltered.json').read_text())
+          root = Path(raw['root']).resolve()
+          allowed = {
+              str(Path(row['path']).resolve())
+              for row in retention['market_shadow']['partitions']
+              if row['action'] == 'COMPRESS_CANDIDATE'
+          }
+          protected = {
+              str(Path(row['path']).resolve())
+              for row in retention['market_shadow']['partitions']
+              if row['action'] in {'KEEP_RECENT_FULL_FIDELITY', 'KEEP_ROBUST_FULL_FIDELITY'}
+          }
+          filtered = []
+          excluded = 0
+          for group in raw['groups']:
+              channel = (root / group['partition']).resolve()
+              coin_dir = str(channel.parent)
+              if coin_dir in protected:
+                  excluded += 1
+                  continue
+              if coin_dir in allowed:
+                  filtered.append(group)
+              else:
+                  excluded += 1
+          assert filtered, 'no COMPRESS_CANDIDATE lifecycle groups'
+          assert all(str((root / g['partition']).resolve().parent) in allowed for g in filtered)
+          source_bytes = sum(sum(int(x['bytes']) for x in g['sources']) for g in filtered)
+          source_rows = sum(sum(int(x['rows']) for x in g['sources']) for g in filtered)
+          compress_budget = int(retention['market_shadow']['compress_candidate_bytes'])
+          assert 0 < source_bytes <= compress_budget
+          raw['groups'] = filtered
+          raw['totals'] = {
+              'groups': len(filtered),
+              'source_bytes': source_bytes,
+              'source_rows': source_rows,
+          }
+          raw['retention_manifest_sha256'] = os.environ['MANIFEST_SHA']
+          raw['retention_action'] = 'COMPRESS_CANDIDATE_ONLY'
+          raw['excluded_non_compress_groups'] = excluded
+          p = out/'lifecycle-plan.json'
+          p.write_text(json.dumps(raw, indent=2, sort_keys=True)+'\n')
+          print('LIFECYCLE_GROUPS', len(filtered))
+          print('LIFECYCLE_SOURCE_BYTES', source_bytes)
+          print('LIFECYCLE_EXCLUDED_NON_COMPRESS_GROUPS', excluded)
+          print('LIFECYCLE_RETENTION_ACTION=COMPRESS_CANDIDATE_ONLY')
+          print('LIFECYCLE_MANIFEST_SHA256', hashlib.sha256(p.read_bytes()).hexdigest())
           PY
-          echo "LIFECYCLE_MANIFEST_SHA256=$(sha256sum "$OUT/lifecycle-plan.json" | awk '{print $1}')"
+          rm -f "$OUT/lifecycle-plan-unfiltered.json"
           echo "COMPACTION_PERFORMED=NO"
 
       - name: Freeze exact review binding
@@ -149,12 +195,15 @@ jobs:
           import json, os
           from pathlib import Path
           out=Path(os.environ['OUT'])
+          lifecycle=json.loads((out/'lifecycle-plan.json').read_text())
+          assert lifecycle['retention_action'] == 'COMPRESS_CANDIDATE_ONLY'
           binding={
               'code_sha': os.environ['CODE_SHA'],
               'retention_manifest_sha256': os.environ['RETENTION_MANIFEST_SHA'],
               'bootstrap_plan_sha256': os.environ['BOOTSTRAP_PLAN_SHA'],
               'bootstrap_free_bytes': 1073741824,
               'lifecycle_manifest_sha256': os.environ['LIFECYCLE_MANIFEST_SHA'],
+              'lifecycle_retention_action': 'COMPRESS_CANDIDATE_ONLY',
               'allowed_delete_root': '/mnt/HC_Volume_106576526/hyperliquid/market-shadow',
               'postgresql_filesystem_deletion': False,
               'polymarket_mutation': False,
