@@ -7,10 +7,13 @@ on:
       - manager/90-safe-storage-recovery-v2
     paths:
       - "scripts/storage_retention_apply.py"
+      - "scripts/p0_90_storage_apply.py"
       - "scripts/market_tape_lifecycle.py"
       - "config/market_tape_lifecycle.json"
       - "tests/test_storage_retention_bootstrap.py"
+      - "tests/test_p0_90_storage_apply.py"
       - ".github/workflows/p0-90-storage-recovery-plan.yml"
+      - ".github/workflows/p0-90-storage-recovery-apply.yml"
 
 permissions:
   contents: read
@@ -88,12 +91,20 @@ jobs:
           assert d['postgresql_filesystem_deletion'] is False
           assert d['polymarket_mutation'] is False
           assert d['target_reached'] is True
+          for row in d['processed']:
+              path=Path(row['path'])
+              st=path.lstat()
+              assert path.is_dir() and not path.is_symlink()
+              assert int(row['planned_bytes']) == int(row['observed_file_bytes'])
+              row['device']=int(st.st_dev)
+              row['inode']=int(st.st_ino)
+          p.write_text(json.dumps(d, indent=2, sort_keys=True)+'\n')
           print('BOOTSTRAP_PARTITIONS_PLANNED', d['partitions_processed'])
           print('BOOTSTRAP_BYTES_PLANNED', d['planned_bytes_processed'])
           print('BOOTSTRAP_AVAILABLE_BEFORE', d['before_available_bytes'])
           print('BOOTSTRAP_AVAILABLE_SIMULATED_AFTER', d['after_available_bytes'])
           for row in d['processed']:
-              print('BOOTSTRAP_CANDIDATE', row['planned_bytes'], row['path'])
+              print('BOOTSTRAP_CANDIDATE', row['planned_bytes'], row['device'], row['inode'], row['path'])
           PY
           echo "BOOTSTRAP_PLAN_SHA256=$(sha256sum "$OUT/bootstrap-plan.json" | awk '{print $1}')"
           echo "DELETION_PERFORMED=NO"
