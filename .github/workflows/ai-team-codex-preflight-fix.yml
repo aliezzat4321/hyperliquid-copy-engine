@@ -1,4 +1,4 @@
-name: p0-93-lane1-handoff-boundary-trace
+name: p0-285-refresh-lane-independence
 
 on:
   push:
@@ -6,69 +6,40 @@ on:
     paths: [".github/workflows/ai-team-codex-preflight-fix.yml"]
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
-  group: p0-93-lane1-handoff-boundary-trace
+  group: p0-285-refresh-lane-independence
   cancel-in-progress: true
 
 jobs:
-  trace:
-    runs-on: [self-hosted, hyperliquid]
+  refresh:
+    runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main
-          fetch-depth: 1
-          persist-credentials: false
-      - name: Trace live Lane 1 boundary
+          ref: manager/238-lane-wrapper-independence
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Rebase reviewed lane-independence change onto current main
         shell: bash
         run: |
           set -euo pipefail
-          test "${REAL_TRADING_ENABLED:-NO}" != YES
-          sudo git -C /root/hyperliquid-copy-engine fetch origin main
-          sudo git -C /root/hyperliquid-copy-engine reset --hard origin/main
-          cd /root/hyperliquid-copy-engine
-          sudo -H .venv/bin/python - <<'PY'
-          import json
-          from collections import Counter
-          from pathlib import Path
-          from hlcopy.profitability.position_copy import load_wide_events
-          from hlcopy.shadow.registry import WalletRegistry
-
-          q=json.loads(Path('/root/hyperliquid-audit/funnel/challenger_queue.json').read_text())
-          challengers=[r for r in q.get('candidates',[]) if r.get('status')=='challenger']
-          ckeys={(str(r['wallet_address']).lower(),str(r['coin'])) for r in challengers}
-          wallets={w for w,_ in ckeys}
-          starts={str(r['candidate_key']):int(r['prospective_start_ns']) for r in challengers}
-          min_start=min(starts.values()) if starts else 0
-          print('CHALLENGERS',len(challengers),'wallets',len(wallets),'wallet_coin',len(ckeys),'min_start',min_start)
-          reg=WalletRegistry(Path('/mnt/HC_Volume_106576526/hyperliquid/shadow/wallets.json'))
-          rows=reg.load(); rmap={w.source_ref.lower():w for w in rows if w.source_type=='hyperliquid_wallet'}
-          print('REGISTRY_OVERLAP',{'present':sum(w in rmap for w in wallets),'enabled':sum(w in rmap and rmap[w].enabled for w in wallets),'stages':dict(Counter(rmap[w].stage for w in wallets if w in rmap))})
-          raw_root=Path('/mnt/HC_Volume_106576526/hyperliquid/shadow/wide-trades-live')
-          raw_total=raw_match=raw_post=0; raw_pairs=Counter()
-          for p in sorted(raw_root.glob('*.jsonl'))[-3:]:
-              with p.open(errors='replace') as f:
-                  for line in f:
-                      try:r=json.loads(line)
-                      except Exception:continue
-                      if r.get('kind')!='public_wallet_trade': continue
-                      raw_total+=1; pair=(str(r.get('wallet_address','')).lower(),str(r.get('coin','')))
-                      if pair in ckeys:
-                          raw_match+=1; raw_pairs[pair]+=1
-                          start=min(int(x['prospective_start_ns']) for x in challengers if (str(x['wallet_address']).lower(),str(x['coin']))==pair)
-                          if int(r.get('received_at_ns') or 0)>=start: raw_post+=1
-          print('RAW',{'total':raw_total,'challenger_matches':raw_match,'post_start_matches':raw_post,'matched_pairs':len(raw_pairs),'top_pairs':raw_pairs.most_common(10)})
-          events=load_wide_events(Path('/mnt/HC_Volume_106576526/hyperliquid/shadow/wide-enriched-live'),cutoff_ns=min_start)
-          epairs=Counter((e.wallet_address.lower(),e.coin) for e in events); matched={k:v for k,v in epairs.items() if k in ckeys}; post=Counter()
-          for e in events:
-              pair=(e.wallet_address.lower(),e.coin)
-              if pair not in ckeys: continue
-              start=min(int(x['prospective_start_ns']) for x in challengers if (str(x['wallet_address']).lower(),str(x['coin']))==pair)
-              if e.received_at_ns>=start: post[pair]+=1
-          print('ENRICHED',{'events_since_min_start':len(events),'matched_events':sum(matched.values()),'matched_pairs':len(matched),'post_start_events':sum(post.values()),'post_start_pairs':len(post),'top_post':post.most_common(10)})
-          PY
+          git config user.name 'ai-team-runtime-repair'
+          git config user.email 'ai-team-runtime-repair@users.noreply.github.com'
+          git fetch origin main manager/238-lane-wrapper-independence
+          before="$(git rev-parse HEAD)"
+          echo "BEFORE_SHA=$before"
+          if ! git rebase origin/main; then
+            echo 'REBASE_CONFLICT=YES'
+            git status --short
+            git rebase --abort || true
+            exit 1
+          fi
+          after="$(git rev-parse HEAD)"
+          echo "AFTER_SHA=$after"
+          git diff --check origin/main...HEAD
+          git push --force-with-lease origin HEAD:manager/238-lane-wrapper-independence
           echo REAL_TRADING_ENABLED=NO
           echo POLYMARKET_TOUCHED=NO
