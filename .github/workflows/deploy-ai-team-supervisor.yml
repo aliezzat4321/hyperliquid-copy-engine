@@ -1,0 +1,68 @@
+name: deploy-ai-team-supervisor
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "scripts/ai_team_external_supervisor.py"
+      - "scripts/install_ai_team_supervisor.sh"
+      - "deploy/systemd/hyperliquid-ai-team-supervisor.service"
+      - "deploy/systemd/hyperliquid-ai-team-supervisor.timer"
+      - ".github/workflows/deploy-ai-team-supervisor.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-ai-team-supervisor
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+          persist-credentials: false
+
+      - name: Assert hard boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "aliezzat4321/hyperliquid-copy-engine"
+          test "$(id -u)" = 0
+          echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
+          echo 'POLYMARKET_INSPECTION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo 'REAL_TRADING_CHANGE=NO'
+          echo 'MODEL_CALLS=NONE'
+
+      - name: Static verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile scripts/ai_team_external_supervisor.py
+          bash -n scripts/install_ai_team_supervisor.sh
+          python3 -m pytest tests/test_ai_team_external_supervisor.py -q
+          systemd-analyze verify \
+            deploy/systemd/hyperliquid-ai-team-supervisor.service \
+            deploy/systemd/hyperliquid-ai-team-supervisor.timer
+
+      - name: Install and prove independent supervisor
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/install_ai_team_supervisor.sh
+          test -x /opt/hyperliquid-ai-team/scripts/ai_team_external_supervisor.py
+          python3 -m py_compile /opt/hyperliquid-ai-team/scripts/ai_team_external_supervisor.py
+          systemctl is-enabled hyperliquid-ai-team-supervisor.timer
+          systemctl is-active hyperliquid-ai-team-supervisor.timer
+          systemctl start hyperliquid-ai-team-supervisor.service
+          systemctl --no-pager --full status hyperliquid-ai-team-supervisor.service || true
+          test -s /var/lib/hyperliquid-ai-team-supervisor/state.json
+          echo 'EXTERNAL_SUPERVISOR_RUNTIME=PROVEN'
+          echo 'POLYMARKET_TOUCHED=NO'
+          echo 'REAL_TRADING_TOUCHED=NO'

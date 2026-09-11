@@ -1,0 +1,22 @@
+[Unit]
+Description=Independent supervisor for Hyperliquid AI-team orchestrator
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/opt/hyperliquid-ai-team/scripts/ai_team_external_supervisor.py
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/bin/python3 /opt/hyperliquid-ai-team/scripts/ai_team_external_supervisor.py
+TimeoutStartSec=240
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/hyperliquid-ai-team-supervisor
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=no
+RestrictSUIDSGID=yes
+LockPersonality=yes
