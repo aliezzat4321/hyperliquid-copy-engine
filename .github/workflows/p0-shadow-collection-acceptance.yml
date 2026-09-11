@@ -16,7 +16,7 @@ concurrency:
 jobs:
   accept:
     runs-on: [self-hosted, hyperliquid]
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,8 +36,10 @@ jobs:
         run: |
           set -euo pipefail
           sudo systemctl reset-failed hyperliquid-selective-shadow.service hyperliquid-prospective-champions.service || true
-          sudo systemctl start hyperliquid-selective-shadow.service || true
-          sudo systemctl start hyperliquid-prospective-champions.service || true
+          # These are producer/scorer jobs, not acceptance wrappers. They may wait on
+          # shared locks for tens of minutes, so never pin the only runner behind them.
+          sudo systemctl start --no-block hyperliquid-selective-shadow.service || true
+          sudo systemctl start --no-block hyperliquid-prospective-champions.service || true
           sudo -H /root/hyperliquid-copy-engine/.venv/bin/python /root/hyperliquid-copy-engine/scripts/prospective_champion_lane.py
           sudo python3 - <<'PY'
           import json
@@ -57,9 +59,16 @@ jobs:
         run: |
           set -euo pipefail
           sudo systemctl reset-failed hyperliquid-invo-wallet-identifier.service hyperliquid-invo-verified-shadow-sync.service || true
-          sudo systemctl start hyperliquid-invo-wallet-identifier.service || true
-          sudo systemctl start hyperliquid-invo-verified-shadow-sync.service || true
+          # The identifier's own service allows up to 50m. Dispatch it and preserve
+          # the runner for the other lanes; OnSuccess owns the verified-shadow sync.
+          sudo systemctl start --no-block hyperliquid-invo-wallet-identifier.service || true
+          if ! systemctl is-active --quiet hyperliquid-invo-wallet-identifier.service; then
+            sudo systemctl start --no-block hyperliquid-invo-verified-shadow-sync.service || true
+          else
+            echo LANE2_VERIFIED_SYNC=DEFERRED_UNTIL_IDENTIFIER_SUCCESS
+          fi
           echo '=== Lane2 service status ==='
+          sudo systemctl status hyperliquid-invo-wallet-identifier.service --no-pager -l || true
           sudo systemctl status hyperliquid-invo-verified-shadow-sync.service --no-pager -l || true
           echo '=== Lane2 newest evidence ==='
           sudo find /var/lib/hyperliquid-copy-engine /root/hyperliquid-audit -maxdepth 7 -type f \
@@ -102,4 +111,5 @@ jobs:
             echo "UNIT=$u ACTIVE=$(systemctl is-active "$u" || true) FAILED=$(systemctl is-failed "$u" || true)"
           done
           sudo -H /opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py --status || true
+          echo FINAL_RECORD_PROOF=REQUIRES_ISSUE_267
           echo REAL_TRADING_ENABLED=NO
