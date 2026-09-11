@@ -75,7 +75,11 @@ def test_bootstrap_dry_run_stops_after_enough_reviewed_bytes(tmp_path, monkeypat
             used_pct=90.0,
         ),
     )
-    monkeypatch.setattr(MODULE, "_revalidate_identity", lambda candidate, _: candidate.bytes_planned)
+    monkeypatch.setattr(
+        MODULE,
+        "_revalidate_identity",
+        lambda candidate, _: candidate.bytes_planned,
+    )
 
     result = MODULE.apply_bootstrap_candidates(
         [first, second],
@@ -120,7 +124,11 @@ def test_bootstrap_mode_never_claims_final_storage_exit_gate(tmp_path, monkeypat
             used_pct=90.0,
         ),
     )
-    monkeypatch.setattr(MODULE, "_revalidate_identity", lambda candidate, _: candidate.bytes_planned)
+    monkeypatch.setattr(
+        MODULE,
+        "_revalidate_identity",
+        lambda candidate, _: candidate.bytes_planned,
+    )
 
     result = MODULE.apply_bootstrap_candidates(
         [candidate],
