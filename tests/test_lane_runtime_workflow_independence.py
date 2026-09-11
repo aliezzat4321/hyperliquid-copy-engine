@@ -1,5 +1,6 @@
 from pathlib import Path
 
+# Exact-SHA regression guard for runner independence after refresh onto current main.
 REPO = Path(__file__).resolve().parents[1]
 REPAIR = REPO / ".github/workflows/p0-lane-runtime-repair.yml"
 ACCEPT = REPO / ".github/workflows/p0-shadow-collection-acceptance.yml"
