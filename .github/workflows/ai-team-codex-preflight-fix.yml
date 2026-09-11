@@ -1,4 +1,4 @@
-name: p0-285-refresh-lane-independence
+name: p0-90-postgres-logical-audit-readonly
 
 on:
   push:
@@ -6,40 +6,37 @@ on:
     paths: [".github/workflows/ai-team-codex-preflight-fix.yml"]
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: p0-285-refresh-lane-independence
+  group: p0-90-postgres-logical-audit-readonly
   cancel-in-progress: true
 
 jobs:
-  refresh:
-    runs-on: ubuntu-latest
-    timeout-minutes: 8
+  audit:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: manager/238-lane-wrapper-independence
-          fetch-depth: 0
-          persist-credentials: true
-      - name: Rebase reviewed lane-independence change onto current main
+      - name: Sync canonical main source only
         shell: bash
         run: |
           set -euo pipefail
-          git config user.name 'ai-team-runtime-repair'
-          git config user.email 'ai-team-runtime-repair@users.noreply.github.com'
-          git fetch origin main manager/238-lane-wrapper-independence
-          before="$(git rev-parse HEAD)"
-          echo "BEFORE_SHA=$before"
-          if ! git rebase origin/main; then
-            echo 'REBASE_CONFLICT=YES'
-            git status --short
-            git rebase --abort || true
-            exit 1
-          fi
-          after="$(git rev-parse HEAD)"
-          echo "AFTER_SHA=$after"
-          git diff --check origin/main...HEAD
-          git push --force-with-lease origin HEAD:manager/238-lane-wrapper-independence
-          echo REAL_TRADING_ENABLED=NO
-          echo POLYMARKET_TOUCHED=NO
+          cd /root/hyperliquid-copy-engine
+          git fetch origin main
+          git reset --hard origin/main
+          echo "MAIN_SHA=$(git rev-parse HEAD)"
+
+      - name: Read-only local PostgreSQL logical attribution
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /root/hyperliquid-copy-engine
+          echo '========== LOCAL POSTGRESQL DATABASES =========='
+          runuser -u postgres -- psql -d postgres -X -Atqc \
+            "SELECT datname FROM pg_database WHERE datallowconn ORDER BY datname;"
+          echo '========== HLCOPY LOGICAL STORAGE =========='
+          runuser -u postgres -- psql -d hlcopy -X -v ON_ERROR_STOP=1 \
+            -f scripts/postgres_storage_audit.sql
+          echo 'READ_ONLY_NO_MUTATION=YES'
+          echo 'REAL_TRADING_ENABLED=NO'
+          echo 'POLYMARKET_TOUCHED=NO'
