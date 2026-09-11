@@ -2,9 +2,9 @@
 
 Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
-**Snapshot:** 2026-09-08T06:22:45Z  
+**Snapshot:** 2026-09-11T16:55:29Z  
 **Updated by:** CODEX_CHATGPT  
-**Observed main head:** `bd3a67185f528981706ed61f9f627cb444def31a`  
+**Observed main head:** `a657ca172d8bbc7e151e8d862ca18150ad3d51d2`  
 **Mission:** Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.
 
 ## Live trading
@@ -14,40 +14,35 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 | Priority | Issue | Objective | Builder | Reviewer | Status | Profit-critical |
 |---|---:|---|---|---|---|---|
 | P0 | #90 | Restore market-data capture and storage headroom | CODEX_CHATGPT | CLAUDE | OPEN | yes |
-| P0 | #91 | Build Lane 3 notification-edge v2 profitability gate | CLAUDE | CODEX_CHATGPT | OPEN | yes |
-| P0 | #92 | Validate and land builder-first Invo wallet resolver | CODEX_CHATGPT | CLAUDE | OPEN | yes |
-| P1 | #93 | Automate Lane 1 research-to-prospective validation handoff | CODEX_CHATGPT | CLAUDE | OPEN | yes |
+| P0 | #91 | Expand Invo trader discovery/tracking before profitability gate | CODEX_CHATGPT | CLAUDE | OPEN | yes |
+| P0 | #92 | Make Invo→Hyperliquid resolver fast, high-yield and safe | CODEX_CHATGPT | CLAUDE | OPEN | yes |
+| P0 | #93 | Restore fresh leaderboard candidates into autonomous funnel | CODEX_CHATGPT | CLAUDE | OPEN | yes |
 
 ## Lane 1 — Hyperliquid native discovery and prospective copying research
-**Status:** `RESEARCH_ACTIVE_HANDOFF_MANUAL`
+**Status:** `SHADOW_EVIDENCE_MEASUREMENT_INCOMPLETE`
 
 | Fact | Value | Observed | Source |
 |---|---:|---|---|
-| screened cohorts | 1,551 | `2026-08-31T07:37:45Z` | run `33369211976` |
-| positive screens | 284 | `2026-08-31T07:37:45Z` | run `33369211976` |
-| confirmation rows | 800 | `2026-08-31T07:37:45Z` | run `33369211976` |
-| robust candidates | 186 | `2026-08-31T07:37:45Z` | run `33369211976` |
-| realized slice rows | 26,238 | `2026-08-31T07:37:45Z` | run `33369211976` |
-| frozen prospective target source | FRESHNESS_GATED_CHALLENGER_QUEUE | `2026-09-03T17:14:49Z` | commit `6530191c524e3b069fd12db7e4a99ed513211440` |
-| frozen targets approved | 2 | `2026-08-31T11:40:40Z` | run `33388075503` |
-| frozen targets with zero observed events | 1 | `2026-08-31T11:40:40Z` | run `33388075503` |
+| robust candidates | 185 | `2026-09-11T16:55:17Z` | run `34624217892` |
+| challenger candidates | 177 | `2026-09-11T16:55:17Z` | run `34624217892` |
+| candidates with prospective shadow events | 24 | `2026-09-11T16:55:17Z` | run `34624217892` |
+| approved prospective candidates | 0 | `2026-09-11T16:55:17Z` | run `34624217892` |
+| real trading enabled | False | `2026-09-11T16:55:29Z` | run `34624217892` |
 
-**Blocker:** The code path now feeds frozen prospective evaluation from the freshness-gated selective challenger queue produced by src/hlcopy/profitability/lane1_handoff.py; a current runtime observation is still required to demonstrate cadence and end-to-end candidate traversal in production.  
+**Blocker:** Prospective events now accrue, but final #267 record-level proof is incomplete and the subsequent Lane 1 runtime-repair run hit the shared storage/infrastructure failure at universe-scout.  
 **Next:** Issue #93.
 
 ## Lane 2 — Third-party identity resolution
-**Status:** `ZERO_CURRENT_PUBLICATION_YIELD`
+**Status:** `SHADOW_EVIDENCE_MEASUREMENT_INCOMPLETE`
 
 | Fact | Value | Observed | Source |
 |---|---:|---|---|
-| candidate portfolios discovered | 324 | `2026-08-31T11:40:40Z` | run `33388075503` |
-| portfolios resolution-ready | 174 | `2026-08-31T11:40:40Z` | run `33388075503` |
-| published verified identities | 0 | `2026-08-31T11:40:40Z` | run `33388075503` |
-| tracked third-party wallets | 12 | `2026-08-31T11:40:40Z` | run `33388075503` |
-| third-party prospective events | 610 | `2026-08-31T11:40:40Z` | run `33388075503` |
-| builder-first resolver PR state | OPEN_DRAFT_HEAD_PREDATES_LINT_BASELINE_NEEDS_REBASE | `2026-08-31T12:32:51Z` | PR `#86` |
+| published verified identities | 26 | `2026-09-11T16:55:20Z` | run `34624217892` |
+| quarantined identities | 9 | `2026-09-11T16:55:20Z` | run `34624217892` |
+| verified-wallet shadow sync state | ENOSPC_REGISTRY_WRITE | `2026-09-11T16:55:19Z` | run `34624217892` |
+| automatic real-trading promotion | False | `2026-09-11T16:55:20Z` | run `34624217892` |
 
-**Blocker:** The Tier B identity gate has published zero identities against 174 resolution-ready portfolios; throughput is not the limit, the seven-clause conjunction is. The builder-first path in PR #86 is unvalidated and its head predates the repository lint baseline, so its last CI result no longer reflects its true state.  
+**Blocker:** Identity publication is producing verified rows, but automatic handoff into the shadow wallet registry is blocked by ENOSPC on the Hyperliquid data volume; restore reviewed storage headroom under #90 without lowering identity safeguards.  
 **Next:** Issue #92.
 
 ## Lane 3 — Direct Invo notification shadow copying
@@ -55,16 +50,13 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
 | Fact | Value | Observed | Source |
 |---|---:|---|---|
-| shadow opens | 55 | `2026-08-31T09:11:47Z` | run `33376459723` |
-| unique shadow closes | 49 | `2026-08-31T09:11:47Z` | run `33376459723` |
-| unresolved open shadow positions | 6 | `2026-08-31T09:11:47Z` | run `33376459723` |
-| gross mid-to-mid shadow PnL (NOT net; no fee, spread, impact or funding) | $37.771087 | `2026-08-31T09:11:47Z` | run `33376459723` |
-| median gross return per closed trade | 27.4256 bps | `2026-08-31T09:11:47Z` | run `33376459723` |
-| median open detection latency | 11,032 | `2026-08-31T09:11:47Z` | run `33376459723` |
-| signals rejected by the 25s freshness gate | 41 | `2026-08-31T09:11:47Z` | run `33376459723` |
-| net-edge attribution engine PR state | OPEN_FOR_REVIEW_CI_GREEN_MERGEABLE | `2026-08-31T11:26:40Z` | PR `#95` |
+| discovered traders | 155 | `2026-09-11T16:55:28Z` | run `34624217892` |
+| trackable traders | 96 | `2026-09-11T16:55:28Z` | run `34624217892` |
+| traders receiving notifications | 96 | `2026-09-11T16:55:28Z` | run `34624217892` |
+| managed paper positions | 39 | `2026-09-11T16:55:28Z` | run `34624217892` |
+| real trading enabled | False | `2026-09-11T16:55:28Z` | run `34624217892` |
 
-**Blocker:** No accepted execution-cost-adjusted, prospective-safe profitability gate. The headline PnL above is gross mid-to-mid and survivorship-biased: the 6 open positions never emit a close and are absent from it.  
+**Blocker:** Fresh causal shadow opens, closes and rejects are accruing, but the full #267 execution-cost/net-PnL record contract and the independent #273 validity audit are still required before profitability conclusions.  
 **Next:** Issue #91.
 
 ## Infrastructure
@@ -72,11 +64,13 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
 | Fact | Value | Observed | Source |
 |---|---:|---|---|
-| /mnt/HC_Volume_106576526 usage | 100.0% | `2026-08-31T11:40:40Z` | run `33388075503` |
-| /mnt/HC_Volume_106576526 bytes available | 0 | `2026-08-31T07:37:45Z` | run `33369211976` |
-| root filesystem usage | 71.3% | `2026-08-31T11:40:40Z` | run `33388075503` |
+| last measured Hyperliquid data-volume usage | 100.0% | `2026-08-31T11:40:40Z` | run `33388075503` |
+| Lane 2 shadow-registry write blocked by ENOSPC | True | `2026-09-11T16:55:19Z` | run `34624217892` |
+| Lane 1 universe-scout runtime repair | FAILED_AFTER_STORAGE_PRESSURE | `2026-09-11T16:56:05Z` | run `34624217974` |
+| external autonomy supervisor timer active | True | `2026-09-11T16:55:28Z` | run `34624217892` |
+| real trading enabled | False | `2026-09-11T16:55:29Z` | run `34624217892` |
 
-**Blocker:** The data volume is full and the storage guard cannot recover it: the guard stops only hyperliquid-market-capture, nothing prunes the data mount, and the 78% resume threshold is therefore unreachable.  
+**Blocker:** The last measured data-volume usage was 100%, and current production now confirms insufficient write headroom via ENOSPC. This is directly blocking Lane 2 registry persistence and a Lane 1 runtime repair path. Reclaim only data covered by the reviewed retention policy/manifest; no blind deletion.  
 **Next:** Issue #90.
 
 ## Update rule
