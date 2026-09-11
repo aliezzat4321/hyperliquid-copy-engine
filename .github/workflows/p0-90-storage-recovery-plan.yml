@@ -7,6 +7,8 @@ on:
       - manager/90-safe-storage-recovery-v2
     paths:
       - "scripts/storage_retention_apply.py"
+      - "scripts/market_tape_lifecycle.py"
+      - "config/market_tape_lifecycle.json"
       - "tests/test_storage_retention_bootstrap.py"
       - ".github/workflows/p0-90-storage-recovery-plan.yml"
 
@@ -73,7 +75,7 @@ jobs:
           python3 scripts/storage_retention_apply.py \
             --manifest "$MANIFEST" \
             --expected-manifest-sha256 "$MANIFEST_SHA" \
-            --bootstrap-free-bytes 2147483648 \
+            --bootstrap-free-bytes 1073741824 \
             --max-manifest-age-minutes 30 \
             --audit-log "$OUT/bootstrap-plan.json"
           python3 - <<'PY'
@@ -96,19 +98,32 @@ jobs:
           echo "BOOTSTRAP_PLAN_SHA256=$(sha256sum "$OUT/bootstrap-plan.json" | awk '{print $1}')"
           echo "DELETION_PERFORMED=NO"
 
+      - name: Set up Python 3.12 for lifecycle planner
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install lifecycle planner dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install 'polars>=1.8,<2'
+
       - name: Build lossless tape-compaction plan without mutation
         shell: bash
         env:
           OUT: ${{ steps.retention.outputs.out }}
+          PYTHONPATH: ${{ github.workspace }}/src
         run: |
           set -euo pipefail
-          python3 scripts/market_tape_lifecycle.py \
+          python scripts/market_tape_lifecycle.py \
             --hyperliquid-root /mnt/HC_Volume_106576526/hyperliquid/market-shadow \
             --policy config/market_tape_lifecycle.json \
             --manifest "$OUT/lifecycle-plan.json" \
             > "$OUT/lifecycle-plan.stdout"
           test -s "$OUT/lifecycle-plan.json"
-          python3 - <<'PY'
+          python - <<'PY'
           import json, os
           from pathlib import Path
           p=Path(os.environ['OUT'])/'lifecycle-plan.json'
@@ -130,7 +145,7 @@ jobs:
           export CODE_SHA="${GITHUB_SHA}"
           export BOOTSTRAP_PLAN_SHA="$(sha256sum "$OUT/bootstrap-plan.json" | awk '{print $1}')"
           export LIFECYCLE_MANIFEST_SHA="$(sha256sum "$OUT/lifecycle-plan.json" | awk '{print $1}')"
-          python3 - <<'PY'
+          python - <<'PY'
           import json, os
           from pathlib import Path
           out=Path(os.environ['OUT'])
@@ -138,7 +153,7 @@ jobs:
               'code_sha': os.environ['CODE_SHA'],
               'retention_manifest_sha256': os.environ['RETENTION_MANIFEST_SHA'],
               'bootstrap_plan_sha256': os.environ['BOOTSTRAP_PLAN_SHA'],
-              'bootstrap_free_bytes': 2147483648,
+              'bootstrap_free_bytes': 1073741824,
               'lifecycle_manifest_sha256': os.environ['LIFECYCLE_MANIFEST_SHA'],
               'allowed_delete_root': '/mnt/HC_Volume_106576526/hyperliquid/market-shadow',
               'postgresql_filesystem_deletion': False,
