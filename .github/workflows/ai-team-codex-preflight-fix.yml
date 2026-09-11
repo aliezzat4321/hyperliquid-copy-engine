@@ -1,4 +1,4 @@
-name: p0-90-postgres-logical-audit-readonly
+name: p0-90-hlcopy-offline-cluster-readonly-trace
 
 on:
   push:
@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: p0-90-postgres-logical-audit-readonly
+  group: p0-90-hlcopy-offline-cluster-readonly-trace
   cancel-in-progress: true
 
 jobs:
@@ -26,17 +26,26 @@ jobs:
           git reset --hard origin/main
           echo "MAIN_SHA=$(git rev-parse HEAD)"
 
-      - name: Read-only local PostgreSQL logical attribution
+      - name: Trace Hyperliquid hlcopy cluster without starting or mutating it
         shell: bash
         run: |
           set -euo pipefail
+          echo '========== HLCOPY CLUSTER STATUS =========='
+          pg_lsclusters 2>/dev/null | grep -E '(^Ver|hlcopy)' || true
+          pg_isready -h 127.0.0.1 -p 5433 || true
+          systemctl status postgresql@14-hlcopy.service --no-pager -l 2>/dev/null || true
+          echo '========== HLCOPY LIFECYCLE LOG =========='
+          tail -n 250 /var/log/postgresql/postgresql-14-hlcopy.log 2>/dev/null || true
+          echo '========== HLCOPY PATH REFERENCES IN SYSTEMD =========='
+          grep -RIlE 'hlcopy|5433|HC_Volume_106576526/hyperliquid/postgresql' \
+            /etc/systemd/system /lib/systemd/system 2>/dev/null | sort | head -n 100 || true
+          echo '========== REPO REFERENCES =========='
           cd /root/hyperliquid-copy-engine
-          echo '========== LOCAL POSTGRESQL DATABASES =========='
-          runuser -u postgres -- psql -d postgres -X -Atqc \
-            "SELECT datname FROM pg_database WHERE datallowconn ORDER BY datname;"
-          echo '========== HLCOPY LOGICAL STORAGE =========='
-          runuser -u postgres -- psql -d hlcopy -X -v ON_ERROR_STOP=1 \
-            -f scripts/postgres_storage_audit.sql
+          grep -RInE '5433|postgresql/14/hlcopy|postgresql@14-hlcopy|RESEARCH_DATABASE_URL' \
+            --exclude-dir=.git --exclude='*.env' . 2>/dev/null | head -n 250 || true
+          echo '========== HLCOPY CONFIG (NON-SECRET KEYS ONLY) =========='
+          grep -E '^[[:space:]]*(port|data_directory|archive_mode|wal_level|max_wal_size|min_wal_size|shared_buffers)[[:space:]]*=' \
+            /etc/postgresql/14/hlcopy/postgresql.conf 2>/dev/null || true
           echo 'READ_ONLY_NO_MUTATION=YES'
           echo 'REAL_TRADING_ENABLED=NO'
           echo 'POLYMARKET_TOUCHED=NO'
