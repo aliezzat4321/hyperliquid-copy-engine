@@ -10,237 +10,62 @@
     "authorization": null
   },
   "priorities": [
-    {
-      "priority": "P0",
-      "issue": 90,
-      "title": "Restore market-data capture and storage headroom",
-      "owner": "CODEX_CHATGPT",
-      "reviewer": "CLAUDE",
-      "status": "OPEN",
-      "profitability_critical": true
-    },
-    {
-      "priority": "P0",
-      "issue": 91,
-      "title": "Expand Invo trader discovery/tracking before profitability gate",
-      "owner": "CODEX_CHATGPT",
-      "reviewer": "CLAUDE",
-      "status": "OPEN",
-      "profitability_critical": true
-    },
-    {
-      "priority": "P0",
-      "issue": 92,
-      "title": "Make Invo→Hyperliquid resolver fast, high-yield and safe",
-      "owner": "CODEX_CHATGPT",
-      "reviewer": "CLAUDE",
-      "status": "OPEN",
-      "profitability_critical": true
-    },
-    {
-      "priority": "P0",
-      "issue": 93,
-      "title": "Restore fresh leaderboard candidates into autonomous funnel",
-      "owner": "CODEX_CHATGPT",
-      "reviewer": "CLAUDE",
-      "status": "OPEN",
-      "profitability_critical": true
-    }
+    {"priority":"P0","issue":90,"title":"Restore market-data capture and storage headroom","owner":"CODEX_CHATGPT","reviewer":"CLAUDE","status":"OPEN","profitability_critical":true},
+    {"priority":"P0","issue":91,"title":"Expand Invo trader discovery/tracking before profitability gate","owner":"CODEX_CHATGPT","reviewer":"CLAUDE","status":"OPEN","profitability_critical":true},
+    {"priority":"P0","issue":92,"title":"Make Invo→Hyperliquid resolver fast, high-yield and safe","owner":"CODEX_CHATGPT","reviewer":"CLAUDE","status":"OPEN","profitability_critical":true},
+    {"priority":"P0","issue":93,"title":"Restore fresh leaderboard candidates into autonomous funnel","owner":"CODEX_CHATGPT","reviewer":"CLAUDE","status":"OPEN","profitability_critical":true}
   ],
   "lanes": {
     "lane_1": {
-      "name": "Hyperliquid native discovery and prospective copying research",
-      "status": "SHADOW_EVIDENCE_MEASUREMENT_INCOMPLETE",
-      "facts": [
-        {
-          "key": "robust_candidates",
-          "label": "robust candidates",
-          "value": 185,
-          "unit": "count",
-          "observed_at": "2026-09-11T16:55:17Z",
-          "source_type": "WORKFLOW_RUN",
-          "source_ref": "34624217892"
-        },
-        {
-          "key": "challenger_candidates",
-          "label": "challenger candidates",
-          "value": 177,
-          "unit": "count",
-          "observed_at": "2026-09-11T16:55:17Z",
-          "source_type": "WORKFLOW_RUN",
-          "source_ref": "34624217892"
-        },
-        {
-          "key": "prospective_shadow_candidates",
-          "label": "candidates with prospective shadow events",
-          "value": 24,
-          "unit": "count",
-          "observed_at": "2026-09-11T16:55:17Z",
-          "source_type": "WORKFLOW_RUN",
-          "source_ref": "34624217892"
-        },
-        {
-          "key": "approved_candidates",
-          "label": "approved prospective candidates",
-          "value": 0,
-          "unit": "count",
-          "observed_at": "2026-09-11T16:55:17Z",
-          "source_type": "WORKFLOW_RUN",
-          "source_ref": "34624217892"
-        },
-        {
-          "key": "real_trading",
-          "label": "real trading enabled",
-          "value": false,
-          "unit": "bool",
-          "observed_at": "2026-09-11T16:55:29Z",
-          "source_type": "WORKFLOW_RUN",
-          "source_ref": "34624217892"
-        }
+      "name":"Hyperliquid native discovery and prospective copying research",
+      "status":"SHADOW_EVIDENCE_MEASUREMENT_INCOMPLETE",
+      "facts":[
+        {"key":"robust_candidates","label":"robust candidates","value":185,"unit":"count","observed_at":"2026-09-11T16:55:17Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"},
+        {"key":"challenger_candidates","label":"challenger candidates","value":177,"unit":"count","observed_at":"2026-09-11T16:55:17Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"},
+        {"key":"prospective_shadow_candidates","label":"candidates with prospective shadow events","value":24,"unit":"count","observed_at":"2026-09-11T16:55:17Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"},
+        {"key":"approved_candidates","label":"approved prospective candidates","value":0,"unit":"count","observed_at":"2026-09-11T16:55:17Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"},
+        {"key":"real_trading","label":"real trading enabled","value":false,"unit":"bool","observed_at":"2026-09-11T16:55:29Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"}
       ],
-      "blocker": "Prospective events now accrue, but final #267 record-level proof is incomplete and the subsequent Lane 1 runtime-repair run hit the shared storage/infrastructure failure at universe-scout.",
-      "next": "Issue #93"
+      "blocker":"Prospective events now accrue, but final #267 record-level proof is incomplete and the subsequent Lane 1 runtime-repair run hit the shared storage/infrastructure failure at universe-scout.",
+      "next":"Issue #93"
     },
     "lane_2": {
-      "name": "Third-party identity resolution",
-      "status": "SHADOW_EVIDENCE_MEASUREMENT_INCOMPLETE",
-      "facts": [
-        {
-          "key": "verified_identities",
-          "label": "published verified identities",
-          "value": 26,
-          "unit": "count",
-          "observed_at": "2026-09-11T16:55:20Z",
-          "source_type": "WORKFLOW_RUN",
-          "source_ref": "34624217892"
-        },
-        {
-          "key": "quarantined_identities",
-          "label": "quarantined identities",
-          "value": 9,
-          "unit": "count",
-          "observed_at": "2026-09-11T16:55:20Z",
-          "source_type": "WORKFLOW_RUN",
-          "source_ref": "34624217892"
-        },
-        {
-          "key": "verified_shadow_sync_state",
-          "label": "verified-wallet shadow sync state",
-          "value": "ENOSPC_REGISTRY_WRITE",
-          "unit": "text",
-          "observed_at": "2026-09-11T16:55:19Z",
-          "source_type": "WORKFLOW_RUN",
-          "source_ref": "34624217892"
-        },
-        {
-          "key": "auto_trading_promotion",
-          "label": "automatic real-trading promotion",
-          "value": false,
-          "unit": "bool",
-          "observed_at": "2026-09-11T16:55:20Z",
-          "source_type": "WORKFLOW_RUN",
-          "source_ref": "34624217892"
-        }
+      "name":"Third-party identity resolution",
+      "status":"SHADOW_EVIDENCE_MEASUREMENT_INCOMPLETE",
+      "facts":[
+        {"key":"verified_identities","label":"published verified identities","value":26,"unit":"count","observed_at":"2026-09-11T16:55:20Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"},
+        {"key":"quarantined_identities","label":"quarantined identities","value":9,"unit":"count","observed_at":"2026-09-11T16:55:20Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"},
+        {"key":"verified_shadow_sync_state","label":"verified-wallet shadow sync state","value":"ENOSPC_REGISTRY_WRITE","unit":"text","observed_at":"2026-09-11T16:55:19Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"},
+        {"key":"auto_trading_promotion","label":"automatic real-trading promotion","value":false,"unit":"bool","observed_at":"2026-09-11T16:55:20Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"}
       ],
-      "blocker": "Identity publication is producing verified rows, but automatic handoff into the shadow wallet registry is blocked by ENOSPC on the Hyperliquid data volume; restore reviewed storage headroom under #90 without lowering identity safeguards.",
-      "next": "Issue #92"
+      "blocker":"Identity publication is producing verified rows, but automatic handoff into the shadow wallet registry is blocked by ENOSPC on the Hyperliquid data volume; restore reviewed storage headroom under #90 without lowering identity safeguards.",
+      "next":"Issue #92"
     },
     "lane_3": {
-      "name": "Direct Invo notification shadow copying",
-      "status": "SHADOW_EVIDENCE_MEASUREMENT_INCOMPLETE",
-      "facts": [
-        {
-          "key": "discovered_traders",
-          "label": "discovered traders",
-          "value": 155,
-          "unit": "count",
-          "observed_at": "2026-09-11T16:55:28Z",
-          "source_type": "WORKFLOW_RUN",
-          "source_ref": "34624217892"
-        },
-        {
-          "key": "trackable_traders",
-          "label": "trackable traders",
-          "value": 96,
-          "unit": "count",
-          "observed_at": "2026-09-11T16:55:28Z",
-          "source_type": "WORKFLOW_RUN",
-          "source_ref": "34624217892"
-        },
-        {
-          "key": "notification_traders",
-          "label": "traders receiving notifications",
-          "value": 96,
-          "unit": "count",
-          "observed_at": "2026-09-11T16:55:28Z",
-          "source_type": "WORKFLOW_RUN",
-          "source_ref": "34624217892"
-        },
-        {
-          "key": "managed_paper_positions",
-          "label": "managed paper positions",
-          "value": 39,
-          "unit": "count",
-          "observed_at": "2026-09-11T16:55:28Z",
-          "source_type": "WORKFLOW_RUN",
-          "source_ref": "34624217892"
-        },
-        {
-          "key": "real_trading",
-          "label": "real trading enabled",
-          "value": false,
-          "unit": "bool",
-          "observed_at": "2026-09-11T16:55:28Z",
-          "source_type": "WORKFLOW_RUN",
-          "source_ref": "34624217892"
-        }
+      "name":"Direct Invo notification shadow copying",
+      "status":"SHADOW_EVIDENCE_MEASUREMENT_INCOMPLETE",
+      "facts":[
+        {"key":"discovered_traders","label":"discovered traders","value":155,"unit":"count","observed_at":"2026-09-11T16:55:28Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"},
+        {"key":"trackable_traders","label":"trackable traders","value":96,"unit":"count","observed_at":"2026-09-11T16:55:28Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"},
+        {"key":"notification_traders","label":"traders receiving notifications","value":96,"unit":"count","observed_at":"2026-09-11T16:55:28Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"},
+        {"key":"managed_paper_positions","label":"managed paper positions","value":39,"unit":"count","observed_at":"2026-09-11T16:55:28Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"},
+        {"key":"real_trading","label":"real trading enabled","value":false,"unit":"bool","observed_at":"2026-09-11T16:55:28Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"}
       ],
-      "blocker": "Fresh causal shadow opens, closes and rejects are accruing, but the full #267 execution-cost/net-PnL record contract and the independent #273 validity audit are still required before profitability conclusions.",
-      "next": "Issue #91"
+      "blocker":"Fresh causal shadow opens, closes and rejects are accruing, but the full #267 execution-cost/net-PnL record contract and the independent #273 validity audit are still required before profitability conclusions.",
+      "next":"Issue #91"
     }
   },
   "infrastructure": {
-    "name": "Research VM, market tape and storage",
-    "status": "P0_STORAGE_PRESSURE",
-    "facts": [
-      {
-        "key": "lane2_registry_write_blocked",
-        "label": "Lane 2 shadow-registry write blocked by ENOSPC",
-        "value": true,
-        "unit": "bool",
-        "observed_at": "2026-09-11T16:55:19Z",
-        "source_type": "WORKFLOW_RUN",
-        "source_ref": "34624217892"
-      },
-      {
-        "key": "lane1_universe_scout_repair",
-        "label": "Lane 1 universe-scout runtime repair",
-        "value": "FAILED_AFTER_STORAGE_PRESSURE",
-        "unit": "text",
-        "observed_at": "2026-09-11T16:56:05Z",
-        "source_type": "WORKFLOW_RUN",
-        "source_ref": "34624217974"
-      },
-      {
-        "key": "external_supervisor_timer",
-        "label": "external autonomy supervisor timer active",
-        "value": true,
-        "unit": "bool",
-        "observed_at": "2026-09-11T16:55:28Z",
-        "source_type": "WORKFLOW_RUN",
-        "source_ref": "34624217892"
-      },
-      {
-        "key": "real_trading",
-        "label": "real trading enabled",
-        "value": false,
-        "unit": "bool",
-        "observed_at": "2026-09-11T16:55:29Z",
-        "source_type": "WORKFLOW_RUN",
-        "source_ref": "34624217892"
-      }
+    "name":"Research VM, market tape and storage",
+    "status":"P0_STORAGE_PRESSURE",
+    "facts":[
+      {"key":"last_measured_data_volume_usage_pct","label":"last measured Hyperliquid data-volume usage","value":100.0,"unit":"pct","observed_at":"2026-08-31T11:40:40Z","source_type":"WORKFLOW_RUN","source_ref":"33388075503"},
+      {"key":"lane2_registry_write_blocked","label":"Lane 2 shadow-registry write blocked by ENOSPC","value":true,"unit":"bool","observed_at":"2026-09-11T16:55:19Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"},
+      {"key":"lane1_universe_scout_repair","label":"Lane 1 universe-scout runtime repair","value":"FAILED_AFTER_STORAGE_PRESSURE","unit":"text","observed_at":"2026-09-11T16:56:05Z","source_type":"WORKFLOW_RUN","source_ref":"34624217974"},
+      {"key":"external_supervisor_timer","label":"external autonomy supervisor timer active","value":true,"unit":"bool","observed_at":"2026-09-11T16:55:28Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"},
+      {"key":"real_trading","label":"real trading enabled","value":false,"unit":"bool","observed_at":"2026-09-11T16:55:29Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"}
     ],
-    "blocker": "The Hyperliquid data volume has insufficient write headroom. This is now directly blocking Lane 2 registry persistence and a Lane 1 runtime repair path. Reclaim only data covered by the reviewed retention policy/manifest; no blind deletion.",
-    "next": "Issue #90"
+    "blocker":"The last measured data-volume usage was 100%, and current production now confirms insufficient write headroom via ENOSPC. This is directly blocking Lane 2 registry persistence and a Lane 1 runtime repair path. Reclaim only data covered by the reviewed retention policy/manifest; no blind deletion.",
+    "next":"Issue #90"
   }
 }
