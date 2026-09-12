@@ -1,0 +1,54 @@
+{
+  "baseline": {
+    "context_bytes": 2531182,
+    "status": "MEASURED",
+    "summary": {
+      "median_cached_input_tokens_estimate": 0,
+      "median_input_tokens_estimate": 525877,
+      "median_latency_ms": 0.0,
+      "p90_input_tokens_estimate": 525877,
+      "p90_latency_ms": 0.0,
+      "required_file_recall": 1.0,
+      "stale_context_errors": 0
+    }
+  },
+  "cache_model": "cold baseline; warm SHA-keyed local index serialized bytes / 4",
+  "decision": {
+    "keep_added_layer": false,
+    "local_threshold_pass": false,
+    "reason": "No layer is retained: Graphify was not measurable in this environment. The local index did not pass the 40% and correctness gate."
+  },
+  "graphify": {
+    "reason": "graphify executable is not installed; no substitute was used",
+    "status": "UNAVAILABLE"
+  },
+  "issue": 150,
+  "limitations": [
+    "Input and cached-input counts are deterministic lexical/index-size proxies, not provider billing telemetry.",
+    "Graphify metrics cannot be collected until the Graphify CLI is present in the runner."
+  ],
+  "local_sha_index": {
+    "build_latency_ms": 1036.162,
+    "index_bytes": 300444,
+    "median_input_reduction": 0.8515,
+    "status": "MEASURED",
+    "summary": {
+      "median_cached_input_tokens_estimate": 75111,
+      "median_input_tokens_estimate": 78108,
+      "median_latency_ms": 0.366,
+      "p90_input_tokens_estimate": 87775,
+      "p90_latency_ms": 0.406,
+      "required_file_recall": 0.7778,
+      "stale_context_errors": 0
+    }
+  },
+  "repository": "aliezzat4321/hyperliquid-copy-engine",
+  "safety": {
+    "canonical_source": "git",
+    "disposable": true,
+    "secrets_stored": false
+  },
+  "schema_version": 1,
+  "sha": "0c8821330779018532c8ee89ace49926b7d47e5a",
+  "token_measurement": "deterministic lexical input-token estimate (not provider billing)"
+}
