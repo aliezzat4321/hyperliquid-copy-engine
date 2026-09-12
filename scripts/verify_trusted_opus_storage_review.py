@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sqlite3
 import stat
 from datetime import datetime
@@ -120,7 +119,11 @@ def verify(
     for key, expected in expected_meta.items():
         if meta.get(key) != expected:
             raise ValueError(f"trusted run metadata mismatch: {key}")
-    if result_file.get("run_id") != run["id"] or result_file.get("status") != EXPECTED_STATUS:
+    result_metadata_matches = (
+        result_file.get("run_id") == run["id"]
+        and result_file.get("status") == EXPECTED_STATUS
+    )
+    if not result_metadata_matches:
         raise ValueError("trusted run result metadata mismatch")
 
     db_result = str(run.get("result") or "")
@@ -159,8 +162,16 @@ def verify(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--db", type=Path, default=Path("/var/lib/hyperliquid-ai-team/orchestrator/ledger.sqlite3"))
-    parser.add_argument("--runtime-root", type=Path, default=Path("/var/lib/hyperliquid-ai-team"))
+    parser.add_argument(
+        "--db",
+        type=Path,
+        default=Path("/var/lib/hyperliquid-ai-team/orchestrator/ledger.sqlite3"),
+    )
+    parser.add_argument(
+        "--runtime-root",
+        type=Path,
+        default=Path("/var/lib/hyperliquid-ai-team"),
+    )
     parser.add_argument("--assignment-id", required=True)
     parser.add_argument("--code-sha", required=True)
     parser.add_argument("--plan-run-id", required=True)
