@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-08-31T11:56:01Z",
+  "updated_at": "2026-09-03T02:48:44Z",
   "experiments": [
     {
       "id": "EXP-001",
@@ -17,6 +17,22 @@
       "reviewed_commit": null,
       "retest_condition": "Rerun on the full 49-close ledger rather than the 10 rows visible in probe run 33376459723, with measured book spread instead of the 9/15/25/40 bps scenario grid, and a clustered bootstrap that accounts for per-trader and per-day dependence.",
       "updated_at": "2026-08-31T11:26:40Z"
+    },
+    {
+      "id": "EXP-002",
+      "lane": "lane_1",
+      "hypothesis": "A causal previous-day high/low liquidity-sweep reversal rule has positive execution-cost-adjusted expectancy on liquid crypto markets during the London morning and survives an untouched holdout.",
+      "slice": "BTCUSDT and ETHUSDT Binance USD-M 5-minute proxy data; first 08:00-10:00 Europe/London PDH/PDL sweep-reclaim with immediate-next-bar confirmation; frozen 1R/1.5R/2R/3R targets.",
+      "status": "IN_REVIEW",
+      "evidence_level": "EXPLORATORY",
+      "result": "FAIL",
+      "issue": 177,
+      "pr": 179,
+      "builder": "CODEX_CHATGPT",
+      "reviewer": "CLAUDE",
+      "reviewed_commit": null,
+      "retest_condition": "Do not retune or rerun the frozen rule after seeing the holdout. Open a new experiment only for a materially different preregistered causal hypothesis or new Hyperliquid-specific execution evidence, with a new untouched validation window.",
+      "updated_at": "2026-09-03T02:48:44Z"
     }
   ]
 }
