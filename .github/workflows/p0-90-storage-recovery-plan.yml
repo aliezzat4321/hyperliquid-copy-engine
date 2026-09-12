@@ -26,7 +26,7 @@ jobs:
   plan:
     if: github.repository == 'aliezzat4321/hyperliquid-copy-engine'
     runs-on: [self-hosted, hyperliquid]
-    timeout-minutes: 35
+    timeout-minutes: 120
     steps:
       - name: Checkout exact recovery SHA
         uses: actions/checkout@v4
