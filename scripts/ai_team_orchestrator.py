@@ -2413,11 +2413,12 @@ class Orchestrator:
         self.ledger.meta_set(key, "DONE")
 
     def reconcile_closed_issue_tasks(self) -> int:
-        """Retire active work whose canonical GitHub issue is already closed.
+        """Retire active work whose canonical GitHub target is already closed.
 
-        This runs before dispatch so a closed RETRY/wait task cannot linger forever
-        behind higher-priority PENDING work or remain projected as current runtime state.
-        GitHub lookup failures are fail-safe: defer that issue and continue unrelated work.
+        This runs before dispatch so a closed Issue or unmerged PR cannot leave a
+        RETRY/wait task projected as current runtime state.  Merged PRs remain valid
+        targets for post-merge acceptance work.  GitHub lookup failures are fail-safe:
+        defer that target and continue reconciling and dispatching unrelated work.
         """
         placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
         rows = self.ledger.db.execute(
@@ -2426,6 +2427,7 @@ class Orchestrator:
             tuple(ACTIVE_STATUSES),
         ).fetchall()
         issue_states: dict[int, str] = {}
+        pr_states: dict[int, tuple[str, bool] | None] = {}
         retired = 0
         for task in rows:
             number = int(task["issue_number"])
@@ -2440,18 +2442,44 @@ class Orchestrator:
                     )
                     continue
                 issue_states[number] = str(issue.get("state") or "open").lower()
-            if issue_states[number] != "closed":
+            obsolete_reason = "OBSOLETE_CLOSED_ISSUE" if issue_states[number] == "closed" else None
+            pr_number = int(task["pr_number"]) if task["pr_number"] is not None else None
+            if obsolete_reason is None and pr_number is not None:
+                if pr_number not in pr_states:
+                    try:
+                        pr = self.gh.pr(pr_number)
+                        pr_states[pr_number] = (
+                            str(pr.get("state") or "open").lower(),
+                            bool(pr.get("merged") or pr.get("merged_at")),
+                        )
+                    except Exception as exc:
+                        pr_states[pr_number] = None
+                        self.runtime.event(
+                            "CLOSED_PR_RECONCILIATION_DEFERRED",
+                            issue=number, pr=pr_number, error=str(exc)[:500],
+                        )
+                pr_state = pr_states[pr_number]
+                if pr_state is not None and pr_state[0] == "closed" and not pr_state[1]:
+                    obsolete_reason = "OBSOLETE_CLOSED_PR"
+            if obsolete_reason is None:
                 continue
             self.reap_stale_child(task)
             self.ledger.update(
                 task["id"], status="DONE", retry_at=None, systemd_unit=None,
-                last_error="OBSOLETE_CLOSED_ISSUE", failure_class=None,
+                last_error=obsolete_reason, failure_class=None,
                 lifecycle_phase="OBSOLETE",
-                next_action="retired because canonical GitHub issue is closed",
+                next_action=(
+                    "retired because canonical GitHub issue is closed"
+                    if obsolete_reason == "OBSOLETE_CLOSED_ISSUE"
+                    else "retired because target pull request is closed without merge"
+                ),
             )
             self.runtime.event(
-                "OBSOLETE_CLOSED_TASK_RETIRED", assignment_id=task["id"],
-                issue=number, pr=task["pr_number"], status="OBSOLETE",
+                ("OBSOLETE_CLOSED_TASK_RETIRED"
+                 if obsolete_reason == "OBSOLETE_CLOSED_ISSUE"
+                 else "OBSOLETE_CLOSED_PR_TASK_RETIRED"),
+                assignment_id=task["id"], issue=number, pr=task["pr_number"],
+                status="OBSOLETE",
                 unrelated_work_continuing=True,
             )
             retired += 1

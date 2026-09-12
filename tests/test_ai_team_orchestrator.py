@@ -1703,3 +1703,88 @@ def test_reconcile_closed_issue_tasks_retires_stale_retry_before_due_selection(t
     assert ledger.get(open_id)["status"] == "PENDING"
     assert ledger.due()["id"] == open_id
     assert any(name == "OBSOLETE_CLOSED_TASK_RETIRED" for name, _ in team.runtime.events)
+
+
+def test_reconcile_expired_rate_limit_assignment_with_closed_pr_is_task_local(tmp_path):
+    ledger = orch.Ledger(tmp_path / "closed-pr-reconcile.sqlite3")
+    stale_id = ledger.create_task(
+        id="b6e1a8c0637a4094", issue_number=93, pr_number=275,
+        task_type="REVIEW", agent="CLAUDE", model_class="SONNET",
+        status="WAITING_RATE_LIMIT", retry_at="2026-09-10T19:30:00Z",
+        failure_class="PROVIDER/RATE_LIMIT_WAIT",
+        last_error="provider rate limit",
+    )
+    runnable_id = ledger.create_task(
+        issue_number=90, task_type="REVIEW", agent="CLAUDE", model_class="OPUS",
+        status="PENDING", queue_priority=-100,
+    )
+
+    class GH:
+        def issue(self, number):
+            return {"number": number, "state": "open"}
+
+        def pr(self, number):
+            assert number == 275
+            return {"number": number, "state": "closed", "merged": False,
+                    "merged_at": None}
+
+    team = object.__new__(orch.Orchestrator)
+    runtime = orch.RuntimeLedgerFiles(
+        tmp_path / "runtime", tmp_path / "closed-pr-reconcile.sqlite3",
+        orch.REPO, orch.RUNTIME_STATUS_ISSUE,
+    )
+    team.ledger, team.gh, team.runtime = ledger, GH(), runtime
+    team.reap_stale_child = lambda task: None
+
+    assert team.reconcile_closed_issue_tasks() == 1
+    retired = ledger.get(stale_id)
+    assert retired["status"] == "DONE"
+    assert retired["last_error"] == "OBSOLETE_CLOSED_PR"
+    assert retired["retry_at"] is None
+    assert retired["failure_class"] is None
+    assert ledger.pending_owner_action() is None
+    assert ledger.due()["id"] == runnable_id
+    handoff = runtime.handoff(
+        main_head="a" * 40, active_priorities=[{"issue": 90, "title": "P0 storage"}],
+        pending_owner_action=ledger.pending_owner_action(),
+    )
+    payload = json.loads(handoff.split("```json\n", 1)[1].split("\n```", 1)[0])
+    assert payload["claude"]["assignment_id"] == runnable_id
+    assert payload["claude"]["issue"] == 90
+    assert payload["pending_owner_action"] is None
+    assert any(
+        name == "OBSOLETE_CLOSED_PR_TASK_RETIRED"
+        and fields["assignment_id"] == "b6e1a8c0637a4094"
+        and fields["unrelated_work_continuing"] is True
+        for name, fields in [
+            (event["event"], event)
+            for event in runtime.last_events(10)
+        ]
+    )
+
+
+def test_reconcile_does_not_retire_post_merge_acceptance_task(tmp_path):
+    ledger = orch.Ledger(tmp_path / "merged-pr-reconcile.sqlite3")
+    task_id = ledger.create_task(
+        issue_number=277, pr_number=278, task_type="PRODUCTION_VALIDATION",
+        agent="CODEX_CHATGPT", model_class="CODEX_DEFAULT", status="RETRY",
+    )
+
+    class GH:
+        def issue(self, number):
+            return {"number": number, "state": "open"}
+
+        def pr(self, number):
+            return {"number": number, "state": "closed", "merged": True,
+                    "merged_at": "2026-09-12T18:00:00Z"}
+
+    class Runtime:
+        def event(self, *args, **kwargs):
+            pass
+
+    team = object.__new__(orch.Orchestrator)
+    team.ledger, team.gh, team.runtime = ledger, GH(), Runtime()
+    team.reap_stale_child = lambda task: None
+
+    assert team.reconcile_closed_issue_tasks() == 0
+    assert ledger.get(task_id)["status"] == "RETRY"
