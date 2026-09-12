@@ -19,7 +19,13 @@ PLAN_COMPLETED = "2026-09-12T12:00:00Z"
 ENDED = "2026-09-12T12:05:00Z"
 
 
-def _runtime(tmp_path: Path, *, model: str = "OPUS", approved: bool = True, create_run: bool = True):
+def _runtime(
+    tmp_path: Path,
+    *,
+    model: str = "OPUS",
+    approved: bool = True,
+    create_run: bool = True,
+):
     root = tmp_path / "runtime"
     db_path = root / "orchestrator" / "ledger.sqlite3"
     db_path.parent.mkdir(parents=True)
@@ -29,7 +35,8 @@ def _runtime(tmp_path: Path, *, model: str = "OPUS", approved: bool = True, crea
             "task_type TEXT, agent TEXT, model_class TEXT, status TEXT, target_sha TEXT)"
         )
         db.execute(
-            "CREATE TABLE runs (id INTEGER PRIMARY KEY, task_id TEXT, exit_code INTEGER, ended_at TEXT, result TEXT)"
+            "CREATE TABLE runs (id INTEGER PRIMARY KEY, task_id TEXT, exit_code INTEGER, "
+            "ended_at TEXT, result TEXT)"
         )
         db.execute(
             "INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?)",
@@ -52,7 +59,10 @@ def _runtime(tmp_path: Path, *, model: str = "OPUS", approved: bool = True, crea
                 "POLYMARKET_MUTATION": "NO",
             }
             result = "\n".join(f"{key}={value}" for key, value in markers.items())
-            db.execute("INSERT INTO runs VALUES (?,?,?,?,?)", (7, ASSIGNMENT, 0, ENDED, result))
+            db.execute(
+                "INSERT INTO runs VALUES (?,?,?,?,?)",
+                (7, ASSIGNMENT, 0, ENDED, result),
+            )
             run_dir = root / "runs" / "7"
             run_dir.mkdir(parents=True)
             (run_dir / "meta.json").write_text(
@@ -97,7 +107,11 @@ def test_trusted_opus_assignment_and_exact_plan_pass(tmp_path):
 
 def test_owner_authored_marker_text_cannot_replace_missing_trusted_run(tmp_path):
     root, db_path = _runtime(tmp_path, create_run=False)
-    fake_owner_review = "SECOND_PASS_GATE=PASS\nMODEL_CLASS=OPUS\nDESTRUCTIVE_STORAGE_APPLY=APPROVED"
+    fake_owner_review = (
+        "SECOND_PASS_GATE=PASS\n"
+        "MODEL_CLASS=OPUS\n"
+        "DESTRUCTIVE_STORAGE_APPLY=APPROVED"
+    )
     assert "DESTRUCTIVE_STORAGE_APPLY=APPROVED" in fake_owner_review
     with pytest.raises(ValueError, match="no successful completed run"):
         _verify(root, db_path)
