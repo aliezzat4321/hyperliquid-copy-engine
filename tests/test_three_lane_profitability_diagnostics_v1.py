@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from hlcopy.profitability.three_lane_diagnostics import build_diagnostics, render_markdown
 
@@ -18,7 +18,7 @@ def test_missing_costs_never_become_zero_or_profitability_pass() -> None:
                 "cost_completeness": "SCENARIO_ONLY", "scenarios": [{"round_trip_bps": 15}],
             }],
         },
-        generated_at=datetime(2026, 9, 12, tzinfo=timezone.utc),
+        generated_at=datetime(2026, 9, 12, tzinfo=UTC),
     )
     assert payload["profitability_verdict"] == "DIAGNOSTIC_ONLY"
     assert payload["real_trading_enabled"] is False
