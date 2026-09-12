@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import storage_retention_apply as retention
@@ -163,7 +163,7 @@ def main() -> None:
     )
     result.update(
         {
-            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "generated_at": datetime.now(UTC).isoformat(),
             "mode": "APPLY_EXACT_REVIEWED_BOOTSTRAP_PLAN",
             "code_sha": args.expected_code_sha.lower(),
             "manifest_sha256": actual_manifest_sha,
