@@ -1,12 +1,27 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import sqlite3
+import sys
 from pathlib import Path
 
 import pytest
 
-from scripts.verify_trusted_opus_storage_review import verify
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS = ROOT / "scripts"
+
+
+def _load(name: str):
+    spec = importlib.util.spec_from_file_location(name, SCRIPTS / f"{name}.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+verify = _load("verify_trusted_opus_storage_review").verify
 
 ASSIGNMENT = "a1b2c3d4e5f60708"
 CODE = "b" * 40
