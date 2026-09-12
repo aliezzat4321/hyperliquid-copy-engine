@@ -1,0 +1,163 @@
+{
+  "contains_secrets": false,
+  "decision": "DO_NOT_KEEP_ADDED_LAYER",
+  "decision_reason": "local candidate passes the token/recall/staleness gates, but the required Graphify comparison is unavailable and provider-observed token/cache metrics were not measured",
+  "fail_open": true,
+  "issue": 150,
+  "measurement": {
+    "cached_input_method": "reusable exact-SHA warm context estimate; provider cache counters unavailable",
+    "latency_method": "local context file-read wall clock via time.perf_counter",
+    "token_method": "ceil(utf8_bytes/4); estimated, not provider billing"
+  },
+  "repository": "aliezzat4321/hyperliquid-copy-engine",
+  "schema": "repo-context-benchmark/v1",
+  "sha": "fcc5fe54175250037cccf8aa6ffc3e42fc207cb9",
+  "strategies": {
+    "baseline": {
+      "index_overhead_bytes": 0,
+      "index_overhead_ms": 0.0,
+      "median_cached_input_tokens_estimate": 632523.0,
+      "median_input_tokens_estimate": 632523.0,
+      "median_latency_ms": 11.929402127861977,
+      "p90_cached_input_tokens_estimate": 632523.0,
+      "p90_input_tokens_estimate": 632523.0,
+      "p90_latency_ms": 12.180525809526443,
+      "required_file_recall": 1.0,
+      "samples": 3,
+      "stale_context_errors": 0,
+      "status": "MEASURED",
+      "tasks": [
+        {
+          "cached_input_tokens_estimate": 632523,
+          "id": "review-routing",
+          "input_tokens_estimate": 632523,
+          "latency_ms": 12.180525809526443,
+          "required_file_recall": 1.0,
+          "selected_file_count": 414,
+          "selected_files": [],
+          "stale_context_error": false,
+          "strategy": "baseline"
+        },
+        {
+          "cached_input_tokens_estimate": 632523,
+          "id": "orchestrator-regression",
+          "input_tokens_estimate": 632523,
+          "latency_ms": 11.911999434232712,
+          "required_file_recall": 1.0,
+          "selected_file_count": 414,
+          "selected_files": [],
+          "stale_context_error": false,
+          "strategy": "baseline"
+        },
+        {
+          "cached_input_tokens_estimate": 632523,
+          "id": "durable-state-docs",
+          "input_tokens_estimate": 632523,
+          "latency_ms": 11.929402127861977,
+          "required_file_recall": 1.0,
+          "selected_file_count": 414,
+          "selected_files": [],
+          "stale_context_error": false,
+          "strategy": "baseline"
+        }
+      ]
+    },
+    "graphify": {
+      "executable": null,
+      "reason": "no graphify executable is installed; no network install was attempted",
+      "samples": 0,
+      "status": "UNAVAILABLE"
+    },
+    "local_sha_index": {
+      "index_overhead_bytes": 1062903,
+      "index_overhead_ms": 163.9625634998083,
+      "median_cached_input_tokens_estimate": 74125.0,
+      "median_input_tokens_estimate": 74125.0,
+      "median_latency_ms": 0.394284725189209,
+      "p90_cached_input_tokens_estimate": 80900.0,
+      "p90_input_tokens_estimate": 80900.0,
+      "p90_latency_ms": 0.41085295379161835,
+      "required_file_recall": 1.0,
+      "samples": 3,
+      "stale_context_errors": 0,
+      "status": "MEASURED",
+      "tasks": [
+        {
+          "cached_input_tokens_estimate": 74125,
+          "id": "review-routing",
+          "input_tokens_estimate": 74125,
+          "latency_ms": 0.394284725189209,
+          "required_file_recall": 1.0,
+          "selected_file_count": 12,
+          "selected_files": [
+            "scripts/ai_team_orchestrator.py",
+            "docs/ai-team/REVIEW_PROVENANCE.md",
+            "tests/test_invo_shadow_handoff_ops_v1.py",
+            "tests/test_shadow_policy_and_permissions.py",
+            "CLAUDE.md",
+            "config/ai_team_router.json",
+            "docs/ai-team/AUTONOMOUS_TEAM.md",
+            "docs/ai-team/OPUS_REPAIR_LOOP_DIAGNOSIS.md",
+            "tests/test_ai_team_orchestrator.py",
+            ".github/workflows/manager-bootstrap-protected-self-change.yml",
+            "docs/SHADOW_ARCHITECTURE.md",
+            "docs/ai-team/TRELLO_MANAGER_WIRING.md"
+          ],
+          "stale_context_error": false,
+          "strategy": "local_sha_index"
+        },
+        {
+          "cached_input_tokens_estimate": 80900,
+          "id": "orchestrator-regression",
+          "input_tokens_estimate": 80900,
+          "latency_ms": 0.41085295379161835,
+          "required_file_recall": 1.0,
+          "selected_file_count": 12,
+          "selected_files": [
+            "docs/ai-team/INCIDENT-2026-09-08-acceptance-runner-deadlock.md",
+            ".github/workflows/emergency-acceptance-runner-failforward.yml",
+            "tests/test_ai_team_orchestrator.py",
+            "scripts/ai_team_orchestrator.py",
+            "docs/ai-team/OPUS_REPAIR_LOOP_DIAGNOSIS.md",
+            "docs/ai-team/PROFITABILITY_EVIDENCE_AUDITOR.md",
+            "src/hlcopy/profitability/evidence_auditor.py",
+            "docs/ai-team/review-repair-drill.md",
+            "src/hlcopy/copyability/runner.py",
+            "src/hlcopy/profitability/evidence_audit_cli.py",
+            "docs/ai-team/AUTONOMOUS_TEAM.md",
+            "docs/ai-team/DECISIONS.md"
+          ],
+          "stale_context_error": false,
+          "strategy": "local_sha_index"
+        },
+        {
+          "cached_input_tokens_estimate": 65084,
+          "id": "durable-state-docs",
+          "input_tokens_estimate": 65084,
+          "latency_ms": 0.3719199448823929,
+          "required_file_recall": 1.0,
+          "selected_file_count": 12,
+          "selected_files": [
+            "scripts/render_ai_team_state.py",
+            "scripts/validate_ai_team_contract.py",
+            "docs/ai-team/state.json",
+            "scripts/ai_team_contract.py",
+            "scripts/edge_temporal_validation.py",
+            "tests/test_ai_team_contract_v2.py",
+            ".github/workflows/ai-team-contract.yml",
+            "AGENTS.md",
+            "docs/ai-team/CURRENT_STATE.md",
+            "docs/ai-team/PROFITABILITY_STANDARD.md",
+            "scripts/ai_team_orchestrator.py",
+            "src/hlcopy/profitability/lane1_handoff.py"
+          ],
+          "stale_context_error": false,
+          "strategy": "local_sha_index"
+        }
+      ]
+    }
+  },
+  "threshold": 0.4,
+  "warm_median_token_reduction": 0.8828105855439249,
+  "workload": "config/repo_context_benchmark.json"
+}
