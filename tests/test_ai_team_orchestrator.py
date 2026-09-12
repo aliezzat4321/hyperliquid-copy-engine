@@ -776,6 +776,20 @@ def test_untracked_file_contents_are_scanned_for_live_enablement(tmp_path: Path)
         orch.validate_changes(orch.DEFAULT_CONFIG, tmp_path, base_sha)
 
 
+def test_authorized_router_change_is_proposable_but_remains_protected(
+    tmp_path: Path,
+) -> None:
+    base_sha = _init_git_repo(tmp_path)
+    router = tmp_path / "config" / "ai_team_router.json"
+    router.parent.mkdir()
+    router.write_text('{"claude_readiness_probe_seconds": 300}\n')
+
+    files, no_auto = orch.validate_changes(orch.DEFAULT_CONFIG, tmp_path, base_sha)
+
+    assert files == ["config/ai_team_router.json"]
+    assert no_auto is True
+
+
 def test_commit_and_push_restores_agent_ownership_before_staging(
     tmp_path: Path, monkeypatch
 ) -> None:
