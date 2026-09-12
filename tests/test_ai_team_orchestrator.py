@@ -1703,3 +1703,142 @@ def test_reconcile_closed_issue_tasks_retires_stale_retry_before_due_selection(t
     assert ledger.get(open_id)["status"] == "PENDING"
     assert ledger.due()["id"] == open_id
     assert any(name == "OBSOLETE_CLOSED_TASK_RETIRED" for name, _ in team.runtime.events)
+
+
+def test_reconcile_open_issue_closed_pr_retires_dead_review_before_due(tmp_path):
+    ledger = orch.Ledger(tmp_path / "closed-pr-reconcile.sqlite3")
+    dead_id = ledger.create_task(
+        id="b6e1a8c0637a4094", issue_number=93, pr_number=275,
+        task_type="REVIEW", agent="CLAUDE", model_class="SONNET",
+        status="WAITING_RATE_LIMIT", retry_at="2026-09-10T19:30:00Z",
+        target_sha="a" * 40, session_id="dead-session", systemd_unit="dead-unit",
+        limit_text="rate limited", last_error="Claude rate/usage limit",
+        failure_class="PROVIDER/RATE_LIMIT_WAIT",
+    )
+    ready_id = ledger.create_task(
+        issue_number=291, task_type="BUILD", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", status="PENDING", queue_priority=-122,
+    )
+
+    class GH:
+        def pr(self, number):
+            assert number == 275
+            return {"number": number, "state": "closed", "merged_at": None,
+                    "head": {"sha": "a" * 40}}
+        def issue(self, number):
+            return {"number": number, "state": "open"}
+
+    class Runtime:
+        def __init__(self):
+            self.events = []
+        def event(self, name, **kwargs):
+            self.events.append((name, kwargs))
+
+    team = object.__new__(orch.Orchestrator)
+    team.ledger, team.gh, team.runtime = ledger, GH(), Runtime()
+    reaped = []
+    team.reap_stale_child = lambda task: reaped.append(str(task["id"]))
+
+    assert team.reconcile_closed_issue_tasks() == 1
+    dead = ledger.get(dead_id)
+    assert dead["status"] == "STALE"
+    assert dead["lifecycle_phase"] == "OBSOLETE"
+    assert dead["retry_at"] is None
+    assert dead["systemd_unit"] is None
+    assert dead["session_id"] is None
+    assert dead["limit_text"] is None
+    assert dead["last_error"] is None
+    assert dead["failure_class"] is None
+    assert reaped == [dead_id]
+    assert ledger.get(ready_id)["status"] == "PENDING"
+    assert ledger.due()["id"] == ready_id
+    assert not ledger.active_for_issue(93)
+    assert any(name == "OBSOLETE_PR_TASK_RETIRED" for name, _ in team.runtime.events)
+
+
+def test_reconcile_pr_lookup_failure_preserves_task_and_unrelated_work(tmp_path):
+    ledger = orch.Ledger(tmp_path / "pr-lookup-failure.sqlite3")
+    deferred_id = ledger.create_task(
+        issue_number=93, pr_number=275, task_type="REVIEW", agent="CLAUDE",
+        model_class="SONNET", status="WAITING_RATE_LIMIT", target_sha="a" * 40,
+    )
+    ready_id = ledger.create_task(
+        issue_number=291, task_type="BUILD", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", status="PENDING", queue_priority=-122,
+    )
+
+    class GH:
+        def pr(self, number):
+            raise RuntimeError("GitHub unavailable")
+        def issue(self, number):
+            return {"number": number, "state": "open"}
+
+    class Runtime:
+        def __init__(self):
+            self.events = []
+        def event(self, name, **kwargs):
+            self.events.append((name, kwargs))
+
+    team = object.__new__(orch.Orchestrator)
+    team.ledger, team.gh, team.runtime = ledger, GH(), Runtime()
+    team.reap_stale_child = lambda task: None
+
+    assert team.reconcile_closed_issue_tasks() == 0
+    assert ledger.get(deferred_id)["status"] == "WAITING_RATE_LIMIT"
+    assert ledger.get(ready_id)["status"] == "PENDING"
+    assert ledger.due()["id"] == ready_id
+    assert any(name == "PR_TASK_RECONCILIATION_DEFERRED" for name, _ in team.runtime.events)
+
+
+def test_reconcile_preserves_post_merge_evidence_bound_to_merged_sha(tmp_path):
+    ledger = orch.Ledger(tmp_path / "merged-evidence.sqlite3")
+    task_id = ledger.create_task(
+        issue_number=93, pr_number=275, task_type="PRODUCTION_VALIDATION",
+        agent="CODEX_CHATGPT", model_class="CODEX_DEFAULT", status="PENDING",
+        target_sha="b" * 40,
+    )
+
+    class GH:
+        def pr(self, number):
+            return {"number": number, "state": "closed", "merged_at": orch.utcnow(),
+                    "merge_commit_sha": "c" * 40, "head": {"sha": "b" * 40}}
+        def issue(self, number):
+            return {"number": number, "state": "open"}
+
+    class Runtime:
+        def event(self, *args, **kwargs):
+            pass
+
+    team = object.__new__(orch.Orchestrator)
+    team.ledger, team.gh, team.runtime = ledger, GH(), Runtime()
+    team.reap_stale_child = lambda task: None
+
+    assert team.reconcile_closed_issue_tasks() == 0
+    assert ledger.get(task_id)["status"] == "PENDING"
+
+
+def test_reconcile_retires_task_bound_to_superseded_open_pr_head(tmp_path):
+    ledger = orch.Ledger(tmp_path / "superseded-head.sqlite3")
+    task_id = ledger.create_task(
+        issue_number=93, pr_number=275, task_type="REVIEW", agent="CLAUDE",
+        model_class="SONNET", status="WAITING_CI", target_sha="a" * 40,
+    )
+
+    class GH:
+        def pr(self, number):
+            return {"number": number, "state": "open", "merged_at": None,
+                    "head": {"sha": "b" * 40}}
+        def issue(self, number):
+            return {"number": number, "state": "open"}
+
+    class Runtime:
+        def event(self, *args, **kwargs):
+            pass
+
+    team = object.__new__(orch.Orchestrator)
+    team.ledger, team.gh, team.runtime = ledger, GH(), Runtime()
+    team.reap_stale_child = lambda task: None
+
+    assert team.reconcile_closed_issue_tasks() == 1
+    assert ledger.get(task_id)["status"] == "STALE"
+    assert ledger.get(task_id)["lifecycle_phase"] == "OBSOLETE"
