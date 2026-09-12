@@ -26,7 +26,7 @@ jobs:
     env:
       MARKET_ROOT: /mnt/HC_Volume_106576526/hyperliquid/market-shadow
       DATA_MOUNT: /mnt/HC_Volume_106576526
-      BUNDLE: ${{ runner.temp }}/p0-90-reviewed-bundle
+      BUNDLE: /tmp/p0-90-reviewed-bundle-${{ github.run_id }}
       BOOTSTRAP_FREE_BYTES: '1073741824'
     steps:
       - name: Parse exact reviewed trigger
