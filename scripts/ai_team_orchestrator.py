@@ -269,7 +269,16 @@ def classify_recovery_failure(task: sqlite3.Row | dict[str, Any]) -> str:
         x in text for x in ("systemd", "service failed", "deployment failed")
     ):
         return "SERVICE/DEPLOYMENT_FAILURE"
-    if any(x in text for x in ("runner", "worktree", "session end", "process")):
+    if any(
+        x in text
+        for x in (
+            "runner",
+            "worktree",
+            "session end",
+            "process",
+            "acceptance wrapper",
+        )
+    ):
         return "RUNNER_FAILURE"
     if task_type in {"BUILD", "REPAIR"} or any(
         x in text for x in ("test failed", "lint", "compile", "code change")
