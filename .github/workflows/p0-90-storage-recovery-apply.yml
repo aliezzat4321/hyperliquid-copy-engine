@@ -28,6 +28,9 @@ jobs:
       DATA_MOUNT: /mnt/HC_Volume_106576526
       BUNDLE: /tmp/p0-90-reviewed-bundle-${{ github.run_id }}
       BOOTSTRAP_FREE_BYTES: '1073741824'
+      AI_TEAM_DB: /var/lib/hyperliquid-ai-team/orchestrator/ledger.sqlite3
+      AI_TEAM_RUNTIME_ROOT: /var/lib/hyperliquid-ai-team
+
     steps:
       - name: Parse exact reviewed trigger
         id: meta
@@ -61,8 +64,8 @@ jobs:
           if pairs['CONFIRM']!='APPLY_REVIEWED_HYPERLIQUID_STORAGE_RECOVERY':
               raise SystemExit('confirmation marker invalid')
           if pairs['PR_NUMBER']!='288': raise SystemExit('unexpected PR number')
-          if pairs['OPUS_ASSIGNMENT_ID']!='caff1293406d486e':
-              raise SystemExit('unexpected Opus assignment id')
+          if not re.fullmatch(r'[0-9a-f]{16}', pairs['OPUS_ASSIGNMENT_ID']):
+              raise SystemExit('invalid Opus assignment id')
           if not re.fullmatch(r'[0-9a-f]{40}', pairs['CODE_SHA']):
               raise SystemExit('invalid code SHA')
           for key in (
@@ -73,32 +76,24 @@ jobs:
           if not re.fullmatch(r'[0-9]+', pairs['PLAN_RUN_ID']):
               raise SystemExit('invalid plan run id')
           mapping={
-              'code_sha':'CODE_SHA', 'plan_run_id':'PLAN_RUN_ID',
-              'retention_sha':'RETENTION_MANIFEST_SHA256',
-              'bootstrap_sha':'BOOTSTRAP_PLAN_SHA256',
-              'lifecycle_sha':'LIFECYCLE_MANIFEST_SHA256',
-              'binding_sha':'REVIEW_BINDING_SHA256',
+              'code_sha':'CODE_SHA','plan_run_id':'PLAN_RUN_ID',
+              'retention_sha':'RETENTION_MANIFEST_SHA256','bootstrap_sha':'BOOTSTRAP_PLAN_SHA256',
+              'lifecycle_sha':'LIFECYCLE_MANIFEST_SHA256','binding_sha':'REVIEW_BINDING_SHA256',
               'assignment_id':'OPUS_ASSIGNMENT_ID',
           }
           with open(os.environ['GITHUB_OUTPUT'],'a',encoding='utf-8') as out:
               for output,key in mapping.items():
                   out.write(f'{output}={pairs[key]}\n')
           print('TRIGGER_PARSE=PASS')
-          print('CODE_SHA='+pairs['CODE_SHA'])
-          print('PLAN_RUN_ID='+pairs['PLAN_RUN_ID'])
           PY
 
-      - name: Verify merged PR, successful fresh plan run and exact Opus review
+      - name: Verify merged PR and successful fresh immutable plan
+        id: plan
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           CODE_SHA: ${{ steps.meta.outputs.code_sha }}
           PLAN_RUN_ID: ${{ steps.meta.outputs.plan_run_id }}
-          RETENTION_SHA: ${{ steps.meta.outputs.retention_sha }}
-          BOOTSTRAP_SHA: ${{ steps.meta.outputs.bootstrap_sha }}
-          LIFECYCLE_SHA: ${{ steps.meta.outputs.lifecycle_sha }}
-          BINDING_SHA: ${{ steps.meta.outputs.binding_sha }}
-          ASSIGNMENT_ID: ${{ steps.meta.outputs.assignment_id }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -125,40 +120,14 @@ jobs:
           plan_updated=run.get('updated_at') or run.get('created_at')
           if not plan_updated:
               raise SystemExit('plan run has no completion timestamp')
-          plan_time=datetime.fromisoformat(plan_updated.replace('Z','+00:00'))
-          plan_age_seconds=(datetime.now(timezone.utc)-plan_time).total_seconds()
-          if plan_age_seconds < 0 or plan_age_seconds > 3600:
-              raise SystemExit(f'plan run is not fresh enough for destructive apply: age_seconds={plan_age_seconds:.0f}')
-          markers=[
-              'SECOND_PASS_GATE=PASS','MODEL_CLASS=OPUS',
-              f"ASSIGNMENT_ID={os.environ['ASSIGNMENT_ID']}",
-              f'TARGET_SHA={code}',
-              f"PLAN_RUN_ID={os.environ['PLAN_RUN_ID']}",
-              f"RETENTION_MANIFEST_SHA256={os.environ['RETENTION_SHA']}",
-              f"BOOTSTRAP_PLAN_SHA256={os.environ['BOOTSTRAP_SHA']}",
-              f"LIFECYCLE_MANIFEST_SHA256={os.environ['LIFECYCLE_SHA']}",
-              f"REVIEW_BINDING_SHA256={os.environ['BINDING_SHA']}",
-              'DESTRUCTIVE_STORAGE_APPLY=APPROVED',
-              'REAL_TRADING_ENABLED=NO','POSTGRESQL_FILESYSTEM_DELETION=NO',
-              'POLYMARKET_MUTATION=NO',
-          ]
-          reviews=get('pulls/288/reviews?per_page=100')
-          owner=os.environ['GITHUB_REPOSITORY_OWNER']
-          matches=[]
-          for review in reviews:
-              body=review.get('body') or ''
-              if review.get('user',{}).get('login') != owner:
-                  continue
-              if all(marker in body for marker in markers):
-                  matches.append(review)
-          if not matches:
-              raise SystemExit('no exact machine-bound Opus PASS review found')
-          if not any((review.get('submitted_at') or '') >= plan_updated for review in matches):
-              raise SystemExit('matching Opus review predates completed plan evidence')
+          age=(datetime.now(timezone.utc)-datetime.fromisoformat(plan_updated.replace('Z','+00:00'))).total_seconds()
+          if age < 0 or age > 3600:
+              raise SystemExit(f'plan run is not fresh enough for destructive apply: age_seconds={age:.0f}')
+          with open(os.environ['GITHUB_OUTPUT'],'a',encoding='utf-8') as out:
+              out.write(f'completed_at={plan_updated}\n')
           print('MERGED_EXACT_HEAD=PASS')
           print('PLAN_RUN_EXACT_HEAD=PASS')
-          print(f'PLAN_RUN_FRESHNESS=PASS age_seconds={plan_age_seconds:.0f}')
-          print('OPUS_EXACT_PLAN_REVIEW=PASS')
+          print(f'PLAN_RUN_FRESHNESS=PASS age_seconds={age:.0f}')
           PY
 
       - name: Checkout exact reviewed code
@@ -168,6 +137,22 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
           clean: true
+
+      - name: Verify trusted root-owned Opus assignment and exact-plan verdict
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/verify_trusted_opus_storage_review.py \
+            --db "$AI_TEAM_DB" \
+            --runtime-root "$AI_TEAM_RUNTIME_ROOT" \
+            --assignment-id '${{ steps.meta.outputs.assignment_id }}' \
+            --code-sha '${{ steps.meta.outputs.code_sha }}' \
+            --plan-run-id '${{ steps.meta.outputs.plan_run_id }}' \
+            --plan-completed-at '${{ steps.plan.outputs.completed_at }}' \
+            --retention-sha '${{ steps.meta.outputs.retention_sha }}' \
+            --bootstrap-sha '${{ steps.meta.outputs.bootstrap_sha }}' \
+            --lifecycle-sha '${{ steps.meta.outputs.lifecycle_sha }}' \
+            --binding-sha '${{ steps.meta.outputs.binding_sha }}'
 
       - name: Assert exact code and safety boundary
         shell: bash
@@ -182,7 +167,6 @@ jobs:
           echo 'REAL_TRADING_ENABLED=NO'
           echo 'POSTGRESQL_FILESYSTEM_DELETION=NO'
           echo 'POLYMARKET_MUTATION=NO'
-          echo 'CAPTURE_MUTATION=NO_PREVALIDATION'
           df -B1 "$DATA_MOUNT"
 
       - name: Download exact immutable plan bundle
@@ -224,7 +208,6 @@ jobs:
           sys.path.insert(0, str(Path.cwd()/'scripts'))
           import p0_90_storage_apply as exact
           import storage_retention_apply as retention
-
           bundle=Path(os.environ['BUNDLE'])
           retention_path=bundle/'retention'/'storage_retention_manifest.json'
           bootstrap_path=bundle/'bootstrap-plan.json'
@@ -236,113 +219,50 @@ jobs:
                   for chunk in iter(lambda: handle.read(1024*1024), b''):
                       h.update(chunk)
               return h.hexdigest()
-          expected={
-              retention_path:os.environ['RETENTION_SHA'],
-              bootstrap_path:os.environ['BOOTSTRAP_SHA'],
-              lifecycle_path:os.environ['LIFECYCLE_SHA'],
-              binding_path:os.environ['BINDING_SHA'],
-          }
+          expected={retention_path:os.environ['RETENTION_SHA'],bootstrap_path:os.environ['BOOTSTRAP_SHA'],lifecycle_path:os.environ['LIFECYCLE_SHA'],binding_path:os.environ['BINDING_SHA']}
           for path,want in expected.items():
               if not path.is_file() or sha(path)!=want:
                   raise SystemExit(f'artifact hash mismatch: {path}')
-
           manifest=json.loads(retention_path.read_text())
           safety=manifest['safety']
-          if not (
-              manifest.get('real_trading') is False
-              and safety.get('postgres_filesystem_deletion_allowed') is False
-              and safety.get('source_evidence_complete') is True
-              and safety.get('robust_set_nonempty') is True
-              and safety.get('profitability_protection_set_nonempty') is True
-              and safety.get('robust_alias_safety_passed') is True
-              and safety.get('profitability_protection_safety_passed') is True
-          ):
+          if not (manifest.get('real_trading') is False and safety.get('postgres_filesystem_deletion_allowed') is False and safety.get('source_evidence_complete') is True and safety.get('robust_set_nonempty') is True and safety.get('profitability_protection_set_nonempty') is True and safety.get('robust_alias_safety_passed') is True and safety.get('profitability_protection_safety_passed') is True):
               raise SystemExit('retention safety contract failed')
-          candidates=retention.validate_manifest(
-              manifest,
-              manifest_path=retention_path,
-              market_root=retention.EXPECTED_MARKET_ROOT,
-              max_age_minutes=120,
-              now=datetime.now(timezone.utc),
-          )
+          candidates=retention.validate_manifest(manifest,manifest_path=retention_path,market_root=retention.EXPECTED_MARKET_ROOT,max_age_minutes=120,now=datetime.now(timezone.utc))
           plan=json.loads(bootstrap_path.read_text())
-          selected=exact._bind_exact_plan(
-              candidates,
-              plan=plan,
-              manifest_sha256=os.environ['RETENTION_SHA'],
-              code_sha=os.environ['CODE_SHA'],
-              bootstrap_free_bytes=int(os.environ['BOOTSTRAP_FREE_BYTES']),
-          )
+          selected=exact._bind_exact_plan(candidates,plan=plan,manifest_sha256=os.environ['RETENTION_SHA'],code_sha=os.environ['CODE_SHA'],bootstrap_free_bytes=int(os.environ['BOOTSTRAP_FREE_BYTES']))
           for candidate in selected:
               retention._revalidate_identity(candidate, retention.EXPECTED_MARKET_ROOT)
-
           binding=json.loads(binding_path.read_text())
-          required_binding={
-              'code_sha':os.environ['CODE_SHA'],
-              'retention_manifest_sha256':os.environ['RETENTION_SHA'],
-              'bootstrap_plan_sha256':os.environ['BOOTSTRAP_SHA'],
-              'bootstrap_free_bytes':int(os.environ['BOOTSTRAP_FREE_BYTES']),
-              'lifecycle_manifest_sha256':os.environ['LIFECYCLE_SHA'],
-              'lifecycle_retention_action':'COMPRESS_CANDIDATE_ONLY',
-              'allowed_delete_root':str(retention.EXPECTED_MARKET_ROOT),
-              'postgresql_filesystem_deletion':False,
-              'polymarket_mutation':False,
-              'real_trading_changed':False,
-              'mutation_performed':False,
-          }
+          required_binding={'code_sha':os.environ['CODE_SHA'],'retention_manifest_sha256':os.environ['RETENTION_SHA'],'bootstrap_plan_sha256':os.environ['BOOTSTRAP_SHA'],'bootstrap_free_bytes':int(os.environ['BOOTSTRAP_FREE_BYTES']),'lifecycle_manifest_sha256':os.environ['LIFECYCLE_SHA'],'lifecycle_retention_action':'COMPRESS_CANDIDATE_ONLY','allowed_delete_root':str(retention.EXPECTED_MARKET_ROOT),'postgresql_filesystem_deletion':False,'polymarket_mutation':False,'real_trading_changed':False,'mutation_performed':False}
           for key,value in required_binding.items():
               if binding.get(key)!=value:
                   raise SystemExit(f'review binding mismatch: {key}')
-
           lifecycle=json.loads(lifecycle_path.read_text())
-          if lifecycle.get('mode')!='DRY_RUN_ONLY_NO_MUTATION':
-              raise SystemExit('lifecycle mode invalid')
-          if lifecycle.get('retention_action')!='COMPRESS_CANDIDATE_ONLY':
-              raise SystemExit('lifecycle retention scope invalid')
-          if lifecycle.get('retention_manifest_sha256')!=os.environ['RETENTION_SHA']:
-              raise SystemExit('lifecycle retention hash mismatch')
-          if lifecycle.get('real_trading') is not False or lifecycle.get('polymarket_mutation') is not False:
-              raise SystemExit('lifecycle safety flags invalid')
+          if lifecycle.get('mode')!='DRY_RUN_ONLY_NO_MUTATION' or lifecycle.get('retention_action')!='COMPRESS_CANDIDATE_ONLY' or lifecycle.get('retention_manifest_sha256')!=os.environ['RETENTION_SHA'] or lifecycle.get('real_trading') is not False or lifecycle.get('polymarket_mutation') is not False:
+              raise SystemExit('lifecycle contract invalid')
           root=Path(lifecycle['root']).resolve()
           if root != retention.EXPECTED_MARKET_ROOT.resolve(strict=True):
               raise SystemExit('lifecycle root invalid')
-          allowed={
-              str(Path(row['path']).resolve())
-              for row in manifest['market_shadow']['partitions']
-              if row['action']=='COMPRESS_CANDIDATE'
-          }
-          protected={
-              str(Path(row['path']).resolve())
-              for row in manifest['market_shadow']['partitions']
-              if row['action'] in {'KEEP_RECENT_FULL_FIDELITY','KEEP_ROBUST_FULL_FIDELITY'}
-          }
-          seen=set()
-          source_bytes=0
+          allowed={str(Path(row['path']).resolve()) for row in manifest['market_shadow']['partitions'] if row['action']=='COMPRESS_CANDIDATE'}
+          protected={str(Path(row['path']).resolve()) for row in manifest['market_shadow']['partitions'] if row['action'] in {'KEEP_RECENT_FULL_FIDELITY','KEEP_ROBUST_FULL_FIDELITY'}}
+          seen=set(); source_bytes=0
           for group in lifecycle['groups']:
-              directory=(root/group['partition']).resolve()
-              coin_dir=str(directory.parent)
+              directory=(root/group['partition']).resolve(); coin_dir=str(directory.parent)
               if coin_dir in protected or coin_dir not in allowed:
                   raise SystemExit(f'non-COMPRESS lifecycle group: {directory}')
               for source in group['sources']:
-                  path=(root/source['path']).resolve()
-                  path.relative_to(root)
-                  if path in seen:
-                      raise SystemExit(f'duplicate lifecycle source: {path}')
+                  path=(root/source['path']).resolve(); path.relative_to(root)
+                  if path in seen: raise SystemExit(f'duplicate lifecycle source: {path}')
                   seen.add(path)
-                  if not path.is_file() or path.stat().st_size != int(source['bytes']):
-                      raise SystemExit(f'lifecycle source size changed: {path}')
-                  if sha(path) != source['sha256']:
-                      raise SystemExit(f'lifecycle source hash changed: {path}')
+                  if not path.is_file() or path.stat().st_size != int(source['bytes']) or sha(path) != source['sha256']:
+                      raise SystemExit(f'lifecycle source changed: {path}')
                   source_bytes += int(source['bytes'])
-          if source_bytes != int(lifecycle['totals']['source_bytes']):
-              raise SystemExit('lifecycle source-byte total mismatch')
-          if source_bytes > int(manifest['market_shadow']['compress_candidate_bytes']):
-              raise SystemExit('lifecycle source bytes exceed retention compression budget')
+          if source_bytes != int(lifecycle['totals']['source_bytes']) or source_bytes > int(manifest['market_shadow']['compress_candidate_bytes']):
+              raise SystemExit('lifecycle source-byte total invalid')
           print('EXACT_BUNDLE_HASHES=PASS')
           print('EXACT_BOOTSTRAP_PREFIX_AND_IDENTITY=PASS')
           print('COMPRESS_CANDIDATE_ONLY=PASS')
           print('LIFECYCLE_SOURCE_HASHES=PASS')
-          print('PREQUIESCE_MUTATION=NO')
           PY
 
       - name: Quiesce Hyperliquid market capture after all review and applicability gates
@@ -396,6 +316,7 @@ jobs:
           df -B1 "$DATA_MOUNT"
 
       - name: Prove final storage gate and safety boundary
+        id: final_gate
         shell: bash
         env:
           PYTHONPATH: ${{ github.workspace }}/src
@@ -412,11 +333,22 @@ jobs:
           print('REAL_TRADING_ENABLED=NO')
           print('POSTGRESQL_FILESYSTEM_DELETION=NO')
           print('POLYMARKET_MUTATION=NO')
-          print('MARKET_CAPTURE_RESUMED=NO')
           PY
+          echo 'passed=true' >> "$GITHUB_OUTPUT"
 
-      - name: Keep capture paused unless a later validated recovery step resumes it
-        if: always()
+      - name: Resume Hyperliquid market capture only after successful final gate
+        if: steps.final_gate.outputs.passed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          systemctl start hyperliquid-market-capture.timer
+          systemctl is-active --quiet hyperliquid-market-capture.timer
+          echo 'MARKET_CAPTURE_RESUMED=YES'
+          echo 'REAL_TRADING_CHANGE=NO'
+          df -B1 "$DATA_MOUNT"
+
+      - name: Fail-closed capture cleanup after any incomplete recovery
+        if: failure()
         shell: bash
         run: |
           systemctl stop hyperliquid-market-capture.timer 2>/dev/null || true
