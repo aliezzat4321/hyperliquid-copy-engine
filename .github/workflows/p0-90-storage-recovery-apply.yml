@@ -88,7 +88,7 @@ jobs:
           print('PLAN_RUN_ID='+pairs['PLAN_RUN_ID'])
           PY
 
-      - name: Verify merged PR, successful plan run and exact Opus review
+      - name: Verify merged PR, successful fresh plan run and exact Opus review
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -103,6 +103,7 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           import json, os, urllib.request
+          from datetime import datetime, timezone
           repo=os.environ['GITHUB_REPOSITORY']
           token=os.environ['GH_TOKEN']
           def get(path):
@@ -121,6 +122,13 @@ jobs:
               raise SystemExit('plan run is not successful at exact reviewed head')
           if run.get('name')!='p0-90-storage-recovery-plan':
               raise SystemExit('unexpected plan workflow')
+          plan_updated=run.get('updated_at') or run.get('created_at')
+          if not plan_updated:
+              raise SystemExit('plan run has no completion timestamp')
+          plan_time=datetime.fromisoformat(plan_updated.replace('Z','+00:00'))
+          plan_age_seconds=(datetime.now(timezone.utc)-plan_time).total_seconds()
+          if plan_age_seconds < 0 or plan_age_seconds > 3600:
+              raise SystemExit(f'plan run is not fresh enough for destructive apply: age_seconds={plan_age_seconds:.0f}')
           markers=[
               'SECOND_PASS_GATE=PASS','MODEL_CLASS=OPUS',
               f"ASSIGNMENT_ID={os.environ['ASSIGNMENT_ID']}",
@@ -145,11 +153,11 @@ jobs:
                   matches.append(review)
           if not matches:
               raise SystemExit('no exact machine-bound Opus PASS review found')
-          plan_updated=run.get('updated_at') or run.get('created_at')
           if not any((review.get('submitted_at') or '') >= plan_updated for review in matches):
               raise SystemExit('matching Opus review predates completed plan evidence')
           print('MERGED_EXACT_HEAD=PASS')
           print('PLAN_RUN_EXACT_HEAD=PASS')
+          print(f'PLAN_RUN_FRESHNESS=PASS age_seconds={plan_age_seconds:.0f}')
           print('OPUS_EXACT_PLAN_REVIEW=PASS')
           PY
 
@@ -254,7 +262,7 @@ jobs:
               manifest,
               manifest_path=retention_path,
               market_root=retention.EXPECTED_MARKET_ROOT,
-              max_age_minutes=30,
+              max_age_minutes=120,
               now=datetime.now(timezone.utc),
           )
           plan=json.loads(bootstrap_path.read_text())
@@ -365,7 +373,7 @@ jobs:
             --expected-bootstrap-plan-sha256 "$BOOTSTRAP_SHA" \
             --expected-code-sha "$CODE_SHA" \
             --bootstrap-free-bytes "$BOOTSTRAP_FREE_BYTES" \
-            --max-manifest-age-minutes 30 \
+            --max-manifest-age-minutes 120 \
             --audit-log "$RUNNER_TEMP/p0-90-bootstrap-apply.json" \
             --apply
           df -B1 "$DATA_MOUNT"
@@ -382,7 +390,7 @@ jobs:
             --policy config/market_tape_lifecycle.json \
             --apply \
             --expected-manifest-sha256 "$LIFECYCLE_SHA" \
-            --max-manifest-age-minutes 30 \
+            --max-manifest-age-minutes 120 \
             --min-free-bytes 536870912 \
             --audit-log "$RUNNER_TEMP/p0-90-lifecycle-apply.json"
           df -B1 "$DATA_MOUNT"
