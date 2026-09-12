@@ -21,7 +21,10 @@ UTC_TZ = timezone(timedelta(0))
 EXPECTED_MARKET_ROOT = Path("/mnt/HC_Volume_106576526/hyperliquid/market-shadow")
 EXPECTED_MOUNT = Path("/mnt/HC_Volume_106576526")
 GIB = 1024**3
+MIB = 1024**2
 MAX_DELETE_BUDGET_BYTES = 24 * GIB
+MIN_BOOTSTRAP_FREE_BYTES = 512 * MIB
+MAX_BOOTSTRAP_FREE_BYTES = 4 * GIB
 
 
 @dataclass(frozen=True)
@@ -48,6 +51,12 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _git_head() -> str:
+    return subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT, text=True
+    ).strip().lower()
 
 
 def _du_bytes(path: Path) -> int:
@@ -265,6 +274,18 @@ def _revalidate_identity(candidate: Candidate, market_root: Path) -> int:
     return observed_bytes
 
 
+def _processed_row(candidate: Candidate, observed_bytes: int, apply: bool) -> dict:
+    return {
+        "path": str(candidate.path),
+        "date": candidate.day,
+        "coin": candidate.coin,
+        "canonical_coin": candidate.canonical_coin,
+        "planned_bytes": candidate.bytes_planned,
+        "observed_file_bytes": observed_bytes,
+        "applied": apply,
+    }
+
+
 def apply_candidates(
     candidates: list[Candidate],
     *,
@@ -298,17 +319,7 @@ def apply_candidates(
         observed_bytes = _revalidate_identity(candidate, market_root)
         if apply:
             shutil.rmtree(candidate.path)
-        processed.append(
-            {
-                "path": str(candidate.path),
-                "date": candidate.day,
-                "coin": candidate.coin,
-                "canonical_coin": candidate.canonical_coin,
-                "planned_bytes": candidate.bytes_planned,
-                "observed_file_bytes": observed_bytes,
-                "applied": apply,
-            }
-        )
+        processed.append(_processed_row(candidate, observed_bytes, apply))
 
     after_pct = _used_pct(mount)
     return {
@@ -320,9 +331,70 @@ def apply_candidates(
         "planned_bytes_processed": sum(row["planned_bytes"] for row in processed),
         "skipped_missing": skipped_missing,
         "target_reached": after_pct <= target_used_pct,
+        "final_exit_gate": True,
         "apply": apply,
-        # This applier accepts DELETE_CANDIDATE rows only. Useful older evidence
-        # classified for future compression is never an input to deletion.
+        "compress_candidates_deleted": 0,
+        "processed": processed,
+    }
+
+
+def apply_bootstrap_candidates(
+    candidates: list[Candidate],
+    *,
+    mount: Path,
+    market_root: Path,
+    bootstrap_free_bytes: int,
+    apply: bool,
+) -> dict:
+    if not (MIN_BOOTSTRAP_FREE_BYTES <= bootstrap_free_bytes <= MAX_BOOTSTRAP_FREE_BYTES):
+        raise ValueError("bootstrap free-byte objective must be between 512 MiB and 4 GiB")
+    if apply and not getattr(shutil.rmtree, "avoids_symlink_attacks", False):
+        raise ValueError("platform does not provide symlink-attack-resistant shutil.rmtree")
+
+    before = disk_usage(mount)
+    required_reclaim_bytes = max(0, bootstrap_free_bytes - int(before.available))
+    reviewed_candidate_bytes = sum(candidate.bytes_planned for candidate in candidates)
+    if reviewed_candidate_bytes < required_reclaim_bytes:
+        raise ValueError(
+            "reviewed candidate pool cannot reach bootstrap objective; refusing before deletion: "
+            f"required={required_reclaim_bytes} reviewed={reviewed_candidate_bytes}"
+        )
+
+    processed: list[dict] = []
+    skipped_missing: list[str] = []
+    simulated_available = int(before.available)
+    for candidate in candidates:
+        current_available = int(disk_usage(mount).available) if apply else simulated_available
+        if current_available >= bootstrap_free_bytes:
+            break
+        if not candidate.path.exists():
+            skipped_missing.append(str(candidate.path))
+            continue
+        observed_bytes = _revalidate_identity(candidate, market_root)
+        if apply:
+            shutil.rmtree(candidate.path)
+        else:
+            simulated_available += candidate.bytes_planned
+        processed.append(_processed_row(candidate, observed_bytes, apply))
+
+    after = disk_usage(mount)
+    after_available = int(after.available) if apply else simulated_available
+    objective_reached = after_available >= bootstrap_free_bytes
+    return {
+        "before_used_pct": round(before.used_pct, 3),
+        "after_used_pct": round(after.used_pct, 3),
+        "target_used_pct": None,
+        "bootstrap_free_bytes": bootstrap_free_bytes,
+        "before_available_bytes": int(before.available),
+        "after_available_bytes": after_available,
+        "required_reclaim_bytes": required_reclaim_bytes,
+        "candidate_count_considered": len(candidates),
+        "partitions_processed": len(processed),
+        "planned_bytes_processed": sum(row["planned_bytes"] for row in processed),
+        "skipped_missing": skipped_missing,
+        "target_reached": objective_reached,
+        "final_exit_gate": False,
+        "apply": apply,
         "compress_candidates_deleted": 0,
         "processed": processed,
     }
@@ -346,9 +418,12 @@ def main() -> None:
             "/root/hyperliquid-audit/storage-retention/storage_retention_apply.json"
         ),
     )
-    parser.add_argument("--target-used-pct", type=float, default=79.0)
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument("--target-used-pct", type=float, default=None)
+    mode_group.add_argument("--bootstrap-free-bytes", type=int, default=None)
     parser.add_argument("--max-manifest-age-minutes", type=int, default=15)
     parser.add_argument("--expected-manifest-sha256", default="")
+    parser.add_argument("--expected-code-sha", default="")
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
 
@@ -356,8 +431,15 @@ def main() -> None:
         raise SystemExit("market-root must be the exact Hyperliquid market-shadow directory")
     if args.mount.resolve(strict=True) != EXPECTED_MOUNT.resolve(strict=True):
         raise SystemExit("mount must be the exact Hyperliquid data volume")
-    if not (70.0 <= args.target_used_pct < 80.0):
+
+    bootstrap_mode = args.bootstrap_free_bytes is not None
+    target_used_pct = 79.0 if args.target_used_pct is None else args.target_used_pct
+    if not bootstrap_mode and not (70.0 <= target_used_pct < 80.0):
         raise SystemExit("exit-gate target-used-pct must be at least 70 and below 80")
+    if bootstrap_mode and not (
+        MIN_BOOTSTRAP_FREE_BYTES <= args.bootstrap_free_bytes <= MAX_BOOTSTRAP_FREE_BYTES
+    ):
+        raise SystemExit("bootstrap-free-bytes must be between 512 MiB and 4 GiB")
 
     actual_manifest_sha256 = _sha256(args.manifest)
     expected_sha = str(args.expected_manifest_sha256 or "").strip().lower()
@@ -366,8 +448,18 @@ def main() -> None:
             "manifest SHA-256 does not match explicitly reviewed manifest: "
             f"actual={actual_manifest_sha256} expected={expected_sha}"
         )
-    if args.apply and not expected_sha:
-        raise SystemExit("--apply requires --expected-manifest-sha256")
+
+    actual_code_sha = _git_head()
+    expected_code_sha = str(args.expected_code_sha or "").strip().lower()
+    if expected_code_sha and actual_code_sha != expected_code_sha:
+        raise SystemExit(
+            "code SHA does not match explicitly reviewed code: "
+            f"actual={actual_code_sha} expected={expected_code_sha}"
+        )
+    if args.apply and (not expected_sha or not expected_code_sha):
+        raise SystemExit(
+            "--apply requires both --expected-manifest-sha256 and --expected-code-sha"
+        )
 
     manifest = _read_json(args.manifest)
     candidates = validate_manifest(
@@ -376,19 +468,38 @@ def main() -> None:
         market_root=args.market_root,
         max_age_minutes=args.max_manifest_age_minutes,
     )
-    result = apply_candidates(
-        candidates,
-        mount=args.mount,
-        market_root=args.market_root,
-        target_used_pct=args.target_used_pct,
-        apply=args.apply,
-    )
+    if bootstrap_mode:
+        result = apply_bootstrap_candidates(
+            candidates,
+            mount=args.mount,
+            market_root=args.market_root,
+            bootstrap_free_bytes=args.bootstrap_free_bytes,
+            apply=args.apply,
+        )
+    else:
+        result = apply_candidates(
+            candidates,
+            mount=args.mount,
+            market_root=args.market_root,
+            target_used_pct=target_used_pct,
+            apply=args.apply,
+        )
+
+    if bootstrap_mode:
+        run_mode = (
+            "APPLY_REVIEWED_BOOTSTRAP_DELETE_CANDIDATES"
+            if args.apply
+            else "DRY_RUN_BOOTSTRAP_HEADROOM"
+        )
+    else:
+        run_mode = "APPLY_REVIEWED_DELETE_CANDIDATES" if args.apply else "DRY_RUN"
     result.update(
         {
             "generated_at": datetime.now(UTC_TZ).isoformat(),
             "manifest": str(args.manifest),
             "manifest_sha256": actual_manifest_sha256,
-            "mode": "APPLY_REVIEWED_DELETE_CANDIDATES" if args.apply else "DRY_RUN",
+            "code_sha": actual_code_sha,
+            "mode": run_mode,
             "real_trading_changed": False,
             "postgresql_filesystem_deletion": False,
             "polymarket_mutation": False,
@@ -402,10 +513,16 @@ def main() -> None:
 
     print("========== HYPERLIQUID EMERGENCY STORAGE RETENTION ==========")
     print(f"mode={result['mode']}")
+    print(f"code_sha={actual_code_sha}")
     print(f"manifest_sha256={actual_manifest_sha256}")
     print(f"before_used_pct={result['before_used_pct']}")
     print(f"after_used_pct={result['after_used_pct']}")
     print(f"target_used_pct={result['target_used_pct']}")
+    if bootstrap_mode:
+        print(f"bootstrap_free_bytes={result['bootstrap_free_bytes']}")
+        print(f"before_available_bytes={result['before_available_bytes']}")
+        print(f"after_available_bytes={result['after_available_bytes']}")
+    print(f"final_exit_gate={result['final_exit_gate']}")
     print(f"partitions_processed={result['partitions_processed']}")
     print(f"planned_bytes_processed={result['planned_bytes_processed']}")
     print(f"target_reached={result['target_reached']}")
@@ -416,7 +533,7 @@ def main() -> None:
     print(f"DELETION_PERFORMED={'YES' if args.apply else 'NO'}")
     if args.apply and not result["target_reached"]:
         raise SystemExit(
-            "reviewed delete-candidate pool exhausted before target headroom was reached"
+            "reviewed delete-candidate pool exhausted before requested headroom was reached"
         )
 
 
