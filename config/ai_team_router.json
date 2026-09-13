@@ -26,6 +26,7 @@
   },
   "legacy_remediation_migration": {"version": 1, "issues": [166, 168, 170], "supersede_issue": 170, "release_issue": 120},
   "completion_reconciliation": {
+    "90": ["STORAGE_PROOF"],
     "120": ["STORAGE_PROOF"],
     "93": ["RUNTIME_PROOF"],
     "196": ["PROSPECTIVE_EVIDENCE"],
