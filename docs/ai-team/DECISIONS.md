@@ -2,6 +2,19 @@
 
 Append-only record of accepted architecture / policy decisions. New decisions may supersede old ones but should not erase them.
 
+## 2026-09-09 — No repository-context index retained after Issue #150 benchmark
+
+- The simple disposable SHA-keyed index reduced the median lexical context estimate by
+  85.15% but recalled only 77.78% of predeclared required files, so it failed the
+  correctness gate despite clearing the 40% reduction floor.
+- Graphify was unavailable in the acceptance environment. Its metrics were not invented
+  or replaced by a look-alike implementation, and an unavailable candidate cannot pass.
+- No added context layer is retained. GitHub/git remains canonical, and any later retest
+  must preserve exact-SHA invalidation and achieve full required-file recall without a
+  safety regression. Evidence and limitations are recorded in
+  `docs/ai-team/ISSUE-150-CONTEXT-BENCHMARK.md`.
+- This decision changes no trading permission. Real trading remains disabled.
+
 ## 2026-09-03 — Risk eligibility is separate from credible edge
 
 - Promotion policy v2 retains the v1 profitability floors and adds a versioned,
