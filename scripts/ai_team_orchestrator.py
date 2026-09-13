@@ -81,6 +81,14 @@ EVIDENCE_TASK_TYPES = {phase for phases in COMPLETION_REQUIREMENTS.values() for 
 ACCEPTANCE_ARTIFACT_SCHEMA = "ai-team-acceptance-artifact/v1"
 ACCEPTANCE_POLICY_VERSION = "ai-team-completion/v1"
 ACCEPTANCE_MAX_AGE = dt.timedelta(days=7)
+HISTORICAL_MERGE_CHECKPOINTS = {
+    90: {
+        "pr_number": 288,
+        "head_sha": "d763b536edd9d6fc5fce76105996bfaf5858d85b",
+        "merge_commit_sha": "3ae5b10d1d9eca1a5fbfd5f65b8dc116123eeaad",
+        "base": "main",
+    },
+}
 # A phase runner is trusted by filesystem isolation and by this exact identity.  Model
 # worktrees cannot write STATE_ROOT/evidence; merely spelling one of these names in an
 # envelope therefore grants no authority.
@@ -149,6 +157,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "legacy_remediation_migration": {"version": 1, "issues": [166, 168, 170],
                                      "supersede_issue": 170, "release_issue": 120},
     "completion_reconciliation": {
+        "90": ["STORAGE_PROOF"],
         "120": ["STORAGE_PROOF"],
         "93": ["RUNTIME_PROOF"], "196": ["PROSPECTIVE_EVIDENCE"],
         "197": ["PROSPECTIVE_EVIDENCE"], "91": ["PROSPECTIVE_EVIDENCE"],
@@ -1873,6 +1882,8 @@ class Orchestrator:
                 continue
             try:
                 merged_sha = self.ledger.latest_merged_sha(number)
+                if merged_sha is None and number in HISTORICAL_MERGE_CHECKPOINTS:
+                    merged_sha = self.backfill_historical_merge_checkpoint(number)
                 if merged_sha is None:
                     self.runtime.event(
                         "ROLLOUT_ACCEPTANCE_RETRY", issue=number,
@@ -1893,7 +1904,48 @@ class Orchestrator:
                                        assignment_id=task["id"], task_type=task["task_type"],
                                        status="PENDING")
             except Exception as exc:
-                self.runtime.event("ROLLOUT_ACCEPTANCE_RETRY", issue=number, error=str(exc))
+                self.runtime.event(
+                    "ROLLOUT_ACCEPTANCE_RETRY", issue=number, error=str(exc),
+                    failure_class="HISTORICAL_MERGE_CHECKPOINT_UNRESOLVED"
+                    if number in HISTORICAL_MERGE_CHECKPOINTS else None,
+                    unrelated_work_continuing=True,
+                )
+
+    def backfill_historical_merge_checkpoint(self, issue_number: int) -> str:
+        """Verify one allowlisted historical PR before recording its merge lifecycle."""
+        existing = self.ledger.latest_merged_sha(issue_number)
+        if existing is not None:
+            return existing
+        expected = HISTORICAL_MERGE_CHECKPOINTS[issue_number]
+        pr_number = int(expected["pr_number"])
+        pr = self.gh.pr(pr_number)
+        observed = {
+            "merged": pr.get("merged"),
+            "merged_at": pr.get("merged_at"),
+            "base": (pr.get("base") or {}).get("ref"),
+            "head_sha": (pr.get("head") or {}).get("sha"),
+            "merge_commit_sha": pr.get("merge_commit_sha"),
+        }
+        required = {
+            "merged": True,
+            "base": expected["base"],
+            "head_sha": expected["head_sha"],
+            "merge_commit_sha": expected["merge_commit_sha"],
+        }
+        facts_mismatch = any(
+            observed[key] != value for key, value in required.items()
+        )
+        if not observed["merged_at"] or facts_mismatch:
+            raise ValueError(f"HISTORICAL_MERGE_CHECKPOINT_MISMATCH pr={pr_number}")
+        self.ledger.create_task(
+            id=f"histmerge-{issue_number}-{pr_number}",
+            issue_number=issue_number, pr_number=pr_number,
+            task_type="MERGE_CHECKPOINT", agent="TRUSTED_MANAGER", model_class="NONE",
+            task_class="ROUTINE", status="DONE", lifecycle_phase="MERGED",
+            target_sha=str(expected["head_sha"]), last_error=None,
+            evidence={"verified_merge_commit_sha": expected["merge_commit_sha"]},
+        )
+        return str(expected["head_sha"])
 
     def enqueue_acceptance(self, issue: dict[str, Any], *, parent_id: str | None,
                            merged_sha: str | None = None) -> sqlite3.Row | None:
@@ -2089,6 +2141,17 @@ class Orchestrator:
         for issue in sorted(ready, key=ready_key):
             number = int(issue["number"])
             if self.ledger.active_for_issue(number):
+                continue
+            if (
+                number in HISTORICAL_MERGE_CHECKPOINTS
+                and str(number) in self.cfg.get("completion_reconciliation", {})
+                and self.ledger.latest_merged_sha(number) is None
+            ):
+                self.runtime.event(
+                    "READY_CLAIM_DEFERRED", issue=number,
+                    failure_class="HISTORICAL_MERGE_CHECKPOINT_UNRESOLVED",
+                    unrelated_work_continuing=True,
+                )
                 continue
             if str(issue.get("author_association") or "") not in self.trusted:
                 continue

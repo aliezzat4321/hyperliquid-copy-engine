@@ -1323,6 +1323,126 @@ def test_rollout_missing_merged_sha_defers_locally_and_continues(tmp_path):
     assert retry["unrelated_work_continuing"] is True
 
 
+def test_historical_merge_checkpoint_is_verified_idempotent_and_enqueues_storage_proof(
+        tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    issue = {"number": 90, "state": "open", "author_association": "OWNER",
+             "body": "", "labels": []}
+
+    class GH:
+        def __init__(self):
+            self.pr_reads = 0
+        def pr(self, number):
+            assert number == 288
+            self.pr_reads += 1
+            return {
+                "merged": True, "merged_at": "2026-09-01T00:00:00Z",
+                "base": {"ref": "main"},
+                "head": {"sha": "d763b536edd9d6fc5fce76105996bfaf5858d85b"},
+                "merge_commit_sha": "3ae5b10d1d9eca1a5fbfd5f65b8dc116123eeaad",
+            }
+        def issue(self, number):
+            return issue
+        def add_labels(self, number, values):
+            pass
+
+    class Runtime:
+        def __init__(self):
+            self.events = []
+        def event(self, kind, **payload):
+            self.events.append((kind, payload))
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg = {**orch.DEFAULT_CONFIG,
+                "completion_reconciliation": {"90": ["STORAGE_PROOF"]}}
+    team.ledger, team.gh, team.runtime, team.trusted = ledger, GH(), Runtime(), {"OWNER"}
+
+    team.reconcile_completion_rollout()
+    team.reconcile_completion_rollout()
+
+    checkpoints = ledger.db.execute(
+        "SELECT * FROM tasks WHERE issue_number=90 AND lifecycle_phase='MERGED'"
+    ).fetchall()
+    assert len(checkpoints) == 1
+    assert checkpoints[0]["pr_number"] == 288
+    assert checkpoints[0]["status"] == "DONE"
+    assert checkpoints[0]["last_error"] is None
+    assert checkpoints[0]["target_sha"] == "d763b536edd9d6fc5fce76105996bfaf5858d85b"
+    phase = ledger.phase_task(90, "PRODUCTION_AUDIT")
+    assert phase is not None
+    assert phase["target_sha"] == "d763b536edd9d6fc5fce76105996bfaf5858d85b"
+    assert team.gh.pr_reads == 1
+
+
+@pytest.mark.parametrize("merged,head_sha", [(False, "d763b536edd9d6fc5fce76105996bfaf5858d85b"),
+                                               (True, "f" * 40)])
+def test_historical_merge_checkpoint_mismatch_fails_closed(tmp_path, merged, head_sha):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+
+    class GH:
+        def pr(self, number):
+            return {
+                "merged": merged, "merged_at": "2026-09-01T00:00:00Z",
+                "base": {"ref": "main"}, "head": {"sha": head_sha},
+                "merge_commit_sha": "3ae5b10d1d9eca1a5fbfd5f65b8dc116123eeaad",
+            }
+
+    class Runtime:
+        def __init__(self):
+            self.events = []
+        def event(self, kind, **payload):
+            self.events.append((kind, payload))
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg = {**orch.DEFAULT_CONFIG,
+                "completion_reconciliation": {"90": ["STORAGE_PROOF"]}}
+    team.ledger, team.gh, team.runtime = ledger, GH(), Runtime()
+
+    team.reconcile_completion_rollout()
+
+    assert ledger.latest_merged_sha(90) is None
+    assert ledger.phase_task(90, "PRODUCTION_AUDIT") is None
+    assert team.runtime.events[-1][0] == "ROLLOUT_ACCEPTANCE_RETRY"
+    assert team.runtime.events[-1][1]["failure_class"] == "HISTORICAL_MERGE_CHECKPOINT_UNRESOLVED"
+
+
+def test_unresolved_historical_rollout_parent_does_not_block_unrelated_ready_work(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    ready = [
+        {"number": 90, "author_association": "OWNER",
+         "body": "AI_TASK_CLASS=MAJOR_ARCHITECTURE\nAI_TEAM_QUEUE_PRIORITY=-210"},
+        {"number": 999, "author_association": "OWNER",
+         "body": "AI_TASK_CLASS=ROUTINE\nAI_TEAM_QUEUE_PRIORITY=0"},
+    ]
+
+    class GH:
+        def ready_issues(self, label):
+            return ready
+        def comment(self, *args):
+            pass
+        def add_labels(self, *args):
+            pass
+        def remove_label(self, *args):
+            pass
+
+    class Runtime:
+        def __init__(self):
+            self.events = []
+        def event(self, kind, **payload):
+            self.events.append((kind, payload))
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.gh = orch.DEFAULT_CONFIG, ledger, GH()
+    team.runtime, team.trusted = Runtime(), {"OWNER"}
+    team.sync_runtime_checkpoint = lambda: None
+
+    assert team.claim_ready_issue() is True
+    assert ledger.has_task_for_issue(90) is False
+    task = ledger.db.execute("SELECT * FROM tasks WHERE issue_number=999").fetchone()
+    assert task["task_type"] == "BUILD"
+    assert any(kind == "READY_CLAIM_DEFERRED" for kind, _ in team.runtime.events)
+
+
 def test_rollout_existing_active_phase_remains_idempotent(tmp_path):
     ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
     sha = "d" * 40
