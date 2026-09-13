@@ -1,0 +1,31 @@
+name: p0-90-pause-ai-schedulers-for-opus
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p0-90-pause-ai-schedulers-for-opus.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pause:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 5
+    steps:
+      - name: Pause competing AI scheduler units
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo systemctl stop hyperliquid-ai-team-orchestrator.timer || true
+          sudo systemctl stop hyperliquid-ai-team-orchestrator.service || true
+          sudo systemctl stop hyperliquid-ai-external-supervisor.timer || true
+          sudo systemctl stop hyperliquid-ai-external-supervisor.service || true
+          if sudo systemctl is-active --quiet hyperliquid-ai-team-orchestrator.timer; then
+            echo 'orchestrator timer still active' >&2
+            exit 1
+          fi
+          echo P0_90_SCHEDULER_ISOLATION=PASS
+          echo REAL_TRADING_ENABLED=NO
