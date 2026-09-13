@@ -29,7 +29,7 @@ jobs:
       LIFECYCLE_SHA: 'ca0bcbd764a68d821c179e3e92f4ad8dc1246fbc71078f506ef6fa02c824b705'
       BINDING_SHA: '6c3f74a34d6e3f94872297c0445de075bc5d2fda1449869d54979fe9231bc661'
       ARTIFACT_NAME: 'p0-90-storage-review-d763b536edd9d6fc5fce76105996bfaf5858d85b'
-      BUNDLE_DIR: ${{ runner.temp }}/p0-90-storage-review-now
+      BUNDLE_DIR: /tmp/p0-90-storage-review-now-${{ github.run_id }}
       REVIEW_WORKDIR: /var/lib/hyperliquid-ai-team/agents/claude/worktrees/p0-90-storage-review-now-${{ github.run_id }}
 
     steps:
@@ -108,16 +108,13 @@ jobs:
             LIFECYCLE_SHA="$LIFECYCLE_SHA" BINDING_SHA="$BINDING_SHA" \
             REVIEW_WORKDIR="$REVIEW_WORKDIR" \
             python3 - <<'PY'
-          import json, os, sys, uuid
+          import os, sys, uuid
           from pathlib import Path
-
           sys.path.insert(0, '/opt/hyperliquid-ai-team/scripts')
           import ai_team_orchestrator as orch
 
           o = orch.Orchestrator()
           ledger = o.ledger
-
-          # Retire only stale #90 acceptance wrappers. This changes no proof predicate.
           active = ('PENDING','RETRY','WAITING_RATE_LIMIT','WAITING_CI','WAITING_EVIDENCE_WINDOW','RUNNING')
           phase_types = tuple(orch.COMPLETION_REQUIREMENTS['STORAGE_PROOF'])
           q1=','.join('?' for _ in active)
@@ -159,7 +156,7 @@ jobs:
           print('OPUS_ASSIGNMENT_ID='+task_id)
           Path('/tmp/p0-90-opus-assignment-id').write_text(task_id)
 
-          for n in range(3):
+          for _ in range(3):
               task=ledger.get(task_id)
               if task['status']=='DONE':
                   break
@@ -178,7 +175,6 @@ jobs:
 
           assignment_id="$(cat /tmp/p0-90-opus-assignment-id)"
           echo "assignment_id=$assignment_id" >> "$GITHUB_OUTPUT"
-
           sudo python3 /opt/hyperliquid-ai-team/scripts/verify_trusted_opus_storage_review.py \
             --db /var/lib/hyperliquid-ai-team/orchestrator/ledger.sqlite3 \
             --runtime-root /var/lib/hyperliquid-ai-team \
@@ -190,7 +186,6 @@ jobs:
             --bootstrap-sha "$BOOTSTRAP_SHA" \
             --lifecycle-sha "$LIFECYCLE_SHA" \
             --binding-sha "$BINDING_SHA"
-
           echo TRUSTED_OPUS_READY_FOR_APPLY=YES
           echo OPUS_ASSIGNMENT_ID="$assignment_id"
           echo PLAN_RUN_ID="$PLAN_RUN_ID"
