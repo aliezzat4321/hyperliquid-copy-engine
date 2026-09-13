@@ -3393,7 +3393,8 @@ TASK_CLASS={task["task_class"]}
         }
 
     def _storage_review_prompt(self, task: sqlite3.Row, plan: dict[str, Any]) -> str:
-        return f"""You are CLAUDE OPUS performing the trusted second-pass destructive storage review.
+        return f"""You are CLAUDE OPUS performing the trusted second-pass destructive
+storage review.
 Review only GitHub PR #288 at exact SHA {task['target_sha']} and the immutable plan bundle
 whose verifier-owned facts are below. Inspect the bundle and relevant storage code read-only.
 Do not edit files, mutate storage, use GitHub, enable real trading, use trading keys, place
