@@ -1,0 +1,25 @@
+name: p0-90-delete-stale-plan-artifact
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p0-90-delete-stale-plan-artifact.yml
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  delete-stale-artifact:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete only the stale P0 #90 review artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api --method DELETE "/repos/${GITHUB_REPOSITORY}/actions/artifacts/10320579359"
+          echo STALE_PLAN_ARTIFACT_DELETED=YES
+          echo STORAGE_MUTATION=NO
