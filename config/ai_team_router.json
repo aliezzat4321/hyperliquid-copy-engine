@@ -33,6 +33,7 @@
     "197": ["PROSPECTIVE_EVIDENCE"],
     "91": ["PROSPECTIVE_EVIDENCE"],
     "92": ["MEASUREMENT_PROOF"],
+    "289": ["MEASUREMENT_PROOF"],
     "150": ["MEASUREMENT_PROOF"]
   },
   "opus_allowed_task_classes": [
