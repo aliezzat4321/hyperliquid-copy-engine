@@ -1242,6 +1242,162 @@ def test_parent_finalization_continues_from_parent_merged_sha(tmp_path):
     ]
 
 
+@pytest.mark.parametrize(
+    ("issue_number", "requirement", "expected_phase"),
+    [(90, "STORAGE_PROOF", "PRODUCTION_AUDIT"),
+     (289, "MEASUREMENT_PROOF", "MEASUREMENT")],
+)
+def test_rollout_acceptance_is_bound_to_exact_merged_sha(
+        tmp_path, issue_number, requirement, expected_phase):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    merged_sha = ("a" if issue_number == 90 else "b") * 40
+    ledger.create_task(
+        issue_number=issue_number, task_type="REVIEW", agent="CLAUDE",
+        model_class="SONNET", task_class="ROUTINE", status="DONE",
+        lifecycle_phase="MERGED", target_sha=merged_sha, pr_number=issue_number + 1,
+    )
+    issue = {"number": issue_number, "state": "open", "author_association": "OWNER",
+             "body": "", "labels": []}
+
+    class GH:
+        def issue(self, number):
+            return issue
+        def add_labels(self, number, values):
+            pass
+
+    class Runtime:
+        def __init__(self):
+            self.events = []
+        def event(self, kind, **payload):
+            self.events.append((kind, payload))
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg = {**orch.DEFAULT_CONFIG,
+                "completion_reconciliation": {str(issue_number): [requirement]}}
+    team.ledger, team.gh, team.runtime, team.trusted = ledger, GH(), Runtime(), {"OWNER"}
+
+    team.reconcile_completion_rollout()
+
+    phase = ledger.phase_task(issue_number, expected_phase)
+    assert phase is not None
+    assert phase["target_sha"] == merged_sha
+
+
+def test_rollout_missing_merged_sha_defers_locally_and_continues(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    good_sha = "c" * 40
+    ledger.create_task(
+        issue_number=289, task_type="REVIEW", agent="CLAUDE", model_class="SONNET",
+        task_class="ROUTINE", status="DONE", lifecycle_phase="MERGED",
+        target_sha=good_sha, pr_number=290,
+    )
+    issues = {
+        90: {"number": 90, "state": "open", "author_association": "OWNER", "body": ""},
+        289: {"number": 289, "state": "open", "author_association": "OWNER", "body": ""},
+    }
+
+    class GH:
+        def issue(self, number):
+            return issues[number]
+        def add_labels(self, number, values):
+            pass
+
+    class Runtime:
+        def __init__(self):
+            self.events = []
+        def event(self, kind, **payload):
+            self.events.append((kind, payload))
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg = {**orch.DEFAULT_CONFIG, "completion_reconciliation": {
+        "90": ["STORAGE_PROOF"], "289": ["MEASUREMENT_PROOF"]}}
+    team.ledger, team.gh, team.runtime, team.trusted = ledger, GH(), Runtime(), {"OWNER"}
+
+    team.reconcile_completion_rollout()
+
+    assert ledger.phase_task(90, "PRODUCTION_AUDIT") is None
+    assert ledger.phase_task(289, "MEASUREMENT")["target_sha"] == good_sha
+    retry = next(payload for kind, payload in team.runtime.events
+                 if kind == "ROLLOUT_ACCEPTANCE_RETRY" and payload["issue"] == 90)
+    assert retry["failure_class"] == "MISSING_EXACT_MERGED_SHA"
+    assert retry["unrelated_work_continuing"] is True
+
+
+def test_rollout_existing_active_phase_remains_idempotent(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    sha = "d" * 40
+    ledger.create_task(
+        issue_number=289, task_type="REVIEW", agent="CLAUDE", model_class="SONNET",
+        task_class="ROUTINE", status="DONE", lifecycle_phase="MERGED",
+        target_sha=sha, pr_number=290,
+    )
+    phase_id = ledger.create_task(
+        issue_number=289, task_type="MEASUREMENT", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", task_class="ROUTINE", status="PENDING",
+        lifecycle_phase="MEASUREMENT", target_sha=sha,
+        evidence={"requirement": "MEASUREMENT_PROOF"},
+    )
+    team = object.__new__(orch.Orchestrator)
+    team.cfg = {**orch.DEFAULT_CONFIG,
+                "completion_reconciliation": {"289": ["MEASUREMENT_PROOF"]}}
+    team.ledger = ledger
+
+    team.reconcile_completion_rollout()
+    team.reconcile_completion_rollout()
+
+    rows = ledger.db.execute(
+        "SELECT id FROM tasks WHERE issue_number=289 AND lifecycle_phase='MEASUREMENT'"
+    ).fetchall()
+    assert [row["id"] for row in rows] == [phase_id]
+
+
+def test_rollout_existing_proven_phase_remains_idempotent(tmp_path):
+    sha = "e" * 40
+    root, evidence = trusted_artifact(
+        tmp_path, issue=289, requirement="MEASUREMENT_PROOF",
+        phase="MEASUREMENT", sha=sha,
+    )
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3", root)
+    ledger.create_task(
+        issue_number=289, task_type="REVIEW", agent="CLAUDE", model_class="SONNET",
+        task_class="ROUTINE", status="DONE", lifecycle_phase="MERGED",
+        target_sha=sha, pr_number=290,
+    )
+    phase_id = ledger.create_task(
+        issue_number=289, task_type="MEASUREMENT", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", task_class="ROUTINE", status="DONE",
+        lifecycle_phase="MEASUREMENT", target_sha=sha,
+        evidence={"requirement": "MEASUREMENT_PROOF"},
+    )
+    ledger.record_acceptance_evidence(
+        issue_number=289, requirement="MEASUREMENT_PROOF", phase="MEASUREMENT",
+        evidence=evidence, expected_merged_sha=sha,
+    )
+
+    class GH:
+        def issue(self, number):
+            return {"number": number, "state": "open", "author_association": "OWNER",
+                    "body": ""}
+        def add_labels(self, number, values):
+            pass
+
+    class Runtime:
+        def event(self, kind, **payload):
+            pass
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg = {**orch.DEFAULT_CONFIG,
+                "completion_reconciliation": {"289": ["MEASUREMENT_PROOF"]}}
+    team.ledger, team.gh, team.runtime, team.trusted = ledger, GH(), Runtime(), {"OWNER"}
+
+    team.reconcile_completion_rollout()
+
+    rows = ledger.db.execute(
+        "SELECT id FROM tasks WHERE issue_number=289 AND lifecycle_phase='MEASUREMENT'"
+    ).fetchall()
+    assert [row["id"] for row in rows] == [phase_id]
+
+
 def test_cycle_blocks_only_invalid_acceptance_evidence_task(tmp_path):
     root, evidence = trusted_artifact(
         tmp_path, issue=154, requirement="RUNTIME_PROOF",
