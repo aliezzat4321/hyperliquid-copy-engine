@@ -1872,10 +1872,21 @@ class Orchestrator:
             if self.ledger.active_for_issue(number):
                 continue
             try:
+                merged_sha = self.ledger.latest_merged_sha(number)
+                if merged_sha is None:
+                    self.runtime.event(
+                        "ROLLOUT_ACCEPTANCE_RETRY", issue=number,
+                        error="MISSING_EXACT_MERGED_SHA",
+                        failure_class="MISSING_EXACT_MERGED_SHA",
+                        unrelated_work_continuing=True,
+                    )
+                    continue
                 issue = self.gh.issue(number)
                 if str(issue.get("state") or "open").lower() != "open":
                     continue
-                task = self.enqueue_acceptance(issue, parent_id=None)
+                task = self.enqueue_acceptance(
+                    issue, parent_id=None, merged_sha=merged_sha
+                )
                 if task:
                     self.gh.add_labels(number, [self.cfg["labels"]["pending"]])
                     self.runtime.event("ROLLOUT_ACCEPTANCE_RECONCILED", issue=number,
