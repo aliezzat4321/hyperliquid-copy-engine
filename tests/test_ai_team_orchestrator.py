@@ -1297,8 +1297,13 @@ def test_rollout_missing_merged_sha_defers_locally_and_continues(tmp_path):
     }
 
     class GH:
+        def pr(self, number):
+            assert number == 288
+            raise RuntimeError("GitHub unavailable/error: test outage")
+
         def issue(self, number):
             return issues[number]
+
         def add_labels(self, number, values):
             pass
 
@@ -1319,7 +1324,8 @@ def test_rollout_missing_merged_sha_defers_locally_and_continues(tmp_path):
     assert ledger.phase_task(289, "MEASUREMENT")["target_sha"] == good_sha
     retry = next(payload for kind, payload in team.runtime.events
                  if kind == "ROLLOUT_ACCEPTANCE_RETRY" and payload["issue"] == 90)
-    assert retry["failure_class"] == "MISSING_EXACT_MERGED_SHA"
+    assert retry["failure_class"] == "GITHUB_PR_LOOKUP_FAILED"
+    assert "HISTORICAL_MERGE_CHECKPOINT_LOOKUP_FAILED pr=288" in retry["error"]
     assert retry["unrelated_work_continuing"] is True
 
 

@@ -89,6 +89,16 @@ HISTORICAL_MERGE_CHECKPOINTS = {
         "base": "main",
     },
 }
+
+
+class HistoricalMergeCheckpointMismatch(ValueError):
+    """The fetched PR facts do not match the trusted historical checkpoint."""
+
+
+class HistoricalMergeCheckpointLookupError(RuntimeError):
+    """GitHub could not supply the PR facts needed for a historical checkpoint."""
+
+
 # A phase runner is trusted by filesystem isolation and by this exact identity.  Model
 # worktrees cannot write STATE_ROOT/evidence; merely spelling one of these names in an
 # envelope therefore grants no authority.
@@ -1904,10 +1914,15 @@ class Orchestrator:
                                        assignment_id=task["id"], task_type=task["task_type"],
                                        status="PENDING")
             except Exception as exc:
+                if isinstance(exc, HistoricalMergeCheckpointMismatch):
+                    failure_class = "HISTORICAL_MERGE_CHECKPOINT_UNRESOLVED"
+                elif isinstance(exc, HistoricalMergeCheckpointLookupError):
+                    failure_class = "GITHUB_PR_LOOKUP_FAILED"
+                else:
+                    failure_class = None
                 self.runtime.event(
                     "ROLLOUT_ACCEPTANCE_RETRY", issue=number, error=str(exc),
-                    failure_class="HISTORICAL_MERGE_CHECKPOINT_UNRESOLVED"
-                    if number in HISTORICAL_MERGE_CHECKPOINTS else None,
+                    failure_class=failure_class,
                     unrelated_work_continuing=True,
                 )
 
@@ -1918,7 +1933,12 @@ class Orchestrator:
             return existing
         expected = HISTORICAL_MERGE_CHECKPOINTS[issue_number]
         pr_number = int(expected["pr_number"])
-        pr = self.gh.pr(pr_number)
+        try:
+            pr = self.gh.pr(pr_number)
+        except Exception as exc:
+            raise HistoricalMergeCheckpointLookupError(
+                f"HISTORICAL_MERGE_CHECKPOINT_LOOKUP_FAILED pr={pr_number}: {exc}"
+            ) from exc
         observed = {
             "merged": pr.get("merged"),
             "merged_at": pr.get("merged_at"),
@@ -1936,7 +1956,9 @@ class Orchestrator:
             observed[key] != value for key, value in required.items()
         )
         if not observed["merged_at"] or facts_mismatch:
-            raise ValueError(f"HISTORICAL_MERGE_CHECKPOINT_MISMATCH pr={pr_number}")
+            raise HistoricalMergeCheckpointMismatch(
+                f"HISTORICAL_MERGE_CHECKPOINT_MISMATCH pr={pr_number}"
+            )
         self.ledger.create_task(
             id=f"histmerge-{issue_number}-{pr_number}",
             issue_number=issue_number, pr_number=pr_number,
