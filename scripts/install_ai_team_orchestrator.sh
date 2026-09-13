@@ -67,6 +67,7 @@ else
 fi
 
 install -m 0755 "$ROOT/scripts/ai_team_orchestrator.py" "$OPT/scripts/ai_team_orchestrator.py"
+install -m 0644 "$ROOT/scripts/verify_trusted_opus_storage_review.py" "$OPT/scripts/verify_trusted_opus_storage_review.py"
 
 # Temporary P0 bootstrap repair for #233. The current orchestrator recursively normalizes
 # agent worktree ownership with os.chown(...), whose default follows symlinks. A Codex-created
