@@ -1380,6 +1380,47 @@ def test_historical_merge_checkpoint_is_verified_idempotent_and_enqueues_storage
     assert team.gh.pr_reads == 1
 
 
+def test_p0_90_destructive_review_has_exact_provenance_and_opus_route(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    checkpoint = orch.HISTORICAL_MERGE_CHECKPOINTS[90]
+    plan = {
+        "plan_run_id": "12345",
+        "plan_completed_at": "2026-09-12T12:00:00Z",
+        "retention_sha": "a" * 64,
+        "bootstrap_sha": "b" * 64,
+        "lifecycle_sha": "c" * 64,
+        "binding_sha": "d" * 64,
+    }
+    ledger.proven_requirements = lambda issue: set()
+    ledger.phase_task = lambda issue, phase: (
+        {"status": "DONE"} if phase in {"PRODUCTION_AUDIT", "IMMUTABLE_PLAN"} else None
+    )
+    ledger.phase_is_proven = lambda issue, requirement, phase: phase in {
+        "PRODUCTION_AUDIT", "IMMUTABLE_PLAN"
+    }
+
+    class Runtime:
+        def event(self, *args, **kwargs):
+            pass
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.runtime = orch.DEFAULT_CONFIG, ledger, Runtime()
+    team.trusted = {"OWNER"}
+    issue = {"number": 90, "state": "open", "author_association": "OWNER", "body": ""}
+    task = team.enqueue_acceptance(
+        issue, parent_id="immutable", merged_sha=checkpoint["head_sha"], trusted_plan=plan
+    )
+
+    assert task["task_type"] == "DESTRUCTIVE_REVIEW"
+    assert task["issue_number"] == 90
+    assert task["pr_number"] == 288
+    assert task["agent"] == "CLAUDE"
+    assert task["model_class"] == "OPUS"
+    assert task["target_sha"] == "d763b536edd9d6fc5fce76105996bfaf5858d85b"
+    assert team._is_trusted_storage_review(task)
+    assert json.loads(task["evidence_json"])["trusted_plan"] == plan
+
+
 @pytest.mark.parametrize("merged,head_sha", [(False, "d763b536edd9d6fc5fce76105996bfaf5858d85b"),
                                                (True, "f" * 40)])
 def test_historical_merge_checkpoint_mismatch_fails_closed(tmp_path, merged, head_sha):
