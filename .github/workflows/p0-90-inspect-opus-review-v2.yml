@@ -1,0 +1,42 @@
+name: p0-90-inspect-opus-review-v2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p0-90-inspect-opus-review-v2.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 5
+    steps:
+      - name: Inspect Opus ledger and root-owned run files
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo python3 - <<'PY'
+          import json, sqlite3
+          from pathlib import Path
+          db=sqlite3.connect('/var/lib/hyperliquid-ai-team/orchestrator/ledger.sqlite3')
+          db.row_factory=sqlite3.Row
+          for aid in ('1698744068364af1','fe89d39f90af4b7b'):
+              row=db.execute('SELECT id,status,attempt,last_error,session_id,systemd_unit,updated_at FROM tasks WHERE id=?',(aid,)).fetchone()
+              print('TASK', aid, json.dumps(dict(row) if row else None, sort_keys=True))
+              runs=db.execute('SELECT id,task_id,agent,model_class,started_at,ended_at,exit_code,session_id,input_tokens,output_tokens,cached_input_tokens,log_path,result,error FROM runs WHERE task_id=? ORDER BY id',(aid,)).fetchall()
+              for r in runs:
+                  d=dict(r)
+                  if d.get('result') and len(str(d['result']))>8000: d['result']=str(d['result'])[-8000:]
+                  if d.get('error') and len(str(d['error']))>4000: d['error']=str(d['error'])[-4000:]
+                  print('RUN', json.dumps(d, sort_keys=True))
+                  rid=str(d['id'])
+                  root=Path('/var/lib/hyperliquid-ai-team/runs')/rid
+                  for name in ('meta.json','result.json','stderr.txt','stdout.txt'):
+                      p=root/name
+                      if p.exists():
+                          txt=p.read_text(errors='replace')
+                          print('FILE', str(p), txt[-8000:])
+          PY
