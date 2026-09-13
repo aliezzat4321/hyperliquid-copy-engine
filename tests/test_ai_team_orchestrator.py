@@ -966,6 +966,12 @@ def test_terminal_block_releases_worker_marker():
     ("RESEARCH", "provider rate limit quota", "PROVIDER/RATE_LIMIT_WAIT"),
     ("BUILD", "dependency #10 incomplete", "DEPENDENCY_WAIT"),
     ("RESEARCH", "future prospective evidence window", "EVIDENCE_WINDOW_WAIT"),
+    (
+        "POST_MERGE_EVIDENCE",
+        "P0 #238 quarantine: broken generic acceptance wrapper evicted so unrelated "
+        "shadow work continues",
+        "RUNNER_FAILURE",
+    ),
     ("TERMINAL", "unexpected internal state", "UNKNOWN_INTERNAL"),
     ("TERMINAL", "OWNER_AUTH_REQUIRED: capital permission", "OWNER_AUTH_REQUIRED"),
 ])
