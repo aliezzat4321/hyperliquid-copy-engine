@@ -142,3 +142,41 @@ def test_missing_destructive_approval_fails_closed(tmp_path):
     root, db_path = _runtime(tmp_path, approved=False)
     with pytest.raises(ValueError, match="DESTRUCTIVE_STORAGE_APPLY"):
         _verify(root, db_path)
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [("issue_number", 91), ("pr_number", 287), ("target_sha", "0" * 40),
+     ("agent", "CODEX_CHATGPT"), ("task_type", "MEASUREMENT")],
+)
+def test_wrong_assignment_identity_fails_closed(tmp_path, column, value):
+    root, db_path = _runtime(tmp_path)
+    with sqlite3.connect(db_path) as db:
+        db.execute(f"UPDATE tasks SET {column}=? WHERE id=?", (value, ASSIGNMENT))
+    with pytest.raises(ValueError, match="trusted assignment|not an Opus"):
+        _verify(root, db_path)
+
+
+@pytest.mark.parametrize(
+    "marker",
+    ["SECOND_PASS_GATE", "ASSIGNMENT_ID", "TARGET_SHA", "PLAN_RUN_ID",
+     "RETENTION_MANIFEST_SHA256", "BOOTSTRAP_PLAN_SHA256",
+     "LIFECYCLE_MANIFEST_SHA256", "REVIEW_BINDING_SHA256",
+     "REAL_TRADING_ENABLED", "POSTGRESQL_FILESYSTEM_DELETION"],
+)
+def test_each_wrong_trusted_marker_fails_closed(tmp_path, marker):
+    root, db_path = _runtime(tmp_path)
+    with sqlite3.connect(db_path) as db:
+        row = db.execute("SELECT id,result FROM runs WHERE task_id=?", (ASSIGNMENT,)).fetchone()
+        bad = "\n".join(
+            f"{key}=WRONG" if key == marker else line
+            for line in row[1].splitlines()
+            for key in [line.split("=", 1)[0]]
+        )
+        db.execute("UPDATE runs SET result=? WHERE id=?", (bad, row[0]))
+    result_path = root / "runs" / str(row[0]) / "result.json"
+    result_file = json.loads(result_path.read_text())
+    result_file["result"] = bad
+    result_path.write_text(json.dumps(result_file))
+    with pytest.raises(ValueError, match="missing/mismatched marker"):
+        _verify(root, db_path)

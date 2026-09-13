@@ -30,6 +30,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ai_team_runtime_ledger import RuntimeLedgerFiles, bounded_redacted
+from verify_trusted_opus_storage_review import verify as verify_trusted_opus_storage_review
 
 REPO = "aliezzat4321/hyperliquid-copy-engine"
 STATE_ROOT = Path("/var/lib/hyperliquid-ai-team")
@@ -202,7 +203,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "claude_readiness_probe_seconds": 300,
     "claude_readiness_probe_timeout_seconds": 20,
     "claude_readiness_probe_output_bytes": 4096,
-    "claude_turn_budgets": {"REVIEW": 12, "RESEARCH": 16},
+    "claude_turn_budgets": {"REVIEW": 12, "RESEARCH": 16, "DESTRUCTIVE_REVIEW": 12},
     "review_timeout_seconds": 1200,
     "research_timeout_seconds": 1800,
     "build_timeout_seconds": 1800,
@@ -529,6 +530,7 @@ class GitHub:
 
 class Ledger:
     def __init__(self, path: Path, evidence_root: Path | None = None) -> None:
+        self.path = path
         self.evidence_root = (evidence_root or (STATE_ROOT / "evidence")).resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(path)
@@ -1970,7 +1972,8 @@ class Orchestrator:
         return str(expected["head_sha"])
 
     def enqueue_acceptance(self, issue: dict[str, Any], *, parent_id: str | None,
-                           merged_sha: str | None = None) -> sqlite3.Row | None:
+                           merged_sha: str | None = None,
+                           trusted_plan: dict[str, Any] | None = None) -> sqlite3.Row | None:
         """Create exactly the next unmet durable acceptance phase."""
         number = int(issue["number"])
         contract = self.completion_contract(issue)
@@ -1987,15 +1990,36 @@ class Orchestrator:
                         continue
                 opus_phase = phase in {"DESTRUCTIVE_REVIEW", "EVIDENCE_AUDIT", "FINAL_VERDICT"}
                 manager_phase = phase == "AUTHORIZED_APPLY"
+                checkpoint = HISTORICAL_MERGE_CHECKPOINTS.get(number)
+                source_pr = None
+                if checkpoint and merged_sha == checkpoint["head_sha"]:
+                    source_pr = int(checkpoint["pr_number"])
+                task_evidence: dict[str, Any] = {"requirement": requirement}
+                if phase == "DESTRUCTIVE_REVIEW" and number == 90:
+                    if not trusted_plan:
+                        immutable = self.ledger.phase_task(number, "IMMUTABLE_PLAN")
+                        if immutable:
+                            saved_immutable = json.loads(immutable["evidence_json"] or "{}")
+                            candidate = saved_immutable.get("result")
+                            if isinstance(candidate, dict):
+                                artifact, _, _, predicate = self.ledger._verify_artifact(
+                                    number, requirement, "IMMUTABLE_PLAN", candidate,
+                                    str(merged_sha),
+                                )
+                                if predicate:
+                                    trusted_plan = self._trusted_storage_plan(candidate, artifact)
+                    if not trusted_plan:
+                        raise ValueError("STORAGE_REVIEW_MISSING_TRUSTED_PLAN")
+                    task_evidence["trusted_plan"] = trusted_plan
                 task_id = self.ledger.create_task(
-                    issue_number=number, task_type=phase,
+                    issue_number=number, pr_number=source_pr, task_type=phase,
                     agent="TRUSTED_MANAGER" if manager_phase else (
                         "CLAUDE" if opus_phase else "CODEX_CHATGPT"),
                     model_class="NONE" if manager_phase else (
                         "OPUS" if opus_phase else "CODEX_DEFAULT"),
                     task_class="ROUTINE", status="PENDING", target_sha=merged_sha,
                     parent_id=parent_id, lifecycle_phase=phase,
-                    completion_contract=contract, evidence={"requirement": requirement},
+                    completion_contract=contract, evidence=task_evidence,
                 )
                 self.runtime.event(
                     "POST_MERGE_PHASE_ENQUEUED", assignment_id=task_id, issue=number,
@@ -2045,7 +2069,7 @@ class Orchestrator:
                 int(task["issue_number"]), requirement, "DESTRUCTIVE_REVIEW"
             ):
                 raise ValueError("APPLY_REQUIRES_PROVEN_DESTRUCTIVE_REVIEW")
-        _, _, _, predicate = self.ledger._verify_artifact(
+        artifact, _, _, predicate = self.ledger._verify_artifact(
             int(task["issue_number"]), requirement, phase, evidence, str(task["target_sha"])
         )
         self.ledger.record_acceptance_evidence(
@@ -2069,8 +2093,14 @@ class Orchestrator:
                                lifecycle_phase="REPAIR", requirement=requirement)
             return self.ledger.get(repair_id)
         self.ledger.update(task["id"], status="DONE", last_error=None)
-        next_task = self.enqueue_acceptance(issue, parent_id=str(task["id"]),
-                                            merged_sha=task["target_sha"])
+        trusted_plan = None
+        if (int(task["issue_number"]) == 90 and requirement == "STORAGE_PROOF"
+                and phase == "IMMUTABLE_PLAN"):
+            trusted_plan = self._trusted_storage_plan(evidence, artifact)
+        next_task = self.enqueue_acceptance(
+            issue, parent_id=str(task["id"]), merged_sha=task["target_sha"],
+            trusted_plan=trusted_plan,
+        )
         if next_task:
             return next_task
         self.ledger.update(task["id"], lifecycle_phase="PROVEN")
@@ -2625,6 +2655,8 @@ class Orchestrator:
                 self.handle_ci(task)
             elif task["status"] == "WAITING_RATE_LIMIT" and task["agent"] == "CLAUDE":
                 self.handle_claude_probe(task)
+            elif self._is_trusted_storage_review(task):
+                self.handle_storage_destructive_review(task)
             elif task["task_type"] in EVIDENCE_TASK_TYPES:
                 # Evidence runners deposit a complete envelope durably before this
                 # transition. A missing result remains runnable and never becomes Done.
@@ -3298,6 +3330,214 @@ TASK_CLASS={task["task_class"]}
             )
         self.ledger.close_run(run_id, exit_code=0, session_id=session_id, usage=usage,
                               result=result, error=None)
+
+    @staticmethod
+    def _is_trusted_storage_review(task: sqlite3.Row) -> bool:
+        return (
+            int(task["issue_number"]) == 90
+            and task["task_type"] == "DESTRUCTIVE_REVIEW"
+            and task["lifecycle_phase"] == "DESTRUCTIVE_REVIEW"
+        )
+
+    def _trusted_storage_plan(
+        self, evidence: dict[str, Any], artifact: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bind review inputs to the verified immutable-plan bundle, never Issue prose."""
+        supplied = evidence.get("trusted_plan")
+        if not isinstance(supplied, dict):
+            raise ValueError("IMMUTABLE_PLAN_MISSING_RUNTIME_BINDING")
+        keys = {
+            "plan_run_id", "plan_completed_at", "retention_sha", "bootstrap_sha",
+            "lifecycle_sha", "binding_sha",
+        }
+        if set(supplied) != keys or not re.fullmatch(r"[0-9]+", str(supplied["plan_run_id"])):
+            raise ValueError("INVALID_IMMUTABLE_PLAN_RUNTIME_BINDING")
+        if not parse_utc(str(supplied["plan_completed_at"])):
+            raise ValueError("INVALID_IMMUTABLE_PLAN_COMPLETION_TIME")
+        names = {
+            "storage_retention_manifest.json": "retention_sha",
+            "bootstrap-plan.json": "bootstrap_sha",
+            "lifecycle-plan.json": "lifecycle_sha",
+            "review-binding.json": "binding_sha",
+        }
+        observed: dict[str, str] = {}
+        paths: dict[str, Path] = {}
+        for item in artifact["artifacts"]:
+            name = Path(str(item["path"])).name
+            if name in names:
+                observed[names[name]] = str(item["sha256"])
+                paths[name] = Path(str(item["path"]))
+        if set(observed) != set(names.values()) or any(
+            supplied[key] != value for key, value in observed.items()
+        ):
+            raise ValueError("IMMUTABLE_PLAN_BUNDLE_HASH_MISMATCH")
+        binding = json.loads(paths["review-binding.json"].read_text(encoding="utf-8"))
+        checkpoint = HISTORICAL_MERGE_CHECKPOINTS[90]
+        required_binding = {
+            "code_sha": checkpoint["head_sha"],
+            "retention_manifest_sha256": supplied["retention_sha"],
+            "bootstrap_plan_sha256": supplied["bootstrap_sha"],
+            "lifecycle_manifest_sha256": supplied["lifecycle_sha"],
+            "postgresql_filesystem_deletion": False,
+            "polymarket_mutation": False,
+            "real_trading_changed": False,
+            "mutation_performed": False,
+        }
+        if any(binding.get(key) != value for key, value in required_binding.items()):
+            raise ValueError("IMMUTABLE_PLAN_REVIEW_BINDING_MISMATCH")
+        return {
+            **{key: str(value) for key, value in supplied.items()},
+            "bundle": {
+                name: paths[name].read_text(encoding="utf-8") for name in sorted(names)
+            },
+        }
+
+    def _storage_review_prompt(self, task: sqlite3.Row, plan: dict[str, Any]) -> str:
+        return f"""You are CLAUDE OPUS performing the trusted second-pass destructive storage review.
+Review only GitHub PR #288 at exact SHA {task['target_sha']} and the immutable plan bundle
+whose verifier-owned facts are below. Inspect the bundle and relevant storage code read-only.
+Do not edit files, mutate storage, use GitHub, enable real trading, use trading keys, place
+orders, or delete PostgreSQL relations from the filesystem.
+
+ASSIGNMENT_ID={task['id']}
+TARGET_SHA={task['target_sha']}
+PLAN_RUN_ID={plan['plan_run_id']}
+RETENTION_MANIFEST_SHA256={plan['retention_sha']}
+BOOTSTRAP_PLAN_SHA256={plan['bootstrap_sha']}
+LIFECYCLE_MANIFEST_SHA256={plan['lifecycle_sha']}
+REVIEW_BINDING_SHA256={plan['binding_sha']}
+
+IMMUTABLE_PLAN_BUNDLE_JSON={canonical_json(plan['bundle'])}
+
+Fail closed if any fact, scope, safety property, or hash cannot be independently confirmed.
+At the very end, on approval emit exactly these lines:
+SECOND_PASS_GATE=PASS
+MODEL_CLASS=OPUS
+ASSIGNMENT_ID={task['id']}
+TARGET_SHA={task['target_sha']}
+PLAN_RUN_ID={plan['plan_run_id']}
+RETENTION_MANIFEST_SHA256={plan['retention_sha']}
+BOOTSTRAP_PLAN_SHA256={plan['bootstrap_sha']}
+LIFECYCLE_MANIFEST_SHA256={plan['lifecycle_sha']}
+REVIEW_BINDING_SHA256={plan['binding_sha']}
+DESTRUCTIVE_STORAGE_APPLY=APPROVED
+REAL_TRADING_ENABLED=NO
+POSTGRESQL_FILESYSTEM_DELETION=NO
+POLYMARKET_MUTATION=NO
+
+Otherwise emit SECOND_PASS_GATE=FAIL and never emit approval.
+"""
+
+    def handle_storage_destructive_review(self, task: sqlite3.Row) -> None:
+        checkpoint = HISTORICAL_MERGE_CHECKPOINTS[90]
+        if (task["agent"] != "CLAUDE" or task["model_class"] != "OPUS"
+                or task["pr_number"] != checkpoint["pr_number"]
+                or task["target_sha"] != checkpoint["head_sha"]):
+            self.block(task, "INVALID_STORAGE_REVIEW_ROUTE")
+            return
+        payload = json.loads(task["evidence_json"] or "{}")
+        plan = payload.get("trusted_plan")
+        if not isinstance(plan, dict):
+            self.block(task, "STORAGE_REVIEW_MISSING_TRUSTED_PLAN")
+            return
+        try:
+            claude_runtime_preflight()
+        except RuntimeError as exc:
+            self.block(task, f"CLAUDE_AUTH_REQUIRED: {exc}")
+            return
+        workdir = Path(task["workdir"]) if task["workdir"] else prepare_checkout(
+            user=CLAUDE_USER, home=CLAUDE_HOME, base_dir=CLAUDE_WORK,
+            task_id=str(task["id"]), ref=str(task["target_sha"]), branch=None,
+        )
+        self.ledger.update(task["id"], status="RUNNING", workdir=str(workdir),
+                           attempt=int(task["attempt"]) + 1)
+        task = self.ledger.get(str(task["id"]))
+        prompt = self._storage_review_prompt(task, plan)
+        log_path = CLAUDE_LOG / f"{task['id']}-attempt-{task['attempt']}.json"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        run_id = self.ledger.open_run(task, log_path)
+        unit = f"hl-ai-claude-{task['id'][:10]}-{int(time.time())}"
+        self.ledger.update(task["id"], systemd_unit=unit)
+        self.runtime.run_started(run_id, task, prompt=prompt, systemd_unit=unit)
+        try:
+            cp = self.invoke_claude(task, workdir, prompt, unit)
+        except subprocess.TimeoutExpired as exc:
+            text = (exc.stdout or "") + "\n" + (exc.stderr or "")
+            session_id, usage, result = parse_claude_output(text)
+            session_id = session_id or task["session_id"]
+            self.ledger.close_run(run_id, exit_code=124, session_id=session_id,
+                                  usage=usage, result=result, error="Claude timeout")
+            self.retry_or_block(task, "Claude timeout", session_id=session_id)
+            self.finish_runtime_run(run_id, str(task["id"]), stdout=exc.stdout or "",
+                                    stderr=exc.stderr or "", exit_code=124,
+                                    session_id=session_id, usage=usage, result=result,
+                                    error="Claude timeout")
+            return
+        combined = cp.stdout + ("\n" + cp.stderr if cp.stderr else "")
+        session_id, usage, result = parse_claude_output(cp.stdout)
+        resume_session = session_id or task["session_id"]
+        limited, retry_at = rate_limit_info(
+            combined, int(self.cfg["claude_readiness_probe_seconds"])
+        )
+        if limited or cp.returncode != 0:
+            error = "Claude rate/usage limit" if limited else f"Claude failed rc={cp.returncode}"
+            self.ledger.close_run(run_id, exit_code=cp.returncode, session_id=resume_session,
+                                  usage=usage, result=result, error=error)
+            if limited:
+                self.ledger.update(task["id"], status="WAITING_RATE_LIMIT", retry_at=retry_at,
+                                   session_id=resume_session,
+                                   attempt=max(0, int(task["attempt"]) - 1),
+                                   systemd_unit=None, last_error=error)
+            else:
+                self.retry_or_block(task, error, session_id=resume_session)
+            self.finish_runtime_run(run_id, str(task["id"]), stdout=cp.stdout,
+                                    stderr=cp.stderr, exit_code=cp.returncode,
+                                    session_id=resume_session, usage=usage, result=result,
+                                    error=error)
+            return
+        self.ledger.close_run(run_id, exit_code=0, session_id=resume_session,
+                              usage=usage, result=result, error=None)
+        self.ledger.update(task["id"], status="DONE", session_id=resume_session,
+                           systemd_unit=None, last_error=None)
+        self.finish_runtime_run(run_id, str(task["id"]), stdout=cp.stdout, stderr=cp.stderr,
+                                exit_code=0, session_id=resume_session, usage=usage,
+                                result=result, status="DONE")
+        try:
+            verify_trusted_opus_storage_review(
+                db_path=self.ledger.path, runtime_root=self.runtime.root,
+                assignment_id=str(task["id"]), code_sha=str(task["target_sha"]),
+                plan_run_id=plan["plan_run_id"], plan_completed_at=plan["plan_completed_at"],
+                retention_sha=plan["retention_sha"], bootstrap_sha=plan["bootstrap_sha"],
+                lifecycle_sha=plan["lifecycle_sha"], binding_sha=plan["binding_sha"],
+                require_root_owner=True,
+            )
+            self._record_storage_review_acceptance(task, result)
+        except (KeyError, TypeError, ValueError) as exc:
+            self.block(self.ledger.get(str(task["id"])), f"trusted storage review failed: {exc}")
+
+    def _record_storage_review_acceptance(self, task: sqlite3.Row, result: str) -> None:
+        root = self.ledger.evidence_root / "opus-review-verifier" / str(task["id"])
+        root.mkdir(parents=True, exist_ok=True)
+        reviewed = root / "review-result.txt"
+        reviewed.write_text(result, encoding="utf-8")
+        now = utcnow()
+        artifact = {
+            "schema_version": ACCEPTANCE_ARTIFACT_SCHEMA,
+            "policy_version": ACCEPTANCE_POLICY_VERSION,
+            "issue_number": 90, "requirement": "STORAGE_PROOF",
+            "phase": "DESTRUCTIVE_REVIEW", "producer": "opus-review-verifier",
+            "predicate": "review_passes", "code_sha": str(task["target_sha"]),
+            "observed_at": now, "window": {"start": now, "end": now},
+            "artifacts": [{"path": str(reviewed),
+                           "sha256": hashlib.sha256(result.encode()).hexdigest()}],
+            "result": {"exact_plan_reviewed": True, "review_verdict_pass": True},
+        }
+        artifact_path = root / "acceptance.json"
+        raw = canonical_json(artifact)
+        artifact_path.write_text(raw, encoding="utf-8")
+        evidence = {"source": "opus-review-verifier", "artifact_path": str(artifact_path),
+                    "artifact_hash": hashlib.sha256(raw.encode()).hexdigest()}
+        self.complete_acceptance_phase(self.ledger.get(str(task["id"])), evidence)
 
     def handle_review(self, task: sqlite3.Row) -> None:
         if not task["pr_number"] or not task["target_sha"]:

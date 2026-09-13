@@ -63,7 +63,7 @@
   "claude_readiness_probe_seconds": 300,
   "claude_readiness_probe_timeout_seconds": 20,
   "claude_readiness_probe_output_bytes": 4096,
-  "claude_turn_budgets": {"REVIEW": 12, "RESEARCH": 16},
+  "claude_turn_budgets": {"REVIEW": 12, "RESEARCH": 16, "DESTRUCTIVE_REVIEW": 12},
   "review_timeout_seconds": 1200,
   "research_timeout_seconds": 1800,
   "build_timeout_seconds": 1800,
