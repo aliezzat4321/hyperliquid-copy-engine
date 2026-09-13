@@ -1295,6 +1295,65 @@ def test_cycle_blocks_only_invalid_acceptance_evidence_task(tmp_path):
     assert "MISSING_EXACT_MERGED_SHA" in task["last_error"]
 
 
+def test_lane3_quarantined_acceptance_is_not_recreated_and_unrelated_work_runs(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    merged_sha = "9" * 40
+    ledger.create_task(
+        issue_number=91, pr_number=188, task_type="MERGE", agent="MANAGER",
+        model_class="NONE", status="DONE", lifecycle_phase="MERGED",
+        target_sha=merged_sha,
+    )
+    issue = {
+        "number": 91, "state": "open", "author_association": "OWNER",
+        "body": "implementation merged; runtime proof remains", "labels": [],
+    }
+    contract = {
+        "version": 1, "close_on_merge": False,
+        "requirements": ["PROSPECTIVE_EVIDENCE"],
+        "source": "rollout_reconciliation",
+    }
+    fingerprint = orch.acceptance_fingerprint(
+        issue_number=91, task_type="POST_MERGE_EVIDENCE",
+        target_sha=merged_sha, contract=contract,
+        requirement="PROSPECTIVE_EVIDENCE",
+    )
+    failed_id = ledger.create_task(
+        issue_number=91, task_type="POST_MERGE_EVIDENCE",
+        agent="CODEX_CHATGPT", model_class="CODEX_DEFAULT", status="STALE",
+        lifecycle_phase="POST_MERGE_EVIDENCE", target_sha=merged_sha,
+        completion_contract=contract, evidence={"requirement": "PROSPECTIVE_EVIDENCE"},
+        acceptance_fingerprint=fingerprint,
+        last_error="broken generic acceptance wrapper evicted",
+    )
+    unrelated_id = ledger.create_task(
+        issue_number=999, task_type="MEASUREMENT", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", status="PENDING",
+    )
+
+    class GH:
+        def issue(self, number):
+            return issue if number == 91 else {"number": number, "state": "closed"}
+        def add_labels(self, *args):
+            raise AssertionError("quarantined acceptance must not be relabelled/requeued")
+
+    class Runtime:
+        def event(self, *args, **kwargs):
+            pass
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.gh = orch.DEFAULT_CONFIG, ledger, GH()
+    team.runtime, team.trusted = Runtime(), {"OWNER"}
+
+    team.reconcile_completion_rollout()
+    team.reconcile_completion_rollout()
+
+    phases = ledger.db.execute(
+        "SELECT id FROM tasks WHERE issue_number=91 AND task_type='POST_MERGE_EVIDENCE'"
+    ).fetchall()
+    assert [row["id"] for row in phases] == [failed_id]
+    assert ledger.due()["id"] == unrelated_id
+
+
 def test_untrusted_or_noncanonical_child_cannot_finalize_parent(tmp_path):
     ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
     ledger.create_task(

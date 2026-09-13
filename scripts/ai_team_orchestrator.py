@@ -291,6 +291,17 @@ def recovery_fingerprint(task: sqlite3.Row | dict[str, Any], failure_class: str)
     return hashlib.sha256(identity.encode()).hexdigest()
 
 
+def acceptance_fingerprint(*, issue_number: int, task_type: str,
+                           target_sha: str | None, contract: dict[str, Any],
+                           requirement: str) -> str:
+    """Identify one immutable acceptance obligation across reconciliation runs."""
+    identity = canonical_json({
+        "issue": issue_number, "task_type": task_type, "sha": target_sha,
+        "contract": contract, "requirement": requirement,
+    })
+    return hashlib.sha256(identity.encode()).hexdigest()
+
+
 def utcnow() -> str:
     now = dt.datetime.now(dt.timezone.utc)
     return now.replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -589,8 +600,8 @@ class Ledger:
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(tasks)")}
         for name in ("limit_text", "systemd_unit", "lifecycle_phase",
                      "completion_contract_json", "evidence_json", "failure_class",
-                     "recovery_fingerprint", "recovery_attempt", "last_progress_at",
-                     "next_action"):
+                     "recovery_fingerprint", "acceptance_fingerprint",
+                     "recovery_attempt", "last_progress_at", "next_action"):
             if name not in columns:
                 self.db.execute(f"ALTER TABLE tasks ADD COLUMN {name} TEXT")
         if "queue_priority" not in columns:
@@ -683,6 +694,7 @@ class Ledger:
             "evidence_json": json.dumps(kw.get("evidence") or {}),
             "failure_class": kw.get("failure_class"),
             "recovery_fingerprint": kw.get("recovery_fingerprint"),
+            "acceptance_fingerprint": kw.get("acceptance_fingerprint"),
             "recovery_attempt": kw.get("recovery_attempt"),
             "last_progress_at": kw.get("last_progress_at", now),
             "next_action": kw.get("next_action"),
@@ -1875,7 +1887,10 @@ class Orchestrator:
                 issue = self.gh.issue(number)
                 if str(issue.get("state") or "open").lower() != "open":
                     continue
-                task = self.enqueue_acceptance(issue, parent_id=None)
+                task = self.enqueue_acceptance(
+                    issue, parent_id=None,
+                    merged_sha=self.ledger.latest_merged_sha(number),
+                )
                 if task:
                     self.gh.add_labels(number, [self.cfg["labels"]["pending"]])
                     self.runtime.event("ROLLOUT_ACCEPTANCE_RECONCILED", issue=number,
@@ -1894,12 +1909,40 @@ class Orchestrator:
             if requirement in proven:
                 continue
             for phase in COMPLETION_REQUIREMENTS[requirement]:
+                fingerprint = acceptance_fingerprint(
+                    issue_number=number, task_type=phase, target_sha=merged_sha,
+                    contract=contract, requirement=requirement,
+                )
                 existing = self.ledger.phase_task(number, phase)
                 if existing:
                     if str(existing["status"]) in ACTIVE_STATUSES:
                         return existing
                     if self.ledger.phase_is_proven(number, requirement, phase):
                         continue
+                    existing_fingerprint = existing["acceptance_fingerprint"]
+                    if not existing_fingerprint:
+                        try:
+                            old_contract = json.loads(
+                                existing["completion_contract_json"] or "{}"
+                            )
+                            old_evidence = json.loads(existing["evidence_json"] or "{}")
+                            existing_fingerprint = acceptance_fingerprint(
+                                issue_number=number, task_type=phase,
+                                target_sha=existing["target_sha"], contract=old_contract,
+                                requirement=str(old_evidence.get("requirement") or ""),
+                            )
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            existing_fingerprint = None
+                    if existing_fingerprint == fingerprint:
+                        repair = self.ledger.db.execute(
+                            "SELECT 1 FROM tasks WHERE parent_id=? AND task_type IN "
+                            "('REPAIR','RECOVERY') AND status='DONE' AND last_error IS NULL "
+                            "LIMIT 1", (existing["id"],),
+                        ).fetchone()
+                        if not repair:
+                            # A quarantined deterministic obligation is not new work.
+                            # Leave it evicted so unrelated collectors/tasks can run.
+                            return None
                 opus_phase = phase in {"DESTRUCTIVE_REVIEW", "EVIDENCE_AUDIT", "FINAL_VERDICT"}
                 manager_phase = phase == "AUTHORIZED_APPLY"
                 task_id = self.ledger.create_task(
@@ -1911,6 +1954,7 @@ class Orchestrator:
                     task_class="ROUTINE", status="PENDING", target_sha=merged_sha,
                     parent_id=parent_id, lifecycle_phase=phase,
                     completion_contract=contract, evidence={"requirement": requirement},
+                    acceptance_fingerprint=fingerprint,
                 )
                 self.runtime.event(
                     "POST_MERGE_PHASE_ENQUEUED", assignment_id=task_id, issue=number,
