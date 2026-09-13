@@ -1242,6 +1242,84 @@ def test_parent_finalization_continues_from_parent_merged_sha(tmp_path):
     ]
 
 
+def test_rollout_reconciliation_binds_phase_to_recorded_merge_sha(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    merged_sha = "d" * 40
+    ledger.create_task(
+        issue_number=197, task_type="REVIEW", agent="CLAUDE",
+        model_class="SONNET", task_class="ROUTINE", status="DONE",
+        lifecycle_phase="MERGED", target_sha=merged_sha, pr_number=201,
+    )
+    issue = {
+        "number": 197, "state": "open", "author_association": "OWNER",
+        "body": "", "labels": [],
+    }
+
+    class GH:
+        def issue(self, number):
+            return issue
+
+        def add_labels(self, number, values):
+            pass
+
+    class Runtime:
+        def __init__(self):
+            self.events = []
+
+        def event(self, kind, **payload):
+            self.events.append((kind, payload))
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg = {
+        **orch.DEFAULT_CONFIG,
+        "completion_reconciliation": {"197": ["PROSPECTIVE_EVIDENCE"]},
+    }
+    team.ledger, team.gh = ledger, GH()
+    team.runtime, team.trusted = Runtime(), {"OWNER"}
+
+    team.reconcile_completion_rollout()
+
+    phase = ledger.phase_task(197, "POST_MERGE_EVIDENCE")
+    assert phase is not None
+    assert phase["target_sha"] == merged_sha
+    assert team.runtime.events[-1][0] == "ROLLOUT_ACCEPTANCE_RECONCILED"
+
+
+def test_rollout_reconciliation_does_not_create_unverifiable_null_sha_phase(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    issue = {
+        "number": 197, "state": "open", "author_association": "OWNER",
+        "body": "", "labels": [],
+    }
+
+    class GH:
+        def issue(self, number):
+            return issue
+
+    class Runtime:
+        def __init__(self):
+            self.events = []
+
+        def event(self, kind, **payload):
+            self.events.append((kind, payload))
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg = {
+        **orch.DEFAULT_CONFIG,
+        "completion_reconciliation": {"197": ["PROSPECTIVE_EVIDENCE"]},
+    }
+    team.ledger, team.gh = ledger, GH()
+    team.runtime, team.trusted = Runtime(), {"OWNER"}
+
+    team.reconcile_completion_rollout()
+
+    assert ledger.phase_task(197, "POST_MERGE_EVIDENCE") is None
+    assert team.runtime.events == [(
+        "ROLLOUT_ACCEPTANCE_MERGE_SHA_MISSING",
+        {"issue": 197, "status": "WAITING_MERGE_PROVENANCE"},
+    )]
+
+
 def test_cycle_blocks_only_invalid_acceptance_evidence_task(tmp_path):
     root, evidence = trusted_artifact(
         tmp_path, issue=154, requirement="RUNTIME_PROOF",
