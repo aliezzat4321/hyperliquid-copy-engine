@@ -776,6 +776,30 @@ def test_untracked_file_contents_are_scanned_for_live_enablement(tmp_path: Path)
         orch.validate_changes(orch.DEFAULT_CONFIG, tmp_path, base_sha)
 
 
+def test_validate_changes_accepts_authorized_router_path_as_protected(
+    tmp_path: Path,
+) -> None:
+    base_sha = _init_git_repo(tmp_path)
+    router = tmp_path / "config" / "ai_team_router.json"
+    router.parent.mkdir()
+    router.write_text('{"real_trading_required_value":"NO"}\n')
+
+    files, no_auto = orch.validate_changes(orch.DEFAULT_CONFIG, tmp_path, base_sha)
+
+    assert files == ["config/ai_team_router.json"]
+    assert no_auto is True
+
+
+def test_validate_changes_still_rejects_non_allowlisted_live_path(tmp_path: Path) -> None:
+    base_sha = _init_git_repo(tmp_path)
+    permissions = tmp_path / "src" / "hlcopy" / "trading" / "permissions.py"
+    permissions.parent.mkdir(parents=True)
+    permissions.write_text("REAL_TRADING_ENABLED = False\n")
+
+    with pytest.raises(RuntimeError, match="owner-sensitive live path"):
+        orch.validate_changes(orch.DEFAULT_CONFIG, tmp_path, base_sha)
+
+
 def test_commit_and_push_restores_agent_ownership_before_staging(
     tmp_path: Path, monkeypatch
 ) -> None:
