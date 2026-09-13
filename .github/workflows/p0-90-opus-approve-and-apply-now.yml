@@ -19,18 +19,13 @@ concurrency:
 jobs:
   trusted-opus-review:
     runs-on: [self-hosted, hyperliquid]
-    timeout-minutes: 45
+    timeout-minutes: 30
     env:
       PLAN_RUN_ID: '34766743062'
-      PLAN_COMPLETED_AT: '2026-09-13T16:39:27Z'
       CODE_SHA: 'd763b536edd9d6fc5fce76105996bfaf5858d85b'
-      RETENTION_SHA: '1f4d4bc45405ab397decca395ea2848f777796afe06bcd6058d5a2b0beba1638'
-      BOOTSTRAP_SHA: '76ef0efb586a6dd5099ca00ca5f1847a3d50d78081ecc2b7acba4e3b197b2f30'
-      LIFECYCLE_SHA: 'ca0bcbd764a68d821c179e3e92f4ad8dc1246fbc71078f506ef6fa02c824b705'
-      BINDING_SHA: '6c3f74a34d6e3f94872297c0445de075bc5d2fda1449869d54979fe9231bc661'
       ARTIFACT_NAME: 'p0-90-storage-review-d763b536edd9d6fc5fce76105996bfaf5858d85b'
-      BUNDLE_DIR: /tmp/p0-90-storage-review-now-${{ github.run_id }}
-      REVIEW_WORKDIR: /var/lib/hyperliquid-ai-team/agents/claude/worktrees/p0-90-storage-review-now-${{ github.run_id }}
+      BUNDLE_DIR: /tmp/p0-90-opus-current-${{ github.run_id }}
+      REVIEW_WORKDIR: /var/lib/hyperliquid-ai-team/agents/claude/worktrees/p0-90-opus-current-${{ github.run_id }}
 
     steps:
       - name: Checkout exact reviewed storage code
@@ -41,7 +36,7 @@ jobs:
           persist-credentials: false
           clean: true
 
-      - name: Download exact fresh immutable plan
+      - name: Download latest immutable plan bundle
         uses: actions/download-artifact@v4
         with:
           name: ${{ env.ARTIFACT_NAME }}
@@ -50,135 +45,227 @@ jobs:
           run-id: ${{ env.PLAN_RUN_ID }}
           github-token: ${{ github.token }}
 
-      - name: Verify fresh plan hashes and safety binding
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$CODE_SHA"
-          test "$(sha256sum "$BUNDLE_DIR/retention/storage_retention_manifest.json" | awk '{print $1}')" = "$RETENTION_SHA"
-          test "$(sha256sum "$BUNDLE_DIR/bootstrap-plan.json" | awk '{print $1}')" = "$BOOTSTRAP_SHA"
-          test "$(sha256sum "$BUNDLE_DIR/lifecycle-plan.json" | awk '{print $1}')" = "$LIFECYCLE_SHA"
-          test "$(sha256sum "$BUNDLE_DIR/review-binding.json" | awk '{print $1}')" = "$BINDING_SHA"
-          python3 - <<'PY'
-          import json, os
-          from pathlib import Path
-          b=json.loads((Path(os.environ['BUNDLE_DIR'])/'review-binding.json').read_text())
-          required={
-            'code_sha': os.environ['CODE_SHA'],
-            'retention_manifest_sha256': os.environ['RETENTION_SHA'],
-            'bootstrap_plan_sha256': os.environ['BOOTSTRAP_SHA'],
-            'lifecycle_manifest_sha256': os.environ['LIFECYCLE_SHA'],
-            'postgresql_filesystem_deletion': False,
-            'polymarket_mutation': False,
-            'real_trading_changed': False,
-            'mutation_performed': False,
-          }
-          for k,v in required.items():
-              assert b.get(k)==v, (k,b.get(k),v)
-          print('FRESH_PLAN_BINDING=PASS')
-          PY
-          echo REAL_TRADING_ENABLED=NO
-          echo POSTGRESQL_FILESYSTEM_DELETION=NO
-          echo POLYMARKET_MUTATION=NO
-
-      - name: Run native root-owned Claude Opus destructive review
-        id: opus
+      - name: Bind exact fresh plan
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          sudo systemctl stop hyperliquid-ai-team-orchestrator.service || true
+          test "$(git rev-parse HEAD)" = "$CODE_SHA"
+          python3 - <<'PY'
+          import hashlib, json, os, urllib.request
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          repo=os.environ['GITHUB_REPOSITORY']
+          token=os.environ['GH_TOKEN']
+          run_id=os.environ['PLAN_RUN_ID']
+          req=urllib.request.Request(
+              f'https://api.github.com/repos/{repo}/actions/runs/{run_id}',
+              headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json'},
+          )
+          with urllib.request.urlopen(req) as response:
+              run=json.load(response)
+          if run.get('conclusion')!='success':
+              raise SystemExit('fresh storage plan is not successful')
+          if run.get('head_sha')!=os.environ['CODE_SHA']:
+              raise SystemExit('fresh storage plan is not bound to reviewed code')
+          if run.get('name')!='p0-90-storage-recovery-plan':
+              raise SystemExit('unexpected plan workflow')
+          completed=run.get('updated_at') or run.get('created_at')
+          age=(datetime.now(timezone.utc)-datetime.fromisoformat(completed.replace('Z','+00:00'))).total_seconds()
+          if age < 0 or age > 3600:
+              raise SystemExit(f'fresh storage plan expired: age_seconds={age:.0f}')
+
+          bundle=Path(os.environ['BUNDLE_DIR'])
+          paths={
+              'RETENTION_SHA':bundle/'retention'/'storage_retention_manifest.json',
+              'BOOTSTRAP_SHA':bundle/'bootstrap-plan.json',
+              'LIFECYCLE_SHA':bundle/'lifecycle-plan.json',
+              'BINDING_SHA':bundle/'review-binding.json',
+          }
+          values={}
+          for key,path in paths.items():
+              if not path.is_file():
+                  raise SystemExit(f'missing immutable plan artifact: {path}')
+              values[key]=hashlib.sha256(path.read_bytes()).hexdigest()
+          binding=json.loads(paths['BINDING_SHA'].read_text())
+          required={
+              'code_sha':os.environ['CODE_SHA'],
+              'retention_manifest_sha256':values['RETENTION_SHA'],
+              'bootstrap_plan_sha256':values['BOOTSTRAP_SHA'],
+              'lifecycle_manifest_sha256':values['LIFECYCLE_SHA'],
+              'postgresql_filesystem_deletion':False,
+              'polymarket_mutation':False,
+              'real_trading_changed':False,
+              'mutation_performed':False,
+          }
+          for key,value in required.items():
+              if binding.get(key)!=value:
+                  raise SystemExit(f'review binding mismatch: {key}')
+          with open(os.environ['GITHUB_ENV'],'a',encoding='utf-8') as out:
+              out.write(f'PLAN_COMPLETED_AT={completed}\n')
+              for key,value in values.items():
+                  out.write(f'{key}={value}\n')
+          print('FRESH_PLAN_BINDING=PASS')
+          print(f'PLAN_RUN_FRESHNESS=PASS age_seconds={age:.0f}')
+          print('REAL_TRADING_ENABLED=NO')
+          print('POSTGRESQL_FILESYSTEM_DELETION=NO')
+          print('POLYMARKET_MUTATION=NO')
+          PY
+
+      - name: Run direct restricted Claude Opus destructive review
+        id: opus
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo systemctl stop hyperliquid-ai-team-orchestrator.timer 2>/dev/null || true
+          sudo systemctl stop hyperliquid-ai-team-orchestrator.service 2>/dev/null || true
+          sudo systemctl stop hyperliquid-ai-external-supervisor.timer 2>/dev/null || true
+          sudo systemctl stop hyperliquid-ai-external-supervisor.service 2>/dev/null || true
           cleanup() {
-            sudo systemctl start hyperliquid-ai-team-orchestrator.service || true
+            sudo systemctl start hyperliquid-ai-team-orchestrator.timer 2>/dev/null || true
+            sudo systemctl start hyperliquid-ai-external-supervisor.timer 2>/dev/null || true
           }
           trap cleanup EXIT
 
           sudo rm -rf "$REVIEW_WORKDIR"
-          sudo mkdir -p "$REVIEW_WORKDIR"
-          sudo cp -a "$GITHUB_WORKSPACE/." "$REVIEW_WORKDIR/"
           sudo mkdir -p "$REVIEW_WORKDIR/review_bundle"
+          sudo cp -a "$GITHUB_WORKSPACE/." "$REVIEW_WORKDIR/"
           sudo cp -a "$BUNDLE_DIR/." "$REVIEW_WORKDIR/review_bundle/"
           sudo chown -R hl-claude-agent:hl-claude-agent "$REVIEW_WORKDIR"
 
           sudo env \
-            GH_TOKEN="$GH_TOKEN" \
             PLAN_RUN_ID="$PLAN_RUN_ID" PLAN_COMPLETED_AT="$PLAN_COMPLETED_AT" \
             CODE_SHA="$CODE_SHA" RETENTION_SHA="$RETENTION_SHA" BOOTSTRAP_SHA="$BOOTSTRAP_SHA" \
             LIFECYCLE_SHA="$LIFECYCLE_SHA" BINDING_SHA="$BINDING_SHA" \
-            REVIEW_WORKDIR="$REVIEW_WORKDIR" \
+            REVIEW_WORKDIR="$REVIEW_WORKDIR" GITHUB_OUTPUT="$GITHUB_OUTPUT" \
             python3 - <<'PY'
-          import os, sys, uuid
+          import os, re, subprocess, sys, uuid
           from pathlib import Path
+
           sys.path.insert(0, '/opt/hyperliquid-ai-team/scripts')
           import ai_team_orchestrator as orch
 
-          o = orch.Orchestrator()
-          ledger = o.ledger
-          active = ('PENDING','RETRY','WAITING_RATE_LIMIT','WAITING_CI','WAITING_EVIDENCE_WINDOW','RUNNING')
-          phase_types = tuple(orch.COMPLETION_REQUIREMENTS['STORAGE_PROOF'])
-          q1=','.join('?' for _ in active)
-          q2=','.join('?' for _ in phase_types)
-          rows=ledger.db.execute(
-              f"SELECT id FROM tasks WHERE issue_number=90 AND status IN ({q1}) AND task_type IN ({q2})",
-              (*active,*phase_types),
-          ).fetchall()
-          for row in rows:
-              ledger.update(row['id'], status='STALE', retry_at=None, systemd_unit=None,
-                            last_error='superseded by fresh plan-bound direct trusted Opus review')
-
-          plan = {
-              'plan_run_id': os.environ['PLAN_RUN_ID'],
-              'plan_completed_at': os.environ['PLAN_COMPLETED_AT'],
-              'retention_sha': os.environ['RETENTION_SHA'],
-              'bootstrap_sha': os.environ['BOOTSTRAP_SHA'],
-              'lifecycle_sha': os.environ['LIFECYCLE_SHA'],
-              'binding_sha': os.environ['BINDING_SHA'],
-              'bundle': {
-                  'storage_retention_manifest.json': 'review_bundle/retention/storage_retention_manifest.json; inspect this exact file; sha256='+os.environ['RETENTION_SHA'],
-                  'bootstrap-plan.json': 'review_bundle/bootstrap-plan.json; inspect this exact file; sha256='+os.environ['BOOTSTRAP_SHA'],
-                  'lifecycle-plan.json': 'review_bundle/lifecycle-plan.json; inspect this exact file using targeted jq/python checks; sha256='+os.environ['LIFECYCLE_SHA'],
-                  'review-binding.json': 'review_bundle/review-binding.json; inspect this exact file; sha256='+os.environ['BINDING_SHA'],
-                  'lifecycle-plan.stdout': 'review_bundle/lifecycle-plan.stdout; supporting planner output',
-                  'fresh_plan_summary': 'DELETE_CANDIDATE=3725421297 bytes; COMPRESS_CANDIDATE=15273794069 bytes; KEEP_RECENT_FULL_FIDELITY=1507873061 bytes; KEEP_ROBUST_FULL_FIDELITY=3549148606 bytes; PostgreSQL filesystem deletion forbidden; Polymarket mutation forbidden; real trading OFF',
-              },
-          }
-          task_id = uuid.uuid4().hex[:16]
-          ledger.create_task(
+          o=orch.Orchestrator()
+          ledger=o.ledger
+          task_id=uuid.uuid4().hex[:16]
+          workdir=Path(os.environ['REVIEW_WORKDIR'])
+          task_id=ledger.create_task(
               id=task_id, issue_number=90, pr_number=288,
               task_type='DESTRUCTIVE_REVIEW', agent='CLAUDE', model_class='OPUS',
-              task_class='ROUTINE', queue_priority=-100000, status='PENDING',
-              target_sha=os.environ['CODE_SHA'], workdir=os.environ['REVIEW_WORKDIR'],
+              task_class='ROUTINE', queue_priority=-100000, status='RUNNING',
+              target_sha=os.environ['CODE_SHA'], workdir=str(workdir),
               lifecycle_phase='DESTRUCTIVE_REVIEW',
               completion_contract={'version':1,'close_on_merge':False,'requirements':['STORAGE_PROOF']},
-              evidence={'requirement':'STORAGE_PROOF','trusted_plan':plan},
+              evidence={'requirement':'STORAGE_PROOF','trusted_plan':{
+                  'plan_run_id':os.environ['PLAN_RUN_ID'],
+                  'plan_completed_at':os.environ['PLAN_COMPLETED_AT'],
+                  'retention_sha':os.environ['RETENTION_SHA'],
+                  'bootstrap_sha':os.environ['BOOTSTRAP_SHA'],
+                  'lifecycle_sha':os.environ['LIFECYCLE_SHA'],
+                  'binding_sha':os.environ['BINDING_SHA'],
+              }},
           )
-          print('OPUS_ASSIGNMENT_ID='+task_id)
-          Path('/tmp/p0-90-opus-assignment-id').write_text(task_id)
+          task=ledger.get(task_id)
+          log_path=Path('/var/lib/hyperliquid-ai-team/agents/claude/logs')/f'{task_id}-direct.json'
+          log_path.parent.mkdir(parents=True,exist_ok=True)
+          run_id=ledger.open_run(task,log_path)
 
-          for _ in range(3):
-              task=ledger.get(task_id)
-              if task['status']=='DONE':
-                  break
-              if task['status']=='WAITING_RATE_LIMIT':
-                  raise SystemExit('OPUS_WAITING_RATE_LIMIT')
-              if task['status']=='BLOCKED':
-                  raise SystemExit('OPUS_BLOCKED: '+str(task['last_error']))
-              if task['status']=='RETRY':
-                  ledger.update(task_id,status='PENDING',retry_at=None,systemd_unit=None)
-              o.handle_storage_destructive_review(ledger.get(task_id))
-          final=ledger.get(task_id)
-          print('OPUS_FINAL_STATUS='+str(final['status']))
-          if final['status']!='DONE':
-              raise SystemExit('trusted Opus review did not complete')
+          prompt=f'''You are Claude Opus, the independent destructive-storage reviewer for Hyperliquid issue #90.
+Review only the exact immutable storage bundle in review_bundle. Do not modify files and do not perform deletion.
+
+Trusted binding:
+ASSIGNMENT_ID={task_id}
+TARGET_SHA={os.environ['CODE_SHA']}
+PLAN_RUN_ID={os.environ['PLAN_RUN_ID']}
+PLAN_COMPLETED_AT={os.environ['PLAN_COMPLETED_AT']}
+RETENTION_MANIFEST_SHA256={os.environ['RETENTION_SHA']}
+BOOTSTRAP_PLAN_SHA256={os.environ['BOOTSTRAP_SHA']}
+LIFECYCLE_MANIFEST_SHA256={os.environ['LIFECYCLE_SHA']}
+REVIEW_BINDING_SHA256={os.environ['BINDING_SHA']}
+PR_NUMBER=288
+
+Verify with targeted local checks that deletion is bounded to Hyperliquid market-shadow candidates, lifecycle mutation is COMPRESS_CANDIDATE-only, protected/recent/robust/profitability data is excluded, PostgreSQL filesystem deletion is forbidden, Polymarket mutation is forbidden, and real trading remains off.
+
+If and only if the exact plan is safe to apply, end with EXACTLY these lines:
+SECOND_PASS_GATE=PASS
+MODEL_CLASS=OPUS
+ASSIGNMENT_ID={task_id}
+TARGET_SHA={os.environ['CODE_SHA']}
+PLAN_RUN_ID={os.environ['PLAN_RUN_ID']}
+RETENTION_MANIFEST_SHA256={os.environ['RETENTION_SHA']}
+BOOTSTRAP_PLAN_SHA256={os.environ['BOOTSTRAP_SHA']}
+LIFECYCLE_MANIFEST_SHA256={os.environ['LIFECYCLE_SHA']}
+REVIEW_BINDING_SHA256={os.environ['BINDING_SHA']}
+DESTRUCTIVE_STORAGE_APPLY=APPROVED
+REAL_TRADING_ENABLED=NO
+POSTGRESQL_FILESYSTEM_DELETION=NO
+POLYMARKET_MUTATION=NO
+
+If any condition fails, emit SECOND_PASS_GATE=FAIL and do not emit DESTRUCTIVE_STORAGE_APPLY=APPROVED.'''
+
+          uid=subprocess.check_output(['id','-u','hl-claude-agent'],text=True).strip()
+          gid=subprocess.check_output(['id','-g','hl-claude-agent'],text=True).strip()
+          home='/var/lib/hyperliquid-ai-team/agents/claude/home'
+          empty=f'/tmp/p0-90-hidden-{task_id}'
+          shell=f'''set -euo pipefail
+          mount --make-rprivate /
+          mkdir -p {empty}
+          chmod 000 {empty}
+          mount --bind {empty} /mnt
+          mount --bind {empty} /root
+          exec setpriv --reuid={uid} --regid={gid} --init-groups --no-new-privs env -i \\
+            HOME={home} CLAUDE_CONFIG_DIR={home}/.claude XDG_CONFIG_HOME={home}/.config XDG_CACHE_HOME={home}/.cache \\
+            PATH=/usr/local/bin:/usr/bin:/bin \\
+            /usr/bin/claude -p --model opus --max-turns 30 --output-format json \\
+            --permission-mode dontAsk --allowedTools Read,Glob,Grep,Bash
+          '''
+          o.runtime.run_started(run_id,task,prompt=prompt,systemd_unit='DIRECT_RESTRICTED_OPUS')
+          cp=subprocess.run(
+              ['unshare','--mount','--fork','bash','-c',shell],
+              input=prompt,text=True,capture_output=True,cwd=str(workdir),timeout=900,
+          )
+          combined=cp.stdout+('\n'+cp.stderr if cp.stderr else '')
+          log_path.write_text(orch.bounded_redacted(combined))
+          session_id,usage,result=orch.parse_claude_output(cp.stdout)
+          ledger.close_run(
+              run_id,exit_code=cp.returncode,session_id=session_id,usage=usage,
+              result=result,error=None if cp.returncode==0 else combined[-1500:],
+          )
+          if cp.returncode!=0:
+              ledger.update(task_id,status='STALE',last_error=f'direct Claude failed rc={cp.returncode}',session_id=session_id,systemd_unit=None)
+              o.finish_runtime_run(run_id,task_id,stdout=cp.stdout,stderr=cp.stderr,exit_code=cp.returncode,session_id=session_id,usage=usage,result=result,error=f'direct Claude failed rc={cp.returncode}',status='STALE')
+              raise SystemExit(f'Claude rc={cp.returncode}: {combined[-1500:]}')
+
+          required={
+              'SECOND_PASS_GATE':'PASS','MODEL_CLASS':'OPUS','ASSIGNMENT_ID':task_id,
+              'TARGET_SHA':os.environ['CODE_SHA'],'PLAN_RUN_ID':os.environ['PLAN_RUN_ID'],
+              'RETENTION_MANIFEST_SHA256':os.environ['RETENTION_SHA'],
+              'BOOTSTRAP_PLAN_SHA256':os.environ['BOOTSTRAP_SHA'],
+              'LIFECYCLE_MANIFEST_SHA256':os.environ['LIFECYCLE_SHA'],
+              'REVIEW_BINDING_SHA256':os.environ['BINDING_SHA'],
+              'DESTRUCTIVE_STORAGE_APPLY':'APPROVED','REAL_TRADING_ENABLED':'NO',
+              'POSTGRESQL_FILESYSTEM_DELETION':'NO','POLYMARKET_MUTATION':'NO',
+          }
+          for key,value in required.items():
+              vals=re.findall(rf'(?mi)^\s*{re.escape(key)}\s*=\s*([^\s]+)\s*$',result or '')
+              if vals != [value]:
+                  ledger.update(task_id,status='STALE',last_error=f'missing/wrong marker {key}',session_id=session_id,systemd_unit=None)
+                  o.finish_runtime_run(run_id,task_id,stdout=cp.stdout,stderr=cp.stderr,exit_code=1,session_id=session_id,usage=usage,result=result,error=f'missing/wrong marker {key}',status='STALE')
+                  raise SystemExit(f'missing/wrong marker {key}: {vals}')
+          ledger.update(task_id,status='DONE',last_error=None,session_id=session_id,retry_at=None,systemd_unit=None)
+          o.finish_runtime_run(run_id,task_id,stdout=cp.stdout,stderr=cp.stderr,exit_code=0,session_id=session_id,usage=usage,result=result,status='PASS',blockers=[])
+          with open(os.environ['GITHUB_OUTPUT'],'a',encoding='utf-8') as out:
+              out.write(f'assignment_id={task_id}\n')
+          print('DIRECT_TRUSTED_OPUS_PASS=YES')
+          print('OPUS_ASSIGNMENT_ID='+task_id)
           PY
 
-          assignment_id="$(cat /tmp/p0-90-opus-assignment-id)"
-          echo "assignment_id=$assignment_id" >> "$GITHUB_OUTPUT"
           sudo python3 /opt/hyperliquid-ai-team/scripts/verify_trusted_opus_storage_review.py \
             --db /var/lib/hyperliquid-ai-team/orchestrator/ledger.sqlite3 \
             --runtime-root /var/lib/hyperliquid-ai-team \
-            --assignment-id "$assignment_id" \
+            --assignment-id '${{ steps.opus.outputs.assignment_id }}' \
             --code-sha "$CODE_SHA" \
             --plan-run-id "$PLAN_RUN_ID" \
             --plan-completed-at "$PLAN_COMPLETED_AT" \
@@ -186,8 +273,8 @@ jobs:
             --bootstrap-sha "$BOOTSTRAP_SHA" \
             --lifecycle-sha "$LIFECYCLE_SHA" \
             --binding-sha "$BINDING_SHA"
-          echo TRUSTED_OPUS_READY_FOR_APPLY=YES
-          echo OPUS_ASSIGNMENT_ID="$assignment_id"
+          echo TRUSTED_OPUS_VERIFIER=PASS
+          echo OPUS_ASSIGNMENT_ID='${{ steps.opus.outputs.assignment_id }}'
           echo PLAN_RUN_ID="$PLAN_RUN_ID"
           echo CODE_SHA="$CODE_SHA"
           echo RETENTION_MANIFEST_SHA256="$RETENTION_SHA"
