@@ -35,7 +35,12 @@ jobs:
           new = """def rep(old: str, new: str) -> None:\n    global text\n    count = text.count(old)\n    if count not in {1, 2}:\n        raise SystemExit(f'expected one or two service replacements, found {count}: {old[:120]!r}')\n    text = text.replace(old, new, count)\n"""
           if old not in s:
               raise SystemExit('patch helper shape changed')
-          p.write_text(s.replace(old, new, 1))
+          s = s.replace(old, new, 1)
+          s = s.replace(
+              "marker = 'This intentionally reports **gross** copied P&L.'",
+              "marker = 'The current execution evidence contract is'",
+          )
+          p.write_text(s)
           PY
       - name: Apply funding v2 service patch
         id: patch
@@ -55,6 +60,21 @@ jobs:
         run: |
           cat patcher/patch-result.txt
           exit 1
+      - name: Finalize v2 documentation labels
+        if: steps.patch.outcome == 'success'
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('target/services/invo-notification-executor/README.md')
+          s = p.read_text()
+          s = s.replace(
+              '5. Complete close economics emit gross PnL, entry/exit taker fees, Hyperliquid funding-history accrual, explicit execution cost, net PnL and net return. Funding retrieval failure is `INCOMPLETE_FUNDING`, never silently zero funding.',
+              '5. Complete close economics emit gross PnL, entry/exit taker fees, and Hyperliquid funding computed as position size × prospective `oraclePx` × funding rate at each hourly interval. Missing/stale oracle evidence is `INCOMPLETE_FUNDING`, never silently zero or reconstructed from entry/mark prices.',
+          )
+          s = s.replace('lane3-causal-l2-v1', 'lane3-causal-l2-v2')
+          s = s.replace('hl-taker-l2-funding-history-v1', 'hl-taker-l2-oracle-funding-v2')
+          p.write_text(s)
+          PY
       - name: Test executor
         if: steps.patch.outcome == 'success'
         working-directory: target/services/invo-notification-executor
