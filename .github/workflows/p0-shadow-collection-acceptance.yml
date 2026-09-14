@@ -1,5 +1,6 @@
 name: p0-shadow-collection-acceptance
 
+# Post-storage reset: arm all three current production/shadow lane producers and snapshot fresh evidence.
 on:
   push:
     branches: [main]
