@@ -1,0 +1,89 @@
+name: p0-273-opus-audit-v2
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/p0-273-opus-audit-v2.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  audit:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 90
+    env:
+      CLAUDE_USER: hl-claude-agent
+      CLAUDE_HOME: /var/lib/hyperliquid-ai-team/agents/claude/home
+      AUDIT_ROOT: /var/lib/hyperliquid-ai-team/agents/claude/worktrees/p0-273-v2-${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Build sanitized evidence bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf "$AUDIT_ROOT"
+          sudo mkdir -p "$AUDIT_ROOT/repo" "$AUDIT_ROOT/evidence/lane1" "$AUDIT_ROOT/evidence/lane2" "$AUDIT_ROOT/evidence/lane3" "$AUDIT_ROOT/evidence/profitability" "$AUDIT_ROOT/evidence/market"
+          sudo tar -C "$GITHUB_WORKSPACE" --exclude=.git --exclude=.venv --exclude='*.env' -cf - . | sudo tar -C "$AUDIT_ROOT/repo" -xf -
+          sudo cp -f /root/hyperliquid-audit/funnel/challenger_queue.json "$AUDIT_ROOT/evidence/lane1/" 2>/dev/null || true
+          sudo cp -f /root/hyperliquid-audit/prospective-champions/report.json "$AUDIT_ROOT/evidence/lane1/prospective_report.json" 2>/dev/null || true
+          sudo cp -f /var/lib/hyperliquid-copy-engine/invo/identified_wallets.json "$AUDIT_ROOT/evidence/lane2/" 2>/dev/null || true
+          sudo tail -n 5000 /var/lib/hyperliquid-copy-engine/invo-notification-executor/audit.jsonl | sudo tee "$AUDIT_ROOT/evidence/lane3/audit_tail.jsonl" >/dev/null || true
+          curl -fsS --max-time 4 http://127.0.0.1:8787/health | sudo tee "$AUDIT_ROOT/evidence/lane3/health.json" >/dev/null || true
+          sudo find /root/hyperliquid-audit/funnel -maxdepth 1 -type f -size -20M \( -name '*.json' -o -name '*.csv' \) -exec cp -f {} "$AUDIT_ROOT/evidence/profitability/" \; 2>/dev/null || true
+          sudo env OUT="$AUDIT_ROOT/evidence/market" python3 - <<'PY'
+          import os, shutil
+          from pathlib import Path
+          root=Path('/mnt/HC_Volume_106576526/hyperliquid/market-shadow')
+          out=Path(os.environ['OUT'])
+          rows=[]
+          if root.is_dir():
+              for p in root.rglob('*'):
+                  try:
+                      if p.is_file() and not p.is_symlink() and p.stat().st_size <= 20*1024*1024:
+                          rows.append((p.stat().st_mtime_ns,p))
+                  except FileNotFoundError:
+                      pass
+          for _,p in sorted(rows,reverse=True)[:40]:
+              dst=out/p.relative_to(root)
+              dst.parent.mkdir(parents=True,exist_ok=True)
+              shutil.copy2(p,dst)
+          print('MARKET_SAMPLE_FILES='+str(min(40,len(rows))))
+          PY
+          sudo sh -c "df -hT /mnt/HC_Volume_106576526 > '$AUDIT_ROOT/evidence/storage.txt'"
+          sudo sh -c "systemctl status hyperliquid-selective-shadow.service hyperliquid-prospective-champions.service hyperliquid-invo-wallet-identifier.service hyperliquid-invo-verified-shadow-sync.service hyperliquid-invo-notification-executor.service hlcopy-profitability-funnel.service --no-pager -l > '$AUDIT_ROOT/evidence/services.txt' 2>&1 || true"
+          sudo find "$AUDIT_ROOT/evidence" -type f -printf '%TY-%Tm-%TdT%TH:%TM:%TSZ %s %p\n' | sudo sort | sudo tee "$AUDIT_ROOT/evidence/MANIFEST.txt" >/dev/null
+          sudo chown -R "$CLAUDE_USER:$CLAUDE_USER" "$AUDIT_ROOT"
+          sudo chmod -R u=rwX,go= "$AUDIT_ROOT"
+
+      - name: Run Claude Opus read-only audit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          prompt="$AUDIT_ROOT/prompt.txt"
+          result="$AUDIT_ROOT/result.txt"
+          cat > /tmp/p0-273-prompt <<'PROMPT'
+          You are Claude Opus, independent senior quant/reliability auditor for Hyperliquid #273. Review repo/ and evidence/ only. Do not modify anything. Real trading must remain OFF.
+
+          Old disposable market-shadow history was intentionally deleted by the owner. Audit the current architecture and fresh post-reset evidence. For Lane 1 (#93), Lane 2 (#92), Lane 3 (#91), and collection runtime (#267), verify causal timestamps/no look-ahead, point-in-time market data, stale/missing-depth rejects, realistic fills/slippage/fees/funding/leverage/partial fills/sizing, position lifecycle, PnL accounting, dedupe/idempotency, Lane 1 prospective freeze/start semantics, Lane 2 identity proof/conflict quarantine, Lane 3 notification provenance/causal decisions, data gaps/bias, reproducibility, and aggregate reconciliation.
+
+          Independently recompute/replay representative records wherever evidence permits. For each lane return exactly one of PASS, FAIL, or INSUFFICIENT_EVIDENCE; cite the exact local evidence paths/records checked; state discrepancies and severity; state whether it is safe for profitability analysis now; state exact repairs/additional evidence needed; and state whether its collector is running/scheduled. Never invent a PASS when fresh samples are insufficient. End with an overall verdict and confirmation REAL_TRADING_ENABLED=NO. Do not inspect or discuss Polymarket.
+          PROMPT
+          sudo mv /tmp/p0-273-prompt "$prompt"
+          sudo chown "$CLAUDE_USER:$CLAUDE_USER" "$prompt"
+
+          sudo -u "$CLAUDE_USER" env -i HOME="$CLAUDE_HOME" CLAUDE_CONFIG_DIR="$CLAUDE_HOME/.claude" XDG_CONFIG_HOME="$CLAUDE_HOME/.config" XDG_CACHE_HOME="$CLAUDE_HOME/.cache" PATH=/usr/local/bin:/usr/bin:/bin /usr/bin/claude -p --model opus --max-turns 1 --output-format text 'Reply exactly OPUS_AUTH_OK' | grep -Fx OPUS_AUTH_OK
+          cd "$AUDIT_ROOT"
+          sudo -u "$CLAUDE_USER" env -i HOME="$CLAUDE_HOME" CLAUDE_CONFIG_DIR="$CLAUDE_HOME/.claude" XDG_CONFIG_HOME="$CLAUDE_HOME/.config" XDG_CACHE_HOME="$CLAUDE_HOME/.cache" PATH=/usr/local/bin:/usr/bin:/bin /usr/bin/claude -p --model opus --max-turns 40 --output-format text --permission-mode dontAsk --allowedTools Read Glob Grep < "$prompt" > "$result"
+          test -s "$result"
+          echo OPUS_AUDIT_COMPLETED=YES
+          cat "$result"
+          gh issue comment 273 --repo aliezzat4321/hyperliquid-copy-engine --body-file "$result"
