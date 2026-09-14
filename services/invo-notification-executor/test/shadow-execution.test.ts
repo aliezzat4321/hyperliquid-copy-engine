@@ -14,6 +14,7 @@ const policy: ShadowExecutionPolicy = {
   maxSpreadBps: 100,
   minNotionalUsd: 10,
   takerFeeBps: 4.5,
+  fundingOracleMaxDelayMs: 10_000,
 };
 
 function book(receivedAtMs = 10_500) {
@@ -88,6 +89,48 @@ test('enforces Hyperliquid size decimals by rounding down', () => {
   assert.deepEqual(result.ok ? null : result.reason, 'lot_rounded_to_zero');
 });
 
+test('computes funding from position size times prospective oracle price times funding rate', () => {
+  const calculated = fundingCostUsd(
+    'long',
+    [{ atMs: 1_000, size: 1 }],
+    [
+      { timeMs: 2_000, rate: 0.0001 },
+      { timeMs: 3_000, rate: 0.0002 },
+    ],
+    [
+      { fundingTimeMs: 2_000, observedAtMs: 2_250, oraclePx: 100 },
+      { fundingTimeMs: 3_000, observedAtMs: 3_400, oraclePx: 110 },
+    ],
+    1_000,
+  );
+  assert.equal(calculated.fundingUsd, 0.032);
+  assert.equal(calculated.fundingPoints, 2);
+  assert.equal(calculated.oraclePointsMatched, 2);
+});
+
+test('fails funding accounting instead of substituting stale or missing oracle prices', () => {
+  assert.throws(
+    () => fundingCostUsd(
+      'long',
+      [{ atMs: 1_000, size: 1 }],
+      [{ timeMs: 2_000, rate: 0.0001 }],
+      [{ fundingTimeMs: 2_000, observedAtMs: 4_000, oraclePx: 100 }],
+      500,
+    ),
+    /Missing fresh oracle checkpoint/,
+  );
+  assert.throws(
+    () => fundingCostUsd(
+      'long',
+      [{ atMs: 1_000, size: 1 }],
+      [{ timeMs: 2_000, rate: 0.0001 }],
+      [],
+      500,
+    ),
+    /Missing fresh oracle checkpoint/,
+  );
+});
+
 test('computes explicit funding, fees and net pnl without double-counting book slippage', () => {
   const exit = simulateL2Fill(book(), 'sell', 1, 3, policy);
   assert.equal(exit.ok, true);
@@ -95,12 +138,17 @@ test('computes explicit funding, fees and net pnl without double-counting book s
 
   const funding = fundingCostUsd(
     'long',
-    [{ atMs: 1_000, notionalUsd: 100 }],
+    [{ atMs: 1_000, size: 1 }],
     [
       { timeMs: 2_000, rate: 0.0001 },
       { timeMs: 3_000, rate: 0.0002 },
     ],
-  );
+    [
+      { fundingTimeMs: 2_000, observedAtMs: 2_100, oraclePx: 100 },
+      { fundingTimeMs: 3_000, observedAtMs: 3_100, oraclePx: 100 },
+    ],
+    500,
+  ).fundingUsd;
   assert.equal(funding, 0.03);
 
   const economics = computePositionEconomics({
@@ -119,17 +167,22 @@ test('computes explicit funding, fees and net pnl without double-counting book s
   assert.equal(economics.netReturnBps, economics.netPnlUsd / 100 * 10_000);
 });
 
-test('funding exposure checkpoints change the notional used after a re-up', () => {
+test('funding size checkpoints apply re-ups to subsequent funding intervals only', () => {
   const funding = fundingCostUsd(
     'short',
     [
-      { atMs: 1_000, notionalUsd: 100 },
-      { atMs: 3_000, notionalUsd: 250 },
+      { atMs: 1_000, size: 1 },
+      { atMs: 3_000, size: 2.5 },
     ],
     [
       { timeMs: 2_000, rate: 0.001 },
       { timeMs: 4_000, rate: 0.001 },
     ],
-  );
+    [
+      { fundingTimeMs: 2_000, observedAtMs: 2_100, oraclePx: 100 },
+      { fundingTimeMs: 4_000, observedAtMs: 4_100, oraclePx: 100 },
+    ],
+    500,
+  ).fundingUsd;
   assert.equal(funding, -0.35);
 });
