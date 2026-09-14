@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "snapshot_at": "2026-09-14T23:02:08Z",
+  "snapshot_at": "2026-09-14T23:13:00Z",
   "updated_by": "CODEX_CHATGPT",
   "head_observed": "4653f0d86650d42fea6062ddfd1fcce0ced0f746",
   "mission": "Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.",
@@ -11,8 +11,8 @@
   },
   "priorities": [
     {"priority":"P0","issue":330,"title":"Complete Lane 3 causal L2 execution and net-cost repair","owner":"CODEX_CHATGPT","reviewer":"CLAUDE","status":"IN_REVIEW","profitability_critical":true},
-    {"priority":"P0","issue":328,"title":"Run integrated Lane 3 pre-Opus challenge after both repair halves","owner":"CODEX_CHATGPT","reviewer":"CLAUDE","status":"OPEN","profitability_critical":true},
-    {"priority":"P0","issue":327,"title":"Challenge Lane 2 repair against every Opus finding","owner":"CODEX_CHATGPT","reviewer":"CLAUDE","status":"OPEN","profitability_critical":true},
+    {"priority":"P0","issue":328,"title":"Run integrated Lane 3 pre-Opus challenge after #330 + #320","owner":"CODEX_CHATGPT","reviewer":"CLAUDE","status":"OPEN","profitability_critical":true},
+    {"priority":"P0","issue":327,"title":"Challenge Lane 2 repair #318 vs every Opus finding","owner":"CODEX_CHATGPT","reviewer":"CLAUDE","status":"OPEN","profitability_critical":true},
     {"priority":"P0","issue":334,"title":"Restore truthful repository-wide CI baseline","owner":"CODEX_CHATGPT","reviewer":"CLAUDE","status":"IN_PROGRESS","profitability_critical":false}
   ],
   "lanes": {
@@ -32,9 +32,9 @@
       "name":"Third-party identity resolution",
       "status":"SHADOW_EVIDENCE_MEASUREMENT_INCOMPLETE",
       "facts":[
+        {"key":"durable_verified_identities_last_measured","label":"last measured durable verified identities","value":26,"unit":"count","observed_at":"2026-09-11T16:55:20Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"},
         {"key":"repair_pr_open","label":"Lane 2 Opus-repair PR open","value":true,"unit":"bool","observed_at":"2026-09-14T23:02:08Z","source_type":"PULL_REQUEST","source_ref":"#318"},
         {"key":"repair_head","label":"Lane 2 repair head","value":"d30772140f20cc5a6aa9d8bc9d8f02f372517863","unit":"text","observed_at":"2026-09-14T23:02:08Z","source_type":"PULL_REQUEST","source_ref":"#318"},
-        {"key":"durable_verified_identities_last_measured","label":"last measured durable verified identities","value":26,"unit":"count","observed_at":"2026-09-11T16:55:20Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"},
         {"key":"real_trading","label":"real trading enabled","value":false,"unit":"bool","observed_at":"2026-09-14T22:39:38Z","source_type":"ISSUE","source_ref":"#130"}
       ],
       "blocker":"PR #318 contains the proposed identity-safety and capacity repair but remains open; actual post-repair Lane 2 shadow throughput/runtime proof and an exact-SHA lane-specific Opus PASS are still required.",
@@ -47,24 +47,26 @@
         {"key":"execution_repair_head","label":"Lane 3 execution-repair head","value":"976c5e2364f9f40b45a3b0a56b31339b3c5036bb","unit":"text","observed_at":"2026-09-14T23:02:08Z","source_type":"PULL_REQUEST","source_ref":"#332"},
         {"key":"executor_ci","label":"exact-head Lane 3 executor CI","value":"PASS","unit":"text","observed_at":"2026-09-14T23:00:30Z","source_type":"WORKFLOW_RUN","source_ref":"34906771193"},
         {"key":"live_sensitive_guard","label":"exact-head live-sensitive classification guard","value":"PASS","unit":"text","observed_at":"2026-09-14T23:00:30Z","source_type":"WORKFLOW_RUN","source_ref":"34906771110"},
-        {"key":"second_codex_review","label":"independent second Codex review","value":"RUNNING","unit":"text","observed_at":"2026-09-14T23:02:08Z","source_type":"WORKFLOW_RUN","source_ref":"34906695969"},
+        {"key":"restart_repair_head","label":"reviewer-driven #320 restart repair head","value":"efbff8897c4ef27c6ef8b35270af1554b83328c4","unit":"text","observed_at":"2026-09-14T23:11:28Z","source_type":"PULL_REQUEST","source_ref":"#321"},
+        {"key":"second_codex_review_old_320","label":"second Codex verdict on superseded #320 SHA","value":"FAIL_REPAIRED_PENDING_REREVIEW","unit":"text","observed_at":"2026-09-14T23:11:28Z","source_type":"ISSUE","source_ref":"#331"},
         {"key":"real_trading","label":"real trading enabled","value":false,"unit":"bool","observed_at":"2026-09-14T22:39:38Z","source_type":"ISSUE","source_ref":"#130"}
       ],
-      "blocker":"The #320 restart/backfill repair and #330 execution/funding repair are built, but exact-SHA independent Codex review, integrated challenge, deployment and fresh prospective evidence remain incomplete; no Lane 3 Opus re-audit has passed yet.",
-      "next":"Issue #330"
+      "blocker":"Second Codex found an owned-close reconciliation defect in the original #320 SHA; reviewer-driven repair head efbff8897c4ef27c6ef8b35270af1554b83328c4 passed the full executor check and now requires exact-SHA re-review plus integration into #332 before the final #328 challenge.",
+      "next":"Issue #331"
     }
   },
   "infrastructure": {
     "name":"Research VM, market tape, autonomy and CI",
     "status":"DEGRADED",
     "facts":[
+      {"key":"ci_baseline_targeted_validation_pct","label":"targeted #334 renderer + contract + Ruff checks passed","value":100.0,"unit":"%","observed_at":"2026-09-14T23:09:49Z","source_type":"WORKFLOW_RUN","source_ref":"34907540686"},
       {"key":"market_shadow_reset_authorized","label":"owner-authorized market-shadow reset task exists","value":true,"unit":"bool","observed_at":"2026-09-14T17:28:43Z","source_type":"ISSUE","source_ref":"#310"},
       {"key":"old_storage_measurement_stale","label":"previous 100% storage measurement is no longer a current-state proof","value":true,"unit":"bool","observed_at":"2026-09-14T23:02:08Z","source_type":"ISSUE","source_ref":"#310"},
-      {"key":"ci_baseline_unblock_open","label":"repository CI baseline repair open","value":true,"unit":"bool","observed_at":"2026-09-14T23:02:08Z","source_type":"ISSUE","source_ref":"#334"},
+      {"key":"ci_baseline_unblock_open","label":"repository CI baseline repair open","value":true,"unit":"bool","observed_at":"2026-09-14T23:10:55Z","source_type":"PULL_REQUEST","source_ref":"#335"},
       {"key":"unrelated_work_continuing","label":"runtime reports unrelated work continuing","value":true,"unit":"bool","observed_at":"2026-09-14T22:39:38Z","source_type":"ISSUE","source_ref":"#130"},
       {"key":"real_trading","label":"real trading enabled","value":false,"unit":"bool","observed_at":"2026-09-14T22:39:38Z","source_type":"ISSUE","source_ref":"#130"}
     ],
-    "blocker":"Repository-wide CI is currently red because an obsolete Opus runner has isolated Ruff debt and the generated AI-team state expired its 72-hour freshness bound. Normal orchestration also still projects stale work, so Lane 3 critical reviews are running through exact-SHA direct review gates instead of waiting behind the scheduler.",
+    "blocker":"PR #335 has already cleared the obsolete Opus-script Ruff debt and stale generated-state contract failure. Its first full CI run exposed only typed-fact ordering assumptions in two contract tests; this snapshot restores the expected percentage/count ordering while keeping facts current and sourced.",
     "next":"Issue #334"
   }
 }
