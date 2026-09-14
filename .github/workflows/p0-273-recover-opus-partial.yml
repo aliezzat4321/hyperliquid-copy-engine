@@ -1,0 +1,31 @@
+name: p0-273-recover-opus-partial
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p0-273-recover-opus-partial.yml
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 5
+    steps:
+      - name: Inspect partial Opus result
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT=/var/lib/hyperliquid-ai-team/agents/claude/worktrees/p0-273-v2-34876048866
+          RESULT="$ROOT/result.txt"
+          echo "RESULT_EXISTS=$(test -f "$RESULT" && echo yes || echo no)"
+          if test -f "$RESULT"; then
+            echo "RESULT_BYTES=$(wc -c < "$RESULT")"
+            echo '=== OPUS PARTIAL RESULT START ==='
+            cat "$RESULT"
+            echo '=== OPUS PARTIAL RESULT END ==='
+          fi
+          echo '=== CLAUDE PROCESS DIAGNOSTIC ==='
+          ps -ef | grep '[c]laude' || true
