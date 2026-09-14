@@ -36,6 +36,32 @@ export async function getAllMids(): Promise<Record<string, string>> {
   return info({ type: 'allMids' });
 }
 
+export interface HyperliquidAssetContext {
+  oraclePx?: string | number;
+  markPx?: string | number;
+  midPx?: string | number | null;
+  funding?: string | number;
+}
+
+export async function getOraclePrices(): Promise<Record<string, number>> {
+  const payload = await info({ type: 'metaAndAssetCtxs' });
+  if (!Array.isArray(payload) || payload.length < 2) {
+    throw new Error('Invalid Hyperliquid metaAndAssetCtxs payload');
+  }
+  const meta = payload[0];
+  const contexts = payload[1];
+  if (!Array.isArray(meta?.universe) || !Array.isArray(contexts)) {
+    throw new Error('Invalid Hyperliquid metaAndAssetCtxs shape');
+  }
+  const prices: Record<string, number> = {};
+  for (let i = 0; i < meta.universe.length; i += 1) {
+    const coin = String(meta.universe[i]?.name ?? '');
+    const oraclePx = Number((contexts[i] as HyperliquidAssetContext | undefined)?.oraclePx);
+    if (coin && Number.isFinite(oraclePx) && oraclePx > 0) prices[coin] = oraclePx;
+  }
+  return prices;
+}
+
 export interface HyperliquidL2Level {
   px: string;
   sz: string;
@@ -64,8 +90,27 @@ export async function getFundingHistory(
   startTime: number,
   endTime: number,
 ): Promise<HyperliquidFundingPoint[]> {
-  const rows = await info({ type: 'fundingHistory', coin, startTime, endTime });
-  if (!Array.isArray(rows)) throw new Error(`Invalid funding history for ${coin}`);
+  const rows: HyperliquidFundingPoint[] = [];
+  const seen = new Set<number>();
+  let cursor = startTime;
+  for (let page = 0; page < 20 && cursor <= endTime; page += 1) {
+    const batch = await info({ type: 'fundingHistory', coin, startTime: cursor, endTime });
+    if (!Array.isArray(batch)) throw new Error(`Invalid funding history for ${coin}`);
+    let maxTime = -1;
+    for (const row of batch) {
+      const time = Number(row?.time);
+      if (!Number.isFinite(time)) continue;
+      maxTime = Math.max(maxTime, time);
+      if (!seen.has(time)) {
+        seen.add(time);
+        rows.push(row);
+      }
+    }
+    if (batch.length < 500) break;
+    if (!(maxTime >= cursor)) throw new Error(`Funding history pagination made no progress for ${coin}`);
+    cursor = maxTime + 1;
+  }
+  rows.sort((a, b) => Number(a.time ?? 0) - Number(b.time ?? 0));
   return rows;
 }
 
