@@ -36,6 +36,39 @@ export async function getAllMids(): Promise<Record<string, string>> {
   return info({ type: 'allMids' });
 }
 
+export interface HyperliquidL2Level {
+  px: string;
+  sz: string;
+  n?: number;
+}
+
+export interface HyperliquidL2Book {
+  coin: string;
+  time: number;
+  levels: [HyperliquidL2Level[], HyperliquidL2Level[]];
+}
+
+export async function getL2Book(coin: string): Promise<HyperliquidL2Book> {
+  return info({ type: 'l2Book', coin });
+}
+
+export interface HyperliquidFundingPoint {
+  coin?: string;
+  fundingRate?: string | number;
+  premium?: string | number;
+  time?: number;
+}
+
+export async function getFundingHistory(
+  coin: string,
+  startTime: number,
+  endTime: number,
+): Promise<HyperliquidFundingPoint[]> {
+  const rows = await info({ type: 'fundingHistory', coin, startTime, endTime });
+  if (!Array.isArray(rows)) throw new Error(`Invalid funding history for ${coin}`);
+  return rows;
+}
+
 export async function getClearinghouseState(wallet: string) {
   if (!wallet) throw new Error('Hyperliquid wallet address is required for account state');
   return info({ type: 'clearinghouseState', user: wallet });
