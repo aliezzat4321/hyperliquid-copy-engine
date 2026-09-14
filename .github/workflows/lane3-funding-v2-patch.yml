@@ -1,0 +1,45 @@
+name: lane3-funding-v2-patch
+
+on:
+  push:
+    branches: [codex/lane3-funding-v2-patcher]
+    paths:
+      - ".github/workflows/lane3-funding-v2-patch.yml"
+      - "scripts/patch_lane3_funding_v2.py"
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/lane3-funding-v2-patcher
+          path: patcher
+          fetch-depth: 1
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/330-lane3-l2-net-cost
+          path: target
+          fetch-depth: 0
+      - name: Apply funding v2 service patch
+        run: python3 patcher/scripts/patch_lane3_funding_v2.py target
+      - name: Test executor
+        working-directory: target/services/invo-notification-executor
+        run: |
+          npm install --ignore-scripts --no-audit --no-fund
+          npm run check
+      - name: Commit exact tested repair
+        working-directory: target
+        run: |
+          git config user.name "lane3-funding-v2-patcher"
+          git config user.email "actions@users.noreply.github.com"
+          git add services/invo-notification-executor/src/service.ts \
+                  services/invo-notification-executor/.env.example \
+                  services/invo-notification-executor/README.md
+          git diff --cached --check
+          git commit -m "Fix Lane 3 oracle funding capture and partial-close carry"
+          git push origin HEAD:codex/330-lane3-l2-net-cost
