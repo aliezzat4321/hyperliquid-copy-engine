@@ -2,6 +2,7 @@ name: p0-273-opus-audit-now
 
 'on':
   push:
+    branches: [main]
     paths:
       - .github/workflows/p0-273-opus-audit-now.yml
   workflow_dispatch:
@@ -10,9 +11,13 @@ permissions:
   contents: read
   issues: write
 
+concurrency:
+  group: p0-273-opus-audit-now
+  cancel-in-progress: false
+
 jobs:
   opus-audit:
-    runs-on: self-hosted
+    runs-on: [self-hosted, hyperliquid]
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -30,11 +35,13 @@ jobs:
           sudo tee /tmp/issue-273-prompt.txt >/dev/null <<'PROMPT'
           You are Claude Opus acting as the independent senior quant and reliability auditor for Hyperliquid issue #273. Audit CURRENT main and CURRENT production runtime artifacts on this host. Do not modify code. Do not enable live trading. Do not trust stored summary metrics without independent recomputation.
 
+          Context: the owner intentionally discarded the old disposable Hyperliquid market-shadow history to reset storage; the data volume is now healthy and the three current lane producers are being re-armed prospectively. Do not treat intentional deletion of old market tape as a defect. Judge each lane on current architecture, current production services, retained provenance/accounting evidence, and fresh post-reset prospective records. If a lane does not yet have enough fresh post-reset samples, return INSUFFICIENT_EVIDENCE with the exact additional evidence needed; never manufacture a PASS.
+
           Audit Lane 1 issue #93, Lane 2 issue #92, Lane 3 issue #91, and runtime collection issue #267 end-to-end. Verify no look-ahead or future-book leakage; causal timestamp semantics; point-in-time market-book correctness; explicit rejects for stale or missing depth; realistic fills, slippage, fees, funding, leverage, margin, partial fills and sizing; correct position lifecycle; independently recompute realized, unrealized and net PnL from raw inputs; dedupe and idempotency across retries/restarts; Lane 1 prospective_start_ns and challenger freeze; Lane 2 identity proof and conflict quarantine; Lane 3 notification provenance and causal decision/reject behavior; measurable data gaps and sample-bias risk; reproducible code/policy/raw-data provenance; aggregate accounting reconciliation; and real trading OFF.
 
-          Independently replay a representative stratified sample from EACH lane from raw source event plus market data through decision, fill and PnL. Any unexplained mismatch is FAIL. If fresh downstream records are insufficient, return INSUFFICIENT_EVIDENCE rather than inventing evidence.
+          Independently replay a representative stratified sample from EACH lane from raw source event plus market data through decision, fill and PnL wherever sufficient post-reset evidence exists. Any unexplained mismatch is FAIL. If fresh downstream records are insufficient, return INSUFFICIENT_EVIDENCE rather than inventing evidence.
 
-          For EACH lane return PASS, FAIL, or INSUFFICIENT_EVIDENCE; exact sampled record identifiers/paths; independent recomputations; discrepancies and severity; whether current shadow results are safe for profitability analysis; and exact scoped repairs required. Finish with an overall verdict and explicit confirmation that real trading is OFF.
+          For EACH lane return PASS, FAIL, or INSUFFICIENT_EVIDENCE; exact sampled record identifiers/paths; independent recomputations; discrepancies and severity; whether current shadow results are safe for profitability analysis; and exact scoped repairs required. Also state whether each lane's producer/collector is currently running or correctly scheduled for continuous prospective collection. Finish with an overall verdict and explicit confirmation that real trading is OFF.
           PROMPT
           sudo bash -lc '
             set -euo pipefail
