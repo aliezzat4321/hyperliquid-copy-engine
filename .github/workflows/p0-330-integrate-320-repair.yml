@@ -1,0 +1,33 @@
+name: p0-330-integrate-320-repair
+
+on:
+  push:
+    branches: [codex/330-integrate-320-repair]
+    paths:
+      - ".github/workflows/p0-330-integrate-320-repair.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/330-lane3-l2-net-cost
+          fetch-depth: 0
+      - name: Integrate exact reviewed #320 repair commit
+        run: |
+          git config user.name "lane3-stack-integrator"
+          git config user.email "actions@users.noreply.github.com"
+          git fetch origin efbff8897c4ef27c6ef8b35270af1554b83328c4
+          git cherry-pick efbff8897c4ef27c6ef8b35270af1554b83328c4
+      - name: Run full executor check
+        working-directory: services/invo-notification-executor
+        run: |
+          npm install --ignore-scripts --no-audit --no-fund
+          npm run check
+      - name: Push exact tested integrated head
+        run: git push origin HEAD:codex/330-lane3-l2-net-cost
