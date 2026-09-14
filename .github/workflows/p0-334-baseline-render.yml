@@ -34,6 +34,8 @@ jobs:
           git config user.email "actions@users.noreply.github.com"
           git add docs/ai-team/CURRENT_STATE.md docs/ai-team/experiments/INDEX.md
           git rm .github/workflows/p0-334-baseline-render.yml
-          git diff --cached --check
+          # CURRENT_STATE.md intentionally uses Markdown hard-break double spaces emitted
+          # by the canonical renderer. Keep diff-check on all non-generated staged files.
+          git diff --cached --check -- . ':(exclude)docs/ai-team/CURRENT_STATE.md'
           git commit -m "Regenerate validated AI-team state (#334)"
           git push origin HEAD:codex/334-ci-baseline-unblock
