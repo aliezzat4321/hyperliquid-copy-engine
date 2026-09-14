@@ -656,23 +656,17 @@ class Ledger:
                         " WHERE remediation_id=?", [*kw.values(), remediation_id])
         self.db.commit()
 
-    def recover_interrupted(self) -> list[dict[str, Any]]:
+    def reclaim_running(self, task_id: str, reason: str) -> bool:
+        """Atomically reclaim one vanished worker, at most once."""
         now = utcnow()
-        rows = [dict(row) for row in self.db.execute("SELECT * FROM tasks WHERE status='RUNNING'")]
-        self.db.execute(
-            """
-            UPDATE tasks
-               SET status='RETRY',
-                   retry_at=?,
-                   systemd_unit=NULL,
-                   last_error=COALESCE(last_error,'orchestrator restarted during task'),
-                   updated_at=?
-             WHERE status='RUNNING'
-            """,
-            (now, now),
+        cursor = self.db.execute(
+            "UPDATE tasks SET status='RETRY',retry_at=?,systemd_unit=NULL,last_error=?,"
+            "last_progress_at=?,next_action='retry vanished worker assignment',updated_at=? "
+            "WHERE id=? AND status='RUNNING'",
+            (now, reason, now, now, task_id),
         )
         self.db.commit()
-        return rows
+        return cursor.rowcount == 1
 
     def create_task(self, **kw: Any) -> str:
         task_id = kw.get("id") or uuid.uuid4().hex[:16]
@@ -1719,6 +1713,80 @@ class Orchestrator:
         except OSError as exc:
             self.runtime.event("TRELLO_RECONCILE_DEFERRED", error=type(exc).__name__)
 
+    @staticmethod
+    def worker_unit_healthy(unit: str | None) -> bool:
+        """Verify that the recorded transient unit still owns a live process."""
+        if not unit or not re.fullmatch(
+            r"hl-ai-(?:claude|codex)(?:-probe)?-[A-Za-z0-9-]+", str(unit)
+        ):
+            return False
+        cp = run(
+            ["systemctl", "show", str(unit),
+             "--property=ActiveState,SubState,MainPID"], timeout=15,
+        )
+        if cp.returncode != 0:
+            return False
+        fields = dict(
+            line.split("=", 1) for line in cp.stdout.splitlines() if "=" in line
+        )
+        try:
+            pid = int(fields.get("MainPID", "0"))
+        except ValueError:
+            return False
+        return fields.get("ActiveState") in {"active", "activating", "reloading"} and pid > 0
+
+    def reconcile_running_assignments(self) -> int:
+        """Preserve healthy workers and durably reclaim vanished ownership once."""
+        reclaimed = 0
+        rows = self.ledger.db.execute(
+            "SELECT * FROM tasks WHERE status='RUNNING' ORDER BY updated_at"
+        ).fetchall()
+        for task in rows:
+            unit = str(task["systemd_unit"] or "")
+            if self.worker_unit_healthy(unit):
+                continue
+            reason = f"WORKER_VANISHED: recorded systemd unit {unit or '<missing>'} is inactive"
+            if not self.ledger.reclaim_running(str(task["id"]), reason):
+                continue
+            reclaimed += 1
+            self.runtime.event(
+                "VANISHED_WORKER_RECLAIMED", assignment_id=task["id"],
+                issue=task["issue_number"], pr=task["pr_number"],
+                stale_unit=unit or None, status="RETRY", reason=reason,
+                unrelated_work_continuing=True,
+            )
+        return reclaimed
+
+    def retire_obsolete_evidence_retries(self) -> int:
+        """Retire exact-SHA evidence retries after the acceptance head moves."""
+        try:
+            main = self.gh.api("GET", f"repos/{REPO}/commits/main") or {}
+            main_sha = str(main.get("sha") or "")
+        except Exception as exc:
+            self.runtime.event("EVIDENCE_SHA_RECONCILIATION_DEFERRED", error=str(exc)[:500])
+            return 0
+        if not re.fullmatch(r"[0-9a-f]{40}", main_sha):
+            return 0
+        placeholders = ",".join("?" for _ in EVIDENCE_TASK_TYPES)
+        rows = self.ledger.db.execute(
+            f"SELECT * FROM tasks WHERE status='RETRY' AND task_type IN ({placeholders}) "
+            "AND target_sha IS NOT NULL AND target_sha<>?",
+            (*sorted(EVIDENCE_TASK_TYPES), main_sha),
+        ).fetchall()
+        for task in rows:
+            self.ledger.update(
+                task["id"], status="STALE", retry_at=None, systemd_unit=None,
+                last_error=f"OBSOLETE_EXACT_SHA: {task['target_sha']} != main {main_sha}",
+                failure_class=None,
+                next_action="retired; enqueue evidence only for the current acceptance SHA",
+            )
+            self.runtime.event(
+                "OBSOLETE_EVIDENCE_SHA_RETIRED", assignment_id=task["id"],
+                issue=task["issue_number"], target_sha=task["target_sha"],
+                main_sha=main_sha, status="STALE", unrelated_work_continuing=True,
+            )
+        return len(rows)
+
     def reconcile_recovery(self) -> None:
         """Turn stopped internal work into bounded, fingerprinted recovery work."""
         cfg = self.cfg.get("recovery", {})
@@ -2612,16 +2680,11 @@ class Orchestrator:
         return retired
 
     def cycle(self) -> None:
-        for stale in self.ledger.recover_interrupted():
-            self.reap_stale_child(stale)
-            self.runtime.event(
-                "STALE_RUN_REQUEUED", assignment_id=stale["id"],
-                issue=stale["issue_number"], pr=stale["pr_number"],
-                target_sha=stale["target_sha"], session_id=stale["session_id"],
-            )
+        self.reconcile_running_assignments()
         self.migrate_legacy_remediation()
         self.reconcile_recovery()
         self.reconcile_closed_issue_tasks()
+        self.retire_obsolete_evidence_retries()
         self.reconcile_completion_rollout()
         self.reconcile_handoffs()
         self.reconcile_parent_finalizers()

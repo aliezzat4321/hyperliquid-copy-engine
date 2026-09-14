@@ -486,7 +486,7 @@ def test_review_enqueue_never_creates_pre_review_merge_gate(tmp_path):
     ).fetchone() is None
 
 
-def test_ledger_recovers_orchestrator_restart_mid_task(tmp_path):
+def test_ledger_reclaims_verified_interrupted_task_once(tmp_path):
     ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
     task_id = ledger.create_task(
         issue_number=1,
@@ -496,10 +496,11 @@ def test_ledger_recovers_orchestrator_restart_mid_task(tmp_path):
         task_class="ROUTINE",
         status="RUNNING",
     )
-    ledger.recover_interrupted()
+    assert ledger.reclaim_running(task_id, "WORKER_VANISHED: no active owner") is True
+    assert ledger.reclaim_running(task_id, "WORKER_VANISHED: no active owner") is False
     row = ledger.get(task_id)
     assert row["status"] == "RETRY"
-    assert "restarted" in row["last_error"]
+    assert "WORKER_VANISHED" in row["last_error"]
 
 
 def test_ledger_keeps_rate_limited_task_and_resume_session(tmp_path):
@@ -615,12 +616,98 @@ def test_watchdog_requeues_same_review_checkpoint(tmp_path):
         target_sha="b" * 40, session_id="checkpoint-session", attempt=1,
         systemd_unit="hl-ai-claude-deadbeef-1",
     )
-    stale = ledger.recover_interrupted()
-    assert stale[0]["id"] == task_id
+    assert ledger.reclaim_running(task_id, "WORKER_VANISHED: inactive unit")
     row = ledger.get(task_id)
     assert row["status"] == "RETRY"
     assert row["target_sha"] == "b" * 40
     assert row["session_id"] == "checkpoint-session"
+
+
+def test_running_reconciliation_preserves_live_owned_worker(tmp_path, monkeypatch):
+    ledger = orch.Ledger(tmp_path / "live-worker.sqlite3")
+    task_id = ledger.create_task(
+        issue_number=322, task_type="BUILD", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", status="RUNNING",
+        systemd_unit="hl-ai-codex-abc123-1",
+    )
+    team = object.__new__(orch.Orchestrator)
+    team.ledger = ledger
+    team.runtime = type("Runtime", (), {"event": lambda *args, **kwargs: None})()
+    monkeypatch.setattr(
+        orch, "run", lambda *args, **kwargs: subprocess.CompletedProcess(
+            [], 0, "ActiveState=active\nSubState=running\nMainPID=4321\n", ""
+        ),
+    )
+    assert team.reconcile_running_assignments() == 0
+    assert ledger.get(task_id)["status"] == "RUNNING"
+    assert ledger.get(task_id)["systemd_unit"] == "hl-ai-codex-abc123-1"
+
+
+def test_running_reconciliation_reclaims_vanished_worker_exactly_once(tmp_path, monkeypatch):
+    ledger = orch.Ledger(tmp_path / "vanished-worker.sqlite3")
+    task_id = ledger.create_task(
+        issue_number=322, task_type="REVIEW", agent="CLAUDE", model_class="SONNET",
+        status="RUNNING", systemd_unit="hl-ai-claude-abc123-1",
+    )
+    events = []
+    team = object.__new__(orch.Orchestrator)
+    team.ledger = ledger
+    team.runtime = type(
+        "Runtime", (), {"event": lambda self, kind, **fields: events.append((kind, fields))}
+    )()
+    monkeypatch.setattr(
+        orch, "run", lambda *args, **kwargs: subprocess.CompletedProcess(
+            [], 0, "ActiveState=inactive\nSubState=dead\nMainPID=0\n", ""
+        ),
+    )
+    assert team.reconcile_running_assignments() == 1
+    assert team.reconcile_running_assignments() == 0
+    row = ledger.get(task_id)
+    assert row["status"] == "RETRY"
+    assert row["systemd_unit"] is None
+    assert row["last_progress_at"]
+    assert row["next_action"] == "retry vanished worker assignment"
+    assert "WORKER_VANISHED" in row["last_error"]
+    assert [kind for kind, _ in events] == ["VANISHED_WORKER_RECLAIMED"]
+
+
+def test_obsolete_exact_sha_evidence_retry_is_retired_idempotently(tmp_path):
+    ledger = orch.Ledger(tmp_path / "stale-evidence.sqlite3")
+    stale_sha, main_sha = "a" * 40, "b" * 40
+    task_id = ledger.create_task(
+        issue_number=322, task_type="MEASUREMENT", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", status="RETRY", retry_at=orch.utcnow(),
+        target_sha=stale_sha,
+        last_error="awaiting deterministic phase runner evidence",
+    )
+    team = object.__new__(orch.Orchestrator)
+    team.ledger = ledger
+    team.gh = type("GH", (), {"api": lambda self, *args: {"sha": main_sha}})()
+    team.runtime = type("Runtime", (), {"event": lambda *args, **kwargs: None})()
+    assert team.retire_obsolete_evidence_retries() == 1
+    assert team.retire_obsolete_evidence_retries() == 0
+    row = ledger.get(task_id)
+    assert row["status"] == "STALE"
+    assert row["retry_at"] is None
+    assert stale_sha in row["last_error"] and main_sha in row["last_error"]
+
+
+def test_due_queue_prefers_ordinary_build_over_provider_and_evidence_retries(tmp_path):
+    ledger = orch.Ledger(tmp_path / "due-fairness.sqlite3")
+    ledger.create_task(
+        issue_number=320, task_type="REVIEW", agent="CLAUDE", model_class="SONNET",
+        status="WAITING_RATE_LIMIT", retry_at=orch.utcnow(),
+    )
+    ledger.create_task(
+        issue_number=321, task_type="MEASUREMENT", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", status="RETRY", retry_at=orch.utcnow(),
+        target_sha="a" * 40,
+    )
+    build_id = ledger.create_task(
+        issue_number=322, task_type="BUILD", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", status="PENDING",
+    )
+    assert ledger.due()["id"] == build_id
 
 
 def test_only_one_active_task_per_issue_is_detected(tmp_path):
