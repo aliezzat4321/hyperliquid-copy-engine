@@ -8,6 +8,14 @@ REVIEW_ROOT='/var/lib/hyperliquid-ai-team/agents/codex/direct-reviews'
 SUDO=''
 if [ "$(id -u)" -ne 0 ]; then SUDO='sudo'; fi
 
+run_as_agent() {
+  if [ "$(id -u)" -eq 0 ]; then
+    runuser -u "$AGENT_USER" -- "$@"
+  else
+    sudo -u "$AGENT_USER" -- "$@"
+  fi
+}
+
 $SUDO test -x /usr/local/bin/codex
 $SUDO test -x /usr/local/bin/codex-code-mode-host
 $SUDO test -x /usr/local/bin/bwrap
@@ -104,9 +112,9 @@ PY
     return
   fi
 
-  if ! $SUDO -u "$AGENT_USER" git -C "$work" diff --quiet -- .; then
+  if ! run_as_agent git -C "$work" diff --quiet -- .; then
     echo "DIRECT_CODEX_REVIEW_INVALID issue=$issue reason=tracked_source_modified"
-    $SUDO -u "$AGENT_USER" git -C "$work" diff --stat -- . || true
+    run_as_agent git -C "$work" diff --stat -- . || true
     overall_rc=1
     return
   fi
@@ -122,7 +130,7 @@ review_one \
   "$GITHUB_WORKSPACE/.github/review-prompts/lane3-331.txt"
 review_one \
   333 \
-  54b040ff4419fa3eb334bbabc293899a0f87c901 \
+  976c5e2364f9f40b45a3b0a56b31339b3c5036bb \
   "$GITHUB_WORKSPACE/.github/review-prompts/lane3-333.txt"
 
 exit "$overall_rc"
