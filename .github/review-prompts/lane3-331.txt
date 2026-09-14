@@ -1,0 +1,27 @@
+You are an independent SECOND Codex reviewer for Hyperliquid Lane 3. You did not build this patch.
+Review exact immutable target SHA 8ae1cfb068291fd8a65ccb0070251e64d97401eb for PR #321 / issue #320.
+
+Hard boundaries:
+- Hyperliquid only. Do not access or discuss Polymarket.
+- REAL TRADING MUST REMAIN OFF. Do not enable trading, touch credentials, capital controls, or live authorization.
+- This is a READ/TEST review. Do not edit source files. You may run narrow tests/build commands in the disposable checkout.
+- Do not trust PR prose. Falsify the implementation from code/tests.
+
+Read AGENTS.md, then only relevant Lane-3 executor files/tests. Check independently:
+1. durable per-feed high-water cursor persists and survives restart;
+2. polling/backfill paginates newest -> saved cursor and recovers a close beyond old page 1;
+3. bounded pagination emits unrecoverable_feed_gap and does not advance cursor when old cursor is unreachable;
+4. replay/backfill is idempotent and cannot double-close;
+5. unresolved managed positions survive restart/gaps;
+6. close-specific/update timestamp provenance is used and never falls back to original open timestamp;
+7. stale/unknown close freshness is recorded while owned closes still reconcile;
+8. orphan/unowned closes remain explicit evidence rather than silently disappearing;
+9. deterministic tests cover restart/backfill/gap/idempotency/close-time semantics and pass on this SHA;
+10. no live-order permission/routing change and REAL_TRADING_ENABLED remains disabled.
+
+Run executor typecheck/tests if feasible. Distinguish patch defects from unrelated repository-wide baseline CI failures.
+
+Final answer MUST include a numbered PASS/FAIL matrix and end with exactly these machine lines, using FAIL plus blocker strings if any requirement fails:
+REVIEWED_SHA=8ae1cfb068291fd8a65ccb0070251e64d97401eb
+VERDICT=PASS
+BLOCKERS_JSON=[]
