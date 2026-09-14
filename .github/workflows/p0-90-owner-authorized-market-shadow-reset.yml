@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: p0-90-owner-authorized-market-shadow-reset
+  group: p0-90-owner-authorized-market-shadow-reset-v2
   cancel-in-progress: false
 
 jobs:
