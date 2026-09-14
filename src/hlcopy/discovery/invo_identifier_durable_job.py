@@ -12,6 +12,11 @@ from hlcopy.discovery import invo_identifier_job as legacy_identifier_job
 from hlcopy.discovery.invo_durable_identity import publish_durable_verified_identities
 from hlcopy.discovery.invo_identifier_job import PortfolioResolutionBatchError, _parse_args
 
+# Compatibility seam used by existing deterministic tests. The durable wrapper calls
+# this alias while redirecting only the legacy public summary writer, so tests can
+# monkeypatch resolver execution without reintroducing the weak public contract.
+run_once = legacy_identifier_job.run_once
+
 
 def _persist_measurement(
     *, state_dir: Path, payload: dict[str, object], append_history: bool = True
@@ -55,7 +60,7 @@ async def _run_legacy_resolver_without_publication(args) -> dict[str, object]:
 
     legacy_identifier_job._save_object = redirected_save
     try:
-        return await legacy_identifier_job.run_once(args)
+        return await run_once(args)
     finally:
         legacy_identifier_job._save_object = original_save
 
@@ -80,9 +85,6 @@ async def _main() -> int:
         try:
             result = await _run_legacy_resolver_without_publication(args)
         except PortfolioResolutionBatchError as exc:
-            # Individual portfolio failures are already persisted as ERROR and are
-            # never published as identities. Do not hold successful verified
-            # portfolios back from durable scoring/shadow handoff.
             result = exc.summary
         publication = publish_durable_verified_identities(state_dir=args.state_dir)
         measurement: dict[str, object] = {
