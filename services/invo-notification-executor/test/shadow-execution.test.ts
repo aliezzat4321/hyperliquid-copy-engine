@@ -23,12 +23,12 @@ function book(receivedAtMs = 10_500) {
       time: 10_000,
       levels: [
         [
-          { px: '99', sz: '1' },
-          { px: '98', sz: '2' },
+          { px: '99.9', sz: '1' },
+          { px: '99.8', sz: '2' },
         ],
         [
-          { px: '101', sz: '1' },
-          { px: '102', sz: '2' },
+          { px: '100.1', sz: '1' },
+          { px: '100.2', sz: '2' },
         ],
       ],
     },
@@ -44,9 +44,9 @@ test('walks causal L2 depth and supports partial fills without fabricating size'
   if (!full.ok) return;
   assert.equal(full.fill.filledSize, 2);
   assert.equal(full.fill.partial, false);
-  assert.equal(full.fill.avgPx, 101.5);
+  assert.equal(full.fill.avgPx, 100.15);
   assert.equal(full.fill.levelsConsumed, 2);
-  assert.equal(full.fill.feeUsd, 203 * 4.5 / 10_000);
+  assert.equal(full.fill.feeUsd, 200.3 * 4.5 / 10_000);
   assert.equal(full.fill.bookAgeMs, 500);
 
   const partial = simulateL2Fill(book(), 'buy', 4, 3, policy);
@@ -70,7 +70,7 @@ test('rejects stale, excessive-spread, zero-depth and below-min-notional books e
   assert.deepEqual(wideResult.ok ? null : wideResult.reason, 'spread_too_wide');
 
   const zero = normalizeL2Book(
-    { coin: 'X', time: 10_000, levels: [[], [{ px: 101, sz: 1 }]] },
+    { coin: 'X', time: 10_000, levels: [[], [{ px: 100.1, sz: 1 }]] },
     10_100,
     10_100,
   );
@@ -112,9 +112,9 @@ test('computes explicit funding, fees and net pnl without double-counting book s
     exitFill: exit.fill,
     fundingUsd: funding,
   });
-  assert.equal(economics.grossPnlUsd, -1);
+  assert.equal(economics.grossPnlUsd, -0.09999999999999432);
   assert.equal(economics.entryFeeUsd, 0.045);
-  assert.equal(economics.exitFeeUsd, 99 * 4.5 / 10_000);
+  assert.equal(economics.exitFeeUsd, 99.9 * 4.5 / 10_000);
   assert.ok(economics.netPnlUsd < economics.grossPnlUsd);
   assert.equal(economics.netReturnBps, economics.netPnlUsd / 100 * 10_000);
 });
