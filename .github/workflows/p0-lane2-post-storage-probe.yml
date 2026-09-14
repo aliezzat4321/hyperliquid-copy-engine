@@ -1,0 +1,38 @@
+name: p0-lane2-post-storage-probe
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/p0-lane2-post-storage-probe.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 5
+    steps:
+      - name: Probe Lane 2 sync and persistence
+        shell: bash
+        run: |
+          set -euo pipefail
+          used="$(df -P /mnt/HC_Volume_106576526 | awk 'NR==2 {gsub(/%/,"",$5); print $5}')"
+          echo "DATA_VOLUME_USED_PCT=$used"
+          test "$used" -lt 80
+          echo "LANE2_SYNC_ACTIVE=$(systemctl is-active hyperliquid-invo-verified-shadow-sync.service || true)"
+          echo "LANE2_SYNC_FAILED=$(systemctl is-failed hyperliquid-invo-verified-shadow-sync.service || true)"
+          echo "LANE2_SYNC_RESULT=$(systemctl show hyperliquid-invo-verified-shadow-sync.service -p Result --value || true)"
+          echo "LANE2_SYNC_EXEC_STATUS=$(systemctl show hyperliquid-invo-verified-shadow-sync.service -p ExecMainStatus --value || true)"
+          sudo systemctl status hyperliquid-invo-verified-shadow-sync.service --no-pager -l || true
+          echo '=== newest Lane 2 persistence evidence ==='
+          sudo find /var/lib/hyperliquid-copy-engine /root/hyperliquid-audit -maxdepth 8 -type f \
+            \( -iname '*verified*' -o -iname '*registry*' -o -iname '*shadow*' -o -iname '*decision*' -o -iname '*execution*' -o -iname '*position*' -o -iname '*pnl*' \) \
+            -printf '%T@ %TY-%Tm-%TdT%TH:%TM:%TSZ %s %p\n' 2>/dev/null | sort -nr | head -n 120
+          failed="$(systemctl is-failed hyperliquid-invo-verified-shadow-sync.service || true)"
+          result="$(systemctl show hyperliquid-invo-verified-shadow-sync.service -p Result --value || true)"
+          test "$failed" != failed
+          test "$result" = success
+          echo LANE2_POST_STORAGE_SYNC_PROOF=PASS
+          echo REAL_TRADING_ENABLED=NO
