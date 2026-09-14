@@ -1,15 +1,19 @@
 import json
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
+from hlcopy.profitability.incremental_funnel_cli import _selection_return_bps, _split_oos
 from hlcopy.profitability.lane1_handoff import (
     LANE1_SELECTION_CONTRACT_V1,
     build_challenger_queue,
     record_prospective_outcomes,
 )
+from hlcopy.profitability.position_copy import CopyFillEvent
 from hlcopy.profitability.position_live_cli import NOTIONALS
 
 WALLET = "0x" + "a" * 40
+D = Decimal
 
 
 def _universe(path: Path, now: datetime) -> None:
@@ -29,6 +33,22 @@ def _robust(notional: str = "25000") -> dict[str, object]:
     }
 
 
+def _event(received_at_ns: int, tid: int) -> CopyFillEvent:
+    return CopyFillEvent(
+        lane="WIDE",
+        wallet_id="wide",
+        wallet_address=WALLET,
+        coin="HYPE",
+        exchange_ts_ms=received_at_ns // 1_000_000,
+        received_at_ns=received_at_ns,
+        tid=tid,
+        leader_start=D("0"),
+        leader_after=D("1"),
+        leader_delta=D("1"),
+        source_price=D("1"),
+    )
+
+
 def test_canonical_notional_grid_contains_high_primary_notionals() -> None:
     assert tuple(str(value) for value in NOTIONALS) == (
         "1000",
@@ -37,6 +57,24 @@ def test_canonical_notional_grid_contains_high_primary_notionals() -> None:
         "25000",
         "50000",
     )
+
+
+def test_selection_return_is_normalized_by_action_count() -> None:
+    summary = {"realized_actions": 5, "closed_net_pnl_usd": "50"}
+    assert _selection_return_bps(summary, D("1000")) == D("100")
+    summary["realized_actions"] = 10
+    assert _selection_return_bps(summary, D("1000")) == D("50")
+
+
+def test_screen_and_confirmation_windows_are_strictly_disjoint() -> None:
+    events = tuple(_event(index * 1_000_000_000, index) for index in range(1, 11))
+    split = _split_oos(events, min_screen_events=4, min_confirm_events=3)
+    assert split is not None
+    screen, confirm = split
+    assert len(screen) >= 4
+    assert len(confirm) >= 3
+    assert {row.tid for row in screen}.isdisjoint({row.tid for row in confirm})
+    assert screen[-1].received_at_ns < confirm[0].received_at_ns
 
 
 def test_prospective_outcome_is_written_to_identity_ledger(tmp_path: Path) -> None:
