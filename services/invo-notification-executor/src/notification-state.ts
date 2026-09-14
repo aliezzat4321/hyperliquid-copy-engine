@@ -3,7 +3,13 @@ import { dirname } from 'path';
 
 export interface ExposureCheckpoint {
   atMs: number;
-  notionalUsd: number;
+  size: number;
+}
+
+export interface FundingOracleCheckpoint {
+  fundingTimeMs: number;
+  observedAtMs: number;
+  oraclePx: number;
 }
 
 export interface ManagedPosition {
@@ -37,6 +43,10 @@ export interface ManagedPosition {
   unfilledOpenSize?: number;
   unresolvedAfterSourceClose?: boolean;
   exposureCheckpoints?: ExposureCheckpoint[];
+  fundingOracleCheckpoints?: FundingOracleCheckpoint[];
+  fundingCarryUsd?: number;
+  fundingAccruedThroughMs?: number;
+  fundingIncompleteReason?: string;
   executionEvidenceVersion?: string;
   costModelVersion?: string;
 }
