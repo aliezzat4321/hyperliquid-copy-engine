@@ -70,7 +70,7 @@ async def _main() -> int:
     run_id = uuid.uuid4().hex
     started_at = datetime.now(tz=UTC).isoformat()
     base: dict[str, object] = {
-        "schema": "hlcopy-lane2-resolution-measurement/v2",
+        "schema": "hlcopy-lane2-resolution-measurement/v1",
         "run_id": run_id,
         "started_at": started_at,
         "real_trading_enabled": False,
