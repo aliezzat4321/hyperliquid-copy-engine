@@ -90,7 +90,12 @@ def _split_oos(
     min_screen_events: int,
     min_confirm_events: int,
 ) -> tuple[tuple[CopyFillEvent, ...], tuple[CopyFillEvent, ...]] | None:
-    ordered = tuple(sorted(events, key=lambda row: (row.received_at_ns, row.exchange_ts_ms, row.tid)))
+    ordered = tuple(
+        sorted(
+            events,
+            key=lambda row: (row.received_at_ns, row.exchange_ts_ms, row.tid),
+        )
+    )
     if len(ordered) < min_screen_events + min_confirm_events:
         return None
     split_index = max(min_screen_events, int(len(ordered) * 0.60))
@@ -100,12 +105,13 @@ def _split_oos(
     screen = ordered[:split_index]
     confirm = ordered[split_index:]
     if screen[-1].received_at_ns >= confirm[0].received_at_ns:
-        # Equal receipt timestamps can occur. Move the boundary left until the
-        # confirmation window is strictly later so screening and confirmation
-        # cannot share the same point-in-time observation.
         boundary_ns = confirm[0].received_at_ns
         split_index = next(
-            (index for index, event in enumerate(ordered) if event.received_at_ns >= boundary_ns),
+            (
+                index
+                for index, event in enumerate(ordered)
+                if event.received_at_ns >= boundary_ns
+            ),
             split_index,
         )
         if split_index < min_screen_events or len(ordered) - split_index < min_confirm_events:
@@ -148,7 +154,9 @@ def _simulate(
     )
     summary = _summary(sim)
     selection_return = _selection_return_bps(summary, notional)
-    summary["selection_return_bps"] = str(selection_return) if selection_return is not None else None
+    summary["selection_return_bps"] = (
+        str(selection_return) if selection_return is not None else None
+    )
     summary["selection_return_basis"] = RETURN_BASIS
     summary["legacy_cumulative_return_bps"] = summary.get("net_return_bps")
     slices = [
@@ -401,7 +409,10 @@ def main() -> None:
     confirmed_by_window: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
     for row in confirmed:
         confirmed_by_window[
-            (_cohort_key(str(row["wallet_address"]), str(row["coin"])), str(row["window_id"]))
+            (
+                _cohort_key(str(row["wallet_address"]), str(row["coin"])),
+                str(row["window_id"]),
+            )
         ].append(row)
 
     robust: list[dict[str, object]] = []
@@ -518,7 +529,11 @@ def main() -> None:
         }
     )
 
-    fd, temporary = tempfile.mkstemp(prefix=f".{report_path.name}.", dir=report_path.parent, text=True)
+    fd, temporary = tempfile.mkstemp(
+        prefix=f".{report_path.name}.",
+        dir=report_path.parent,
+        text=True,
+    )
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(report, handle, indent=2)
