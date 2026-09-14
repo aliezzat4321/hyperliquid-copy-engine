@@ -19,40 +19,118 @@ jobs:
   opus-audit:
     runs-on: [self-hosted, hyperliquid]
     timeout-minutes: 90
+    env:
+      CLAUDE_USER: hl-claude-agent
+      CLAUDE_HOME: /var/lib/hyperliquid-ai-team/agents/claude/home
+      AUDIT_ROOT: /var/lib/hyperliquid-ai-team/agents/claude/worktrees/p0-273-opus-${{ github.run_id }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Run independent Claude Opus audit
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Build sanitized read-only audit bundle
         shell: bash
         run: |
           set -euo pipefail
           sudo git -C /root/hyperliquid-copy-engine fetch origin main
           sudo git -C /root/hyperliquid-copy-engine reset --hard origin/main
-          sudo tee /tmp/issue-273-prompt.txt >/dev/null <<'PROMPT'
-          You are Claude Opus acting as the independent senior quant and reliability auditor for Hyperliquid issue #273. Audit CURRENT main and CURRENT production runtime artifacts on this host. Do not modify code. Do not enable live trading. Do not trust stored summary metrics without independent recomputation.
+          sudo rm -rf "$AUDIT_ROOT"
+          sudo mkdir -p "$AUDIT_ROOT/repo" "$AUDIT_ROOT/evidence/lane1" "$AUDIT_ROOT/evidence/lane2" "$AUDIT_ROOT/evidence/lane3" "$AUDIT_ROOT/evidence/profitability" "$AUDIT_ROOT/evidence/market-shadow"
 
-          Context: the owner intentionally discarded the old disposable Hyperliquid market-shadow history to reset storage; the data volume is now healthy and the three current lane producers are being re-armed prospectively. Do not treat intentional deletion of old market tape as a defect. Judge each lane on current architecture, current production services, retained provenance/accounting evidence, and fresh post-reset prospective records. If a lane does not yet have enough fresh post-reset samples, return INSUFFICIENT_EVIDENCE with the exact additional evidence needed; never manufacture a PASS.
+          # Current source, without Git metadata, virtualenvs or credentials.
+          sudo bash -c "tar -C /root/hyperliquid-copy-engine --exclude=.git --exclude=.venv --exclude='*.env' --exclude='*credential*' --exclude='*secret*' -cf - . | tar -C '$AUDIT_ROOT/repo' -xf -"
 
-          Audit Lane 1 issue #93, Lane 2 issue #92, Lane 3 issue #91, and runtime collection issue #267 end-to-end. Verify no look-ahead or future-book leakage; causal timestamp semantics; point-in-time market-book correctness; explicit rejects for stale or missing depth; realistic fills, slippage, fees, funding, leverage, margin, partial fills and sizing; correct position lifecycle; independently recompute realized, unrealized and net PnL from raw inputs; dedupe and idempotency across retries/restarts; Lane 1 prospective_start_ns and challenger freeze; Lane 2 identity proof and conflict quarantine; Lane 3 notification provenance and causal decision/reject behavior; measurable data gaps and sample-bias risk; reproducible code/policy/raw-data provenance; aggregate accounting reconciliation; and real trading OFF.
+          # Lane 1 / profitability evidence.
+          sudo cp -f /root/hyperliquid-audit/funnel/challenger_queue.json "$AUDIT_ROOT/evidence/lane1/" 2>/dev/null || true
+          sudo cp -f /root/hyperliquid-audit/prospective-champions/report.json "$AUDIT_ROOT/evidence/lane1/prospective_report.json" 2>/dev/null || true
+          sudo find /root/hyperliquid-audit/funnel -maxdepth 2 -type f \( -name '*.json' -o -name '*.csv' \) -size -20M -print0 2>/dev/null | sudo xargs -0 -r -I{} cp -f {} "$AUDIT_ROOT/evidence/profitability/" || true
 
-          Independently replay a representative stratified sample from EACH lane from raw source event plus market data through decision, fill and PnL wherever sufficient post-reset evidence exists. Any unexplained mismatch is FAIL. If fresh downstream records are insufficient, return INSUFFICIENT_EVIDENCE rather than inventing evidence.
+          # Lane 2 retained identity evidence.
+          sudo cp -f /var/lib/hyperliquid-copy-engine/invo/identified_wallets.json "$AUDIT_ROOT/evidence/lane2/" 2>/dev/null || true
+          sudo find /var/lib/hyperliquid-copy-engine -maxdepth 6 -type f \( -iname '*verified*' -o -iname '*registry*' -o -iname '*resolver*' \) -size -20M -print0 2>/dev/null | sudo xargs -0 -r -I{} cp -f --backup=numbered {} "$AUDIT_ROOT/evidence/lane2/" || true
 
-          For EACH lane return PASS, FAIL, or INSUFFICIENT_EVIDENCE; exact sampled record identifiers/paths; independent recomputations; discrepancies and severity; whether current shadow results are safe for profitability analysis; and exact scoped repairs required. Also state whether each lane's producer/collector is currently running or correctly scheduled for continuous prospective collection. Finish with an overall verdict and explicit confirmation that real trading is OFF.
+          # Lane 3 provenance/audit evidence.
+          if sudo test -f /var/lib/hyperliquid-copy-engine/invo-notification-executor/audit.jsonl; then
+            sudo tail -n 5000 /var/lib/hyperliquid-copy-engine/invo-notification-executor/audit.jsonl > /tmp/p0-273-lane3-audit.jsonl
+            sudo mv /tmp/p0-273-lane3-audit.jsonl "$AUDIT_ROOT/evidence/lane3/audit_tail.jsonl"
+          fi
+
+          # Copy only a bounded sample of fresh post-reset market files for independent checks.
+          sudo env AUDIT_ROOT="$AUDIT_ROOT" python3 - <<'PY'
+          import os, shutil
+          from pathlib import Path
+          root=Path('/mnt/HC_Volume_106576526/hyperliquid/market-shadow')
+          out=Path(os.environ['AUDIT_ROOT'])/'evidence'/'market-shadow'
+          files=[]
+          if root.is_dir():
+              for p in root.rglob('*'):
+                  try:
+                      if p.is_file() and not p.is_symlink() and p.stat().st_size <= 20*1024*1024:
+                          files.append((p.stat().st_mtime_ns,p))
+                  except FileNotFoundError:
+                      pass
+          for _,p in sorted(files, reverse=True)[:40]:
+              rel=p.relative_to(root)
+              dest=out/rel
+              dest.parent.mkdir(parents=True,exist_ok=True)
+              shutil.copy2(p,dest)
+          print(f'MARKET_SAMPLE_FILES={min(len(files),40)}')
+          PY
+
+          # Production state snapshots; no secrets.
+          sudo bash -c "df -hT /mnt/HC_Volume_106576526 > '$AUDIT_ROOT/evidence/storage.txt'"
+          sudo bash -c "systemctl status hyperliquid-selective-shadow.service hyperliquid-prospective-champions.service hyperliquid-invo-wallet-identifier.service hyperliquid-invo-verified-shadow-sync.service hyperliquid-invo-notification-executor.service hlcopy-profitability-funnel.service --no-pager -l > '$AUDIT_ROOT/evidence/services.txt' 2>&1 || true"
+          curl -fsS --max-time 4 http://127.0.0.1:8787/health | sudo tee "$AUDIT_ROOT/evidence/lane3/health.json" >/dev/null || true
+          sudo find "$AUDIT_ROOT/evidence" -type f -printf '%TY-%Tm-%TdT%TH:%TM:%TSZ %s %p\n' | sudo sort > /tmp/p0-273-evidence-manifest.txt
+          sudo mv /tmp/p0-273-evidence-manifest.txt "$AUDIT_ROOT/evidence/MANIFEST.txt"
+          sudo chown -R "$CLAUDE_USER:$CLAUDE_USER" "$AUDIT_ROOT"
+          sudo chmod -R u=rwX,go= "$AUDIT_ROOT"
+
+      - name: Run independent authenticated Claude Opus audit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          uid="$(id -u "$CLAUDE_USER")"
+          gid="$(id -g "$CLAUDE_USER")"
+          prompt_file="$AUDIT_ROOT/prompt.txt"
+          result_file="$AUDIT_ROOT/opus-audit.txt"
+          sudo tee "$prompt_file" >/dev/null <<'PROMPT'
+          You are Claude Opus acting as the independent senior quant and reliability auditor for Hyperliquid issue #273. Audit the CURRENT repo snapshot under repo/ and CURRENT production evidence under evidence/. Do not modify code. Do not enable live trading. Do not trust stored summary metrics without independent recomputation.
+
+          The owner intentionally discarded the old disposable Hyperliquid market-shadow history to reset storage. Do not treat that intentional deletion as a defect. Judge each lane on current architecture, current production state, retained provenance/accounting evidence, and fresh post-reset prospective records. If a lane does not yet have enough fresh post-reset samples, return INSUFFICIENT_EVIDENCE with the exact additional evidence needed; never manufacture a PASS.
+
+          Audit Lane 1 (#93), Lane 2 (#92), Lane 3 (#91), and runtime collection (#267) end-to-end. Verify: no look-ahead/future-book leakage; causal timestamp semantics; point-in-time market-book correctness; explicit rejects for stale/missing depth; realistic fills, slippage, fees, funding, leverage, margin, partial fills and sizing; correct position lifecycle; independently recompute realized/unrealized/net PnL wherever raw evidence allows; dedupe/idempotency across retries/restarts; Lane 1 prospective_start_ns and challenger freeze; Lane 2 identity proof/conflict quarantine; Lane 3 notification provenance and causal decisions/rejects; data gaps/sample-bias risk; reproducible code/policy/data provenance; aggregate accounting reconciliation; and real trading OFF.
+
+          Independently replay a representative stratified sample from EACH lane from source event + market evidence through decision/fill/PnL wherever the bundle is sufficient. Any unexplained mismatch is FAIL. Missing fresh evidence is INSUFFICIENT_EVIDENCE, not PASS.
+
+          For EACH lane return PASS, FAIL, or INSUFFICIENT_EVIDENCE; exact sampled record identifiers/paths; independent recomputations; discrepancies/severity; whether current shadow results are safe for profitability analysis; exact scoped repairs/evidence required; and whether its producer/collector is currently running or correctly scheduled for continuous collection. Finish with an overall verdict and explicit confirmation that REAL_TRADING_ENABLED remains NO. Do not inspect or discuss Polymarket.
           PROMPT
-          sudo bash -lc '
-            set -euo pipefail
-            set -a
-            source /etc/hyperliquid-ai-team/claude.env
-            set +a
-            cd /root/hyperliquid-copy-engine
-            CLAUDE_BIN="$(command -v claude || true)"
-            if [ -z "$CLAUDE_BIN" ] && [ -x /root/.local/bin/claude ]; then CLAUDE_BIN=/root/.local/bin/claude; fi
-            test -n "$CLAUDE_BIN"
-            "$CLAUDE_BIN" -p --model opus --max-turns 40 "$(cat /tmp/issue-273-prompt.txt)" | tee /tmp/issue-273-opus-audit.txt
-          '
-          test -s /tmp/issue-273-opus-audit.txt
-          gh issue comment 273 --repo aliezzat4321/hyperliquid-copy-engine --body-file /tmp/issue-273-opus-audit.txt
+          sudo chown "$CLAUDE_USER:$CLAUDE_USER" "$prompt_file"
+
+          # Validate the configured Claude agent identity first; root's Claude profile is intentionally not used.
+          sudo -u "$CLAUDE_USER" env -i \
+            HOME="$CLAUDE_HOME" \
+            CLAUDE_CONFIG_DIR="$CLAUDE_HOME/.claude" \
+            XDG_CONFIG_HOME="$CLAUDE_HOME/.config" \
+            XDG_CACHE_HOME="$CLAUDE_HOME/.cache" \
+            PATH=/usr/local/bin:/usr/bin:/bin \
+            /usr/bin/claude -p --model opus --max-turns 1 --output-format text 'Reply exactly OPUS_AUTH_OK' \
+            | grep -Fx 'OPUS_AUTH_OK'
+
+          sudo -u "$CLAUDE_USER" env -i \
+            HOME="$CLAUDE_HOME" \
+            CLAUDE_CONFIG_DIR="$CLAUDE_HOME/.claude" \
+            XDG_CONFIG_HOME="$CLAUDE_HOME/.config" \
+            XDG_CACHE_HOME="$CLAUDE_HOME/.cache" \
+            PATH=/usr/local/bin:/usr/bin:/bin \
+            /usr/bin/claude -p --model opus --max-turns 40 --output-format text \
+            --permission-mode dontAsk --allowedTools Read,Glob,Grep,Bash \
+            "$(cat "$prompt_file")" \
+            > "$result_file"
+          test -s "$result_file"
+          echo OPUS_AUDIT_COMPLETED=YES
+          cat "$result_file"
+          gh issue comment 273 --repo aliezzat4321/hyperliquid-copy-engine --body-file "$result_file"
