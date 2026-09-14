@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: p0-90-owner-authorized-market-shadow-reset-v2
+  group: p0-90-owner-authorized-market-shadow-reset-v3
   cancel-in-progress: false
 
 jobs:
@@ -25,6 +25,7 @@ jobs:
       MARKET_ROOT: /mnt/HC_Volume_106576526/hyperliquid/market-shadow
     steps:
       - name: Owner-authorized safety boundary
+        id: before
         shell: bash
         run: |
           set -euo pipefail
@@ -32,17 +33,17 @@ jobs:
           test -d "$DATA_MOUNT"
           test -d "$MARKET_ROOT"
           test ! -L "$MARKET_ROOT"
+          USED_BEFORE="$(df -B1 --output=used "$DATA_MOUNT" | tail -1 | tr -d ' ')"
+          echo "used_before=$USED_BEFORE" >> "$GITHUB_OUTPUT"
+          echo "DATA_VOLUME_USED_BYTES_BEFORE=$USED_BEFORE"
           echo 'OWNER_AUTHORIZED_MARKET_SHADOW_RESET=YES'
-          echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
-          echo 'DELETE_SCOPE=MARKET_SHADOW_CONTENTS_ONLY'
+          echo 'DELETE_SCOPE=HYPERLIQUID_MARKET_SHADOW_CONTENTS_ONLY'
           echo 'POSTGRESQL_FILESYSTEM_DELETION=NO'
           echo 'PROFITABILITY_OUTPUT_DELETION=NO'
           echo 'SHADOW_LEDGER_DELETION=NO'
           echo 'POLYMARKET_MUTATION=NO'
           echo 'REAL_TRADING_ENABLED=NO'
-          echo '========== BEFORE =========='
           df -hT "$DATA_MOUNT"
-          du -sh "$MARKET_ROOT" || true
 
       - name: Quiesce market capture
         shell: bash
@@ -63,52 +64,46 @@ jobs:
           test "$MARKET_ROOT" = '/mnt/HC_Volume_106576526/hyperliquid/market-shadow'
           test -d "$MARKET_ROOT"
           test ! -L "$MARKET_ROOT"
-          BEFORE_BYTES="$(du -sb "$MARKET_ROOT" | awk '{print $1}')"
-          export MARKET_ROOT BEFORE_BYTES
-          sudo --preserve-env=MARKET_ROOT,BEFORE_BYTES python3 - <<'PY'
+          export MARKET_ROOT
+          sudo --preserve-env=MARKET_ROOT python3 - <<'PY'
           import os, shutil
           from pathlib import Path
-
-          root = Path(os.environ['MARKET_ROOT'])
-          expected = Path('/mnt/HC_Volume_106576526/hyperliquid/market-shadow')
+          root=Path(os.environ['MARKET_ROOT'])
+          expected=Path('/mnt/HC_Volume_106576526/hyperliquid/market-shadow')
           if root != expected or not root.is_dir() or root.is_symlink():
               raise SystemExit('refusing unexpected market root')
-
-          deleted = 0
-          entries = 0
-          for entry in root.iterdir():
+          entries=0
+          for entry in list(root.iterdir()):
               entries += 1
-              try:
-                  if entry.is_symlink() or entry.is_file():
-                      entry.unlink()
-                  elif entry.is_dir():
-                      shutil.rmtree(entry)
-                  else:
-                      entry.unlink(missing_ok=True)
-                  deleted += 1
-              except FileNotFoundError:
-                  pass
-          print(f'MARKET_SHADOW_TOP_LEVEL_ENTRIES_SEEN={entries}')
-          print(f'MARKET_SHADOW_TOP_LEVEL_ENTRIES_DELETED={deleted}')
+              if entry.is_symlink() or entry.is_file():
+                  entry.unlink(missing_ok=True)
+              elif entry.is_dir():
+                  shutil.rmtree(entry)
+              else:
+                  entry.unlink(missing_ok=True)
+          print(f'MARKET_SHADOW_TOP_LEVEL_ENTRIES_DELETED={entries}')
           PY
           sync
-          AFTER_BYTES="$(du -sb "$MARKET_ROOT" | awk '{print $1}')"
-          echo "MARKET_SHADOW_BYTES_BEFORE=$BEFORE_BYTES"
-          echo "MARKET_SHADOW_BYTES_AFTER=$AFTER_BYTES"
-          echo "MARKET_SHADOW_BYTES_RECLAIMED=$(( BEFORE_BYTES - AFTER_BYTES ))"
-          test "$AFTER_BYTES" -lt 10485760
+          test -z "$(find "$MARKET_ROOT" -mindepth 1 -maxdepth 1 -print -quit)"
+          echo 'MARKET_SHADOW_EMPTY=YES'
 
       - name: Verify storage headroom
         id: storage
+        env:
+          USED_BEFORE: ${{ steps.before.outputs.used_before }}
         shell: bash
         run: |
           set -euo pipefail
-          echo '========== AFTER RESET =========='
-          df -hT "$DATA_MOUNT"
+          USED_AFTER="$(df -B1 --output=used "$DATA_MOUNT" | tail -1 | tr -d ' ')"
+          RECLAIMED=$(( USED_BEFORE - USED_AFTER ))
           USED_PCT="$(df -P "$DATA_MOUNT" | awk 'NR==2 {gsub(/%/,"",$5); print $5}')"
+          echo "DATA_VOLUME_USED_BYTES_AFTER=$USED_AFTER"
+          echo "DATA_VOLUME_BYTES_RECLAIMED=$RECLAIMED"
           echo "DATA_VOLUME_USED_PCT=$USED_PCT"
+          df -hT "$DATA_MOUNT"
+          test "$RECLAIMED" -gt 1073741824
           if [ "$USED_PCT" -ge 80 ]; then
-            echo "Storage reset reclaimed market-shadow but volume remains ${USED_PCT}% used; refusing capture restart." >&2
+            echo "volume remains ${USED_PCT}% used; refusing capture restart" >&2
             exit 1
           fi
           touch "$MARKET_ROOT/.owner-storage-reset-write-probe"
