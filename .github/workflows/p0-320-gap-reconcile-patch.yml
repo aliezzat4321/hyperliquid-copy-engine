@@ -1,0 +1,45 @@
+name: p0-320-gap-reconcile-patch
+
+on:
+  push:
+    branches: [codex/320-gap-reconcile-patcher]
+    paths:
+      - ".github/workflows/p0-320-gap-reconcile-patch.yml"
+      - "scripts/patch_lane3_320_gap_reconcile.py"
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/320-gap-reconcile-patcher
+          path: patcher
+          fetch-depth: 1
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/auto-320-b8096982
+          path: target
+          fetch-depth: 0
+      - name: Apply reviewed #320 repair
+        run: python3 patcher/scripts/patch_lane3_320_gap_reconcile.py target
+      - name: Run full executor check
+        working-directory: target/services/invo-notification-executor
+        run: |
+          npm install --ignore-scripts --no-audit --no-fund
+          npm run check
+      - name: Commit exact tested repair
+        working-directory: target
+        run: |
+          git config user.name "lane3-320-gap-repair"
+          git config user.email "actions@users.noreply.github.com"
+          git add services/invo-notification-executor/src/service.ts \
+                  services/invo-notification-executor/src/gap-reconciliation.ts \
+                  services/invo-notification-executor/test/gap-reconciliation.test.ts
+          git diff --cached --check
+          git commit -m "Fix #320 owned-close reconciliation across feed gaps"
+          git push origin HEAD:codex/auto-320-b8096982
