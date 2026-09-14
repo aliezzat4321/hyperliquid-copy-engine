@@ -10,6 +10,7 @@ import { ManagedPosition, NotificationState } from './notification-state.js';
 import { TraderTracker } from './trader-tracker.js';
 import { liveScopeSkipReason } from './live-scope.js';
 import { fetchFeedBackfill } from './feed-backfill.js';
+import { planUnrecoverableGap } from './gap-reconciliation.js';
 
 if (INVO_TOKEN) invo.setToken(INVO_TOKEN);
 if (INVO_REFRESH_TOKEN) invo.setRefreshToken(INVO_REFRESH_TOKEN);
@@ -670,6 +671,12 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
   );
   const posts = backfill.posts;
   if (saved && !backfill.cursorReached) {
+    const gapPlan = planUnrecoverableGap(
+      posts,
+      post => signalFromFeedPost(post, receivedAtMs),
+      sourceBaseId => Boolean(state.getManagedBySource(sourceBaseId)),
+      key => state.hasSeen(key),
+    );
     log({
       type: 'unrecoverable_feed_gap',
       feedFilter,
@@ -680,9 +687,25 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
       exhausted: backfill.exhausted,
       managedCount: state.managedCount(),
       unresolvedManaged: state.snapshot().managed,
+      cursorAdvanceAllowed: gapPlan.cursorAdvanceAllowed,
+      recoverableOwnedCloses: gapPlan.ownedCloses.length,
+    });
+    // A missing historical cursor must never make a close already visible on a fetched
+    // page disappear. Reconcile only closes for exposure this service still owns; leave
+    // all other gap posts unseen and never advance the cursor across the missing range.
+    for (const signal of gapPlan.ownedCloses) {
+      await execute(signal, `${source}:gap_recovery`, receivedAtMs, feedFilter);
+    }
+    log({
+      type: 'unrecoverable_feed_gap_reconciliation',
+      feedFilter,
+      savedCursor: saved,
+      ownedCloseKeys: gapPlan.ownedCloses.map(signal => signal.key),
+      reconciledOwnedCloses: gapPlan.ownedCloses.filter(signal => state.hasSeen(signal.key)).length,
+      cursorAdvanceAllowed: false,
     });
     lastSuccessPollMs = Date.now();
-    return 0;
+    return gapPlan.ownedCloses.length;
   }
   const tracked = (posts as any[]).map((post: any) => {
     const signal = signalFromFeedPost(post);
