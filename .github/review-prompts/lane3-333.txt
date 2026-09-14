@@ -1,5 +1,5 @@
 You are an independent SECOND Codex reviewer for Hyperliquid Lane 3. You did not build this patch.
-Review exact immutable target SHA 54b040ff4419fa3eb334bbabc293899a0f87c901 for stacked PR #332 / issue #330.
+Review exact immutable target SHA 976c5e2364f9f40b45a3b0a56b31339b3c5036bb for stacked PR #332 / issue #330.
 
 Hard boundaries:
 - Hyperliquid only. Do not access or discuss Polymarket.
@@ -13,22 +13,27 @@ Read AGENTS.md, then only relevant Lane-3 executor files/tests. Check independen
 3. partial fills preserve unfilled exposure and never fabricate full execution;
 4. szDecimals rounding and minimum-notional enforcement are correct for open/re-up/close;
 5. source size/leverage remain distinct from copy sizing and re-up ratios are not silently distorted;
-6. entry/exit taker fees, L2 walk/spread slippage, funding, gross PnL, net PnL and net return have correct units/arithmetic/provenance and costs cannot silently default to zero;
-7. funding-history failure makes economics incomplete, not optimistic zero funding;
-8. every open/unresolved paper position is represented in /health MTM/cohort evidence and closed-only profitability is explicitly forbidden;
-9. rejected/partial closes preserve unresolved exposure; legacy positions without causal entry provenance remain explicitly incomplete;
-10. deterministic executor tests/typecheck pass on exact SHA, #320 restart/backfill behavior remains intact, and live order routing/permissions are unchanged.
+6. entry/exit taker fees, L2 walk/spread slippage, gross PnL, net PnL and net return have correct units/arithmetic/provenance and costs cannot silently default to zero;
+7. funding uses the Hyperliquid formula position size × oracle price × funding rate, with funding rate from `fundingHistory` and oracle price collected prospectively from `metaAndAssetCtxs.oraclePx`; entry/mark/book-mid prices must never substitute for a missing historical oracle;
+8. each applicable funding interval requires a sufficiently fresh oracle checkpoint; missed/late/missing oracle evidence makes economics incomplete, not optimistic zero funding;
+9. funding-history pagination cannot silently truncate longer holds and cannot double count duplicated pages/points;
+10. re-ups change the size used only for subsequent funding intervals; partial closes allocate accrued funding pro-rata to the closed/remaining exposure and reset the remaining accrual boundary so prior funding is not charged again later;
+11. every open/unresolved paper position is represented in /health MTM/cohort evidence and closed-only profitability is explicitly forbidden;
+12. rejected/partial closes preserve unresolved exposure; legacy/non-v2 positions without causal entry/funding provenance remain explicitly incomplete;
+13. deterministic executor tests/typecheck pass on exact SHA, #320 restart/backfill behavior remains intact, and live order routing/permissions are unchanged.
 
 Adversarial checks required:
 - reject negative book age / future-dated book timestamps;
 - ensure average executable fill price already incorporates L2 walk and slippage is not double-subtracted from net PnL;
-- verify Hyperliquid funding sign semantics for long/short rather than assuming them;
-- verify partial-close allocation of entry fee/funding/notional and remaining state consistency;
+- verify Hyperliquid funding sign semantics for long/short from code/docs or existing authoritative behavior, rather than assuming them;
+- challenge exact funding-boundary ordering for opens/re-ups/closes and identify any ambiguity that could attach the wrong size to a funding interval;
+- prove a partial close followed by a later close cannot charge any pre-partial-close funding twice;
+- verify a service restart cannot silently fabricate missed oracle checkpoints or retroactively reconstruct them;
 - verify one failed mark/funding call cannot make /health lose all other open-position marks.
 
 Run executor typecheck/tests if feasible.
 
 Final answer MUST include a numbered PASS/FAIL matrix and end with exactly these machine lines, using FAIL plus blocker strings if any requirement fails:
-REVIEWED_SHA=54b040ff4419fa3eb334bbabc293899a0f87c901
+REVIEWED_SHA=976c5e2364f9f40b45a3b0a56b31339b3c5036bb
 VERDICT=PASS
 BLOCKERS_JSON=[]
