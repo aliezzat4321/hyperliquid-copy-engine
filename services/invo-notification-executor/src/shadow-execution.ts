@@ -32,6 +32,7 @@ export interface ShadowExecutionPolicy {
   maxSpreadBps: number;
   minNotionalUsd: number;
   takerFeeBps: number;
+  fundingOracleMaxDelayMs?: number;
 }
 
 export interface ShadowFill {
@@ -75,7 +76,20 @@ export interface FundingPoint {
 
 export interface ExposureCheckpoint {
   atMs: number;
-  notionalUsd: number;
+  size: number;
+}
+
+export interface FundingOracleCheckpoint {
+  fundingTimeMs: number;
+  observedAtMs: number;
+  oraclePx: number;
+}
+
+export interface FundingCostResult {
+  fundingUsd: number;
+  fundingPoints: number;
+  oraclePointsMatched: number;
+  maxOracleDelayMs: number;
 }
 
 export interface PositionEconomicsInput {
@@ -255,25 +269,56 @@ export function fundingCostUsd(
   side: ShadowSide,
   checkpoints: ExposureCheckpoint[],
   history: FundingPoint[],
-): number {
-  if (!history.length || !checkpoints.length) return 0;
-  const ordered = [...checkpoints]
-    .filter(p => Number.isFinite(p.atMs) && Number.isFinite(p.notionalUsd) && p.notionalUsd >= 0)
+  oracleCheckpoints: FundingOracleCheckpoint[],
+  maxOracleDelayMs: number,
+): FundingCostResult {
+  if (!Number.isFinite(maxOracleDelayMs) || maxOracleDelayMs < 0) {
+    throw new Error(`Invalid maxOracleDelayMs: ${maxOracleDelayMs}`);
+  }
+  if (!history.length) {
+    return { fundingUsd: 0, fundingPoints: 0, oraclePointsMatched: 0, maxOracleDelayMs };
+  }
+  const orderedExposure = [...checkpoints]
+    .filter(p => Number.isFinite(p.atMs) && Number.isFinite(p.size) && p.size >= 0)
     .sort((a, b) => a.atMs - b.atMs);
-  if (!ordered.length) return 0;
+  if (!orderedExposure.length) throw new Error('No valid size checkpoints for funding accounting');
+
+  const oracleByFundingTime = new Map<number, FundingOracleCheckpoint>();
+  for (const checkpoint of oracleCheckpoints) {
+    if (
+      !Number.isFinite(checkpoint.fundingTimeMs)
+      || !Number.isFinite(checkpoint.observedAtMs)
+      || !(checkpoint.oraclePx > 0)
+    ) continue;
+    const delayMs = checkpoint.observedAtMs - checkpoint.fundingTimeMs;
+    if (delayMs < 0 || delayMs > maxOracleDelayMs) continue;
+    const prior = oracleByFundingTime.get(checkpoint.fundingTimeMs);
+    if (!prior || checkpoint.observedAtMs < prior.observedAtMs) {
+      oracleByFundingTime.set(checkpoint.fundingTimeMs, checkpoint);
+    }
+  }
+
   const sign = side === 'long' ? 1 : -1;
   let total = 0;
+  let fundingPoints = 0;
+  let oraclePointsMatched = 0;
   for (const point of history) {
     if (!Number.isFinite(point.timeMs) || !Number.isFinite(point.rate)) continue;
     let active: ExposureCheckpoint | null = null;
-    for (const checkpoint of ordered) {
+    for (const checkpoint of orderedExposure) {
       if (checkpoint.atMs <= point.timeMs) active = checkpoint;
       else break;
     }
-    if (!active) continue;
-    total += active.notionalUsd * point.rate * sign;
+    if (!active || !(active.size > 0)) continue;
+    fundingPoints += 1;
+    const oracle = oracleByFundingTime.get(point.timeMs);
+    if (!oracle) {
+      throw new Error(`Missing fresh oracle checkpoint for funding interval ${point.timeMs}`);
+    }
+    oraclePointsMatched += 1;
+    total += active.size * oracle.oraclePx * point.rate * sign;
   }
-  return total;
+  return { fundingUsd: total, fundingPoints, oraclePointsMatched, maxOracleDelayMs };
 }
 
 export function computePositionEconomics(input: PositionEconomicsInput): PositionEconomics {
