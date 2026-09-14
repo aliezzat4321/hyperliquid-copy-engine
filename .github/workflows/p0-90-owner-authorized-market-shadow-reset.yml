@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: p0-90-owner-authorized-market-shadow-reset-v4
+  group: p0-90-owner-authorized-market-shadow-reset-v5
   cancel-in-progress: false
 
 jobs:
@@ -98,14 +98,17 @@ jobs:
           RECLAIMED=$(( USED_BEFORE - USED_AFTER ))
           USED_PCT="$(df -P "$DATA_MOUNT" | awk 'NR==2 {gsub(/%/,"",$5); print $5}')"
           echo "DATA_VOLUME_USED_BYTES_AFTER=$USED_AFTER"
-          echo "DATA_VOLUME_BYTES_RECLAIMED=$RECLAIMED"
+          echo "DATA_VOLUME_BYTES_RECLAIMED_THIS_RUN=$RECLAIMED"
           echo "DATA_VOLUME_USED_PCT=$USED_PCT"
           df -hT "$DATA_MOUNT"
-          test "$RECLAIMED" -gt 1073741824
+          if [ "$RECLAIMED" -le 1073741824 ]; then
+            echo 'STORAGE_ALREADY_CLEAN=YES'
+          fi
           if [ "$USED_PCT" -ge 80 ]; then
             echo "volume remains ${USED_PCT}% used; refusing capture restart" >&2
             exit 1
           fi
+          test -z "$(find "$MARKET_ROOT" -mindepth 1 -maxdepth 1 -print -quit)"
           touch "$MARKET_ROOT/.owner-storage-reset-write-probe"
           rm -f "$MARKET_ROOT/.owner-storage-reset-write-probe"
           echo 'STORAGE_HEADROOM_GATE=PASS'
@@ -117,8 +120,11 @@ jobs:
           sudo systemctl start hyperliquid-market-capture.timer 2>/dev/null || true
           sudo systemctl start hyperliquid-market-capture.service 2>/dev/null || true
           sleep 5
-          echo 'MARKET_CAPTURE_TIMER_STATE='"$(systemctl is-active hyperliquid-market-capture.timer 2>/dev/null || true)"
-          echo 'MARKET_CAPTURE_SERVICE_STATE='"$(systemctl is-active hyperliquid-market-capture.service 2>/dev/null || true)"
+          TIMER_STATE="$(systemctl is-active hyperliquid-market-capture.timer 2>/dev/null || true)"
+          SERVICE_STATE="$(systemctl is-active hyperliquid-market-capture.service 2>/dev/null || true)"
+          echo "MARKET_CAPTURE_TIMER_STATE=$TIMER_STATE"
+          echo "MARKET_CAPTURE_SERVICE_STATE=$SERVICE_STATE"
+          test "$TIMER_STATE" = active
           echo 'REAL_TRADING_ENABLED=NO'
           echo 'POSTGRESQL_FILESYSTEM_DELETION=NO'
           echo 'POLYMARKET_MUTATION=NO'
