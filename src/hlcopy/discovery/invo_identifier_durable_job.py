@@ -8,12 +8,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from hlcopy.discovery import invo_identifier_job as legacy_identifier_job
 from hlcopy.discovery.invo_durable_identity import publish_durable_verified_identities
-from hlcopy.discovery.invo_identifier_job import (
-    PortfolioResolutionBatchError,
-    _parse_args,
-    run_once,
-)
+from hlcopy.discovery.invo_identifier_job import PortfolioResolutionBatchError, _parse_args
 
 
 def _persist_measurement(
@@ -41,15 +38,38 @@ def _persist_measurement(
         os.fsync(handle.fileno())
 
 
+async def _run_legacy_resolver_without_publication(args) -> dict[str, object]:
+    """Run legacy discovery/state updates without exposing its weak v3 publication.
+
+    The durable v12 attestation publisher is the only writer allowed to the public
+    `identified_wallets.json` contract. The legacy resolver still owns mutable
+    identifier state and reports, so its writes are preserved except for its summary
+    projection, which is redirected to a private diagnostic file.
+    """
+    public_path = args.state_dir / "identified_wallets.json"
+    private_path = args.state_dir / "identified_wallets_legacy_diagnostic.json"
+    original_save = legacy_identifier_job._save_object
+
+    def redirected_save(path: Path, payload) -> None:
+        original_save(private_path if path == public_path else path, payload)
+
+    legacy_identifier_job._save_object = redirected_save
+    try:
+        return await legacy_identifier_job.run_once(args)
+    finally:
+        legacy_identifier_job._save_object = original_save
+
+
 async def _main() -> int:
     args = _parse_args()
     run_id = uuid.uuid4().hex
     started_at = datetime.now(tz=UTC).isoformat()
     base: dict[str, object] = {
-        "schema": "hlcopy-lane2-resolution-measurement/v1",
+        "schema": "hlcopy-lane2-resolution-measurement/v2",
         "run_id": run_id,
         "started_at": started_at,
         "real_trading_enabled": False,
+        "public_identity_contract": "durable_attestation_only",
     }
     _persist_measurement(
         state_dir=args.state_dir,
@@ -58,7 +78,7 @@ async def _main() -> int:
     )
     try:
         try:
-            result = await run_once(args)
+            result = await _run_legacy_resolver_without_publication(args)
         except PortfolioResolutionBatchError as exc:
             # Individual portfolio failures are already persisted as ERROR and are
             # never published as identities. Do not hold successful verified
@@ -74,6 +94,9 @@ async def _main() -> int:
             "durable_identity_usernames": [
                 row["username"] for row in publication["identities"]
             ],
+            "quarantined_identity_count": publication.get("quarantined_identity_count", 0),
+            "identity_conflicts": publication.get("identity_conflicts", []),
+            "attestation_reports_seen": publication.get("attestation_reports_seen", 0),
         }
         _persist_measurement(state_dir=args.state_dir, payload=measurement)
         print(json.dumps(measurement, sort_keys=True))
