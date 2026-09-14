@@ -11,9 +11,9 @@ import {
   type ShadowExecutionPolicy,
 } from './shadow-execution.js';
 
-export const EXECUTION_EVIDENCE_VERSION = 'lane3-causal-l2-v1';
-export const COST_MODEL_VERSION = 'hl-taker-l2-funding-history-v1';
-export const FUNDING_MODEL_VERSION = 'funding-history-rate-x-exposure-checkpoint-notional-v1';
+export const EXECUTION_EVIDENCE_VERSION = 'lane3-causal-l2-v2';
+export const COST_MODEL_VERSION = 'hl-taker-l2-oracle-funding-v2';
+export const FUNDING_MODEL_VERSION = 'funding-history-rate-x-prospective-oracle-x-size-v2';
 
 export interface AssetBook {
   assetIndex: number;
@@ -65,22 +65,44 @@ export async function executableShadowFill(
 export async function fundingForPosition(
   position: ManagedPosition,
   endTimeMs: number,
+  maxOracleDelayMs = 10_000,
 ): Promise<{
   fundingUsd: number;
   fundingPoints: number;
+  oraclePointsMatched: number;
+  carryUsd: number;
   model: string;
 }> {
+  if (position.fundingIncompleteReason) {
+    throw new Error(`funding evidence already incomplete: ${position.fundingIncompleteReason}`);
+  }
   const checkpoints = position.exposureCheckpoints ?? [];
   if (!checkpoints.length) {
-    throw new Error('position has no exposure checkpoints for funding accounting');
+    throw new Error('position has no size checkpoints for funding accounting');
   }
-  const raw = await hl.getFundingHistory(position.coin, position.openedAtMs, endTimeMs);
+  if (!Array.isArray(position.fundingOracleCheckpoints)) {
+    throw new Error('position has no prospective oracle checkpoint ledger');
+  }
+  const carryUsd = Number(position.fundingCarryUsd ?? 0);
+  if (!Number.isFinite(carryUsd)) throw new Error('invalid funding carry');
+  const accruedThroughMs = Number(position.fundingAccruedThroughMs ?? position.openedAtMs);
+  const startTimeMs = accruedThroughMs > position.openedAtMs ? accruedThroughMs + 1 : position.openedAtMs;
+  const raw = await hl.getFundingHistory(position.coin, startTimeMs, endTimeMs);
   const history: FundingPoint[] = raw
     .map(row => ({ timeMs: Number(row.time), rate: Number(row.fundingRate) }))
     .filter(row => Number.isFinite(row.timeMs) && Number.isFinite(row.rate));
+  const calculated = fundingCostUsd(
+    position.side,
+    checkpoints,
+    history,
+    position.fundingOracleCheckpoints,
+    maxOracleDelayMs,
+  );
   return {
-    fundingUsd: fundingCostUsd(position.side, checkpoints, history),
-    fundingPoints: history.length,
+    fundingUsd: carryUsd + calculated.fundingUsd,
+    fundingPoints: calculated.fundingPoints,
+    oraclePointsMatched: calculated.oraclePointsMatched,
+    carryUsd,
     model: FUNDING_MODEL_VERSION,
   };
 }
@@ -129,6 +151,7 @@ export async function markShadowPosition(
     || !(size > 0)
     || !(Number(position.entryNotionalExecutedUsd) > 0)
     || !Array.isArray(position.exposureCheckpoints)
+    || !Array.isArray(position.fundingOracleCheckpoints)
   ) {
     return {
       sourceBaseId: position.sourceBaseId,
@@ -136,7 +159,7 @@ export async function markShadowPosition(
       side: position.side,
       size: Number.isFinite(size) ? size : null,
       status: 'INCOMPLETE_LEGACY_ENTRY',
-      reason: 'missing causal entry-book provenance',
+      reason: 'missing v2 causal entry/funding provenance',
       markedAtMs,
       executionEvidenceVersion: position.executionEvidenceVersion,
       costModelVersion: position.costModelVersion,
@@ -167,7 +190,7 @@ export async function markShadowPosition(
   const fraction = Math.min(1, fill.filledSize / size);
   let funding;
   try {
-    funding = await fundingForPosition(position, markedAtMs);
+    funding = await fundingForPosition(position, markedAtMs, policy.fundingOracleMaxDelayMs ?? 10_000);
   } catch (err) {
     return {
       sourceBaseId: position.sourceBaseId,
