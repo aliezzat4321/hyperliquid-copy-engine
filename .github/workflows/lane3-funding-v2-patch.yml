@@ -38,13 +38,31 @@ jobs:
           p.write_text(s.replace(old, new, 1))
           PY
       - name: Apply funding v2 service patch
-        run: python3 patcher/scripts/patch_lane3_funding_v2.py target
+        id: patch
+        continue-on-error: true
+        run: python3 patcher/scripts/patch_lane3_funding_v2.py target > patcher/patch-result.txt 2>&1
+      - name: Persist patch failure reason
+        if: steps.patch.outcome != 'success'
+        working-directory: patcher
+        run: |
+          git config user.name "lane3-funding-v2-patcher"
+          git config user.email "actions@users.noreply.github.com"
+          git add patch-result.txt
+          git commit -m "Record funding patch failure diagnostic" || true
+          git push origin HEAD:codex/lane3-funding-v2-patcher
+      - name: Stop on patch failure
+        if: steps.patch.outcome != 'success'
+        run: |
+          cat patcher/patch-result.txt
+          exit 1
       - name: Test executor
+        if: steps.patch.outcome == 'success'
         working-directory: target/services/invo-notification-executor
         run: |
           npm install --ignore-scripts --no-audit --no-fund
           npm run check
       - name: Commit exact tested repair
+        if: steps.patch.outcome == 'success'
         working-directory: target
         run: |
           git config user.name "lane3-funding-v2-patcher"
