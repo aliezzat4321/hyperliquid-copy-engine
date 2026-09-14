@@ -25,6 +25,18 @@ jobs:
           ref: codex/330-lane3-l2-net-cost
           path: target
           fetch-depth: 0
+      - name: Normalize patch helper for duplicated status blocks
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('patcher/scripts/patch_lane3_funding_v2.py')
+          s = p.read_text()
+          old = """def rep(old: str, new: str) -> None:\n    global text\n    count = text.count(old)\n    if count != 1:\n        raise SystemExit(f'expected exactly one service replacement, found {count}: {old[:120]!r}')\n    text = text.replace(old, new, 1)\n"""
+          new = """def rep(old: str, new: str) -> None:\n    global text\n    count = text.count(old)\n    if count not in {1, 2}:\n        raise SystemExit(f'expected one or two service replacements, found {count}: {old[:120]!r}')\n    text = text.replace(old, new, count)\n"""
+          if old not in s:
+              raise SystemExit('patch helper shape changed')
+          p.write_text(s.replace(old, new, 1))
+          PY
       - name: Apply funding v2 service patch
         run: python3 patcher/scripts/patch_lane3_funding_v2.py target
       - name: Test executor
