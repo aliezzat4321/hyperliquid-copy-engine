@@ -83,11 +83,13 @@ Dry mode is an execution-realistic trade-lifecycle ledger, not a mid-price entry
 2. Persist the average executed entry price, book/request/arrival timestamps and age, spread/book-walk slippage, executed notional, entry taker fee, source size/leverage, copy size, and exposure checkpoints. Legacy positions without causal entry-book provenance remain explicitly `INCOMPLETE_LEGACY_ENTRY`.
 3. Each feed surface has a durable high-water cursor. Restart and normal polling page backward from newest to the saved cursor. If bounded pagination cannot reach it, the service emits `unrecoverable_feed_gap`, keeps unresolved exposure, and refuses to advance the checkpoint.
 4. Owned source closes are reconciled even when late. Close time comes from close/update provenance, not the original open timestamp. The shadow close walks the causal L2 book. A rejected or partial close does **not** erase the remaining position.
-5. Complete close economics emit gross PnL, entry/exit taker fees, Hyperliquid funding-history accrual, explicit execution cost, net PnL and net return. Funding retrieval failure is `INCOMPLETE_FUNDING`, never silently zero funding.
+5. Complete close economics emit gross PnL, entry/exit taker fees, and Hyperliquid funding computed as position size × prospective `oraclePx` × funding rate at each hourly interval. Missing/stale oracle evidence is `INCOMPLETE_FUNDING`, never silently zero or reconstructed from entry/mark prices.
 6. `/health` marks every still-open paper position through executable L2 depth. Closed-only profitability is explicitly forbidden; unresolved exposure remains visible in the dataset.
 
-The current execution evidence contract is `lane3-causal-l2-v1`; the cost model is
-`hl-taker-l2-funding-history-v1`. Shadow configuration is explicit in
+Funding evidence is prospective: each hourly funding interval must have a fresh Hyperliquid `oraclePx` checkpoint; cost is position size × oracle price × funding rate. Missing checkpoints make economics incomplete rather than substituting entry/mark prices.
+
+The current execution evidence contract is `lane3-causal-l2-v2`; the cost model is
+`hl-taker-l2-oracle-funding-v2`. Shadow configuration is explicit in
 `.env.example`. These assumptions are evidence inputs for research; they do not
 change or authorize the live order route.
 

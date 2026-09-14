@@ -67,6 +67,7 @@ function loadConfig() {
     shadowMaxBookAgeMs: Math.max(50, n('NOTIFICATION_TRADER_SHADOW_MAX_BOOK_AGE_MS', 750)),
     shadowMaxSpreadBps: Math.max(0, n('NOTIFICATION_TRADER_SHADOW_MAX_SPREAD_BPS', 50)),
     shadowTakerFeeBps: Math.max(0, n('NOTIFICATION_TRADER_SHADOW_TAKER_FEE_BPS', 4.5)),
+    shadowFundingOracleMaxDelayMs: Math.max(500, n('NOTIFICATION_TRADER_SHADOW_FUNDING_ORACLE_MAX_DELAY_MS', 10_000)),
     shadowMinNotionalUsd: Math.max(1, n('NOTIFICATION_TRADER_SHADOW_MIN_NOTIONAL_USD', 10)),
     marginPct: Math.max(0.01, n('NOTIFICATION_TRADER_MARGIN_PCT', 1)),
     // These are live-account safety controls only. Shadow research is intentionally uncapped.
@@ -94,6 +95,7 @@ const shadowPolicy: ShadowExecutionPolicy = {
   maxSpreadBps: cfg.shadowMaxSpreadBps,
   minNotionalUsd: cfg.shadowMinNotionalUsd,
   takerFeeBps: cfg.shadowTakerFeeBps,
+  fundingOracleMaxDelayMs: cfg.shadowFundingOracleMaxDelayMs,
 };
 if (cfg.live && (process.env.REAL_TRADING_ENABLED ?? 'NO').trim().toUpperCase() !== 'YES') {
   throw new Error('NOTIFICATION_TRADER_LIVE=true requires REAL_TRADING_ENABLED=YES');
@@ -118,6 +120,8 @@ let pendingWake: { source: string; hints?: NotificationHints; receivedAtMs: numb
 let lastSuccessPollMs = 0;
 let backoffMs = 0;
 let discoverySurfaceIndex = 0;
+let lastFundingOracleBoundaryMs = -1;
+const FUNDING_INTERVAL_MS = 60 * 60 * 1000;
 
 function log(event: Record<string, unknown>) {
   const row = { ts: new Date().toISOString(), ...event };
@@ -291,7 +295,10 @@ async function shadowOpen(
     addCount: 0,
     estimatedOpenCostUsd: fill.feeUsd + fill.slippageUsd,
     unfilledOpenSize: fill.unfilledSize,
-    exposureCheckpoints: [{ atMs: fill.receivedAtMs, notionalUsd: fill.notionalUsd }],
+    exposureCheckpoints: [{ atMs: fill.receivedAtMs, size: fill.filledSize }],
+    fundingOracleCheckpoints: [],
+    fundingCarryUsd: 0,
+    fundingAccruedThroughMs: fill.receivedAtMs,
     executionEvidenceVersion: EXECUTION_EVIDENCE_VERSION,
     costModelVersion: COST_MODEL_VERSION,
   });
@@ -308,7 +315,7 @@ async function shadowOpen(
     bookReceivedAtMs: fill.receivedAtMs, bookAgeMs: fill.bookAgeMs,
     executionEvidenceVersion: EXECUTION_EVIDENCE_VERSION,
     costModelVersion: COST_MODEL_VERSION,
-    fundingModel: 'hyperliquid fundingHistory; no zero-cost omission',
+    fundingModel: 'Hyperliquid fundingHistory rate x prospective oraclePx x position size; missing oracle fails closed',
     detectionLatencyMs: detectionLatencyMs(signal, receivedAtMs),
     decisionLatencyMs: fill.requestedAtMs - receivedAtMs,
     marketDataLatencyMs: fill.receivedAtMs - fill.requestedAtMs,
@@ -393,7 +400,7 @@ async function shadowReup(
   const newMargin = Number(managed.marginUsd ?? 0) + fill.notionalUsd / leverage;
   const checkpoints = [
     ...(managed.exposureCheckpoints ?? []),
-    { atMs: fill.receivedAtMs, notionalUsd: newEntryNotional },
+    { atMs: fill.receivedAtMs, size: newSize },
   ];
 
   state.setManaged({
@@ -514,17 +521,28 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
         const legacy = managed.executionEvidenceVersion !== EXECUTION_EVIDENCE_VERSION
           || !(Number(managed.entryPrice) > 0)
           || !(Number(managed.entryNotionalExecutedUsd) > 0)
-          || !Array.isArray(managed.exposureCheckpoints);
+          || !Array.isArray(managed.exposureCheckpoints)
+          || !Array.isArray(managed.fundingOracleCheckpoints);
         const fraction = Math.min(1, fill.filledSize / size);
         let fundingUsd: number | null = null;
+        let fullPositionFundingUsd: number | null = null;
         let fundingPoints: number | null = null;
+        let fundingOraclePointsMatched: number | null = null;
+        let fundingCarryUsd: number | null = null;
         let fundingModel: string | null = null;
         let fundingError: string | null = null;
         if (!legacy) {
           try {
-            const funding = await fundingForPosition(managed, fill.receivedAtMs);
+            const funding = await fundingForPosition(
+              managed,
+              fill.receivedAtMs,
+              cfg.shadowFundingOracleMaxDelayMs,
+            );
+            fullPositionFundingUsd = funding.fundingUsd;
             fundingUsd = funding.fundingUsd * fraction;
             fundingPoints = funding.fundingPoints;
+            fundingOraclePointsMatched = funding.oraclePointsMatched;
+            fundingCarryUsd = funding.carryUsd;
             fundingModel = funding.model;
           } catch (err) {
             fundingError = err instanceof Error ? err.message : String(err);
@@ -556,10 +574,15 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
             notionalUsd: Number(managed.notionalUsd ?? 0) * remainingFraction,
             marginUsd: Number(managed.marginUsd ?? 0) * remainingFraction,
             unresolvedAfterSourceClose: true,
-            exposureCheckpoints: [
-              ...(managed.exposureCheckpoints ?? []),
-              { atMs: fill.receivedAtMs, notionalUsd: Number(managed.entryNotionalExecutedUsd ?? 0) * remainingFraction },
-            ],
+            exposureCheckpoints: [{ atMs: fill.receivedAtMs, size: remainingSize }],
+            fundingOracleCheckpoints: [],
+            fundingCarryUsd: fullPositionFundingUsd == null
+              ? Number(managed.fundingCarryUsd ?? 0)
+              : fullPositionFundingUsd * remainingFraction,
+            fundingAccruedThroughMs: fill.receivedAtMs,
+            fundingIncompleteReason: fullPositionFundingUsd == null
+              ? (fundingError ?? managed.fundingIncompleteReason ?? 'funding evidence incomplete at partial close')
+              : undefined,
           });
         } else {
           state.clearManagedBySource(signal.sourceBaseId);
@@ -584,7 +607,7 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
           entryFeeUsd: economics?.entryFeeUsd ?? null,
           exitFeeUsd: economics?.exitFeeUsd ?? fill.feeUsd,
           fundingUsd: economics?.fundingUsd ?? fundingUsd,
-          fundingPoints, fundingModel,
+          fundingPoints, fundingOraclePointsMatched, fundingCarryUsd, fundingModel,
           totalExplicitCostUsd: economics?.totalExplicitCostUsd ?? null,
           netPnlUsd: economics?.netPnlUsd ?? null,
           netReturnBps: economics?.netReturnBps ?? null,
@@ -872,6 +895,86 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
   }
 }
 
+
+async function captureFundingOracleCheckpoints(nowMs = Date.now()) {
+  if (cfg.live) return;
+  const fundingTimeMs = Math.floor(nowMs / FUNDING_INTERVAL_MS) * FUNDING_INTERVAL_MS;
+  if (fundingTimeMs === lastFundingOracleBoundaryMs) return;
+
+  const snapshot = state.snapshot();
+  const targets = Object.values(snapshot.managed).filter(position => (
+    position.paper
+    && position.executionEvidenceVersion === EXECUTION_EVIDENCE_VERSION
+    && position.openedAtMs < fundingTimeMs
+    && !position.fundingIncompleteReason
+    && !(position.fundingOracleCheckpoints ?? []).some(point => point.fundingTimeMs === fundingTimeMs)
+  ));
+  const delayAtStartMs = nowMs - fundingTimeMs;
+  if (delayAtStartMs > cfg.shadowFundingOracleMaxDelayMs) {
+    lastFundingOracleBoundaryMs = fundingTimeMs;
+    for (const position of targets) {
+      const latest = state.getManagedBySource(position.sourceBaseId);
+      if (!latest || latest.fundingIncompleteReason) continue;
+      state.setManaged({
+        ...latest,
+        fundingIncompleteReason: `missed oracle checkpoint for funding interval ${fundingTimeMs}`,
+      });
+    }
+    if (targets.length) {
+      log({
+        type: 'funding_oracle_capture_missed',
+        fundingTimeMs,
+        delayMs: delayAtStartMs,
+        maxDelayMs: cfg.shadowFundingOracleMaxDelayMs,
+        affectedSourceBaseIds: targets.map(position => position.sourceBaseId),
+      });
+    }
+    return;
+  }
+  if (!targets.length) {
+    lastFundingOracleBoundaryMs = fundingTimeMs;
+    return;
+  }
+
+  const requestedAtMs = Date.now();
+  const oraclePrices = await hl.getOraclePrices();
+  const observedAtMs = Date.now();
+  const delayMs = observedAtMs - fundingTimeMs;
+  lastFundingOracleBoundaryMs = fundingTimeMs;
+
+  for (const position of targets) {
+    const latest = state.getManagedBySource(position.sourceBaseId);
+    if (!latest || latest.fundingIncompleteReason || latest.openedAtMs >= fundingTimeMs) continue;
+    if ((latest.fundingOracleCheckpoints ?? []).some(point => point.fundingTimeMs === fundingTimeMs)) continue;
+    const oraclePx = Number(oraclePrices[latest.coin]);
+    if (!(oraclePx > 0) || delayMs > cfg.shadowFundingOracleMaxDelayMs) {
+      state.setManaged({
+        ...latest,
+        fundingIncompleteReason: !(oraclePx > 0)
+          ? `missing oraclePx for ${latest.coin} at funding interval ${fundingTimeMs}`
+          : `oracle checkpoint too late for funding interval ${fundingTimeMs}: ${delayMs}ms`,
+      });
+      continue;
+    }
+    state.setManaged({
+      ...latest,
+      fundingOracleCheckpoints: [
+        ...(latest.fundingOracleCheckpoints ?? []),
+        { fundingTimeMs, observedAtMs, oraclePx },
+      ],
+    });
+  }
+  log({
+    type: 'funding_oracle_checkpoint',
+    fundingTimeMs,
+    requestedAtMs,
+    observedAtMs,
+    delayMs,
+    maxDelayMs: cfg.shadowFundingOracleMaxDelayMs,
+    targetCount: targets.length,
+  });
+}
+
 async function fetchAndProcess(source: string, hints: NotificationHints | undefined, receivedAtMs: number, feedFilter = cfg.feedFilter): Promise<number> {
   const saved = state.getFeedCursor(feedFilter);
   const backfill = await fetchFeedBackfill(
@@ -1075,6 +1178,13 @@ async function pollLoop() {
     await new Promise(r => setTimeout(r, wait));
     const surface = cfg.discoverySurfaces[discoverySurfaceIndex % cfg.discoverySurfaces.length];
     discoverySurfaceIndex += 1;
+    if (!cfg.live) {
+      try {
+        await captureFundingOracleCheckpoints(Date.now());
+      } catch (err) {
+        log({ type: 'funding_oracle_capture_error', error: err instanceof Error ? err.message : String(err) });
+      }
+    }
     await wake(`api_poll:${surface}`, undefined, Date.now(), surface);
   }
 }
@@ -1084,6 +1194,13 @@ async function main() {
   if (cfg.live) {
     await hl.connect(HL_AGENT_KEY, WALLET_ADDRESS);
     await invo.checkAccountReady();
+  }
+  if (!cfg.live) {
+    try {
+      await captureFundingOracleCheckpoints(Date.now());
+    } catch (err) {
+      log({ type: 'funding_oracle_capture_error', phase: 'startup', error: err instanceof Error ? err.message : String(err) });
+    }
   }
   await wake('startup_baseline', undefined, Date.now());
   startServer();
@@ -1098,6 +1215,7 @@ async function main() {
     feedLimit: cfg.feedLimit,
     feedMaxPages: cfg.feedMaxPages,
     shadowExecutionPolicy: shadowPolicy,
+    fundingOracleMaxDelayMs: cfg.shadowFundingOracleMaxDelayMs,
     executionEvidenceVersion: EXECUTION_EVIDENCE_VERSION,
     costModelVersion: COST_MODEL_VERSION,
     closedOnlyProfitabilityForbidden: true,
