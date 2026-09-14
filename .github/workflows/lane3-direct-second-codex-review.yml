@@ -1,0 +1,213 @@
+name: lane3-direct-second-codex-review
+
+on:
+  push:
+    branches: [codex/lane3-second-review-runner]
+    paths: [".github/workflows/lane3-direct-second-codex-review.yml"]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  review:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/lane3-second-review-runner
+          fetch-depth: 1
+
+      - name: Run bounded exact-SHA Codex reviews
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          REPO='aliezzat4321/hyperliquid-copy-engine'
+          AGENT_USER='hl-codex-agent'
+          AGENT_HOME='/var/lib/hyperliquid-ai-team/agents/codex/home'
+          REVIEW_ROOT='/var/lib/hyperliquid-ai-team/agents/codex/direct-reviews'
+          SUDO=''
+          if [ "$(id -u)" -ne 0 ]; then SUDO='sudo'; fi
+
+          $SUDO test -x /usr/local/bin/codex
+          $SUDO test -x /usr/local/bin/codex-code-mode-host
+          $SUDO test -x /usr/local/bin/bwrap
+          $SUDO install -d -m 0750 -o "$AGENT_USER" -g "$AGENT_USER" "$REVIEW_ROOT"
+
+          overall_rc=0
+
+          review_one() {
+            local issue="$1"
+            local sha="$2"
+            local label="$3"
+            local work="$REVIEW_ROOT/${issue}-${GITHUB_RUN_ID}"
+            local output="$RUNNER_TEMP/codex-review-${issue}.jsonl"
+            local result="$RUNNER_TEMP/codex-review-${issue}.txt"
+            local prompt="$RUNNER_TEMP/codex-review-${issue}.prompt"
+
+            $SUDO rm -rf "$work"
+            git clone --quiet "https://github.com/${REPO}.git" "$work"
+            git -C "$work" checkout --quiet --detach "$sha"
+            test "$(git -C "$work" rev-parse HEAD)" = "$sha"
+            $SUDO chown -R "$AGENT_USER:$AGENT_USER" "$work"
+
+            if [ "$issue" = '331' ]; then
+              cat > "$prompt" <<'PROMPT331'
+You are an independent SECOND Codex reviewer for Hyperliquid Lane 3. You did not build this patch.
+Review exact immutable target SHA 8ae1cfb068291fd8a65ccb0070251e64d97401eb for PR #321 / issue #320.
+
+Hard boundaries:
+- Hyperliquid only. Do not access or discuss Polymarket.
+- REAL TRADING MUST REMAIN OFF. Do not enable trading, touch credentials, capital controls, or live authorization.
+- This is a READ/TEST review. Do not edit source files. You may run narrow tests/build commands in the disposable checkout.
+- Do not trust PR prose. Falsify the implementation from code/tests.
+
+Read AGENTS.md, then only the relevant Lane-3 executor files/tests.
+Check every item independently:
+1. durable per-feed high-water cursor persists and survives restart;
+2. polling/backfill paginates newest -> saved cursor and recovers a close beyond old page 1;
+3. bounded pagination emits unrecoverable_feed_gap and does not advance cursor when old cursor is unreachable;
+4. replay/backfill is idempotent and cannot double-close;
+5. unresolved managed positions survive restart/gaps;
+6. close-specific/update timestamp provenance is used and never falls back to the original open timestamp;
+7. stale/unknown close freshness is recorded while owned closes still reconcile;
+8. orphan/unowned closes remain explicit evidence rather than silently disappearing;
+9. deterministic tests cover restart/backfill/gap/idempotency/close-time semantics and actually pass on this SHA;
+10. no live-order permission/routing change and REAL_TRADING_ENABLED remains disabled.
+
+Run the executor typecheck/tests if feasible. Distinguish patch defects from unrelated repository-wide baseline CI failures.
+
+Final answer MUST include a numbered PASS/FAIL matrix and end with exactly these machine lines:
+REVIEWED_SHA=8ae1cfb068291fd8a65ccb0070251e64d97401eb
+VERDICT=PASS
+BLOCKERS_JSON=[]
+Use VERDICT=FAIL and a valid JSON array of concise blocker strings if ANY required item fails. Do not return PASS with unresolved required evidence.
+PROMPT331
+            else
+              cat > "$prompt" <<'PROMPT333'
+You are an independent SECOND Codex reviewer for Hyperliquid Lane 3. You did not build this patch.
+Review exact immutable target SHA 54b040ff4419fa3eb334bbabc293899a0f87c901 for stacked PR #332 / issue #330.
+
+Hard boundaries:
+- Hyperliquid only. Do not access or discuss Polymarket.
+- REAL TRADING MUST REMAIN OFF. Do not enable trading, touch credentials, capital controls, or live authorization.
+- This is a READ/TEST review. Do not edit source files. You may run narrow tests/build commands in the disposable checkout.
+- Do not trust PR prose. Falsify the implementation from code/tests.
+
+Read AGENTS.md, then only the relevant Lane-3 executor files/tests. Review #330's delta while preserving #320 behavior already in the stacked base.
+Check every item independently:
+1. shadow opens/re-ups/closes use causal Hyperliquid l2Book requested after decision; scalar mids cannot silently become shadow fills;
+2. missing/stale/future-invalid books, excessive spread and zero depth are rejected explicitly;
+3. partial fills preserve unfilled exposure and never fabricate full execution;
+4. szDecimals rounding and minimum-notional enforcement are correct for open/re-up/close;
+5. source size/leverage remain distinct from copy sizing and re-up ratios are not silently distorted;
+6. entry/exit taker fees, L2 walk/spread slippage, funding, gross PnL, net PnL and net return have correct units/arithmetic/provenance and costs cannot silently default to zero;
+7. funding-history failure makes economics incomplete, not optimistic zero funding;
+8. every open/unresolved paper position is represented in /health MTM/cohort evidence and closed-only profitability is explicitly forbidden;
+9. rejected/partial closes preserve unresolved exposure; legacy positions without causal entry provenance remain explicitly incomplete;
+10. deterministic executor tests/typecheck pass on the exact SHA, #320 restart/backfill behavior remains intact, and live order routing/permissions are unchanged.
+
+Adversarial checks required:
+- reject negative book age / future-dated book timestamps;
+- ensure average executable fill price already incorporates L2 walk and slippage is not double-subtracted from net PnL;
+- verify Hyperliquid funding sign semantics for long/short rather than assuming them;
+- verify partial-close allocation of entry fee/funding/notional and remaining state consistency;
+- verify one failed mark/funding call cannot make /health lose all other open-position marks.
+
+Run the executor typecheck/tests if feasible.
+
+Final answer MUST include a numbered PASS/FAIL matrix and end with exactly these machine lines:
+REVIEWED_SHA=54b040ff4419fa3eb334bbabc293899a0f87c901
+VERDICT=PASS
+BLOCKERS_JSON=[]
+Use VERDICT=FAIL and a valid JSON array of concise blocker strings if ANY required item fails. Do not return PASS with unresolved required evidence.
+PROMPT333
+            fi
+
+            $SUDO chown "$AGENT_USER:$AGENT_USER" "$prompt"
+
+            set +e
+            cat "$prompt" | $SUDO systemd-run \
+              --pipe --wait --collect --quiet \
+              --unit="hl-ai-codex-direct-${issue}-${GITHUB_RUN_ID}" \
+              --uid="$AGENT_USER" --gid="$AGENT_USER" \
+              --working-directory="$work" \
+              --property=NoNewPrivileges=yes \
+              --property=PrivateTmp=yes \
+              --property=ProtectHome=yes \
+              --property=ProtectSystem=strict \
+              --property=RestrictSUIDSGID=yes \
+              --property=InaccessiblePaths=/mnt \
+              --property="ReadWritePaths=$work $AGENT_HOME" \
+              --setenv="HOME=$AGENT_HOME" \
+              --setenv="CODEX_HOME=$AGENT_HOME/.codex" \
+              /usr/local/bin/codex exec --json --sandbox workspace-write --skip-git-repo-check - \
+              > "$output" 2>&1
+            local rc=$?
+            set -e
+
+            if [ "$rc" -ne 0 ]; then
+              gh api "repos/${REPO}/issues/${issue}/comments" \
+                -f body="DIRECT_CODEX_REVIEW_RUNTIME_FAIL label=${label} rc=${rc}. No review verdict accepted; retry/reroute required. REAL_TRADING_ENABLED=NO."
+              overall_rc=1
+              return
+            fi
+
+            python3 - "$output" "$result" "$sha" <<'PY'
+import json, re, sys
+src, dst, expected = sys.argv[1:]
+message = ''
+for raw in open(src, encoding='utf-8', errors='replace'):
+    raw = raw.strip()
+    if not raw.startswith('{'):
+        continue
+    try:
+        row = json.loads(raw)
+    except json.JSONDecodeError:
+        continue
+    item = row.get('item') or {}
+    if item.get('type') in {'agent_message', 'message'} and isinstance(item.get('text'), str):
+        message = item['text']
+    if row.get('type') in {'message.completed', 'response.completed'}:
+        candidate = row.get('message') or row.get('response') or {}
+        if isinstance(candidate, dict) and isinstance(candidate.get('text'), str):
+            message = candidate['text']
+if not message:
+    raise SystemExit('no Codex reviewer message found')
+sha = re.search(r'(?mi)^REVIEWED_SHA=([0-9a-f]{40})\s*$', message)
+verdict = re.search(r'(?mi)^VERDICT=(PASS|FAIL)\s*$', message)
+blockers = re.search(r'(?mi)^BLOCKERS_JSON=(\[.*\])\s*$', message)
+if not sha or sha.group(1) != expected:
+    raise SystemExit('invalid or stale REVIEWED_SHA')
+if not verdict or not blockers:
+    raise SystemExit('missing VERDICT/BLOCKERS_JSON')
+parsed = json.loads(blockers.group(1))
+if not isinstance(parsed, list):
+    raise SystemExit('BLOCKERS_JSON is not a list')
+if verdict.group(1) == 'PASS' and parsed:
+    raise SystemExit('PASS cannot carry blockers')
+if verdict.group(1) == 'FAIL' and not parsed:
+    raise SystemExit('FAIL must carry blockers')
+open(dst, 'w', encoding='utf-8').write(message.strip() + '\n')
+PY
+
+            if ! $SUDO -u "$AGENT_USER" git -C "$work" diff --quiet -- .; then
+              gh api "repos/${REPO}/issues/${issue}/comments" \
+                -f body="DIRECT_CODEX_REVIEW_INVALID: reviewer modified tracked source despite read/test-only instruction; no verdict accepted."
+              overall_rc=1
+              return
+            fi
+
+            local body
+            body="$(printf '## Direct independent Codex review — %s\n\n%s' "$label" "$(cat "$result")")"
+            gh api "repos/${REPO}/issues/${issue}/comments" -f body="$body"
+          }
+
+          review_one 331 8ae1cfb068291fd8a65ccb0070251e64d97401eb 'PR #321 restart/backfill'
+          review_one 333 54b040ff4419fa3eb334bbabc293899a0f87c901 'PR #332 L2/net-cost'
+
+          exit "$overall_rc"
