@@ -1,6 +1,6 @@
 name: deploy-profitability-funnel
 
-# EMERGENCY_REDEPLOY_2026_09_09_LANE1
+# POST_STORAGE_RESET_2026_09_14_RESTART_PROSPECTIVE_PROFITABILITY
 on:
   push:
     branches:
@@ -21,7 +21,7 @@ concurrency:
 jobs:
   deploy:
     if: github.repository == 'aliezzat4321/hyperliquid-copy-engine'
-    runs-on: self-hosted
+    runs-on: [self-hosted, hyperliquid]
     timeout-minutes: 10
     steps:
       - name: Checkout canonical main
