@@ -35,3 +35,5 @@ jobs:
           git add services/invo-notification-executor scripts/patch_330_lane3_service.py .github/workflows/p0-330-apply.yml
           git commit -m 'fix: Lane 3 causal L2 execution and net cost accounting (#330)'
           git push origin HEAD:codex/330-lane3-l2-net-cost
+
+# rerun after correcting the realistic-spread test fixture; execution policy unchanged
