@@ -10,10 +10,12 @@ test('persists dedupe and source-position ownership across restart', () => {
   const path = join(dir, 'state.json');
   const first = new NotificationState(path, 3);
   first.markSeen('a');
+  first.setFeedCursor('following', { postId: 'post-high-water', observedAtMs: 2, source: 'poll' });
   first.setManaged({ coin: 'SOL', sourceBaseId: 'base-1', sourceBaseShortId: 'short-1', sourcePostId: 'post-1', side: 'long', openedAtMs: 1, localBaseShortId: 'local-1' });
   const second = new NotificationState(path, 3);
   assert.equal(second.hasSeen('a'), true);
   assert.equal(second.getManagedBySource('base-1')?.coin, 'SOL');
+  assert.deepEqual(second.getFeedCursor('following'), { postId: 'post-high-water', observedAtMs: 2, source: 'poll' });
   second.clearManagedBySource('base-1');
   assert.equal(second.getManagedBySource('base-1'), null);
 });

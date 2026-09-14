@@ -82,6 +82,12 @@ Dry mode is a real trade-lifecycle ledger, not an entry logger:
 4. Emit `shadow_closed` with gross copied P&L, gross return bps, return on simulated margin, holding time, and close-detection latency.
 5. A restart recovers matching source closes from the startup feed rather than baselining them away.
 
+Each feed surface has a durable high-water post ID. Polling walks backward from the
+newest page to that ID (bounded by `NOTIFICATION_TRADER_FEED_MAX_PAGES`); if it cannot
+reach the checkpoint, the service records `unrecoverable_feed_gap`, retains managed
+exposure, and refuses to advance the checkpoint. Managed closes are reconciled even
+when stale, while the audit records close freshness and the timestamp source field.
+
 This intentionally reports **gross** copied P&L. Fee/builder/funding assumptions should be layered on from measured Hyperliquid execution costs rather than hard-coded guesses.
 
 Every decision writes JSONL with detection/decision/execution latency, chase, sizing and reason codes. That audit stream is the profitability dataset: source headline P&L is irrelevant if the edge disappears after our latency, fill drift and fees.

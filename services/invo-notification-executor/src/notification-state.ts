@@ -25,6 +25,13 @@ interface DiskState {
   seen: string[];
   /** Keyed by the Invo source position/base id, not by coin. */
   managed: Record<string, ManagedPosition>;
+  feedCursors: Record<string, FeedCursor>;
+}
+
+export interface FeedCursor {
+  postId: string;
+  observedAtMs: number;
+  source: string;
 }
 
 function normalizeManaged(raw: Record<string, ManagedPosition> | undefined): Record<string, ManagedPosition> {
@@ -38,7 +45,7 @@ function normalizeManaged(raw: Record<string, ManagedPosition> | undefined): Rec
 }
 
 export class NotificationState {
-  private state: DiskState = { seen: [], managed: {} };
+  private state: DiskState = { seen: [], managed: {}, feedCursors: {} };
   private seen = new Set<string>();
 
   constructor(private readonly path: string, private readonly maxSeen = 20_000) {
@@ -52,6 +59,7 @@ export class NotificationState {
       this.state = {
         seen: parsed.seen ?? [],
         managed: normalizeManaged(parsed.managed),
+        feedCursors: parsed.feedCursors ?? {},
       };
       this.seen = new Set(this.state.seen);
     } catch (err) {
@@ -100,6 +108,15 @@ export class NotificationState {
 
   managedCount() {
     return Object.keys(this.state.managed).length;
+  }
+
+  getFeedCursor(feed: string): FeedCursor | null {
+    return this.state.feedCursors[feed] ?? null;
+  }
+
+  setFeedCursor(feed: string, cursor: FeedCursor) {
+    this.state.feedCursors[feed] = cursor;
+    this.save();
   }
 
   snapshot() { return JSON.parse(JSON.stringify(this.state)) as DiskState; }
