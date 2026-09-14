@@ -1,0 +1,129 @@
+name: p0-273-opus-audit-split
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p0-273-opus-audit-split.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  audit:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 180
+    env:
+      CLAUDE_USER: hl-claude-agent
+      CLAUDE_HOME: /var/lib/hyperliquid-ai-team/agents/claude/home
+      AUDIT_ROOT: /var/lib/hyperliquid-ai-team/agents/claude/worktrees/p0-273-split-${{ github.run_id }}
+      REPO: aliezzat4321/hyperliquid-copy-engine
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Build fresh sanitized evidence bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf "$AUDIT_ROOT"
+          sudo mkdir -p "$AUDIT_ROOT/repo" "$AUDIT_ROOT/evidence/lane1" "$AUDIT_ROOT/evidence/lane2" "$AUDIT_ROOT/evidence/lane3" "$AUDIT_ROOT/evidence/profitability" "$AUDIT_ROOT/evidence/market"
+          sudo tar -C "$GITHUB_WORKSPACE" --exclude=.git --exclude=.venv --exclude='*.env' -cf - . | sudo tar -C "$AUDIT_ROOT/repo" -xf -
+          sudo cp -f /root/hyperliquid-audit/funnel/challenger_queue.json "$AUDIT_ROOT/evidence/lane1/" 2>/dev/null || true
+          sudo cp -f /root/hyperliquid-audit/prospective-champions/report.json "$AUDIT_ROOT/evidence/lane1/prospective_report.json" 2>/dev/null || true
+          sudo cp -f /var/lib/hyperliquid-copy-engine/invo/identified_wallets.json "$AUDIT_ROOT/evidence/lane2/" 2>/dev/null || true
+          sudo cp -f /mnt/HC_Volume_106576526/hyperliquid/shadow/wallets.json "$AUDIT_ROOT/evidence/lane2/wallets.json" 2>/dev/null || true
+          sudo tail -n 5000 /var/lib/hyperliquid-copy-engine/invo-notification-executor/audit.jsonl | sudo tee "$AUDIT_ROOT/evidence/lane3/audit_tail.jsonl" >/dev/null || true
+          curl -fsS --max-time 4 http://127.0.0.1:8787/health | sudo tee "$AUDIT_ROOT/evidence/lane3/health.json" >/dev/null || true
+          sudo find /root/hyperliquid-audit/funnel -maxdepth 1 -type f -size -20M \( -name '*.json' -o -name '*.csv' \) -exec cp -f {} "$AUDIT_ROOT/evidence/profitability/" \; 2>/dev/null || true
+          sudo env OUT="$AUDIT_ROOT/evidence/market" python3 - <<'PY'
+          import os, shutil
+          from pathlib import Path
+          root=Path('/mnt/HC_Volume_106576526/hyperliquid/market-shadow')
+          out=Path(os.environ['OUT'])
+          rows=[]
+          if root.is_dir():
+              for p in root.rglob('*'):
+                  try:
+                      if p.is_file() and not p.is_symlink() and p.stat().st_size <= 20*1024*1024:
+                          rows.append((p.stat().st_mtime_ns,p))
+                  except FileNotFoundError:
+                      pass
+          for _,p in sorted(rows,reverse=True)[:60]:
+              dst=out/p.relative_to(root)
+              dst.parent.mkdir(parents=True,exist_ok=True)
+              shutil.copy2(p,dst)
+          print('MARKET_SAMPLE_FILES='+str(min(60,len(rows))))
+          PY
+          sudo sh -c "df -hT /mnt/HC_Volume_106576526 > '$AUDIT_ROOT/evidence/storage.txt'"
+          sudo sh -c "systemctl status hyperliquid-selective-shadow.service hyperliquid-prospective-champions.service hyperliquid-invo-wallet-identifier.service hyperliquid-invo-verified-shadow-sync.service hyperliquid-invo-notification-executor.service hlcopy-profitability-funnel.service --no-pager -l > '$AUDIT_ROOT/evidence/services.txt' 2>&1 || true"
+          sudo find "$AUDIT_ROOT/evidence" -type f -printf '%TY-%Tm-%TdT%TH:%TM:%TSZ %s %p\n' | sudo sort | sudo tee "$AUDIT_ROOT/evidence/MANIFEST.txt" >/dev/null
+          sudo chown -R "$CLAUDE_USER:$CLAUDE_USER" "$AUDIT_ROOT"
+          sudo chmod -R u=rwX,go= "$AUDIT_ROOT"
+
+      - name: Verify Opus authentication
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo -u "$CLAUDE_USER" env -i HOME="$CLAUDE_HOME" CLAUDE_CONFIG_DIR="$CLAUDE_HOME/.claude" XDG_CONFIG_HOME="$CLAUDE_HOME/.config" XDG_CACHE_HOME="$CLAUDE_HOME/.cache" PATH=/usr/local/bin:/usr/bin:/bin /usr/bin/claude -p --model opus --max-turns 1 --output-format text 'Reply exactly OPUS_AUTH_OK' | grep -Fx OPUS_AUTH_OK
+
+      - name: Run three bounded Opus lane audits
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          cd "$AUDIT_ROOT"
+          overall_rc=0
+
+          audit_lane() {
+            lane="$1"
+            issue="$2"
+            focus="$3"
+            result="$AUDIT_ROOT/${lane}_result.txt"
+            prompt="$AUDIT_ROOT/${lane}_prompt.txt"
+            cat > "$prompt" <<PROMPT
+          You are Claude Opus, independent senior quant/reliability auditor for Hyperliquid issue #273. Audit ONLY ${lane} / issue #${issue}. Review repo/ plus evidence/${lane}/, evidence/market/, evidence/profitability/, evidence/services.txt, evidence/storage.txt and evidence/MANIFEST.txt as needed. Read only; do not modify anything. Do not inspect or discuss Polymarket. REAL_TRADING_ENABLED must remain NO.
+
+          Focus: ${focus}
+
+          Check causal timestamps/no look-ahead, point-in-time market data, stale/missing-depth rejects, realistic fills/slippage/fees/funding/leverage/partial fills/sizing, position lifecycle, PnL accounting, dedupe/idempotency, data-gap/sample-bias handling, reproducibility, and aggregate reconciliation wherever applicable. Independently recompute or replay representative records when evidence permits.
+
+          Be efficient and stop once the evidence supports a decision. Return FIRST LINE exactly one of:
+          VERDICT=PASS
+          VERDICT=FAIL
+          VERDICT=INSUFFICIENT_EVIDENCE
+          Then give the exact evidence paths/records checked, discrepancies with severity, whether this lane is safe for profitability analysis now, exact repair/additional evidence required, collector running/scheduled status, and REAL_TRADING_ENABLED=NO. Never invent a PASS.
+          PROMPT
+            chown "$CLAUDE_USER:$CLAUDE_USER" "$prompt"
+            set +e
+            sudo -u "$CLAUDE_USER" env -i HOME="$CLAUDE_HOME" CLAUDE_CONFIG_DIR="$CLAUDE_HOME/.claude" XDG_CONFIG_HOME="$CLAUDE_HOME/.config" XDG_CACHE_HOME="$CLAUDE_HOME/.cache" PATH=/usr/local/bin:/usr/bin:/bin /usr/bin/claude -p --model opus --max-turns 60 --output-format text --permission-mode dontAsk --allowedTools Read Glob Grep < "$prompt" > "$result"
+            rc=$?
+            set -e
+            if [ ! -s "$result" ] || grep -Fq 'Reached max turns' "$result"; then
+              echo "${lane^^}_OPUS_VALID_VERDICT=NO rc=$rc"
+              cat "$result" 2>/dev/null || true
+              overall_rc=1
+              return
+            fi
+            first="$(head -n1 "$result" | tr -d '\r')"
+            case "$first" in
+              VERDICT=PASS|VERDICT=FAIL|VERDICT=INSUFFICIENT_EVIDENCE) ;;
+              *) echo "${lane^^}_OPUS_VALID_VERDICT=NO malformed_first_line=$first"; cat "$result"; overall_rc=1; return ;;
+            esac
+            echo "${lane^^}_OPUS_VALID_VERDICT=YES $first"
+            cat "$result"
+            { echo "## Opus ${lane} audit"; echo; cat "$result"; } > "$AUDIT_ROOT/${lane}_comment.md"
+            gh issue comment 273 --repo "$REPO" --body-file "$AUDIT_ROOT/${lane}_comment.md"
+          }
+
+          set -e
+          audit_lane lane1 93 'Leaderboard wallet discovery -> wallet×coin profiling -> challenger/prospective shadow; verify prospective freeze/start semantics, candidate selection causality, and demotion/performance accounting.'
+          audit_lane lane2 92 'Third-party/Invo identity -> verified Hyperliquid wallet resolution -> shadow handoff; verify identity proof, conflict quarantine, stale/revoked handling, capacity waiting, and post-storage persistence.'
+          audit_lane lane3 91 'Direct Invo/third-party notification shadow trading without wallet resolution; verify notification provenance, causal decision time, execution realism, lifecycle accounting, dedupe, and gap/restart behavior.'
+
+          exit "$overall_rc"
