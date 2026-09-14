@@ -16,18 +16,51 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: codex/320-gap-reconcile-patcher
+          path: patcher
+          fetch-depth: 1
+      - uses: actions/checkout@v4
+        with:
           ref: codex/330-lane3-l2-net-cost
+          path: target
           fetch-depth: 0
-      - name: Integrate exact reviewed #320 repair commit
+      - name: Merge repaired #320 base and resolve service conflict explicitly
+        working-directory: target
         run: |
           git config user.name "lane3-stack-integrator"
           git config user.email "actions@users.noreply.github.com"
-          git fetch origin efbff8897c4ef27c6ef8b35270af1554b83328c4
-          git cherry-pick efbff8897c4ef27c6ef8b35270af1554b83328c4
+          git fetch origin codex/auto-320-b8096982
+          set +e
+          git merge --no-ff --no-commit origin/codex/auto-320-b8096982
+          merge_rc=$?
+          set -e
+          conflicts="$(git diff --name-only --diff-filter=U)"
+          if [ -n "$conflicts" ]; then
+            if [ "$conflicts" != "services/invo-notification-executor/src/service.ts" ]; then
+              echo "Unexpected merge conflicts:"
+              printf '%s\n' "$conflicts"
+              exit 1
+            fi
+            git checkout --ours services/invo-notification-executor/src/service.ts
+            python3 ../patcher/scripts/patch_lane3_320_gap_reconcile.py .
+            git add services/invo-notification-executor/src/service.ts \
+                    services/invo-notification-executor/src/gap-reconciliation.ts \
+                    services/invo-notification-executor/test/gap-reconciliation.test.ts
+          elif [ "$merge_rc" -ne 0 ]; then
+            echo "Merge failed without a resolvable service conflict"
+            exit 1
+          fi
+          if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
+            echo "Unresolved merge conflict remains"
+            exit 1
+          fi
+          git diff --check --cached
+          git commit -m "Integrate reviewed #320 gap repair into Lane 3 execution stack"
       - name: Run full executor check
-        working-directory: services/invo-notification-executor
+        working-directory: target/services/invo-notification-executor
         run: |
           npm install --ignore-scripts --no-audit --no-fund
           npm run check
       - name: Push exact tested integrated head
+        working-directory: target
         run: git push origin HEAD:codex/330-lane3-l2-net-cost
