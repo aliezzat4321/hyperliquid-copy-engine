@@ -1,0 +1,46 @@
+name: deploy-invo-portfolio-research
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - services/invo-notification-executor/src/invo-client.ts
+      - services/invo-notification-executor/src/portfolio-candidates.ts
+      - services/invo-notification-executor/src/portfolio-candidate-cli.ts
+      - services/invo-notification-executor/src/elite-shadow-projector.ts
+      - services/invo-notification-executor/test/portfolio-candidates.test.ts
+      - deploy/systemd/hyperliquid-invo-portfolio-research.service
+      - deploy/systemd/hyperliquid-invo-portfolio-research.timer
+      - scripts/deploy_invo_portfolio_research_self_hosted.sh
+      - .github/workflows/deploy-invo-portfolio-research.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-invo-portfolio-research
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on:
+      - self-hosted
+      - hyperliquid
+    timeout-minutes: 20
+    steps:
+      - name: Checkout canonical main
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          clean: true
+      - name: Deploy portfolio research cycle
+        shell: bash
+        run: |
+          set -euo pipefail
+          script="$GITHUB_WORKSPACE/scripts/deploy_invo_portfolio_research_self_hosted.sh"
+          if [[ "$(id -u)" -eq 0 ]]; then
+            bash "$script"
+          else
+            sudo -n bash "$script"
+          fi

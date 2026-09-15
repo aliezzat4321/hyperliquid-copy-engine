@@ -1,0 +1,29 @@
+[Unit]
+Description=Hyperliquid Invo portfolio candidate + elite shadow research cycle
+After=network-online.target hyperliquid-invo-notification-executor.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/hyperliquid-copy-engine/services/invo-notification-executor
+EnvironmentFile=/etc/hyperliquid-copy-engine/invo.env
+EnvironmentFile=-/etc/hyperliquid-copy-engine/invo-notification-executor.env
+Environment=REAL_TRADING_ENABLED=NO
+Environment=INVO_PORTFOLIO_DISCOVERY_FILTERS=trending,all
+Environment=INVO_PORTFOLIO_DISCOVERY_PAGES=2
+Environment=INVO_PORTFOLIO_DISCOVERY_PAGE_SIZE=50
+Environment=INVO_PORTFOLIO_CANDIDATE_STATE_PATH=/var/lib/hyperliquid-copy-engine/invo-notification-executor/portfolio-candidates.json
+Environment=INVO_PORTFOLIO_CANDIDATE_SNAPSHOTS_PATH=/var/lib/hyperliquid-copy-engine/invo-notification-executor/portfolio-candidate-snapshots.jsonl
+Environment=INVO_ELITE_SHADOW_REPORT_PATH=/var/lib/hyperliquid-copy-engine/invo-notification-executor/elite-shadow-report.json
+Environment=INVO_ELITE_SHADOW_LEDGER_PATH=/var/lib/hyperliquid-copy-engine/invo-notification-executor/elite-shadow-ledger.jsonl
+Environment=INVO_ELITE_SHADOW_HEALTH_URL=http://127.0.0.1:8787/health
+ExecStart=/bin/bash -lc 'node dist/src/portfolio-candidate-cli.js && node dist/src/elite-shadow-projector.js'
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=full
+ReadWritePaths=/var/lib/hyperliquid-copy-engine/invo-notification-executor
+
+[Install]
+WantedBy=multi-user.target

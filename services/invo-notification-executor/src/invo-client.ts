@@ -76,6 +76,16 @@ async function post(path: string, body: unknown, retried = false): Promise<any> 
   return data;
 }
 
+/**
+ * Reverse-engineered Invo portfolio discovery endpoint used by the Top/Trending portfolio surfaces.
+ * `portfolioId` is the canonical candidate identity; owner/user identity is metadata only.
+ */
+export async function discoverPortfolios(filter: string, page = 1, size = 50, userId?: string) {
+  const body: any = { filter, params: { page, size } };
+  if (userId) body.userId = userId;
+  return post('/v1_0/trending/get_portfolios_pl', body);
+}
+
 export async function getFeed(filter = 'following', lastPostId: string | null = null, itemLimit = 30) {
   return post('/v1_0/posts/get_feed', {
     filter: { filter, assetTypes: [] },
