@@ -3,6 +3,7 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
+import polars as pl
 import pytest
 
 from hlcopy.profitability import lane1_audit_bundle as bundle
@@ -32,6 +33,16 @@ def _event(*, coin: str = "BTC", ts: int = 1_800_000_000_000) -> CopyFillEvent:
 def _write_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _write_market_rows(path: Path, received_at_ns: list[int]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        {
+            "received_at_ns": received_at_ns,
+            "exchange_ts_ms": [value // 1_000_000 for value in received_at_ns],
+        }
+    ).write_parquet(path)
 
 
 def test_collect_targets_unions_and_deduplicates_roles() -> None:
@@ -150,16 +161,14 @@ def test_build_bundle_contains_exact_target_market_funding_events_and_hashes(
     monkeypatch.setattr(bundle, "fetch_official_funding_history", fake_funding)
 
     market = tmp_path / "market"
-    l2_dates = bundle._utc_dates(start, end + 2_000)
-    ctx_dates = bundle._utc_dates(max(0, start - 60_000), end + 2_000)
-    for day in l2_dates:
+    event_received = [start * 1_000_000, end * 1_000_000]
+    for day in bundle._utc_dates(start, end + 2_000):
         directory = market / f"date={day}" / "coin=BTC" / "channel=l2Book"
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / "l2.parquet").write_bytes(f"l2-{day}".encode())
-    for day in ctx_dates:
+        _write_market_rows(directory / "l2.parquet", event_received)
+    oracle_received = [(boundary - 1_000) * 1_000_000 for boundary in required]
+    for day in bundle._utc_dates(max(0, start - 60_000), end + 2_000):
         directory = market / f"date={day}" / "coin=BTC" / "channel=activeAssetCtx"
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / "ctx.parquet").write_bytes(f"ctx-{day}".encode())
+        _write_market_rows(directory / "ctx.parquet", oracle_received)
 
     output = tmp_path / "evidence"
     manifest = bundle.build_lane1_audit_bundle(
@@ -176,7 +185,10 @@ def test_build_bundle_contains_exact_target_market_funding_events_and_hashes(
     assert manifest["bundle_version"] == bundle.BUNDLE_VERSION
     assert manifest["git_sha"] == "abc123"
     assert manifest["target_count"] == 1
-    assert manifest["targets"][0]["required_hourly_funding_boundaries"] == list(required)
+    target = manifest["targets"][0]
+    assert target["required_hourly_funding_boundaries"] == list(required)
+    assert target["l2_row_count"] > 0
+    assert target["active_asset_ctx_row_count"] > 0
     event_lines = (output / "events/lane1_target_events.jsonl").read_text().splitlines()
     assert len(event_lines) == 2
     assert all(json.loads(line)["wallet_address"].lower() == WALLET for line in event_lines)
@@ -220,14 +232,15 @@ def test_build_bundle_fails_when_required_funding_boundary_missing(
 
     monkeypatch.setattr(bundle, "fetch_official_funding_history", fake_funding)
     market = tmp_path / "market"
+    event_received = [start * 1_000_000, end * 1_000_000]
     for day in bundle._utc_dates(start, end + 2_000):
-        l2 = market / f"date={day}" / "coin=BTC" / "channel=l2Book"
-        l2.mkdir(parents=True, exist_ok=True)
-        (l2 / "l2.parquet").write_bytes(b"l2")
+        directory = market / f"date={day}" / "coin=BTC" / "channel=l2Book"
+        _write_market_rows(directory / "l2.parquet", event_received)
+    required = bundle._required_hourly_boundaries(start, end)
+    oracle_received = [(boundary - 1_000) * 1_000_000 for boundary in required]
     for day in bundle._utc_dates(max(0, start - 60_000), end + 2_000):
-        ctx = market / f"date={day}" / "coin=BTC" / "channel=activeAssetCtx"
-        ctx.mkdir(parents=True, exist_ok=True)
-        (ctx / "ctx.parquet").write_bytes(b"ctx")
+        directory = market / f"date={day}" / "coin=BTC" / "channel=activeAssetCtx"
+        _write_market_rows(directory / "ctx.parquet", oracle_received)
 
     with pytest.raises(bundle.Lane1AuditBundleError, match="MISSING_FUNDING_EVIDENCE"):
         bundle.build_lane1_audit_bundle(
