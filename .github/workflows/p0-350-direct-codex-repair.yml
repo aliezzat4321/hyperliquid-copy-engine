@@ -32,7 +32,9 @@ jobs:
           set -euo pipefail
           sudo rm -rf -- "$WORKDIR"
           sudo mkdir -p "$WORKDIR"
-          sudo cp -a "$GITHUB_WORKSPACE/." "$WORKDIR/"
+          # Do not copy the repository's read-only .agents control path into the model worktree;
+          # Codex's bwrap sandbox creates its own mountpoint there.
+          sudo tar -C "$GITHUB_WORKSPACE" --exclude='./.agents' -cf - . | sudo tar -C "$WORKDIR" -xf -
           sudo git -c safe.directory="$WORKDIR" -C "$WORKDIR" config --local --unset-all http.https://github.com/.extraheader || true
           sudo chown -R hl-codex-agent:hl-codex-agent "$WORKDIR"
 
