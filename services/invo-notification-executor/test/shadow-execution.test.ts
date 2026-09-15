@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   computePositionEconomics,
   fundingCostUsd,
+  isNonExecutableDust,
   normalizeL2Book,
   roundSizeDown,
   simulateL2Fill,
@@ -82,11 +83,29 @@ test('rejects stale, excessive-spread, zero-depth and below-min-notional books e
   assert.deepEqual(tiny.ok ? null : tiny.reason, 'below_min_notional');
 });
 
-test('enforces Hyperliquid size decimals by rounding down', () => {
+test('enforces Hyperliquid size decimals without floating-point under-rounding', () => {
   assert.equal(roundSizeDown(1.23456, 3), 1.234);
+  assert.equal(roundSizeDown(2.01, 2), 2.01);
+  assert.equal(roundSizeDown(2.05, 2), 2.05);
   assert.equal(roundSizeDown(0.0009, 3), 0);
   const result = simulateL2Fill(book(), 'buy', 0.0009, 3, policy);
   assert.deepEqual(result.ok ? null : result.reason, 'lot_rounded_to_zero');
+});
+
+test('reports sub-lot residual against the true requested exposure', () => {
+  const result = simulateL2Fill(book(), 'buy', 2.005, 2, policy);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.fill.requestedRoundedSize, 2);
+  assert.equal(result.fill.filledSize, 2);
+  assert.ok(Math.abs(result.fill.unfilledSize - 0.005) < 1e-12);
+  assert.equal(result.fill.partial, true);
+});
+
+test('classifies non-executable source-close dust deterministically', () => {
+  assert.equal(isNonExecutableDust(0.01, 2, 97.2, 10), true);
+  assert.equal(isNonExecutableDust(0.11, 2, 97.2, 10), false);
+  assert.equal(isNonExecutableDust(0.009, 2, 97.2, 10), true);
 });
 
 test('computes funding from position size times prospective oracle price times funding rate', () => {
