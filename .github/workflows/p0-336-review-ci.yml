@@ -18,11 +18,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: npm
-          cache-dependency-path: services/invo-notification-executor/package-lock.json
       - name: Install executor dependencies
         working-directory: services/invo-notification-executor
-        run: npm ci
+        run: npm install
       - name: Full executor check
         working-directory: services/invo-notification-executor
         run: npm run check
