@@ -3,7 +3,11 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
-from hlcopy.profitability.incremental_funnel_cli import _selection_return_bps, _split_oos
+from hlcopy.profitability.incremental_funnel_cli import (
+    _selection_return_bps,
+    _split_oos,
+    _window_id,
+)
 from hlcopy.profitability.lane1_handoff import (
     LANE1_SELECTION_CONTRACT_V1,
     build_challenger_queue,
@@ -75,6 +79,23 @@ def test_screen_and_confirmation_windows_are_strictly_disjoint() -> None:
     assert len(confirm) >= 3
     assert {row.tid for row in screen}.isdisjoint({row.tid for row in confirm})
     assert screen[-1].received_at_ns < confirm[0].received_at_ns
+
+
+def test_window_id_is_scoped_to_wallet_and_coin() -> None:
+    events = tuple(_event(index * 1_000_000_000, index) for index in range(1, 11))
+    cutoff_ns = 123
+    split_index = 6
+    base = _window_id(WALLET, "HYPE", events, split_index, cutoff_ns)
+    other_wallet = _window_id(
+        "0x" + "b" * 40,
+        "HYPE",
+        events,
+        split_index,
+        cutoff_ns,
+    )
+    other_coin = _window_id(WALLET, "BTC", events, split_index, cutoff_ns)
+    assert base != other_wallet
+    assert base != other_coin
 
 
 def test_prospective_outcome_is_written_to_identity_ledger(tmp_path: Path) -> None:
