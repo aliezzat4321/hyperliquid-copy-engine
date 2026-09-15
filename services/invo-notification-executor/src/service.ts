@@ -65,7 +65,9 @@ function loadConfig() {
     discoverySurfaces: [...new Set(discoverySurfaces)],
     feedLimit: Math.max(1, Math.min(100, Math.trunc(n('NOTIFICATION_TRADER_FEED_LIMIT', 100)))),
     feedMaxPages: Math.max(1, Math.min(100, Math.trunc(n('NOTIFICATION_TRADER_FEED_MAX_PAGES', 20)))),
-    shadowMaxBookAgeMs: Math.max(50, n('NOTIFICATION_TRADER_SHADOW_MAX_BOOK_AGE_MS', 750)),
+    // Opus 2026-09-15 measured transport lag p99=799ms (p50=586, p90=753).
+    // A reproducible 1s ceiling covers that measured tail without the prior 5s looseness.
+    shadowMaxBookAgeMs: Math.max(50, n('NOTIFICATION_TRADER_SHADOW_MAX_BOOK_AGE_MS', 1000)),
     shadowMaxSpreadBps: Math.max(0, n('NOTIFICATION_TRADER_SHADOW_MAX_SPREAD_BPS', 50)),
     shadowTakerFeeBps: Math.max(0, n('NOTIFICATION_TRADER_SHADOW_TAKER_FEE_BPS', 4.5)),
     shadowFundingOracleMaxDelayMs: Math.max(500, n('NOTIFICATION_TRADER_SHADOW_FUNDING_ORACLE_MAX_DELAY_MS', 10_000)),
@@ -123,6 +125,26 @@ let backoffMs = 0;
 let discoverySurfaceIndex = 0;
 let lastFundingOracleBoundaryMs = -1;
 const FUNDING_INTERVAL_MS = 60 * 60 * 1000;
+const SOURCE_CLOSE_RETRY_BASE_MS = 250;
+const SOURCE_CLOSE_RETRY_MAX_MS = 30_000;
+const HEALTH_MTM_CONCURRENCY = 4;
+
+function closeRetryDelayMs(attempt: number) {
+  return Math.min(SOURCE_CLOSE_RETRY_MAX_MS, SOURCE_CLOSE_RETRY_BASE_MS * (2 ** Math.min(7, Math.max(0, attempt - 1))));
+}
+
+async function mapConcurrent<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < items.length) {
+      const index = cursor++;
+      results[index] = await fn(items[index]);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()));
+  return results;
+}
 
 function log(event: Record<string, unknown>) {
   const row = { ts: new Date().toISOString(), ...event };
@@ -486,14 +508,25 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
       }
 
       if (!cfg.live) {
+        if (managed.sourceCloseNextRetryAtMs && decisionAtMs < managed.sourceCloseNextRetryAtMs) return;
         const size = Number(managed.size);
         const assetBook = await fetchAssetBook(signal.coin);
         if (!assetBook || !(size > 0)) {
-          state.setManaged({ ...managed, unresolvedAfterSourceClose: true });
-          state.markSeen(signal.key);
+          const reason = !assetBook ? 'missing_book' : 'invalid_managed_size';
+          const attempt = (managed.sourceCloseRetryAttempts ?? 0) + 1;
+          state.setManaged({
+            ...managed,
+            unresolvedAfterSourceClose: true,
+            sourceCloseRetryAttempts: attempt,
+            sourceCloseNextRetryAtMs: decisionAtMs + closeRetryDelayMs(attempt),
+            sourceCloseLastReason: reason,
+            pendingSourceClose: signal,
+          });
           log({
-            type: 'shadow_close_incomplete', reason: !assetBook ? 'missing_book' : 'invalid_managed_size',
-            economicsCompleteness: 'INCOMPLETE', managed, signal, wakeSource,
+            type: 'shadow_close_incomplete', reason,
+            economicsCompleteness: 'UNRESOLVED_EXPOSURE', managed, signal, wakeSource,
+            retryAttempt: attempt,
+            retryInMs: closeRetryDelayMs(attempt),
             ...closeFreshness(signal, receivedAtMs),
           });
           return;
@@ -506,13 +539,23 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
           shadowPolicy,
         );
         if (!result.ok) {
-          state.setManaged({ ...managed, unresolvedAfterSourceClose: true });
-          state.markSeen(signal.key);
+          const retryable = true;
+          const attempt = (managed.sourceCloseRetryAttempts ?? 0) + 1;
+          state.setManaged({
+            ...managed,
+            unresolvedAfterSourceClose: true,
+            sourceCloseRetryAttempts: attempt,
+            sourceCloseNextRetryAtMs: retryable ? decisionAtMs + closeRetryDelayMs(attempt) : undefined,
+            sourceCloseLastReason: result.reason,
+            pendingSourceClose: signal,
+          });
           log({
             type: 'shadow_close_rejected', reason: result.reason, detail: result.detail ?? null,
             economicsCompleteness: 'UNRESOLVED_EXPOSURE', managed, signal, wakeSource,
             decisionAtMs, bookRequestedAtMs: assetBook.requestedAtMs,
             bookReceivedAtMs: assetBook.receivedAtMs,
+            retryable, retryAttempt: attempt,
+            retryInMs: retryable ? closeRetryDelayMs(attempt) : null,
             ...closeFreshness(signal, receivedAtMs),
           });
           return;
@@ -575,6 +618,10 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
             notionalUsd: Number(managed.notionalUsd ?? 0) * remainingFraction,
             marginUsd: Number(managed.marginUsd ?? 0) * remainingFraction,
             unresolvedAfterSourceClose: true,
+            sourceCloseRetryAttempts: (managed.sourceCloseRetryAttempts ?? 0) + 1,
+            sourceCloseNextRetryAtMs: fill.receivedAtMs + closeRetryDelayMs((managed.sourceCloseRetryAttempts ?? 0) + 1),
+            sourceCloseLastReason: 'partial_depth',
+            pendingSourceClose: signal,
             exposureCheckpoints: [{ atMs: fill.receivedAtMs, size: remainingSize }],
             fundingOracleCheckpoints: [],
             fundingCarryUsd: fullPositionFundingUsd == null
@@ -588,7 +635,7 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
         } else {
           state.clearManagedBySource(signal.sourceBaseId);
         }
-        state.markSeen(signal.key);
+        if (remainingSize <= 1e-12) state.markSeen(signal.key);
         log({
           type: remainingSize > 1e-12 ? 'shadow_partially_closed' : 'shadow_closed',
           economicsCompleteness: legacy
@@ -977,6 +1024,14 @@ async function captureFundingOracleCheckpoints(nowMs = Date.now()) {
 }
 
 async function fetchAndProcess(source: string, hints: NotificationHints | undefined, receivedAtMs: number, feedFilter = cfg.feedFilter): Promise<number> {
+  if (!cfg.live) {
+    const pendingCloses = Object.values(state.snapshot().managed)
+      .map(position => position.pendingSourceClose)
+      .filter((signal): signal is InvoSignal => Boolean(signal));
+    for (const signal of pendingCloses) {
+      await execute(signal, `${source}:source_close_reconciliation`, receivedAtMs, feedFilter);
+    }
+  }
   const saved = state.getFeedCursor(feedFilter);
   const backfill = await fetchFeedBackfill(
     lastPostId => invo.getFeed(feedFilter, lastPostId, cfg.feedLimit),
@@ -1123,7 +1178,9 @@ function startServer() {
       const population = tracker.report();
       const snapshot = state.snapshot();
       const paperPositions = Object.values(snapshot.managed).filter(position => position.paper);
-      const shadowMarks = cfg.live ? [] : await Promise.all(paperPositions.map(async position => {
+      const unresolvedPaperPositions = paperPositions.filter(position => position.unresolvedAfterSourceClose);
+      const markablePaperPositions = paperPositions.filter(position => !position.unresolvedAfterSourceClose);
+      const shadowMarks = cfg.live ? [] : await mapConcurrent(markablePaperPositions, HEALTH_MTM_CONCURRENCY, async position => {
         try {
           return await markShadowPosition(position, shadowPolicy);
         } catch (err) {
@@ -1137,7 +1194,7 @@ function startServer() {
             markedAtMs: Date.now(),
           };
         }
-      }));
+      });
       return json(res, 200, {
         ok: true,
         initialized,
@@ -1152,6 +1209,17 @@ function startServer() {
         managed: snapshot.managed,
         shadowMarks,
         shadowOpenExposureCount: paperPositions.length,
+        shadowMtmEligibleCount: markablePaperPositions.length,
+        unresolvedSourceCloseExposureCount: unresolvedPaperPositions.length,
+        unresolvedSourceCloseExposures: unresolvedPaperPositions.map(position => ({
+          sourceBaseId: position.sourceBaseId,
+          coin: position.coin,
+          size: position.size ?? null,
+          retryAttempts: position.sourceCloseRetryAttempts ?? 0,
+          nextRetryAtMs: position.sourceCloseNextRetryAtMs ?? null,
+          lastReason: position.sourceCloseLastReason ?? null,
+        })),
+        healthMtmConcurrency: HEALTH_MTM_CONCURRENCY,
         closedOnlyProfitabilityForbidden: true,
         shadowExecutionPolicy: shadowPolicy,
         executionEvidenceVersion: EXECUTION_EVIDENCE_VERSION,

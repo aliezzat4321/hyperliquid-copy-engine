@@ -85,24 +85,46 @@ export interface HyperliquidFundingPoint {
   time?: number;
 }
 
+export interface FundingHistoryQuery {
+  rows: HyperliquidFundingPoint[];
+  diagnostics: {
+    queryStartTimeMs: number;
+    queryEndTimeMs: number;
+    returnedTimeMs: number[];
+    returnedRows: HyperliquidFundingPoint[];
+  };
+}
+
 export async function getFundingHistory(
   coin: string,
   startTime: number,
   endTime: number,
-): Promise<HyperliquidFundingPoint[]> {
+): Promise<FundingHistoryQuery> {
+  if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || startTime > endTime) {
+    throw new Error(`Invalid funding history boundary for ${coin}: ${startTime}..${endTime}`);
+  }
   const rows: HyperliquidFundingPoint[] = [];
+  const returnedRows: HyperliquidFundingPoint[] = [];
   const seen = new Set<number>();
   let cursor = startTime;
   const maxPages = 20;
   for (let page = 0; page < maxPages && cursor <= endTime; page += 1) {
     const batch = await info({ type: 'fundingHistory', coin, startTime: cursor, endTime });
     if (!Array.isArray(batch)) throw new Error(`Invalid funding history for ${coin}`);
+    returnedRows.push(...batch.map(row => ({
+      coin: row?.coin,
+      fundingRate: row?.fundingRate,
+      premium: row?.premium,
+      time: row?.time,
+    })));
     let maxTime = -1;
     for (const row of batch) {
       const time = Number(row?.time);
       if (!Number.isFinite(time)) continue;
       maxTime = Math.max(maxTime, time);
-      if (!seen.has(time)) {
+      // Enforce our inclusive accounting interval even if an upstream response includes
+      // adjacent rows. Raw returned boundaries remain available in diagnostics below.
+      if (time >= startTime && time <= endTime && !seen.has(time)) {
         seen.add(time);
         rows.push(row);
       }
@@ -115,7 +137,15 @@ export async function getFundingHistory(
     cursor = maxTime + 1;
   }
   rows.sort((a, b) => Number(a.time ?? 0) - Number(b.time ?? 0));
-  return rows;
+  return {
+    rows,
+    diagnostics: {
+      queryStartTimeMs: startTime,
+      queryEndTimeMs: endTime,
+      returnedTimeMs: returnedRows.map(row => Number(row.time)).filter(Number.isFinite),
+      returnedRows,
+    },
+  };
 }
 
 export async function getClearinghouseState(wallet: string) {

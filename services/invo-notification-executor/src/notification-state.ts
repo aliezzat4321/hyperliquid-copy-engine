@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
 import { dirname } from 'path';
+import type { InvoSignal } from './notification-signal.js';
 
 export interface ExposureCheckpoint {
   atMs: number;
@@ -42,6 +43,10 @@ export interface ManagedPosition {
   estimatedOpenCostUsd?: number;
   unfilledOpenSize?: number;
   unresolvedAfterSourceClose?: boolean;
+  sourceCloseRetryAttempts?: number;
+  sourceCloseNextRetryAtMs?: number;
+  sourceCloseLastReason?: string;
+  pendingSourceClose?: InvoSignal;
   exposureCheckpoints?: ExposureCheckpoint[];
   fundingOracleCheckpoints?: FundingOracleCheckpoint[];
   fundingCarryUsd?: number;
