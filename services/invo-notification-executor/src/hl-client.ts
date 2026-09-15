@@ -93,7 +93,8 @@ export async function getFundingHistory(
   const rows: HyperliquidFundingPoint[] = [];
   const seen = new Set<number>();
   let cursor = startTime;
-  for (let page = 0; page < 20 && cursor <= endTime; page += 1) {
+  const maxPages = 20;
+  for (let page = 0; page < maxPages && cursor <= endTime; page += 1) {
     const batch = await info({ type: 'fundingHistory', coin, startTime: cursor, endTime });
     if (!Array.isArray(batch)) throw new Error(`Invalid funding history for ${coin}`);
     let maxTime = -1;
@@ -106,8 +107,11 @@ export async function getFundingHistory(
         rows.push(row);
       }
     }
-    if (batch.length < 500) break;
+    if (batch.length < 500 || maxTime >= endTime) break;
     if (!(maxTime >= cursor)) throw new Error(`Funding history pagination made no progress for ${coin}`);
+    if (page === maxPages - 1) {
+      throw new Error(`Funding history pagination limit reached for ${coin}; economics incomplete`);
+    }
     cursor = maxTime + 1;
   }
   rows.sort((a, b) => Number(a.time ?? 0) - Number(b.time ?? 0));
