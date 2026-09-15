@@ -77,10 +77,19 @@ def _confirmation_key(
     return f"{_cohort_key(wallet, coin)}|{scenario}|{notional}|{window_id}"
 
 
-def _window_id(events: tuple[CopyFillEvent, ...], split_index: int, cutoff_ns: int) -> str:
+def _window_id(
+    wallet: str,
+    coin: str,
+    events: tuple[CopyFillEvent, ...],
+    split_index: int,
+    cutoff_ns: int,
+) -> str:
     first_ns = events[0].received_at_ns
     last_ns = events[-1].received_at_ns
-    payload = f"{cutoff_ns}|{first_ns}|{last_ns}|{len(events)}|{split_index}"
+    payload = (
+        f"{_cohort_key(wallet, coin)}|{cutoff_ns}|{first_ns}|{last_ns}|"
+        f"{len(events)}|{split_index}"
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
 
 
@@ -248,7 +257,7 @@ def main() -> None:
         if split is None:
             continue
         screen_events, confirm_events = split
-        window_id = _window_id(all_rows, len(screen_events), cutoff_ns)
+        window_id = _window_id(wallet, coin, all_rows, len(screen_events), cutoff_ns)
         cohort_windows.append((wallet, coin, screen_events, confirm_events, window_id))
 
     cohort_windows.sort(key=lambda item: len(item[2]) + len(item[3]), reverse=True)
