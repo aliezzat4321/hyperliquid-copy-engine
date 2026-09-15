@@ -6,6 +6,8 @@ on:
     paths:
       - .github/workflows/hyperliquid-safe-root-gc.yml
   workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * *'
 
 permissions:
   contents: read
@@ -37,7 +39,6 @@ jobs:
           sudo du -sh /var/lib/hyperliquid-ai-team/agents/claude/worktrees 2>/dev/null || true
           sudo journalctl --disk-usage || true
 
-          # Permanently bound systemd journal growth on the root filesystem.
           sudo install -d -m 0755 /etc/systemd/journald.conf.d
           cat <<'EOF' | sudo tee /etc/systemd/journald.conf.d/90-hyperliquid-root-cap.conf >/dev/null
           [Journal]
@@ -49,8 +50,6 @@ jobs:
           sudo journalctl --rotate
           sudo journalctl --vacuum-size=512M
 
-          # Remove only stale, inactive AI-team worktree directories older than 7 days.
-          # Agent homes, runtime ledger/runs, Hyperliquid executor state, and market data are excluded.
           sudo python3 - <<'PY'
           import os
           import shutil
@@ -70,8 +69,7 @@ jobs:
               if not entry.name.isdigit():
                   continue
               try:
-                  cwd = os.path.realpath(entry / 'cwd')
-                  proc_cwds.append(cwd)
+                  proc_cwds.append(os.path.realpath(entry / 'cwd'))
               except OSError:
                   pass
               try:
@@ -85,9 +83,7 @@ jobs:
               prefix = p + os.sep
               if any(c == p or c.startswith(prefix) for c in proc_cwds):
                   return True
-              if any(p in cmd for cmd in proc_cmdlines):
-                  return True
-              return False
+              return any(p in cmd for cmd in proc_cmdlines)
 
           def newest_mtime(path: Path) -> float:
               newest = path.stat().st_mtime
@@ -137,7 +133,6 @@ jobs:
               print(f'REMOVED {size} {path}')
           PY
 
-          # Safe OS/runner caches and diagnostics only.
           sudo apt-get clean || true
           sudo find /var/crash -mindepth 1 -maxdepth 1 -type f -delete 2>/dev/null || true
           sudo find /home/hyperliquid-runner/_diag -type f -mtime +14 -delete 2>/dev/null || true
@@ -149,7 +144,6 @@ jobs:
           sudo du -sh /var/lib/hyperliquid-ai-team/agents/claude/worktrees 2>/dev/null || true
           sudo journalctl --disk-usage || true
 
-          # Keep a healthy root reserve; fail loudly if the root remains critically constrained.
           avail_kb="$(df -Pk / | awk 'NR==2 {print $4}')"
           echo "ROOT_AVAILABLE_KB=$avail_kb"
           test "$avail_kb" -ge 3145728
