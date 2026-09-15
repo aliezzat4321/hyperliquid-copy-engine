@@ -14,6 +14,20 @@ import {
 export const EXECUTION_EVIDENCE_VERSION = 'lane3-causal-l2-v2';
 export const COST_MODEL_VERSION = 'hl-taker-l2-oracle-funding-v2';
 export const FUNDING_MODEL_VERSION = 'funding-history-rate-x-prospective-oracle-x-size-v2';
+const META_CACHE_TTL_MS = 60_000;
+let metaCache: { value: Awaited<ReturnType<typeof hl.getMeta>>; expiresAtMs: number } | null = null;
+let metaInFlight: Promise<Awaited<ReturnType<typeof hl.getMeta>>> | null = null;
+
+async function getCachedMeta(nowMs = Date.now()) {
+  if (metaCache && nowMs < metaCache.expiresAtMs) return metaCache.value;
+  if (!metaInFlight) {
+    metaInFlight = hl.getMeta().then(value => {
+      metaCache = { value, expiresAtMs: Date.now() + META_CACHE_TTL_MS };
+      return value;
+    }).finally(() => { metaInFlight = null; });
+  }
+  return metaInFlight;
+}
 
 export interface AssetBook {
   assetIndex: number;
@@ -25,8 +39,12 @@ export interface AssetBook {
 
 export async function fetchAssetBook(coin: string): Promise<AssetBook | null> {
   const requestedAtMs = Date.now();
-  const [meta, rawBook] = await Promise.all([hl.getMeta(), hl.getL2Book(coin)]);
+  const metaPromise = getCachedMeta(requestedAtMs);
+  const rawBook = await hl.getL2Book(coin);
+  // Book receipt is the completion of the l2Book request. Metadata latency must never
+  // make an otherwise fresh book appear stale.
   const receivedAtMs = Date.now();
+  const meta = await metaPromise;
   const assetIndex = meta.universe.findIndex((asset: any) => asset.name === coin);
   if (assetIndex < 0) return null;
   const asset = meta.universe[assetIndex];
@@ -87,17 +105,18 @@ export async function fundingForPosition(
   if (!Number.isFinite(carryUsd)) throw new Error('invalid funding carry');
   const accruedThroughMs = Number(position.fundingAccruedThroughMs ?? position.openedAtMs);
   const startTimeMs = accruedThroughMs > position.openedAtMs ? accruedThroughMs + 1 : position.openedAtMs;
-  const raw = await hl.getFundingHistory(position.coin, startTimeMs, endTimeMs);
-  const history: FundingPoint[] = raw
+  const query = await hl.getFundingHistory(position.coin, startTimeMs, endTimeMs);
+  const history: FundingPoint[] = query.rows
     .map(row => ({ timeMs: Number(row.time), rate: Number(row.fundingRate) }))
     .filter(row => Number.isFinite(row.timeMs) && Number.isFinite(row.rate));
-  const calculated = fundingCostUsd(
-    position.side,
-    checkpoints,
-    history,
-    position.fundingOracleCheckpoints,
-    maxOracleDelayMs,
-  );
+  let calculated;
+  try {
+    calculated = fundingCostUsd(
+      position.side, checkpoints, history, position.fundingOracleCheckpoints, maxOracleDelayMs,
+    );
+  } catch (err) {
+    throw new Error(`${err instanceof Error ? err.message : String(err)}; fundingQuery=${JSON.stringify(query.diagnostics)}`);
+  }
   return {
     fundingUsd: carryUsd + calculated.fundingUsd,
     fundingPoints: calculated.fundingPoints,

@@ -24,11 +24,43 @@ test('funding history paginates and deduplicates until the requested end', async
     ]);
   }) as typeof fetch;
   try {
-    const rows = await getFundingHistory('BTC', 0, 501);
+    const result = await getFundingHistory('BTC', 0, 501);
+    const rows = result.rows;
     assert.equal(calls, 2);
     assert.equal(rows.length, 502);
     assert.equal(Number(rows[0].time), 0);
     assert.equal(Number(rows.at(-1)?.time), 501);
+    assert.deepEqual(result.diagnostics.returnedTimeMs.slice(-3), [500, 501, 501]);
+    assert.equal(result.diagnostics.queryStartTimeMs, 0);
+    assert.equal(result.diagnostics.queryEndTimeMs, 501);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('funding history preserves exact inclusive boundaries and rejects adjacent response rows', async () => {
+  const originalFetch = globalThis.fetch;
+  let requestBody: any;
+  globalThis.fetch = (async (_url, init) => {
+    requestBody = JSON.parse(String(init?.body));
+    return jsonResponse([
+      { time: 999, fundingRate: '9' },
+      { time: 1000, fundingRate: '0.001', premium: '0.01' },
+      { time: 2000, fundingRate: '-0.002', premium: '-0.02' },
+      { time: 2001, fundingRate: '9' },
+    ]);
+  }) as typeof fetch;
+  try {
+    const result = await getFundingHistory('BTC', 1000, 2000);
+    assert.equal(requestBody.startTime, 1000);
+    assert.equal(requestBody.endTime, 2000);
+    assert.deepEqual(result.rows.map(row => row.time), [1000, 2000]);
+    assert.deepEqual(result.diagnostics.returnedRows, [
+      { coin: undefined, fundingRate: '9', premium: undefined, time: 999 },
+      { coin: undefined, fundingRate: '0.001', premium: '0.01', time: 1000 },
+      { coin: undefined, fundingRate: '-0.002', premium: '-0.02', time: 2000 },
+      { coin: undefined, fundingRate: '9', premium: undefined, time: 2001 },
+    ]);
   } finally {
     globalThis.fetch = originalFetch;
   }
