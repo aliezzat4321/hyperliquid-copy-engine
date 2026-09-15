@@ -59,7 +59,7 @@
     "name":"Research VM, market tape, autonomy and CI",
     "status":"DEGRADED",
     "facts":[
-      {"key":"ci_baseline_targeted_validation_pct","label":"targeted #334 renderer + contract + Ruff checks passed","value":100.0,"unit":"%","observed_at":"2026-09-14T23:09:49Z","source_type":"WORKFLOW_RUN","source_ref":"34907540686"},
+      {"key":"ci_baseline_targeted_validation_pct","label":"targeted #334 renderer + contract + Ruff checks passed","value":100.0,"unit":"pct","observed_at":"2026-09-14T23:09:49Z","source_type":"WORKFLOW_RUN","source_ref":"34907540686"},
       {"key":"market_shadow_reset_authorized","label":"owner-authorized market-shadow reset task exists","value":true,"unit":"bool","observed_at":"2026-09-14T17:28:43Z","source_type":"ISSUE","source_ref":"#310"},
       {"key":"old_storage_measurement_stale","label":"previous 100% storage measurement is no longer a current-state proof","value":true,"unit":"bool","observed_at":"2026-09-14T23:02:08Z","source_type":"ISSUE","source_ref":"#310"},
       {"key":"ci_baseline_unblock_open","label":"repository CI baseline repair open","value":true,"unit":"bool","observed_at":"2026-09-14T23:10:55Z","source_type":"PULL_REQUEST","source_ref":"#335"},
