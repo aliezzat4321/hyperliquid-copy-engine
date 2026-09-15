@@ -1,3 +1,4 @@
+# Rerun requested after Claude Opus session reset on 2026-09-15T13:40:00Z.
 name: p0-341-opus-lane3-integrity-now
 
 on:
@@ -51,9 +52,7 @@ jobs:
           state_root=/var/lib/hyperliquid-copy-engine/invo-notification-executor
           sudo tail -n 5000 "$state_root/audit.jsonl" | sudo tee "$AUDIT_ROOT/evidence/lane3/audit_tail.jsonl" >/dev/null || true
           for f in state.json trader-population.json evidence-epoch; do
-            if sudo test -f "$state_root/$f"; then
-              sudo cp -f "$state_root/$f" "$AUDIT_ROOT/evidence/lane3/$f"
-            fi
+            if sudo test -f "$state_root/$f"; then sudo cp -f "$state_root/$f" "$AUDIT_ROOT/evidence/lane3/$f"; fi
           done
           curl -fsS --max-time 4 http://127.0.0.1:8787/health | sudo tee "$AUDIT_ROOT/evidence/lane3/health.json" >/dev/null
           sudo sh -c "systemctl status hyperliquid-invo-notification-executor.service --no-pager -l > '$AUDIT_ROOT/evidence/lane3/service-status.txt' 2>&1"
@@ -62,63 +61,31 @@ jobs:
           sudo env OUT="$AUDIT_ROOT/evidence/market" python3 - <<'PY'
           import os, shutil
           from pathlib import Path
-          root = Path('/mnt/HC_Volume_106576526/hyperliquid/market-shadow')
-          out = Path(os.environ['OUT'])
-          rows = []
+          root = Path('/mnt/HC_Volume_106576526/hyperliquid/market-shadow'); out = Path(os.environ['OUT']); rows=[]
           if root.is_dir():
               for p in root.rglob('*'):
                   try:
-                      size = p.stat().st_size
-                      if p.is_file() and not p.is_symlink() and size <= 4 * 1024 * 1024:
-                          rows.append((p.stat().st_mtime_ns, p))
-                  except FileNotFoundError:
-                      pass
-          selected = sorted(rows, reverse=True)[:12]
-          for _, p in selected:
-              dst = out / p.relative_to(root)
-              dst.parent.mkdir(parents=True, exist_ok=True)
-              shutil.copy2(p, dst)
-          print('MARKET_SAMPLE_FILES=' + str(len(selected)))
+                      size=p.stat().st_size
+                      if p.is_file() and not p.is_symlink() and size <= 4*1024*1024: rows.append((p.stat().st_mtime_ns,p))
+                  except FileNotFoundError: pass
+          selected=sorted(rows, reverse=True)[:12]
+          for _,p in selected:
+              dst=out/p.relative_to(root); dst.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(p,dst)
+          print('MARKET_SAMPLE_FILES='+str(len(selected)))
           PY
-
           printf '%s\n' "$LANE3_REPAIRED_SHA" | sudo tee "$AUDIT_ROOT/evidence/lane3/repaired-sha.txt" >/dev/null
           git rev-parse HEAD | sudo tee "$AUDIT_ROOT/evidence/lane3/audit-main-sha.txt" >/dev/null
           sudo find "$AUDIT_ROOT/evidence" -type f -printf '%TY-%Tm-%TdT%TH:%TM:%TSZ %s %p\n' | sudo sort | sudo tee "$AUDIT_ROOT/evidence/MANIFEST.txt" >/dev/null
-          sudo chown -R "$CLAUDE_USER:$CLAUDE_USER" "$AUDIT_ROOT"
-          sudo chmod -R u=rwX,go= "$AUDIT_ROOT"
-
-          avail_kb="$(df -Pk / | awk 'NR==2 {print $4}')"
-          echo "ROOT_AVAILABLE_KB=$avail_kb"
-          test "$avail_kb" -ge 262144
+          sudo chown -R "$CLAUDE_USER:$CLAUDE_USER" "$AUDIT_ROOT"; sudo chmod -R u=rwX,go= "$AUDIT_ROOT"
+          avail_kb="$(df -Pk / | awk 'NR==2 {print $4}')"; echo "ROOT_AVAILABLE_KB=$avail_kb"; test "$avail_kb" -ge 262144
 
       - name: Verify Claude Opus authentication
         shell: bash
         run: |
           set -euo pipefail
-          auth_out="$AUDIT_ROOT/auth-stdout.txt"
-          auth_err="$AUDIT_ROOT/auth-stderr.txt"
-          set +e
-          sudo -u "$CLAUDE_USER" env -i \
-            HOME="$CLAUDE_HOME" \
-            CLAUDE_CONFIG_DIR="$CLAUDE_HOME/.claude" \
-            XDG_CONFIG_HOME="$CLAUDE_HOME/.config" \
-            XDG_CACHE_HOME="$CLAUDE_HOME/.cache" \
-            PATH=/usr/local/bin:/usr/bin:/bin \
-            /usr/bin/claude -p --model opus --max-turns 1 --output-format text 'Reply exactly OPUS_AUTH_OK' \
-            > "$auth_out" 2> "$auth_err"
-          auth_rc=$?
-          set -e
-          echo "OPUS_AUTH_EXIT_CODE=$auth_rc"
-          if test -s "$auth_out"; then
-            echo '=== OPUS AUTH STDOUT ==='
-            cat "$auth_out"
-          fi
-          if test -s "$auth_err"; then
-            echo '=== OPUS AUTH STDERR ==='
-            cat "$auth_err"
-          fi
-          test "$auth_rc" -eq 0
-          grep -Fx OPUS_AUTH_OK "$auth_out"
+          auth_out="$AUDIT_ROOT/auth-stdout.txt"; auth_err="$AUDIT_ROOT/auth-stderr.txt"; set +e
+          sudo -u "$CLAUDE_USER" env -i HOME="$CLAUDE_HOME" CLAUDE_CONFIG_DIR="$CLAUDE_HOME/.claude" XDG_CONFIG_HOME="$CLAUDE_HOME/.config" XDG_CACHE_HOME="$CLAUDE_HOME/.cache" PATH=/usr/local/bin:/usr/bin:/bin /usr/bin/claude -p --model opus --max-turns 1 --output-format text 'Reply exactly OPUS_AUTH_OK' > "$auth_out" 2> "$auth_err"
+          auth_rc=$?; set -e; echo "OPUS_AUTH_EXIT_CODE=$auth_rc"; test -s "$auth_out" && cat "$auth_out" || true; test -s "$auth_err" && cat "$auth_err" || true; test "$auth_rc" -eq 0; grep -Fx OPUS_AUTH_OK "$auth_out"
 
       - name: Run independent Lane 3 Opus integrity audit now
         env:
@@ -126,67 +93,26 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          prompt="$AUDIT_ROOT/prompt.txt"
-          result="$AUDIT_ROOT/result.txt"
-          stderr_file="$AUDIT_ROOT/claude-stderr.txt"
+          prompt="$AUDIT_ROOT/prompt.txt"; result="$AUDIT_ROOT/result.txt"; stderr_file="$AUDIT_ROOT/claude-stderr.txt"
           cat > /tmp/p0-341-opus-prompt <<'PROMPT'
           You are Claude Opus acting as the independent senior quant and reliability auditor for Hyperliquid Lane 3, issue #341 / repair parent #314. Audit ONLY Lane 3 using repo/ and evidence/ in the current directory. This is a read-only integrity/data-quality audit of the repaired production collection path. Do not modify code or production state. Do not inspect or discuss Polymarket. Real trading must remain OFF.
-
           The repaired Lane 3 implementation baseline is 59d5966bae6fd50c827874c8a182f99c7bf67b2c. The workflow has already proved no Lane 3 executor/deploy files changed between that baseline and the audit checkout. The fresh evidence epoch is lane3-causal-l2-v2-funding-complete-20260915.
-
           Check end-to-end source-notification coverage with no silent drops; causal source/signal/receipt/decision/order-arrival/book timestamps and no future-book leakage; stale/missing/future book rejection; executable L2 spread/depth/VWAP, partial fills, lot/min-notional rules and sizing; complete fees, book-walk/slippage and funding with missing economics failing closed; open/add/reduce/close lifecycle, unresolved exposure and MTM; restart/backfill/cursor reconciliation; dedupe/idempotency; policy/evidence/version/SHA provenance; and aggregate accounting identities. Sample raw records and independently recompute fills and net economics wherever current evidence permits. Explicitly inspect current coverage/reject/gap counts and whether avoidable opportunities are being lost. Confirm live=false and REAL_TRADING_ENABLED=NO.
-
           This is NOT the final profitability/live-readiness decision. Do not require seven days or twenty events merely to decide whether the collection path is trustworthy. If current records are insufficient for a specific empirical check, distinguish that from a code/data-integrity defect.
-
           FIRST LINE must be exactly one of:
           INTERIM_INTEGRITY_PASS
           FAIL
           INSUFFICIENT_EVIDENCE
-
           Then provide: exact evidence paths/record identifiers sampled; independent recomputations; defects with severity; current coverage and opportunity-loss concerns; whether the current evidence epoch is clean or contaminated; exact scoped repair/additional evidence required; whether collection should continue; and explicit confirmation REAL_TRADING_ENABLED=NO. A PASS means only that continuing to collect this epoch is trustworthy, not that profitability or live-readiness is proven.
           PROMPT
-          sudo mv /tmp/p0-341-opus-prompt "$prompt"
-          sudo chown "$CLAUDE_USER:$CLAUDE_USER" "$prompt"
-          cd "$AUDIT_ROOT"
-
-          set +e
-          sudo -u "$CLAUDE_USER" env -i \
-            HOME="$CLAUDE_HOME" \
-            CLAUDE_CONFIG_DIR="$CLAUDE_HOME/.claude" \
-            XDG_CONFIG_HOME="$CLAUDE_HOME/.config" \
-            XDG_CACHE_HOME="$CLAUDE_HOME/.cache" \
-            PATH=/usr/local/bin:/usr/bin:/bin \
-            /usr/bin/claude -p --model opus --max-turns 90 --output-format text \
-            --permission-mode dontAsk --allowedTools Read Glob Grep Bash \
-            < "$prompt" > "$result" 2> "$stderr_file"
-          claude_rc=$?
-          set -e
-
-          echo "CLAUDE_EXIT_CODE=$claude_rc"
-          if test -s "$stderr_file"; then
-            echo '=== CLAUDE STDERR ==='
-            cat "$stderr_file"
-          fi
-          if ! test -s "$result"; then
-            echo 'CLAUDE_RESULT_EMPTY=YES'
-            exit "${claude_rc:-1}"
-          fi
-
-          echo '=== CLAUDE RESULT ==='
-          cat "$result"
-          first="$(head -n1 "$result" | tr -d '\r')"
-          case "$first" in
-            INTERIM_INTEGRITY_PASS|FAIL|INSUFFICIENT_EVIDENCE) ;;
-            *) echo "Malformed Opus verdict: $first" >&2; exit 3 ;;
-          esac
-
+          sudo mv /tmp/p0-341-opus-prompt "$prompt"; sudo chown "$CLAUDE_USER:$CLAUDE_USER" "$prompt"; cd "$AUDIT_ROOT"; set +e
+          sudo -u "$CLAUDE_USER" env -i HOME="$CLAUDE_HOME" CLAUDE_CONFIG_DIR="$CLAUDE_HOME/.claude" XDG_CONFIG_HOME="$CLAUDE_HOME/.config" XDG_CACHE_HOME="$CLAUDE_HOME/.cache" PATH=/usr/local/bin:/usr/bin:/bin /usr/bin/claude -p --model opus --max-turns 90 --output-format text --permission-mode dontAsk --allowedTools Read Glob Grep Bash < "$prompt" > "$result" 2> "$stderr_file"
+          claude_rc=$?; set -e; echo "CLAUDE_EXIT_CODE=$claude_rc"; test -s "$stderr_file" && cat "$stderr_file" || true; test -s "$result" || exit "${claude_rc:-1}"; cat "$result"
+          first="$(head -n1 "$result" | tr -d '\r')"; case "$first" in INTERIM_INTEGRITY_PASS|FAIL|INSUFFICIENT_EVIDENCE) ;; *) exit 3;; esac
           gh issue comment 341 --repo aliezzat4321/hyperliquid-copy-engine --body-file "$result"
           { echo '## Repaired Lane 3 interim Opus re-audit (#341)'; echo; cat "$result"; } > "$AUDIT_ROOT/issue-273-comment.md"
           gh issue comment 273 --repo aliezzat4321/hyperliquid-copy-engine --body-file "$AUDIT_ROOT/issue-273-comment.md"
           echo OPUS_LANE3_INTEGRITY_AUDIT_POSTED=YES
-          if test "$claude_rc" -ne 0; then
-            echo "Opus returned a valid verdict with non-zero CLI status $claude_rc" >&2
-          fi
 
       - name: Remove disposable audit copy
         if: always()
