@@ -9,6 +9,7 @@ from hlcopy.profitability.portfolio_position_copy import PortfolioCopySimulation
 D = Decimal
 ZERO = D("0")
 BPS = D("10000")
+LANE1_RETURN_BASIS = "COMPLETED_ROUND_TRIP_NET_RETURN_ON_EPISODE_PEAK_GROSS_V1"
 
 
 @dataclass(frozen=True, slots=True)
