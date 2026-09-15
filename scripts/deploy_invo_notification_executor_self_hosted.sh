@@ -43,8 +43,9 @@ cd "$REPO"
 git fetch origin main
 git checkout main
 # npm/build output is disposable. Clean only known generated paths before fast-forwarding so
-# a locally generated package-lock cannot block deployment when that file becomes tracked.
-git clean -fd -- \
+# locally generated files (including ignored node_modules/dist) cannot block tracked files
+# arriving from main. Tracked files are never removed by git clean, even with -x.
+git clean -fdx -- \
   "$SERVICE_REL/package-lock.json" \
   "$SERVICE_REL/node_modules" \
   "$SERVICE_REL/dist"
