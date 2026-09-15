@@ -6,6 +6,7 @@ export interface InvoSignal {
   action: SignalAction;
   observedAtMs: number;
   sourceTimeMs: number | null;
+  sourceTimeField: string | null;
   ownerId: string;
   username: string;
   portfolioId: string;
@@ -66,9 +67,24 @@ export function signalFromFeedPost(post: any, observedAtMs = Date.now()): InvoSi
 
   if (!postId || !sourceBaseId || !coin || !portfolioId || !ownerId) return null;
 
-  const sourceTimeMs = toMs(
-    update.updatedAt ?? update.createdAt ?? post.updatedAt ?? post.createdAt ?? post.date,
-  );
+  const timeCandidates: Array<[string, unknown]> = action === 'close'
+    ? [
+        ['update.closedAt', update.closedAt],
+        ['update.closeTime', update.closeTime],
+        ['update.closingTime', update.closingTime],
+        ['update.updatedAt', update.updatedAt],
+        ['post.updatedAt', post.updatedAt],
+      ]
+    : [
+        ['update.updatedAt', update.updatedAt],
+        ['update.createdAt', update.createdAt],
+        ['post.updatedAt', post.updatedAt],
+        ['post.createdAt', post.createdAt],
+        ['post.date', post.date],
+      ];
+  const selectedTime = timeCandidates.find(([, value]) => toMs(value) != null);
+  const sourceTimeMs = selectedTime ? toMs(selectedTime[1]) : null;
+  const sourceTimeField = selectedTime?.[0] ?? null;
 
   return {
     key: `${postId}:${action}:${sourceBaseId}`,
@@ -76,6 +92,7 @@ export function signalFromFeedPost(post: any, observedAtMs = Date.now()): InvoSi
     action,
     observedAtMs,
     sourceTimeMs,
+    sourceTimeField,
     ownerId,
     username,
     portfolioId,
