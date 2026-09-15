@@ -1,3 +1,4 @@
+# Safety-classification retrigger after PR body corrected; no trading behavior change.
 name: p0-350-opus-lane3-postfix-recheck
 
 on:
