@@ -21,6 +21,7 @@ import {
 import {
   closeAction,
   computePositionEconomics,
+  isNonExecutableDust,
   openAction,
   simulateL2Fill,
   type ShadowExecutionPolicy,
@@ -539,6 +540,19 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
           shadowPolicy,
         );
         if (!result.ok) {
+          const dustRejected = result.reason === 'below_min_notional' || result.reason === 'lot_rounded_to_zero';
+          if (dustRejected) {
+            state.clearManagedBySource(signal.sourceBaseId);
+            state.markSeen(signal.key);
+            log({
+              type: 'shadow_close_dust_reconciled', reason: result.reason, detail: result.detail ?? null,
+              economicsCompleteness: 'INCOMPLETE_DUST_RECONCILIATION', managed, signal, wakeSource,
+              dustReconciledSize: size, unresolvedSize: 0, decisionAtMs,
+              bookRequestedAtMs: assetBook.requestedAtMs, bookReceivedAtMs: assetBook.receivedAtMs,
+              ...closeFreshness(signal, receivedAtMs),
+            });
+            return;
+          }
           const retryable = true;
           const attempt = (managed.sourceCloseRetryAttempts ?? 0) + 1;
           state.setManaged({
@@ -607,11 +621,15 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
         }
 
         const remainingSize = Math.max(0, size - fill.filledSize);
-        if (remainingSize > 1e-12) {
-          const remainingFraction = remainingSize / size;
+        const dustReconciled = remainingSize > 1e-12 && isNonExecutableDust(
+          remainingSize, assetBook.asset.szDecimals, fill.midPx, shadowPolicy.minNotionalUsd,
+        );
+        const unresolvedSize = dustReconciled ? 0 : remainingSize;
+        if (unresolvedSize > 1e-12) {
+          const remainingFraction = unresolvedSize / size;
           state.setManaged({
             ...managed,
-            size: remainingSize,
+            size: unresolvedSize,
             entryFeeUsd: Number(managed.entryFeeUsd ?? 0) * remainingFraction,
             entrySlippageUsd: Number(managed.entrySlippageUsd ?? 0) * remainingFraction,
             entryNotionalExecutedUsd: Number(managed.entryNotionalExecutedUsd ?? 0) * remainingFraction,
@@ -622,7 +640,7 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
             sourceCloseNextRetryAtMs: fill.receivedAtMs + closeRetryDelayMs((managed.sourceCloseRetryAttempts ?? 0) + 1),
             sourceCloseLastReason: 'partial_depth',
             pendingSourceClose: signal,
-            exposureCheckpoints: [{ atMs: fill.receivedAtMs, size: remainingSize }],
+            exposureCheckpoints: [{ atMs: fill.receivedAtMs, size: unresolvedSize }],
             fundingOracleCheckpoints: [],
             fundingCarryUsd: fullPositionFundingUsd == null
               ? Number(managed.fundingCarryUsd ?? 0)
@@ -635,10 +653,12 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
         } else {
           state.clearManagedBySource(signal.sourceBaseId);
         }
-        if (remainingSize <= 1e-12) state.markSeen(signal.key);
+        if (unresolvedSize <= 1e-12) state.markSeen(signal.key);
         log({
-          type: remainingSize > 1e-12 ? 'shadow_partially_closed' : 'shadow_closed',
-          economicsCompleteness: legacy
+          type: dustReconciled ? 'shadow_close_dust_reconciled' : unresolvedSize > 1e-12 ? 'shadow_partially_closed' : 'shadow_closed',
+          economicsCompleteness: dustReconciled
+            ? 'INCOMPLETE_DUST_RECONCILIATION'
+            : legacy
             ? 'INCOMPLETE_LEGACY_ENTRY'
             : fundingUsd == null ? 'INCOMPLETE_FUNDING' : 'COMPLETE_EXECUTION_REALISTIC',
           fundingError,
@@ -647,7 +667,9 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
           entryPrice: managed.entryPrice ?? null, entryBookMid: managed.entryBookMid ?? null,
           exitPrice: fill.avgPx, exitBookMid: fill.midPx,
           sourceClosingPrice: signal.closingPrice, requestedCloseSize: fill.requestedRoundedSize,
-          closedSize: fill.filledSize, unresolvedSize: remainingSize,
+          closedSize: fill.filledSize, unresolvedSize,
+          dustReconciledSize: dustReconciled ? remainingSize : 0,
+          dustEstimatedNotionalUsd: dustReconciled ? remainingSize * fill.midPx : null,
           partialFill: fill.partial, sourceSize: managed.sourceSize,
           addCount: managed.addCount ?? 0, leverage: managed.leverage,
           grossPnlUsd: economics?.grossPnlUsd ?? null,
