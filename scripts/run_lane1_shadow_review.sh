@@ -8,6 +8,7 @@ CUTOFF_FILE="/mnt/HC_Volume_106576526/hyperliquid/shadow/wide_clean_cutoff_ns.tx
 MARKET_DIR="/mnt/HC_Volume_106576526/hyperliquid/market-shadow"
 UNIVERSE_STATE="/mnt/HC_Volume_106576526/hyperliquid/discovery/universe_state.json"
 CANONICAL_EVIDENCE="/root/hyperliquid-audit/evidence"
+BOOTSTRAP_PY="${HLCOPY_REVIEW_PYTHON:-/root/hyperliquid-copy-engine/.venv/bin/python}"
 
 if [[ "${REAL_TRADING_ENABLED:-NO}" == "YES" ]]; then
   echo "REAL_TRADING_ENABLED must remain NO" >&2
@@ -27,6 +28,15 @@ for required in "$WIDE_DIR" "$CUTOFF_FILE" "$MARKET_DIR" "$UNIVERSE_STATE"; do
     exit 4
   fi
 done
+if [[ ! -x "$BOOTSTRAP_PY" ]]; then
+  echo "Python >=3.12 bootstrap interpreter missing: $BOOTSTRAP_PY" >&2
+  exit 5
+fi
+if ! "$BOOTSTRAP_PY" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)'; then
+  echo "review bootstrap Python must be >=3.12: $BOOTSTRAP_PY" >&2
+  "$BOOTSTRAP_PY" --version >&2 || true
+  exit 5
+fi
 
 SHORT_SHA="${REVIEW_SHA:0:12}"
 RUNTIME_ROOT="/root/hyperliquid-review-runtime/$REVIEW_SHA"
@@ -43,12 +53,20 @@ rsync -a --delete \
   --exclude '.venv/' \
   "$SOURCE_REPO/" "$RUNTIME_REPO/"
 
+# A prior failed review may have left a Python 3.10 venv behind. Never reuse an
+# incompatible environment: destroy it and recreate from the managed >=3.12 runtime.
+if [[ -x "$VENV/bin/python" ]] && \
+   ! "$VENV/bin/python" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)'; then
+  rm -rf "$VENV"
+fi
 if [[ ! -x "$VENV/bin/python" ]]; then
-  python3 -m venv "$VENV"
+  "$BOOTSTRAP_PY" -m venv "$VENV"
 fi
 "$VENV/bin/python" -m pip install -q -U pip
 "$VENV/bin/python" -m pip install -q -e "$RUNTIME_REPO"
 PY="$VENV/bin/python"
+
+echo "lane1_review_python=$($PY --version 2>&1) bootstrap=$BOOTSTRAP_PY"
 
 export REAL_TRADING_ENABLED=NO
 export HLCOPY_DEPLOYED_GIT_SHA="$REVIEW_SHA"
