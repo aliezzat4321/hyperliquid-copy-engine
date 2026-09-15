@@ -1,0 +1,131 @@
+name: p0-350-direct-codex-repair-v2
+
+on:
+  push:
+    branches: [codex/350-lane3-yield-repair-direct]
+    paths:
+      - .github/workflows/p0-350-direct-codex-repair-v2.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: p0-350-direct-codex-repair-v2
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 45
+    env:
+      WORKDIR: /var/lib/hyperliquid-ai-team/agents/codex/worktrees/p0-350-v2-${{ github.run_id }}
+      CODEX_HOME: /var/lib/hyperliquid-ai-team/agents/codex/home
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/350-lane3-yield-repair-direct
+          fetch-depth: 0
+
+      - name: Prepare writable isolated worktree
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf -- "$WORKDIR"
+          sudo mkdir -p "$WORKDIR"
+          sudo tar -C "$GITHUB_WORKSPACE" --exclude='./.agents' -cf - . | sudo tar -C "$WORKDIR" -xf -
+          sudo mkdir -p "$WORKDIR/.agents"
+          sudo git -c safe.directory="$WORKDIR" -C "$WORKDIR" config --local --unset-all http.https://github.com/.extraheader || true
+          sudo chown -R hl-codex-agent:hl-codex-agent "$WORKDIR"
+          sudo chmod 0755 "$WORKDIR/.agents"
+
+      - name: Run Codex repair from isolated worktree
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/p0-350-v2-prompt <<'PROMPT'
+          Repair Hyperliquid Lane 3 issue #350 after Claude Opus INTERIM_INTEGRITY_PASS. Work only in the local repository. Hyperliquid only; never inspect or touch Polymarket. Keep REAL_TRADING_ENABLED=NO and do not alter credentials, capital controls or live order routing.
+
+          Existing evidence epoch lane3-causal-l2-v2-funding-complete-20260915 is clean/uncontaminated and must be preserved unless you prove semantic corruption.
+
+          Fix all of these:
+          1. In shadow-market.ts cache getMeta() with bounded TTL and timestamp receivedAtMs from l2Book completion alone, not meta completion.
+          2. In service.ts bound health MTM concurrency so many open positions cannot self-create stale books.
+          3. Preserve fail-closed funding. Add diagnostics containing query start/end and returned funding row timestamps/raw-enough response. Determine exact boundary mismatch and repair it only if proven. Add deterministic boundary tests. Never substitute missing funding with zero.
+          4. Add bounded retry/reconciliation for source-close exposures rejected for transient book freshness/missing-book reasons. Do not mark them permanently complete while exposure remains. Exclude unresolved exposures from profitability/MTM aggregates until resolved. Add deterministic tests.
+          5. Reconcile collector maxBookAgeMs=750 with config/lane3_measurement.json=5000 using Opus-measured transport lag p50=586ms, p90=753ms, p99=799ms. Do not loosen just to increase fills. Make chosen policy reproducible.
+          6. Run npm check under services/invo-notification-executor.
+
+          Allowed modifications ONLY:
+          services/invo-notification-executor/src/shadow-market.ts
+          services/invo-notification-executor/src/service.ts
+          services/invo-notification-executor/src/notification-state.ts
+          services/invo-notification-executor/src/hl-client.ts
+          services/invo-notification-executor/test/*.test.ts
+          config/lane3_measurement.json
+
+          Do not edit workflows/deploy scripts. Do not claim profitability. One valid ARB close was +$2.0030846766 net, but it is only one observation.
+          PROMPT
+
+          cd "$WORKDIR"
+          set +e
+          sudo -u hl-codex-agent env -i \
+            HOME="$CODEX_HOME" \
+            XDG_CONFIG_HOME="$CODEX_HOME/.config" \
+            XDG_CACHE_HOME="$CODEX_HOME/.cache" \
+            PATH=/usr/local/bin:/usr/bin:/bin \
+            /usr/local/bin/codex exec --json --sandbox workspace-write --skip-git-repo-check - \
+            < /tmp/p0-350-v2-prompt | tee /tmp/p0-350-v2-codex.jsonl
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "CODEX_EXIT_CODE=$rc"
+          test "$rc" -eq 0
+
+      - name: Enforce scope and run focused executor checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t changed < <(sudo git -c safe.directory="$WORKDIR" -C "$WORKDIR" diff --name-only)
+          printf 'CHANGED=%s\n' "${changed[*]:-}"
+          test "${#changed[@]}" -gt 0
+          if sudo git -c safe.directory="$WORKDIR" -C "$WORKDIR" diff --diff-filter=D --name-only | grep -q .; then
+            echo 'File deletion is not allowed' >&2
+            exit 1
+          fi
+          for path in "${changed[@]}"; do
+            case "$path" in
+              services/invo-notification-executor/src/shadow-market.ts|\
+              services/invo-notification-executor/src/service.ts|\
+              services/invo-notification-executor/src/notification-state.ts|\
+              services/invo-notification-executor/src/hl-client.ts|\
+              services/invo-notification-executor/test/*.test.ts|\
+              config/lane3_measurement.json) ;;
+              *) echo "Unsafe changed path: $path" >&2; exit 1 ;;
+            esac
+          done
+          cd "$WORKDIR/services/invo-notification-executor"
+          sudo -u hl-codex-agent env HOME="$CODEX_HOME" PATH=/usr/local/bin:/usr/bin:/bin npm install --ignore-scripts --no-audit --no-fund
+          sudo -u hl-codex-agent env HOME="$CODEX_HOME" PATH=/usr/local/bin:/usr/bin:/bin npm run check
+
+      - name: Copy validated repair and push branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t changed < <(sudo git -c safe.directory="$WORKDIR" -C "$WORKDIR" diff --name-only)
+          for path in "${changed[@]}"; do
+            mkdir -p "$(dirname "$path")"
+            sudo cp -f "$WORKDIR/$path" "$GITHUB_WORKSPACE/$path"
+            sudo chown "$(id -u):$(id -g)" "$GITHUB_WORKSPACE/$path"
+          done
+          git config user.name 'hyperliquid-ai-team'
+          git config user.email 'hyperliquid-ai-team@users.noreply.github.com'
+          git add services/invo-notification-executor/src services/invo-notification-executor/test config/lane3_measurement.json
+          git diff --cached --check
+          git commit -m 'fix: repair Lane 3 yield after Opus audit (#350)'
+          git push origin HEAD:codex/350-lane3-yield-repair-direct
+
+      - name: Cleanup disposable worktree
+        if: always()
+        shell: bash
+        run: |
+          sudo rm -rf -- "$WORKDIR"
+          df -h /
