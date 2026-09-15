@@ -8,7 +8,11 @@
   "max_book_age_policy": {
     "source": "Opus transport-lag measurement 2026-09-15",
     "transport_lag_ms": {"p50": 586, "p90": 753, "p99": 799},
-    "rule": "ceil p99 to 1000ms; no fill-yield optimization"
+    "rule": "ceil p99 to 1000ms; no fill-yield optimization",
+    "prior_value_ms": 750,
+    "changeover_deploy_run": 34992024173,
+    "changeover_effective_at_utc": "2026-09-15T15:59:18Z",
+    "changeover_commit": "90ee58d679a093c86543e09a6afc6e3238bc3a74"
   },
   "follower_submit_latency_ms": 0,
   "transport_latency_ms": 0,
