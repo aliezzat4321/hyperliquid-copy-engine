@@ -46,3 +46,48 @@ test('bounds the persistent dedupe window', () => {
   assert.equal(state.hasSeen('b'), true);
   assert.equal(state.hasSeen('c'), true);
 });
+
+test('restart synthesizes a retryable close signal for legacy unresolved source-close exposure', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'invo-notify-state-'));
+  const path = join(dir, 'state.json');
+  const first = new NotificationState(path);
+  first.setManaged({
+    coin: 'XRP',
+    sourceBaseId: 'legacy-xrp',
+    sourceBaseShortId: 'legacy-short',
+    sourcePostId: 'legacy-post',
+    username: 'legacy-user',
+    side: 'long',
+    openedAtMs: 1,
+    size: 100,
+    leverage: 3,
+    unresolvedAfterSourceClose: true,
+    sourceCloseLastReason: 'pre-repair-orphan',
+  });
+
+  const restarted = new NotificationState(path);
+  const pending = restarted.getManagedBySource('legacy-xrp')?.pendingSourceClose;
+  assert.ok(pending);
+  assert.equal(pending.action, 'close');
+  assert.equal(pending.coin, 'XRP');
+  assert.equal(pending.sourceBaseId, 'legacy-xrp');
+  assert.equal(pending.sourceTimeField, 'legacy_unresolved_source_close');
+});
+
+test('explicit pending close evidence is preserved instead of being overwritten by migration', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'invo-notify-state-'));
+  const path = join(dir, 'state.json');
+  const first = new NotificationState(path);
+  first.setManaged({
+    coin: 'ETH', sourceBaseId: 'base-eth', sourceBaseShortId: 'short-eth', sourcePostId: 'post-eth',
+    side: 'short', openedAtMs: 1, size: 1, unresolvedAfterSourceClose: true,
+    pendingSourceClose: {
+      key: 'explicit-close', postId: 'explicit-post', action: 'close', observedAtMs: 2,
+      sourceTimeMs: 2, sourceTimeField: 'update.closedAt', ownerId: 'owner', username: 'trader',
+      portfolioId: 'portfolio', sourceBaseId: 'base-eth', sourceBaseShortId: 'short-eth', coin: 'ETH',
+      side: 'short', leverage: 2, entryPrice: 100, closingPrice: 90, entrySize: 1,
+    },
+  });
+  const restarted = new NotificationState(path);
+  assert.equal(restarted.getManagedBySource('base-eth')?.pendingSourceClose?.key, 'explicit-close');
+});
