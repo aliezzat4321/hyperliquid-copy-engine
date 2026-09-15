@@ -2,7 +2,7 @@
 
 Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
-**Snapshot:** 2026-09-14T23:02:08Z  
+**Snapshot:** 2026-09-14T23:13:00Z  
 **Updated by:** CODEX_CHATGPT  
 **Observed main head:** `4653f0d86650d42fea6062ddfd1fcce0ced0f746`  
 **Mission:** Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.
@@ -14,8 +14,8 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 | Priority | Issue | Objective | Builder | Reviewer | Status | Profit-critical |
 |---|---:|---|---|---|---|---|
 | P0 | #330 | Complete Lane 3 causal L2 execution and net-cost repair | CODEX_CHATGPT | CLAUDE | IN_REVIEW | yes |
-| P0 | #328 | Run integrated Lane 3 pre-Opus challenge after both repair halves | CODEX_CHATGPT | CLAUDE | OPEN | yes |
-| P0 | #327 | Challenge Lane 2 repair against every Opus finding | CODEX_CHATGPT | CLAUDE | OPEN | yes |
+| P0 | #328 | Run integrated Lane 3 pre-Opus challenge after #330 + #320 | CODEX_CHATGPT | CLAUDE | OPEN | yes |
+| P0 | #327 | Challenge Lane 2 repair #318 vs every Opus finding | CODEX_CHATGPT | CLAUDE | OPEN | yes |
 | P0 | #334 | Restore truthful repository-wide CI baseline | CODEX_CHATGPT | CLAUDE | IN_PROGRESS | no |
 
 ## Lane 1 — Hyperliquid native discovery and prospective copying research
@@ -36,9 +36,9 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
 | Fact | Value | Observed | Source |
 |---|---:|---|---|
+| last measured durable verified identities | 26 | `2026-09-11T16:55:20Z` | run `34624217892` |
 | Lane 2 Opus-repair PR open | True | `2026-09-14T23:02:08Z` | PR `#318` |
 | Lane 2 repair head | d30772140f20cc5a6aa9d8bc9d8f02f372517863 | `2026-09-14T23:02:08Z` | PR `#318` |
-| last measured durable verified identities | 26 | `2026-09-11T16:55:20Z` | run `34624217892` |
 | real trading enabled | False | `2026-09-14T22:39:38Z` | issue `#130` |
 
 **Blocker:** PR #318 contains the proposed identity-safety and capacity repair but remains open; actual post-repair Lane 2 shadow throughput/runtime proof and an exact-SHA lane-specific Opus PASS are still required.  
@@ -52,24 +52,26 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 | Lane 3 execution-repair head | 976c5e2364f9f40b45a3b0a56b31339b3c5036bb | `2026-09-14T23:02:08Z` | PR `#332` |
 | exact-head Lane 3 executor CI | PASS | `2026-09-14T23:00:30Z` | run `34906771193` |
 | exact-head live-sensitive classification guard | PASS | `2026-09-14T23:00:30Z` | run `34906771110` |
-| independent second Codex review | RUNNING | `2026-09-14T23:02:08Z` | run `34906695969` |
+| reviewer-driven #320 restart repair head | efbff8897c4ef27c6ef8b35270af1554b83328c4 | `2026-09-14T23:11:28Z` | PR `#321` |
+| second Codex verdict on superseded #320 SHA | FAIL_REPAIRED_PENDING_REREVIEW | `2026-09-14T23:11:28Z` | issue `#331` |
 | real trading enabled | False | `2026-09-14T22:39:38Z` | issue `#130` |
 
-**Blocker:** The #320 restart/backfill repair and #330 execution/funding repair are built, but exact-SHA independent Codex review, integrated challenge, deployment and fresh prospective evidence remain incomplete; no Lane 3 Opus re-audit has passed yet.  
-**Next:** Issue #330.
+**Blocker:** Second Codex found an owned-close reconciliation defect in the original #320 SHA; reviewer-driven repair head efbff8897c4ef27c6ef8b35270af1554b83328c4 passed the full executor check and now requires exact-SHA re-review plus integration into #332 before the final #328 challenge.  
+**Next:** Issue #331.
 
 ## Infrastructure
 **Status:** `DEGRADED`
 
 | Fact | Value | Observed | Source |
 |---|---:|---|---|
+| targeted #334 renderer + contract + Ruff checks passed | 100.0% | `2026-09-14T23:09:49Z` | run `34907540686` |
 | owner-authorized market-shadow reset task exists | True | `2026-09-14T17:28:43Z` | issue `#310` |
 | previous 100% storage measurement is no longer a current-state proof | True | `2026-09-14T23:02:08Z` | issue `#310` |
-| repository CI baseline repair open | True | `2026-09-14T23:02:08Z` | issue `#334` |
+| repository CI baseline repair open | True | `2026-09-14T23:10:55Z` | PR `#335` |
 | runtime reports unrelated work continuing | True | `2026-09-14T22:39:38Z` | issue `#130` |
 | real trading enabled | False | `2026-09-14T22:39:38Z` | issue `#130` |
 
-**Blocker:** Repository-wide CI is currently red because an obsolete Opus runner has isolated Ruff debt and the generated AI-team state expired its 72-hour freshness bound. Normal orchestration also still projects stale work, so Lane 3 critical reviews are running through exact-SHA direct review gates instead of waiting behind the scheduler.  
+**Blocker:** PR #335 has already cleared the obsolete Opus-script Ruff debt and stale generated-state contract failure. Its first full CI run exposed only typed-fact ordering assumptions in two contract tests; this snapshot restores the expected percentage/count ordering while keeping facts current and sourced.  
 **Next:** Issue #334.
 
 ## Update rule
