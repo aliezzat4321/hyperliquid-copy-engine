@@ -61,3 +61,18 @@ test('transient source-close book failures remain unseen and retry with bounded 
   assert.match(closeBranch, /sourceCloseNextRetryAtMs/);
   assert.match(serviceSource, /source_close_reconciliation/);
 });
+
+test('source-close residual below one lot terminates with explicit dust accounting', () => {
+  const serviceSource = readFileSync(new URL('../../src/service.ts', import.meta.url), 'utf8');
+  const closeStart = serviceSource.indexOf("if (signal.action === 'close')");
+  const liveCloseStart = serviceSource.indexOf('const sameCoinManaged =', closeStart);
+  const closeBranch = serviceSource.slice(closeStart, liveCloseStart);
+
+  assert.match(closeBranch, /result\.reason === 'lot_rounded_to_zero'/);
+  assert.match(closeBranch, /state\.reconcileTerminalClose\(signal\.sourceBaseId, signal\.key\)/);
+  assert.match(closeBranch, /type: 'shadow_close_dust_reconciled'/);
+  assert.match(closeBranch, /economicsCompleteness: 'INCOMPLETE_UNEXECUTABLE_DUST'/);
+  assert.match(closeBranch, /accountingTreatment: 'TERMINAL_UNEXECUTABLE_SUB_LOT_WRITE_OFF'/);
+  assert.match(closeBranch, /dustWriteoffUsd: residualNotionalUsd/);
+  assert.match(closeBranch, /retryable: false/);
+});

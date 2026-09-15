@@ -91,3 +91,21 @@ test('explicit pending close evidence is preserved instead of being overwritten 
   const restarted = new NotificationState(path);
   assert.equal(restarted.getManagedBySource('base-eth')?.pendingSourceClose?.key, 'explicit-close');
 });
+
+test('terminal sub-lot close reconciliation atomically clears exposure and consumes the signal', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'invo-notify-state-'));
+  const path = join(dir, 'state.json');
+  const state = new NotificationState(path);
+  state.setManaged({
+    coin: 'BTC', sourceBaseId: 'dust-btc', sourceBaseShortId: 'dust-short',
+    sourcePostId: 'dust-post', side: 'long', openedAtMs: 1, size: 0.004,
+    unresolvedAfterSourceClose: true, sourceCloseRetryAttempts: 4,
+  });
+
+  state.reconcileTerminalClose('dust-btc', 'dust-close');
+
+  const restarted = new NotificationState(path);
+  assert.equal(restarted.getManagedBySource('dust-btc'), null);
+  assert.equal(restarted.hasSeen('dust-close'), true);
+  assert.equal(restarted.managedCount(), 0);
+});

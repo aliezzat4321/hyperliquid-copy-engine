@@ -172,6 +172,20 @@ export class NotificationState {
     this.save();
   }
 
+  /** Atomically consume a terminal close signal and remove its paper exposure. */
+  reconcileTerminalClose(sourceBaseId: string, signalKey: string) {
+    delete this.state.managed[sourceBaseId];
+    if (!this.seen.has(signalKey)) {
+      this.state.seen.push(signalKey);
+      this.seen.add(signalKey);
+      while (this.state.seen.length > this.maxSeen) {
+        const old = this.state.seen.shift();
+        if (old) this.seen.delete(old);
+      }
+    }
+    this.save();
+  }
+
   managedCount() {
     return Object.keys(this.state.managed).length;
   }

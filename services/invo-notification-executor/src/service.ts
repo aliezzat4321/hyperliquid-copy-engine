@@ -546,6 +546,34 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
           shadowPolicy,
         );
         if (!result.ok) {
+          if (result.reason === 'lot_rounded_to_zero') {
+            const bestBid = assetBook.book?.bids[0]?.px ?? null;
+            const bestAsk = assetBook.book?.asks[0]?.px ?? null;
+            const markPx = bestBid != null && bestAsk != null ? (bestBid + bestAsk) / 2 : null;
+            const residualNotionalUsd = markPx == null ? null : size * markPx;
+            // No valid Hyperliquid lot can close this paper residual. Persist explicit
+            // conservative write-off evidence before removing operational exposure, so
+            // a crash cannot silently discard the residual without its accounting record.
+            log({
+              type: 'shadow_close_dust_reconciled', reason: result.reason,
+              detail: result.detail ?? null,
+              economicsCompleteness: 'INCOMPLETE_UNEXECUTABLE_DUST',
+              accountingTreatment: 'TERMINAL_UNEXECUTABLE_SUB_LOT_WRITE_OFF',
+              residualSize: size, residualMarkPx: markPx, residualNotionalUsd,
+              dustWriteoffUsd: residualNotionalUsd,
+              entryCostBasisUsd: Number(managed.entryNotionalExecutedUsd ?? managed.notionalUsd ?? 0),
+              entryFeeUsd: Number(managed.entryFeeUsd ?? 0),
+              fundingCarryUsd: Number(managed.fundingCarryUsd ?? 0),
+              managed, signal, wakeSource, decisionAtMs,
+              bookRequestedAtMs: assetBook.requestedAtMs,
+              bookReceivedAtMs: assetBook.receivedAtMs,
+              retryable: false, retryAttempt: managed.sourceCloseRetryAttempts ?? 0,
+              retryInMs: null,
+              ...closeFreshness(signal, receivedAtMs),
+            });
+            state.reconcileTerminalClose(signal.sourceBaseId, signal.key);
+            return;
+          }
           const retryable = true;
           const attempt = (managed.sourceCloseRetryAttempts ?? 0) + 1;
           state.setManaged({
