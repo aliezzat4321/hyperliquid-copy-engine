@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
 import { dirname } from 'path';
+import type { UnresolvedCloseState } from './unresolved-close.js';
 
 export interface ExposureCheckpoint {
   atMs: number;
@@ -42,6 +43,7 @@ export interface ManagedPosition {
   estimatedOpenCostUsd?: number;
   unfilledOpenSize?: number;
   unresolvedAfterSourceClose?: boolean;
+  unresolvedClose?: UnresolvedCloseState;
   exposureCheckpoints?: ExposureCheckpoint[];
   fundingOracleCheckpoints?: FundingOracleCheckpoint[];
   fundingCarryUsd?: number;

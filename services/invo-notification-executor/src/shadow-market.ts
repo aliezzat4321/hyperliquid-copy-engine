@@ -14,6 +14,27 @@ import {
 export const EXECUTION_EVIDENCE_VERSION = 'lane3-causal-l2-v2';
 export const COST_MODEL_VERSION = 'hl-taker-l2-oracle-funding-v2';
 export const FUNDING_MODEL_VERSION = 'funding-history-rate-x-prospective-oracle-x-size-v2';
+const META_TTL_MS = 5 * 60 * 1000;
+
+type Meta = Awaited<ReturnType<typeof hl.getMeta>>;
+let metaCache: { value: Meta; expiresAtMs: number } | null = null;
+let metaRequest: Promise<Meta> | null = null;
+
+async function getCachedMeta(nowMs = Date.now()): Promise<Meta> {
+  if (metaCache && metaCache.expiresAtMs > nowMs) return metaCache.value;
+  if (!metaRequest) {
+    metaRequest = hl.getMeta().then(value => {
+      metaCache = { value, expiresAtMs: Date.now() + META_TTL_MS };
+      return value;
+    }).finally(() => { metaRequest = null; });
+  }
+  return metaRequest;
+}
+
+export function resetMetaCacheForTest(): void {
+  metaCache = null;
+  metaRequest = null;
+}
 
 export interface AssetBook {
   assetIndex: number;
@@ -25,8 +46,9 @@ export interface AssetBook {
 
 export async function fetchAssetBook(coin: string): Promise<AssetBook | null> {
   const requestedAtMs = Date.now();
-  const [meta, rawBook] = await Promise.all([hl.getMeta(), hl.getL2Book(coin)]);
-  const receivedAtMs = Date.now();
+  const bookRequest = hl.getL2Book(coin).then(rawBook => ({ rawBook, receivedAtMs: Date.now() }));
+  const [meta, bookResponse] = await Promise.all([getCachedMeta(requestedAtMs), bookRequest]);
+  const { rawBook, receivedAtMs } = bookResponse;
   const assetIndex = meta.universe.findIndex((asset: any) => asset.name === coin);
   if (assetIndex < 0) return null;
   const asset = meta.universe[assetIndex];
@@ -66,6 +88,7 @@ export async function fundingForPosition(
   position: ManagedPosition,
   endTimeMs: number,
   maxOracleDelayMs = 10_000,
+  evidence?: (record: FundingHistoryEvidence) => void,
 ): Promise<{
   fundingUsd: number;
   fundingPoints: number;
@@ -86,18 +109,51 @@ export async function fundingForPosition(
   const carryUsd = Number(position.fundingCarryUsd ?? 0);
   if (!Number.isFinite(carryUsd)) throw new Error('invalid funding carry');
   const accruedThroughMs = Number(position.fundingAccruedThroughMs ?? position.openedAtMs);
-  const startTimeMs = accruedThroughMs > position.openedAtMs ? accruedThroughMs + 1 : position.openedAtMs;
-  const raw = await hl.getFundingHistory(position.coin, startTimeMs, endTimeMs);
+  // Query on the exact first captured settlement boundary. Using the arbitrary open-fill
+  // millisecond as startTime made the API boundary contract implicit and made partial-close
+  // +1 arithmetic capable of hiding the row whose oracle checkpoint proves it is required.
+  const expectedBoundaryTimes = position.fundingOracleCheckpoints
+    .map(point => point.fundingTimeMs)
+    .filter(timeMs => timeMs > accruedThroughMs && timeMs <= endTimeMs)
+    .sort((a, b) => a - b);
+  const startTimeMs = expectedBoundaryTimes[0] ?? endTimeMs + 1;
+  let raw: Awaited<ReturnType<typeof hl.getFundingHistory>> = [];
+  try {
+    if (expectedBoundaryTimes.length) {
+      raw = await hl.getFundingHistory(position.coin, startTimeMs, endTimeMs);
+    }
+  } catch (cause) {
+    throw new FundingEvidenceError(cause instanceof Error ? cause.message : String(cause), {
+      coin: position.coin,
+      queriedStartTimeMs: startTimeMs,
+      queriedEndTimeMs: endTimeMs,
+      returnedRowTimesMs: [],
+      rawRows: [],
+    });
+  }
+  const record: FundingHistoryEvidence = {
+    coin: position.coin,
+    queriedStartTimeMs: startTimeMs,
+    queriedEndTimeMs: endTimeMs,
+    returnedRowTimesMs: raw.map(row => Number(row.time)).filter(Number.isFinite),
+    rawRows: raw,
+  };
+  evidence?.(record);
   const history: FundingPoint[] = raw
     .map(row => ({ timeMs: Number(row.time), rate: Number(row.fundingRate) }))
     .filter(row => Number.isFinite(row.timeMs) && Number.isFinite(row.rate));
-  const calculated = fundingCostUsd(
-    position.side,
-    checkpoints,
-    history,
-    position.fundingOracleCheckpoints,
-    maxOracleDelayMs,
-  );
+  let calculated;
+  try {
+    calculated = fundingCostUsd(
+      position.side,
+      checkpoints,
+      history,
+      position.fundingOracleCheckpoints.filter(point => point.fundingTimeMs > accruedThroughMs),
+      maxOracleDelayMs,
+    );
+  } catch (cause) {
+    throw new FundingEvidenceError(cause instanceof Error ? cause.message : String(cause), record);
+  }
   return {
     fundingUsd: carryUsd + calculated.fundingUsd,
     fundingPoints: calculated.fundingPoints,
@@ -105,6 +161,21 @@ export async function fundingForPosition(
     carryUsd,
     model: FUNDING_MODEL_VERSION,
   };
+}
+
+export interface FundingHistoryEvidence {
+  coin: string;
+  queriedStartTimeMs: number;
+  queriedEndTimeMs: number;
+  returnedRowTimesMs: number[];
+  rawRows: Awaited<ReturnType<typeof hl.getFundingHistory>>;
+}
+
+export class FundingEvidenceError extends Error {
+  constructor(message: string, readonly evidence: FundingHistoryEvidence) {
+    super(message);
+    this.name = 'FundingEvidenceError';
+  }
 }
 
 export interface ShadowMark {
