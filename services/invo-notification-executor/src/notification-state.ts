@@ -79,7 +79,8 @@ export function synthesizeLegacyPendingSourceClose(position: ManagedPosition): I
     key: `${sourcePostId}:close:${position.sourceBaseId}:legacy-reconcile`,
     postId: sourcePostId,
     action: 'close',
-    observedAtMs: Date.now(),
+    // Persisted provenance only: this migration must be identical on every restart.
+    observedAtMs: position.openedAtMs,
     sourceTimeMs: null,
     sourceTimeField: 'legacy_unresolved_source_close',
     ownerId: '',
