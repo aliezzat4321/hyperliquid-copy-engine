@@ -1,3 +1,4 @@
+# Trusted shadow-only Lane 1 review harness. Real trading must remain disabled.
 name: lane1-shadow-pr-review
 
 on:
