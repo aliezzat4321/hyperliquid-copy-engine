@@ -1,4 +1,3 @@
-import asyncio
 import hashlib
 import json
 from decimal import Decimal
