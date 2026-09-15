@@ -15,6 +15,7 @@ from hlcopy.profitability.lane1_handoff import (
     LANE1_SELECTION_CONTRACT_V1,
     build_challenger_queue,
 )
+from hlcopy.profitability.lane1_metrics import completed_round_trip_metrics
 from hlcopy.profitability.portfolio_position_copy import simulate_copy_with_portfolio_capital
 from hlcopy.profitability.position_copy import CopyFillEvent, load_wide_events
 from hlcopy.profitability.position_live_cli import NOTIONALS, SCENARIOS, _summary
@@ -28,7 +29,7 @@ DEFAULT_UNIVERSE_STATE = Path(
     "/mnt/HC_Volume_106576526/hyperliquid/discovery/universe_state.json"
 )
 DEFAULT_PROSPECTIVE_REPORT = Path("/root/hyperliquid-audit/prospective-champions/report.json")
-RETURN_BASIS = "AVERAGE_REALIZED_NET_PNL_PER_ACTION_OVER_TARGET_NOTIONAL_V1"
+RETURN_BASIS = "COMPLETED_ROUND_TRIP_NET_RETURN_ON_EPISODE_PEAK_GROSS_V1"
 
 
 def _write_jsonl_atomic(path: Path, rows: list[dict[str, object]]) -> None:
@@ -133,6 +134,7 @@ def _split_oos(
 
 
 def _selection_return_bps(summary: dict[str, object], notional: Decimal) -> Decimal | None:
+    """Legacy normalization retained only for compatibility tests and diagnostics."""
     actions = int(summary.get("realized_actions") or 0)
     if actions <= 0 or notional <= ZERO:
         return None
@@ -162,10 +164,13 @@ def _simulate(
         max_book_forward_ms=max(1, max_book_forward_ms),
     )
     summary = _summary(sim)
-    selection_return = _selection_return_bps(summary, notional)
+    metrics = completed_round_trip_metrics(sim)
     summary["selection_return_bps"] = (
-        str(selection_return) if selection_return is not None else None
+        str(metrics.return_bps) if metrics.return_bps is not None else None
     )
+    summary["completed_round_trips"] = metrics.completed_round_trips
+    summary["completed_round_trip_net_pnl_usd"] = str(metrics.completed_net_pnl_usd)
+    summary["completed_round_trip_peak_gross_usd"] = str(metrics.completed_peak_gross_usd)
     summary["selection_return_basis"] = RETURN_BASIS
     summary["legacy_cumulative_return_bps"] = summary.get("net_return_bps")
     slices = [
@@ -182,8 +187,8 @@ def _simulate(
 def _screen_rank(row: dict[str, object]) -> tuple[Decimal, int, Decimal]:
     return (
         D(str(row.get("selection_return_bps") or "0")),
-        int(row.get("realized_actions") or 0),
-        D(str(row.get("closed_net_pnl_usd") or "0")),
+        int(row.get("completed_round_trips") or 0),
+        D(str(row.get("completed_round_trip_net_pnl_usd") or "0")),
     )
 
 
@@ -247,6 +252,7 @@ def main() -> None:
     ] = []
     min_screen = max(1, args.min_events)
     min_confirm = max(1, args.min_confirm_events)
+    min_completed_round_trips = max(1, args.min_screen_actions)
     for (wallet, coin), raw_rows in grouped.items():
         all_rows = tuple(raw_rows)
         split = _split_oos(
@@ -320,7 +326,8 @@ def main() -> None:
         print(
             f"screen {index}/{len(cohort_windows)} wallet={wallet[:14]} coin={coin} "
             f"screen_events={len(screen_events)} held_out={len(confirm_events)} "
-            f"actions={row['realized_actions']} selection_return_bps={row['selection_return_bps']}",
+            f"round_trips={row['completed_round_trips']} "
+            f"selection_return_bps={row['selection_return_bps']}",
             flush=True,
         )
     _write_jsonl_atomic(screen_path, screened)
@@ -328,7 +335,7 @@ def main() -> None:
     positive = [
         row
         for row in screened
-        if int(row.get("realized_actions") or 0) >= max(1, args.min_screen_actions)
+        if int(row.get("completed_round_trips") or 0) >= min_completed_round_trips
         and row.get("selection_return_bps") is not None
         and D(str(row["selection_return_bps"])) > ZERO
     ]
@@ -408,7 +415,7 @@ def main() -> None:
                 confirmed_keys.add(key)
                 print(
                     f"confirm wallet={wallet[:14]} coin={coin} scenario={scenario.name} "
-                    f"notional={notional} actions={row['realized_actions']} "
+                    f"notional={notional} round_trips={row['completed_round_trips']} "
                     f"selection_return_bps={row['selection_return_bps']}",
                     flush=True,
                 )
@@ -445,7 +452,8 @@ def main() -> None:
                 continue
             worst = min(returns)
             actions = min(int(row["realized_actions"]) for row in scenario_rows)
-            if worst <= ZERO or actions < max(1, args.min_screen_actions):
+            round_trips = min(int(row.get("completed_round_trips") or 0) for row in scenario_rows)
+            if worst <= ZERO or round_trips < min_completed_round_trips:
                 continue
             robust.append(
                 {
@@ -454,6 +462,7 @@ def main() -> None:
                     "notional_usd": notional,
                     "worst_latency_return_bps": str(worst),
                     "actions_floor": actions,
+                    "completed_round_trips_floor": round_trips,
                     "selection_return_basis": RETURN_BASIS,
                     "oos_window_id": window_id,
                 }
@@ -462,7 +471,7 @@ def main() -> None:
     robust.sort(
         key=lambda row: (
             D(str(row["worst_latency_return_bps"])),
-            int(row["actions_floor"]),
+            int(row["completed_round_trips_floor"]),
         ),
         reverse=True,
     )
@@ -470,9 +479,10 @@ def main() -> None:
         _cohort_key(str(row["wallet_address"]), str(row["coin"])) for row in robust
     }
     report: dict[str, object] = {
-        "mode": "INCREMENTAL_PROFITABILITY_FUNNEL_V2_DISJOINT_OOS",
+        "mode": "INCREMENTAL_PROFITABILITY_FUNNEL_V3_DISJOINT_COMPLETED_ROUND_TRIPS",
         "real_trading": False,
         "return_basis": RETURN_BASIS,
+        "selection_evidence_unit": "COMPLETED_FOLLOWER_ROUND_TRIP",
         "wide_event_count": len(events),
         "eligible_disjoint_cohort_count": len(cohort_windows),
         "screened_cohort_count": len(screened),
@@ -485,6 +495,7 @@ def main() -> None:
             "screen_fraction_target": 0.60,
             "min_screen_events": min_screen,
             "min_confirm_events": min_confirm,
+            "min_completed_round_trips": min_completed_round_trips,
             "screen_and_confirmation_disjoint": True,
             "stale_window_rows_expired": True,
         },
