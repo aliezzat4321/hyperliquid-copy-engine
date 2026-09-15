@@ -1,0 +1,130 @@
+name: p0-361-opus-dust-postdeploy-recheck
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p0-361-opus-dust-postdeploy-recheck.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: p0-361-opus-dust-postdeploy-recheck
+  cancel-in-progress: false
+
+jobs:
+  opus-dust-recheck:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 60
+    env:
+      CLAUDE_USER: hl-claude-agent
+      CLAUDE_HOME: /var/lib/hyperliquid-ai-team/agents/claude/home
+      AUDIT_ROOT: /var/lib/hyperliquid-ai-team/agents/claude/worktrees/p0-361-dust-${{ github.run_id }}
+      LANE3_DUST_BASELINE_SHA: 64b289c5d695471db929f4a0c3d9f7b5eb2bd02b
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build bounded read-only audit bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor "$LANE3_DUST_BASELINE_SHA" HEAD
+          test "$(git diff --name-only "$LANE3_DUST_BASELINE_SHA"..HEAD -- services/invo-notification-executor config/lane3_measurement.json scripts/deploy_invo_notification_executor_self_hosted.sh | wc -l)" -eq 0
+          sudo rm -rf -- "$AUDIT_ROOT"
+          sudo mkdir -p "$AUDIT_ROOT/repo" "$AUDIT_ROOT/evidence"
+          sudo tar -C "$GITHUB_WORKSPACE" \
+            --exclude=.git --exclude=.venv --exclude=node_modules --exclude=dist \
+            --exclude='*.env' --exclude='*credential*' --exclude='*secret*' \
+            -cf - services/invo-notification-executor config/lane3_measurement.json \
+            | sudo tar -C "$AUDIT_ROOT/repo" -xf -
+          curl -fsS --max-time 90 http://127.0.0.1:8787/health | sudo tee "$AUDIT_ROOT/evidence/health.json" >/dev/null
+          sudo sh -c "systemctl status hyperliquid-invo-notification-executor.service --no-pager -l > '$AUDIT_ROOT/evidence/service-status.txt' 2>&1"
+          state_root=/var/lib/hyperliquid-copy-engine/invo-notification-executor
+          sudo tail -n 1200 "$state_root/audit.jsonl" | sudo tee "$AUDIT_ROOT/evidence/audit-tail.jsonl" >/dev/null || true
+          printf '%s\n' "$LANE3_DUST_BASELINE_SHA" | sudo tee "$AUDIT_ROOT/evidence/deployed-lane3-sha.txt" >/dev/null
+          sudo chown -R "$CLAUDE_USER:$CLAUDE_USER" "$AUDIT_ROOT"
+          sudo chmod -R u=rwX,go= "$AUDIT_ROOT"
+
+      - name: Verify Opus authentication
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          sudo -u "$CLAUDE_USER" env -i \
+            HOME="$CLAUDE_HOME" CLAUDE_CONFIG_DIR="$CLAUDE_HOME/.claude" \
+            XDG_CONFIG_HOME="$CLAUDE_HOME/.config" XDG_CACHE_HOME="$CLAUDE_HOME/.cache" \
+            PATH=/usr/local/bin:/usr/bin:/bin \
+            /usr/bin/claude -p --model opus --max-turns 1 --output-format text \
+            'Reply exactly OPUS_AUTH_OK' > "$AUDIT_ROOT/auth.txt" 2> "$AUDIT_ROOT/auth.err"
+          rc=$?
+          set -e
+          cat "$AUDIT_ROOT/auth.txt" || true
+          cat "$AUDIT_ROOT/auth.err" || true
+          test "$rc" -eq 0
+          grep -Fx OPUS_AUTH_OK "$AUDIT_ROOT/auth.txt"
+
+      - name: Run independent Opus dust-repair re-check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/p0-361-opus-prompt <<'PROMPT'
+          You are Claude Opus acting as the independent senior quant/reliability reviewer for Hyperliquid Lane 3 issue #361 / parent #359. This is a focused post-deploy integrity re-check after your prior POSTFIX_INTEGRITY_PASS identified the floating-point roundSizeDown / hidden sub-lot residual defect. Audit read-only. Do not modify code or runtime state. Do not inspect or discuss Polymarket. Real trading must remain OFF.
+
+          Exact deployed Lane 3 repair baseline is 64b289c5d695471db929f4a0c3d9f7b5eb2bd02b. The workflow already proved no Lane 3 executor/config/deploy files changed after that baseline. Inspect repo/ and evidence/.
+
+          Independently verify:
+          1. `roundSizeDown(2.01,2)` and `(2.05,2)` no longer under-round due floating representation, without rounding genuinely sub-lot amounts upward.
+          2. `simulateL2Fill` reports partial/unfilled exposure against the caller's true raw size, not only the rounded size.
+          3. Normal min-notional execution remains fail-closed: there is no bypass that fabricates an executable below-minimum order.
+          4. Source-close dust that is below lot/min-notional cannot retry forever or be silently called COMPLETE_EXECUTION_REALISTIC. It must be explicitly reconciled/quarantined as INCOMPLETE_DUST_RECONCILIATION and excluded from valid profitability economics; normal executable residuals must retain bounded retry.
+          5. Current runtime unresolvedSourceCloseExposureCount is zero and current marks contain no hidden residual labelled complete. Specifically inspect the live SOL source position `4676d4e4-f6b4-4406-9a47-e04cd2c2acd2`, which previously had size 2.01 but markedSize 2.00; confirm its current size/markedSize/unfilled/status.
+          6. Returned L2 book coin identity now fails closed on a requested/returned mismatch.
+          7. Funding-boundary ambiguity/duplicates remain fail-closed and have regression coverage.
+          8. The 750ms→1000ms maxBookAge policy changeover is recorded with deploy run 34992024173, effective 2026-09-15T15:59:18Z, commit 90ee58d679a093c86543e09a6afc6e3238bc3a74.
+          9. Evidence epoch remains clean/preserved and REAL_TRADING_ENABLED=NO / health.live=false.
+
+          FIRST LINE must be exactly one of:
+          DUST_REPAIR_PASS
+          FAIL
+          INSUFFICIENT_EVIDENCE
+
+          Then give the concrete evidence/recomputations, any remaining defect with severity, whether the evidence epoch remains clean, and exact required repair if not PASS. This is an integrity repair check only; do not call profitability or live-readiness proven.
+          PROMPT
+          sudo mv /tmp/p0-361-opus-prompt "$AUDIT_ROOT/prompt.txt"
+          sudo chown "$CLAUDE_USER:$CLAUDE_USER" "$AUDIT_ROOT/prompt.txt"
+          cd "$AUDIT_ROOT"
+          set +e
+          sudo -u "$CLAUDE_USER" env -i \
+            HOME="$CLAUDE_HOME" CLAUDE_CONFIG_DIR="$CLAUDE_HOME/.claude" \
+            XDG_CONFIG_HOME="$CLAUDE_HOME/.config" XDG_CACHE_HOME="$CLAUDE_HOME/.cache" \
+            PATH=/usr/local/bin:/usr/bin:/bin \
+            /usr/bin/claude -p --model opus --max-turns 60 --output-format text \
+            --permission-mode dontAsk --allowedTools Read Glob Grep Bash \
+            < "$AUDIT_ROOT/prompt.txt" > "$AUDIT_ROOT/result.txt" 2> "$AUDIT_ROOT/claude.err"
+          rc=$?
+          set -e
+          echo "CLAUDE_EXIT_CODE=$rc"
+          test -s "$AUDIT_ROOT/claude.err" && cat "$AUDIT_ROOT/claude.err" || true
+          test -s "$AUDIT_ROOT/result.txt" || exit "${rc:-1}"
+          cat "$AUDIT_ROOT/result.txt"
+          first="$(head -n1 "$AUDIT_ROOT/result.txt" | tr -d '\r')"
+          case "$first" in DUST_REPAIR_PASS|FAIL|INSUFFICIENT_EVIDENCE) ;; *) exit 3;; esac
+          gh issue comment 361 --repo aliezzat4321/hyperliquid-copy-engine --body-file "$AUDIT_ROOT/result.txt"
+          { echo '## Opus dust repair re-check (#361)'; echo; cat "$AUDIT_ROOT/result.txt"; } > "$AUDIT_ROOT/issue-359.md"
+          gh issue comment 359 --repo aliezzat4321/hyperliquid-copy-engine --body-file "$AUDIT_ROOT/issue-359.md"
+          echo OPUS_DUST_RECHECK_POSTED=YES
+
+      - name: Cleanup audit copy
+        if: always()
+        shell: bash
+        run: |
+          sudo rm -rf -- "$AUDIT_ROOT"
+          df -h /
