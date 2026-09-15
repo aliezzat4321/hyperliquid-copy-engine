@@ -11,9 +11,13 @@ import { TraderTracker } from './trader-tracker.js';
 import { liveScopeSkipReason } from './live-scope.js';
 import { fetchFeedBackfill } from './feed-backfill.js';
 import { planUnrecoverableGap } from './gap-reconciliation.js';
+import { mapBounded } from './bounded.js';
+import { scheduleUnresolvedClose } from './unresolved-close.js';
 import {
   COST_MODEL_VERSION,
   EXECUTION_EVIDENCE_VERSION,
+  FundingEvidenceError,
+  type FundingHistoryEvidence,
   fetchAssetBook,
   fundingForPosition,
   markShadowPosition,
@@ -66,6 +70,10 @@ function loadConfig() {
     feedLimit: Math.max(1, Math.min(100, Math.trunc(n('NOTIFICATION_TRADER_FEED_LIMIT', 100)))),
     feedMaxPages: Math.max(1, Math.min(100, Math.trunc(n('NOTIFICATION_TRADER_FEED_MAX_PAGES', 20)))),
     shadowMaxBookAgeMs: Math.max(50, n('NOTIFICATION_TRADER_SHADOW_MAX_BOOK_AGE_MS', 750)),
+    shadowMarkConcurrency: Math.max(1, Math.min(8, Math.trunc(n('NOTIFICATION_TRADER_SHADOW_MARK_CONCURRENCY', 3)))),
+    unresolvedSweepConcurrency: Math.max(1, Math.min(4, Math.trunc(n('NOTIFICATION_TRADER_UNRESOLVED_SWEEP_CONCURRENCY', 2)))),
+    unresolvedRetryBaseMs: Math.max(500, n('NOTIFICATION_TRADER_UNRESOLVED_RETRY_BASE_MS', 2_000)),
+    unresolvedRetryMaxMs: Math.max(2_000, n('NOTIFICATION_TRADER_UNRESOLVED_RETRY_MAX_MS', 60_000)),
     shadowMaxSpreadBps: Math.max(0, n('NOTIFICATION_TRADER_SHADOW_MAX_SPREAD_BPS', 50)),
     shadowTakerFeeBps: Math.max(0, n('NOTIFICATION_TRADER_SHADOW_TAKER_FEE_BPS', 4.5)),
     shadowFundingOracleMaxDelayMs: Math.max(500, n('NOTIFICATION_TRADER_SHADOW_FUNDING_ORACLE_MAX_DELAY_MS', 10_000)),
@@ -82,6 +90,7 @@ function loadConfig() {
     allow: new Set(allow),
     statePath: resolve(process.env.NOTIFICATION_TRADER_STATE_PATH ?? 'data/notification-trader-state.json'),
     auditPath: resolve(process.env.NOTIFICATION_TRADER_AUDIT_PATH ?? 'data/notification-trader-audit.jsonl'),
+    fundingCachePath: resolve(process.env.NOTIFICATION_TRADER_FUNDING_CACHE_PATH ?? '/var/lib/hyperliquid-copy-engine/invo-notification-executor/funding_history.jsonl'),
     trackerPath: resolve(process.env.NOTIFICATION_TRADER_TRACKER_PATH ?? 'data/notification-trader-population.json'),
     minEvidenceEvents: Math.max(1, Math.trunc(n('NOTIFICATION_TRADER_MIN_EVIDENCE_EVENTS', 20))),
     minObservationDays: Math.max(1, Math.trunc(n('NOTIFICATION_TRADER_MIN_OBSERVATION_DAYS', 7))),
@@ -133,6 +142,11 @@ function log(event: Record<string, unknown>) {
   if (signal && (event.type === 'skip' || event.type === 'execution_error')) {
     tracker.recordFailure(`invo-user:${signal.ownerId}`, String(event.reason ?? event.type));
   }
+}
+
+function cacheFundingEvidence(record: Record<string, unknown>) {
+  mkdirSync(dirname(cfg.fundingCachePath), { recursive: true });
+  appendFileSync(cfg.fundingCachePath, `${JSON.stringify({ capturedAt: new Date().toISOString(), ...record })}\n`);
 }
 
 function detectionLatencyMs(signal: InvoSignal, receivedAtMs: number): number | null {
@@ -453,8 +467,16 @@ async function shadowReup(
   });
 }
 
-async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: number, feedFilter: string) {
-  if (state.hasSeen(signal.key) || inFlight.has(signal.key)) return;
+function nextUnresolvedClose(managed: ManagedPosition, signal: InvoSignal, lastReason: string) {
+  const nowMs = Date.now();
+  return scheduleUnresolvedClose(
+    signal as unknown as Record<string, unknown>, lastReason, nowMs,
+    cfg.unresolvedRetryBaseMs, cfg.unresolvedRetryMaxMs, managed.unresolvedClose,
+  );
+}
+
+async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: number, feedFilter: string, retryUnresolved = false) {
+  if ((!retryUnresolved && state.hasSeen(signal.key)) || inFlight.has(signal.key)) return;
   inFlight.add(signal.key);
   const decisionAtMs = Date.now();
 
@@ -489,7 +511,11 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
         const size = Number(managed.size);
         const assetBook = await fetchAssetBook(signal.coin);
         if (!assetBook || !(size > 0)) {
-          state.setManaged({ ...managed, unresolvedAfterSourceClose: true });
+          state.setManaged({
+            ...managed,
+            unresolvedAfterSourceClose: true,
+            unresolvedClose: !assetBook ? nextUnresolvedClose(managed, signal, 'missing_book') : managed.unresolvedClose,
+          });
           state.markSeen(signal.key);
           log({
             type: 'shadow_close_incomplete', reason: !assetBook ? 'missing_book' : 'invalid_managed_size',
@@ -506,7 +532,11 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
           shadowPolicy,
         );
         if (!result.ok) {
-          state.setManaged({ ...managed, unresolvedAfterSourceClose: true });
+          state.setManaged({
+            ...managed,
+            unresolvedAfterSourceClose: true,
+            unresolvedClose: nextUnresolvedClose(managed, signal, result.reason),
+          });
           state.markSeen(signal.key);
           log({
             type: 'shadow_close_rejected', reason: result.reason, detail: result.detail ?? null,
@@ -532,12 +562,17 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
         let fundingCarryUsd: number | null = null;
         let fundingModel: string | null = null;
         let fundingError: string | null = null;
+        let fundingEvidence: FundingHistoryEvidence | null = null;
         if (!legacy) {
           try {
             const funding = await fundingForPosition(
               managed,
               fill.receivedAtMs,
               cfg.shadowFundingOracleMaxDelayMs,
+              evidence => {
+                fundingEvidence = evidence;
+                cacheFundingEvidence({ type: 'funding_history', sourceBaseId: managed.sourceBaseId, ...evidence });
+              },
             );
             fullPositionFundingUsd = funding.fundingUsd;
             fundingUsd = funding.fundingUsd * fraction;
@@ -547,6 +582,14 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
             fundingModel = funding.model;
           } catch (err) {
             fundingError = err instanceof Error ? err.message : String(err);
+            if (err instanceof FundingEvidenceError) {
+              fundingEvidence = err.evidence;
+              cacheFundingEvidence({ type: 'funding_history_error', sourceBaseId: managed.sourceBaseId, ...err.evidence, error: fundingError });
+              log({
+                type: 'funding_history_incomplete', sourceBaseId: managed.sourceBaseId,
+                ...err.evidence, error: fundingError,
+              });
+            }
           }
         }
 
@@ -584,6 +627,7 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
             fundingIncompleteReason: fullPositionFundingUsd == null
               ? (fundingError ?? managed.fundingIncompleteReason ?? 'funding evidence incomplete at partial close')
               : undefined,
+            unresolvedClose: nextUnresolvedClose(managed, signal, 'partial_depth'),
           });
         } else {
           state.clearManagedBySource(signal.sourceBaseId);
@@ -595,6 +639,10 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
             ? 'INCOMPLETE_LEGACY_ENTRY'
             : fundingUsd == null ? 'INCOMPLETE_FUNDING' : 'COMPLETE_EXECUTION_REALISTIC',
           fundingError,
+          fundingEvidenceCachePath: cfg.fundingCachePath,
+          fundingQueriedStartTimeMs: fundingEvidence?.queriedStartTimeMs ?? null,
+          fundingQueriedEndTimeMs: fundingEvidence?.queriedEndTimeMs ?? null,
+          fundingReturnedRowTimesMs: fundingEvidence?.returnedRowTimesMs ?? null,
           username: managed.username ?? signal.username,
           coin: signal.coin, side: managed.side, sourceBaseId: managed.sourceBaseId,
           entryPrice: managed.entryPrice ?? null, entryBookMid: managed.entryBookMid ?? null,
@@ -976,6 +1024,25 @@ async function captureFundingOracleCheckpoints(nowMs = Date.now()) {
   });
 }
 
+async function sweepUnresolvedCloses(nowMs = Date.now()) {
+  if (cfg.live) return;
+  const due = Object.values(state.snapshot().managed).filter(position => (
+    position.paper
+    && position.unresolvedAfterSourceClose
+    && position.unresolvedClose
+    && position.unresolvedClose.nextAttemptAtMs <= nowMs
+  ));
+  await mapBounded(due, cfg.unresolvedSweepConcurrency, async position => {
+    const pending = position.unresolvedClose!;
+    const signal = pending.signal as unknown as InvoSignal;
+    log({
+      type: 'unresolved_close_retry', sourceBaseId: position.sourceBaseId,
+      attempt: pending.attempts + 1, priorReason: pending.lastReason,
+    });
+    await execute(signal, 'unresolved_close_sweep', nowMs, cfg.feedFilter, true);
+  });
+}
+
 async function fetchAndProcess(source: string, hints: NotificationHints | undefined, receivedAtMs: number, feedFilter = cfg.feedFilter): Promise<number> {
   const saved = state.getFeedCursor(feedFilter);
   const backfill = await fetchFeedBackfill(
@@ -1123,7 +1190,8 @@ function startServer() {
       const population = tracker.report();
       const snapshot = state.snapshot();
       const paperPositions = Object.values(snapshot.managed).filter(position => position.paper);
-      const shadowMarks = cfg.live ? [] : await Promise.all(paperPositions.map(async position => {
+      const markablePositions = paperPositions.filter(position => !position.unresolvedAfterSourceClose);
+      const shadowMarks = cfg.live ? [] : await mapBounded(markablePositions, cfg.shadowMarkConcurrency, async position => {
         try {
           return await markShadowPosition(position, shadowPolicy);
         } catch (err) {
@@ -1137,7 +1205,7 @@ function startServer() {
             markedAtMs: Date.now(),
           };
         }
-      }));
+      });
       return json(res, 200, {
         ok: true,
         initialized,
@@ -1152,6 +1220,8 @@ function startServer() {
         managed: snapshot.managed,
         shadowMarks,
         shadowOpenExposureCount: paperPositions.length,
+        shadowMarkEligibleCount: markablePositions.length,
+        unresolvedExposureCount: paperPositions.length - markablePositions.length,
         closedOnlyProfitabilityForbidden: true,
         shadowExecutionPolicy: shadowPolicy,
         executionEvidenceVersion: EXECUTION_EVIDENCE_VERSION,
@@ -1207,6 +1277,11 @@ async function pollLoop() {
       } catch (err) {
         log({ type: 'funding_oracle_capture_error', error: err instanceof Error ? err.message : String(err) });
       }
+      try {
+        await sweepUnresolvedCloses(Date.now());
+      } catch (err) {
+        log({ type: 'unresolved_close_sweep_error', error: err instanceof Error ? err.message : String(err) });
+      }
     }
     await wake(`api_poll:${surface}`, undefined, Date.now(), surface);
   }
@@ -1238,6 +1313,8 @@ async function main() {
     feedLimit: cfg.feedLimit,
     feedMaxPages: cfg.feedMaxPages,
     shadowExecutionPolicy: shadowPolicy,
+    shadowMarkConcurrency: cfg.shadowMarkConcurrency,
+    unresolvedSweepConcurrency: cfg.unresolvedSweepConcurrency,
     fundingOracleMaxDelayMs: cfg.shadowFundingOracleMaxDelayMs,
     executionEvidenceVersion: EXECUTION_EVIDENCE_VERSION,
     costModelVersion: COST_MODEL_VERSION,
