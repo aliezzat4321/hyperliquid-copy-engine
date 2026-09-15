@@ -35,6 +35,12 @@ export interface ShadowExecutionPolicy {
   fundingOracleMaxDelayMs?: number;
 }
 
+export interface ShadowFillOptions {
+  /** Source-close reconciliation must not orphan an otherwise executable residual solely
+   * because the remaining notional is below the research entry floor. */
+  allowBelowMinNotional?: boolean;
+}
+
 export interface ShadowFill {
   requestedRawSize: number;
   requestedRoundedSize: number;
@@ -151,7 +157,15 @@ export function roundSizeDown(rawSize: number, szDecimals: number): number {
     throw new Error(`Invalid szDecimals: ${szDecimals}`);
   }
   const factor = 10 ** szDecimals;
-  return Math.floor((rawSize + Number.EPSILON) * factor) / factor;
+  const scaled = rawSize * factor;
+  // Multiplication can put an exact decimal lot a few representable values below its
+  // integer (for example 2.01 * 100). Correct only that relative-ULP-sized error. The
+  // cap prevents a genuinely sub-lot request from ever being rounded up.
+  const relativeUlpAllowance = Math.min(
+    0.25,
+    Number.EPSILON * Math.max(1, Math.abs(scaled)) * 4,
+  );
+  return Math.floor(scaled + relativeUlpAllowance) / factor;
 }
 
 export function simulateL2Fill(
@@ -160,6 +174,7 @@ export function simulateL2Fill(
   rawSize: number,
   szDecimals: number,
   policy: ShadowExecutionPolicy,
+  options: ShadowFillOptions = {},
 ): ShadowFillResult {
   if (!book) return { ok: false, reason: 'missing_book' };
   const bookAgeMs = book.receivedAtMs - book.bookTimeMs;
@@ -192,7 +207,7 @@ export function simulateL2Fill(
       detail: { rawSize, szDecimals },
     };
   }
-  if (requestedRoundedSize * midPx < policy.minNotionalUsd) {
+  if (!options.allowBelowMinNotional && requestedRoundedSize * midPx < policy.minNotionalUsd) {
     return {
       ok: false,
       reason: 'below_min_notional',
@@ -221,7 +236,7 @@ export function simulateL2Fill(
 
   const avgPx = quoteUsd / filledSize;
   const notionalUsd = quoteUsd;
-  if (notionalUsd < policy.minNotionalUsd) {
+  if (!options.allowBelowMinNotional && notionalUsd < policy.minNotionalUsd) {
     return {
       ok: false,
       reason: 'below_min_notional',
@@ -231,7 +246,10 @@ export function simulateL2Fill(
   const adversePx = action === 'buy' ? avgPx - midPx : midPx - avgPx;
   const slippageBps = Math.max(0, (adversePx / midPx) * 10_000);
   const slippageUsd = Math.max(0, adversePx * filledSize);
-  const unfilledSize = Math.max(0, requestedRoundedSize - filledSize);
+  // Exposure truth is the caller's requested position, including any sub-lot residue;
+  // requestedRoundedSize describes only the executable order quantity.
+  const unfilledSize = Math.max(0, rawSize - filledSize);
+  const residualTolerance = Number.EPSILON * Math.max(1, rawSize, filledSize) * 8;
 
   return {
     ok: true,
@@ -240,7 +258,7 @@ export function simulateL2Fill(
       requestedRoundedSize,
       filledSize,
       unfilledSize,
-      partial: unfilledSize > Math.max(1e-12, requestedRoundedSize * 1e-12),
+      partial: unfilledSize > residualTolerance,
       avgPx,
       notionalUsd,
       midPx,

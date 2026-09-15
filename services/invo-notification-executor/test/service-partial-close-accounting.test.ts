@@ -14,7 +14,7 @@ test('production partial-close path allocates costs proportionally and resets fu
   assert.match(closeBranch, /entryFeeUsd: Number\(managed\.entryFeeUsd \?\? 0\) \* fraction/);
   assert.match(closeBranch, /entryNotionalUsd: Number\(managed\.entryNotionalExecutedUsd\) \* fraction/);
 
-  assert.match(closeBranch, /const remainingSize = Math\.max\(0, size - fill\.filledSize\)/);
+  assert.match(closeBranch, /const remainingSize = fill\.unfilledSize/);
   assert.match(closeBranch, /const remainingFraction = remainingSize \/ size/);
   assert.match(closeBranch, /entryFeeUsd: Number\(managed\.entryFeeUsd \?\? 0\) \* remainingFraction/);
   assert.match(closeBranch, /entrySlippageUsd: Number\(managed\.entrySlippageUsd \?\? 0\) \* remainingFraction/);
@@ -49,7 +49,9 @@ test('transient source-close book failures remain unseen and retry with bounded 
   assert.match(serviceSource, /SOURCE_CLOSE_RETRY_MAX_MS = 30_000/);
   assert.match(serviceSource, /Math\.min\(SOURCE_CLOSE_RETRY_MAX_MS/);
   assert.match(closeBranch, /pendingSourceClose: signal/);
-  assert.match(closeBranch, /if \(remainingSize <= 1e-12\) state\.markSeen\(signal\.key\)/);
+  assert.match(closeBranch, /if \(!fill\.partial\) state\.markSeen\(signal\.key\)/);
+  assert.match(closeBranch, /\{ allowBelowMinNotional: true \}/);
+  assert.match(closeBranch, /dustCloseReconciliation/);
   assert.match(closeBranch, /sourceCloseNextRetryAtMs/);
   assert.match(serviceSource, /source_close_reconciliation/);
 });
