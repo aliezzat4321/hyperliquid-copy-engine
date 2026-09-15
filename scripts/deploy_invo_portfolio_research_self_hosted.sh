@@ -43,34 +43,50 @@ systemctl daemon-reload
 systemd-analyze verify "/etc/systemd/system/$SERVICE_UNIT" "/etc/systemd/system/$TIMER_UNIT"
 systemctl enable "$TIMER_UNIT"
 
-# Run immediately once; the timer then keeps it current.
+# Run immediately once; the timer then keeps both broad discovery and exact UI leaderboards current.
 systemctl start "$SERVICE_UNIT"
 systemctl restart "$TIMER_UNIT"
 
 candidate="$STATE/portfolio-candidates.json"
+leaderboards="$STATE/invo-leaderboards.json"
+leaderboard_snapshots="$STATE/invo-leaderboard-snapshots.jsonl"
 elite="$STATE/elite-shadow-report.json"
-if [[ ! -s "$candidate" ]]; then
-  echo "candidate ledger missing after research cycle" >&2
-  journalctl -u "$SERVICE_UNIT" -n 120 --no-pager || true
-  exit 1
-fi
-if [[ ! -s "$elite" ]]; then
-  echo "elite shadow report missing after research cycle" >&2
-  journalctl -u "$SERVICE_UNIT" -n 120 --no-pager || true
-  exit 1
-fi
+for required in "$candidate" "$leaderboards" "$leaderboard_snapshots" "$elite"; do
+  if [[ ! -s "$required" ]]; then
+    echo "required portfolio research artifact missing: $required" >&2
+    journalctl -u "$SERVICE_UNIT" -n 160 --no-pager || true
+    exit 1
+  fi
+done
 
-node - "$candidate" "$elite" <<'NODE'
+node - "$candidate" "$leaderboards" "$elite" <<'NODE'
 const fs = require('fs');
-const [candidatePath, elitePath] = process.argv.slice(2);
+const [candidatePath, leaderboardPath, elitePath] = process.argv.slice(2);
 const candidate = JSON.parse(fs.readFileSync(candidatePath, 'utf8'));
+const leaderboards = JSON.parse(fs.readFileSync(leaderboardPath, 'utf8'));
 const elite = JSON.parse(fs.readFileSync(elitePath, 'utf8'));
 const portfolios = Object.values(candidate.portfolios || {});
 if (!portfolios.length) throw new Error('Invo portfolio discovery returned zero portfolios');
 if (candidate.selectorVersion !== 'invo-portfolio-elite-v1-20260916') throw new Error(`unexpected selector version ${candidate.selectorVersion}`);
+if (leaderboards.leaderboardVersion !== 'invo-top-portfolios-horizons-v1-20260916') throw new Error(`unexpected leaderboard version ${leaderboards.leaderboardVersion}`);
+const requiredHorizons = ['1D', '1W', '1M', '1Y', 'AT'];
+const countsByHorizon = {};
+for (const horizon of requiredHorizons) {
+  const rows = leaderboards.latestByHorizon?.[horizon];
+  if (!Array.isArray(rows) || rows.length === 0) throw new Error(`missing/non-populated Invo leaderboard horizon ${horizon}`);
+  if (!rows.every((row, index) => row.horizon === horizon && row.rank === index + 1 && row.sourceEndpoint === '/v1_0/trending/get_portfolios_pl')) {
+    throw new Error(`invalid rank/horizon provenance for ${horizon}`);
+  }
+  countsByHorizon[horizon] = rows.length;
+}
 if (elite.liveTrading !== false) throw new Error('elite shadow report must prove live trading false');
 console.log(JSON.stringify({
   PORTFOLIO_RESEARCH_DEPLOYED: true,
+  EXACT_INVO_LEADERBOARDS: true,
+  leaderboardVersion: leaderboards.leaderboardVersion,
+  leaderboardEndpoint: leaderboards.sourceEndpoint,
+  leaderboardCountsByHorizon: countsByHorizon,
+  leaderboardUniquePortfolios: new Set(requiredHorizons.flatMap(h => leaderboards.latestByHorizon[h].map(row => row.portfolioId))).size,
   selectorVersion: candidate.selectorVersion,
   discoveredPortfolios: portfolios.length,
   uniqueOwners: new Set(portfolios.map(p => p.ownerId).filter(Boolean)).size,
