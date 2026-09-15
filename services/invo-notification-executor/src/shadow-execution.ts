@@ -151,7 +151,22 @@ export function roundSizeDown(rawSize: number, szDecimals: number): number {
     throw new Error(`Invalid szDecimals: ${szDecimals}`);
   }
   const factor = 10 ** szDecimals;
-  return Math.floor((rawSize + Number.EPSILON) * factor) / factor;
+  const scaled = rawSize * factor;
+  // Correct only floating-point representation error around an exact lot boundary.
+  // Number.EPSILON is relative to values near 1, so scale it to the magnitude being floored.
+  const ulpAllowance = Math.max(1, Math.abs(scaled)) * Number.EPSILON * 8;
+  return Math.floor(scaled + ulpAllowance) / factor;
+}
+
+export function isNonExecutableDust(
+  rawSize: number,
+  szDecimals: number,
+  referencePrice: number,
+  minNotionalUsd: number,
+): boolean {
+  if (!(rawSize > 0) || !(referencePrice > 0) || !(minNotionalUsd > 0)) return false;
+  const rounded = roundSizeDown(rawSize, szDecimals);
+  return !(rounded > 0) || rounded * referencePrice < minNotionalUsd;
 }
 
 export function simulateL2Fill(
@@ -231,7 +246,9 @@ export function simulateL2Fill(
   const adversePx = action === 'buy' ? avgPx - midPx : midPx - avgPx;
   const slippageBps = Math.max(0, (adversePx / midPx) * 10_000);
   const slippageUsd = Math.max(0, adversePx * filledSize);
-  const unfilledSize = Math.max(0, requestedRoundedSize - filledSize);
+  // Compare coverage to the caller's true requested exposure, not only the lot-rounded amount.
+  // This makes any sub-lot residual visible instead of incorrectly labelling the mark complete.
+  const unfilledSize = Math.max(0, rawSize - filledSize);
 
   return {
     ok: true,
@@ -240,7 +257,7 @@ export function simulateL2Fill(
       requestedRoundedSize,
       filledSize,
       unfilledSize,
-      partial: unfilledSize > Math.max(1e-12, requestedRoundedSize * 1e-12),
+      partial: unfilledSize > Math.max(1e-12, rawSize * 1e-12),
       avgPx,
       notionalUsd,
       midPx,
