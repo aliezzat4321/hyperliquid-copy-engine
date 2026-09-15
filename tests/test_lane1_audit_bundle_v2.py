@@ -79,8 +79,12 @@ def test_partition_copy_uses_hip3_wire_symbol_and_excludes_unrelated_coin(tmp_pa
         dates=(day,),
     )
 
+    expected = (
+        destination
+        / f"market/date={day}/coin=xyz:ZHIPU/channel=l2Book/wanted.parquet"
+    )
     assert [path.name for path in copied] == ["wanted.parquet"]
-    assert (destination / f"market/date={day}/coin=xyz:ZHIPU/channel=l2Book/wanted.parquet").exists()
+    assert expected.exists()
     assert not list(destination.rglob("unrelated.parquet"))
 
 
