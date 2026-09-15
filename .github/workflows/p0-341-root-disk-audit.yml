@@ -1,0 +1,37 @@
+name: p0-341-root-disk-audit
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p0-341-root-disk-audit.yml
+
+permissions:
+  contents: read
+
+jobs:
+  root-disk-audit:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 5
+    steps:
+      - name: Read-only root disk usage audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
+          echo 'MUTATION=NO'
+          df -h /
+          echo '=== root top-level, same filesystem ==='
+          sudo du -x -h -d1 / 2>/dev/null | sort -h | tail -n 25 || true
+          echo '=== /var top-level ==='
+          sudo du -x -h -d2 /var 2>/dev/null | sort -h | tail -n 35 || true
+          echo '=== /home top-level ==='
+          sudo du -x -h -d3 /home 2>/dev/null | sort -h | tail -n 35 || true
+          echo '=== AI-team roots ==='
+          sudo du -x -h -d4 /var/lib/hyperliquid-ai-team 2>/dev/null | sort -h | tail -n 50 || true
+          echo '=== runner work/temp ==='
+          sudo du -x -h -d3 /home/hyperliquid-runner/_work 2>/dev/null | sort -h | tail -n 50 || true
+          echo '=== journal ==='
+          sudo journalctl --disk-usage || true
+          echo 'REAL_TRADING_TOUCHED=NO'
+          echo 'POLYMARKET_TOUCHED=NO'
