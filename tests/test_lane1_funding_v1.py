@@ -36,7 +36,7 @@ def _state(*, ts: int, action: str, qty: str, avg: str | None) -> FollowerStateE
     )
 
 
-def _slice(*, ts: int, pnl: str) -> RealizedSlice:
+def _slice(*, ts: int, pnl: str, action: str = "CLOSE") -> RealizedSlice:
     return RealizedSlice(
         lane="WIDE",
         wallet_id="wide",
@@ -46,7 +46,7 @@ def _slice(*, ts: int, pnl: str) -> RealizedSlice:
         exchange_ts_ms=ts,
         source_tid=ts,
         feed_ms=10.0,
-        action="CLOSE",
+        action=action,
         qty=D("1"),
         execution_price=D("100"),
         gross_pnl_usd=D(pnl),
@@ -75,6 +75,78 @@ def test_positive_funding_rate_long_pays_and_short_receives() -> None:
     assert funding_cashflows(short_sim, (settlement,))[0].pnl_usd == D("0.2")
 
 
+def test_negative_funding_rate_reverses_long_short_economics() -> None:
+    settlement = FundingSettlement("HYPE", HOUR, D("-0.001"), D("100"), HOUR * 1_000_000)
+    long_sim = _sim(
+        _state(ts=1, action="INCREASE", qty="2", avg="100"),
+        _state(ts=HOUR + 1, action="CLOSE", qty="0", avg=None),
+    )
+    short_sim = _sim(
+        _state(ts=1, action="INCREASE", qty="-2", avg="100"),
+        _state(ts=HOUR + 1, action="CLOSE", qty="0", avg=None),
+    )
+
+    assert funding_cashflows(long_sim, (settlement,))[0].pnl_usd == D("0.2")
+    assert funding_cashflows(short_sim, (settlement,))[0].pnl_usd == D("-0.2")
+
+
+def test_flat_before_funding_boundary_has_no_cashflow() -> None:
+    settlement = FundingSettlement("HYPE", HOUR, D("0.001"), D("100"), HOUR * 1_000_000)
+    sim = _sim(
+        _state(ts=1, action="INCREASE", qty="2", avg="100"),
+        _state(ts=HOUR - 1, action="CLOSE", qty="0", avg=None),
+    )
+
+    assert funding_cashflows(sim, (settlement,)) == ()
+
+
+def test_partial_reduction_before_boundary_uses_remaining_exposure() -> None:
+    settlement = FundingSettlement("HYPE", HOUR, D("0.001"), D("100"), HOUR * 1_000_000)
+    sim = _sim(
+        _state(ts=1, action="INCREASE", qty="10", avg="100"),
+        _state(ts=HOUR - 1, action="REDUCE", qty="4", avg="100"),
+        _state(ts=HOUR + 1, action="CLOSE", qty="0", avg=None),
+    )
+
+    flows = funding_cashflows(sim, (settlement,))
+
+    assert len(flows) == 1
+    assert flows[0].qty == D("4")
+    assert flows[0].pnl_usd == D("-0.4")
+
+
+def test_multiple_hourly_funding_events_apply_exactly_once_each() -> None:
+    settlements = (
+        FundingSettlement("HYPE", HOUR, D("0.001"), D("100"), HOUR * 1_000_000),
+        FundingSettlement("HYPE", 2 * HOUR, D("0.002"), D("100"), 2 * HOUR * 1_000_000),
+    )
+    sim = _sim(
+        _state(ts=1, action="INCREASE", qty="2", avg="100"),
+        _state(ts=2 * HOUR + 1, action="CLOSE", qty="0", avg=None),
+    )
+
+    flows = funding_cashflows(sim, settlements)
+
+    assert [row.time_ms for row in flows] == [HOUR, 2 * HOUR]
+    assert [row.pnl_usd for row in flows] == [D("-0.2"), D("-0.4")]
+    assert sum((row.pnl_usd for row in flows), D("0")) == D("-0.6")
+
+
+def test_boundary_semantics_charge_existing_position_not_same_ms_open() -> None:
+    settlement = FundingSettlement("HYPE", HOUR, D("0.001"), D("100"), HOUR * 1_000_000)
+    closes_at_boundary = _sim(
+        _state(ts=1, action="INCREASE", qty="2", avg="100"),
+        _state(ts=HOUR, action="CLOSE", qty="0", avg=None),
+    )
+    opens_at_boundary = _sim(
+        _state(ts=HOUR, action="INCREASE", qty="2", avg="100"),
+        _state(ts=HOUR + 1, action="CLOSE", qty="0", avg=None),
+    )
+
+    assert funding_cashflows(closes_at_boundary, (settlement,))[0].pnl_usd == D("-0.2")
+    assert funding_cashflows(opens_at_boundary, (settlement,)) == ()
+
+
 def test_completed_round_trip_return_includes_funding() -> None:
     sim = _sim(
         _state(ts=1, action="INCREASE", qty="10", avg="100"),
@@ -89,6 +161,32 @@ def test_completed_round_trip_return_includes_funding() -> None:
     assert metrics.completed_net_pnl_usd == D("49")
     assert metrics.completed_peak_gross_usd == D("1000")
     assert metrics.return_bps == D("490")
+
+
+def test_splitting_realized_slice_does_not_change_funding_adjusted_return() -> None:
+    close_ts = HOUR + 1
+    states = (
+        _state(ts=1, action="INCREASE", qty="10", avg="100"),
+        _state(ts=close_ts, action="CLOSE", qty="0", avg=None),
+    )
+    one_slice = _sim(*states, slices=(_slice(ts=close_ts, pnl="50"),))
+    split_slices = _sim(
+        *states,
+        slices=(
+            _slice(ts=close_ts, pnl="20", action="REDUCE"),
+            _slice(ts=close_ts, pnl="30", action="CLOSE"),
+        ),
+    )
+    settlement = FundingSettlement("HYPE", HOUR, D("0.001"), D("100"), HOUR * 1_000_000)
+
+    one_flows = funding_cashflows(one_slice, (settlement,))
+    split_flows = funding_cashflows(split_slices, (settlement,))
+    one_metrics = completed_round_trip_metrics(one_slice, funding_cashflows=one_flows)
+    split_metrics = completed_round_trip_metrics(split_slices, funding_cashflows=split_flows)
+
+    assert one_flows == split_flows
+    assert one_metrics.completed_net_pnl_usd == split_metrics.completed_net_pnl_usd == D("49")
+    assert one_metrics.return_bps == split_metrics.return_bps == D("490")
 
 
 def test_completed_episode_reports_only_exact_crossed_hourly_boundaries() -> None:
