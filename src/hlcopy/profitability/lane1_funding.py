@@ -133,9 +133,7 @@ def resolve_funding_settlements(
             # Zero funding creates no cashflow. Preserve a deterministic placeholder
             # oracle only when one is available; otherwise no price is economically needed.
             if latest is None:
-                settlements.append(
-                    FundingSettlement(coin, time_ms, rate, ZERO, boundary_ns)
-                )
+                settlements.append(FundingSettlement(coin, time_ms, rate, ZERO, boundary_ns))
                 continue
         if latest is None:
             raise FundingEvidenceError(
@@ -161,7 +159,9 @@ def resolve_funding_settlements(
     return tuple(settlements)
 
 
-def _completed_episode_boundaries(sim: PortfolioCopySimulation) -> tuple[tuple[str, int, int], ...]:
+def _completed_episode_boundaries(
+    sim: PortfolioCopySimulation,
+) -> tuple[tuple[str, int, int], ...]:
     opened_at: dict[str, int] = {}
     completed: list[tuple[str, int, int]] = []
     for state in sorted(
@@ -187,16 +187,26 @@ def _hour_boundaries_after(start_ms: int, end_ms: int) -> tuple[int, ...]:
     return tuple(range(first, end_ms + 1, HOUR_MS))
 
 
+def completed_episode_funding_boundaries(
+    sim: PortfolioCopySimulation,
+) -> tuple[tuple[str, int], ...]:
+    """Return the exact hourly settlements crossed by completed follower episodes."""
+    required: list[tuple[str, int]] = []
+    for coin, start_ms, end_ms in _completed_episode_boundaries(sim):
+        required.extend((coin, boundary) for boundary in _hour_boundaries_after(start_ms, end_ms))
+    return tuple(dict.fromkeys(required))
+
+
 def validate_completed_episode_funding_coverage(
     sim: PortfolioCopySimulation,
     settlements: Iterable[FundingSettlement],
 ) -> None:
     available = {(row.coin, row.time_ms) for row in settlements}
-    missing: list[str] = []
-    for coin, start_ms, end_ms in _completed_episode_boundaries(sim):
-        for boundary in _hour_boundaries_after(start_ms, end_ms):
-            if (coin, boundary) not in available:
-                missing.append(f"{coin}@{boundary}")
+    missing = [
+        f"{coin}@{boundary}"
+        for coin, boundary in completed_episode_funding_boundaries(sim)
+        if (coin, boundary) not in available
+    ]
     if missing:
         raise FundingEvidenceError(
             "missing finalized funding evidence for completed follower episode(s): "
