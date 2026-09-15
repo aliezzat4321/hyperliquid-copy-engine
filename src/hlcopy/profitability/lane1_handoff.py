@@ -304,7 +304,12 @@ def build_challenger_queue(
             continue
         demoted_row = dict(row)
         if row.get("status") == "challenger":
-            reason = rejection_reason_by_key.get(key, "NO_LONGER_ROBUST_OR_CURRENT")
+            rejection_reason = rejection_reason_by_key.get(key)
+            reason = (
+                "PROSPECTIVE_UNDERPERFORM"
+                if rejection_reason == "PROSPECTIVE_UNDERPERFORM"
+                else "NO_LONGER_ROBUST_OR_CURRENT"
+            )
             history = list(row.get("history", []))
             history.append(
                 {
