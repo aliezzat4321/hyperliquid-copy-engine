@@ -1,0 +1,159 @@
+# Safety-classification retrigger after PR body corrected; no trading behavior change.
+name: p0-350-opus-lane3-postfix-recheck
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p0-350-opus-lane3-postfix-recheck.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: p0-350-opus-lane3-postfix-recheck
+  cancel-in-progress: false
+
+jobs:
+  opus-postfix-recheck:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 90
+    env:
+      CLAUDE_USER: hl-claude-agent
+      CLAUDE_HOME: /var/lib/hyperliquid-ai-team/agents/claude/home
+      AUDIT_ROOT: /var/lib/hyperliquid-ai-team/agents/claude/worktrees/p0-350-postfix-${{ github.run_id }}
+      CLAUDE_WORKTREE_ROOT: /var/lib/hyperliquid-ai-team/agents/claude/worktrees
+      LANE3_POSTFIX_BASELINE_SHA: 748a05a86ec03f93ea6c31f32ca0c64b17ce0dc7
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Reclaim stale disposable Lane 3 post-fix audit copies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo find "$CLAUDE_WORKTREE_ROOT" -mindepth 1 -maxdepth 1 -type d -name 'p0-350-postfix-*' -print -exec rm -rf -- {} +
+          df -h /
+
+      - name: Assert post-fix lineage and build bounded read-only evidence bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor "$LANE3_POSTFIX_BASELINE_SHA" HEAD
+          test "$(git diff --name-only "$LANE3_POSTFIX_BASELINE_SHA"..HEAD -- services/invo-notification-executor scripts/deploy_invo_notification_executor_self_hosted.sh | wc -l)" -eq 0
+
+          sudo mkdir -p "$AUDIT_ROOT/repo" "$AUDIT_ROOT/evidence/lane3" "$AUDIT_ROOT/evidence/market"
+          sudo tar -C "$GITHUB_WORKSPACE" --exclude=.git --exclude=.venv --exclude='*.env' --exclude='*credential*' --exclude='*secret*' -cf - . | sudo tar -C "$AUDIT_ROOT/repo" -xf -
+
+          state_root=/var/lib/hyperliquid-copy-engine/invo-notification-executor
+          sudo tail -n 3500 "$state_root/audit.jsonl" | sudo tee "$AUDIT_ROOT/evidence/lane3/audit_tail.jsonl" >/dev/null || true
+          for f in state.json trader-population.json evidence-epoch; do
+            if sudo test -f "$state_root/$f"; then sudo cp -f "$state_root/$f" "$AUDIT_ROOT/evidence/lane3/$f"; fi
+          done
+          curl -fsS --max-time 90 http://127.0.0.1:8787/health | sudo tee "$AUDIT_ROOT/evidence/lane3/health.json" >/dev/null
+          sudo sh -c "systemctl status hyperliquid-invo-notification-executor.service --no-pager -l > '$AUDIT_ROOT/evidence/lane3/service-status.txt' 2>&1"
+          sudo sh -c "journalctl -u hyperliquid-invo-notification-executor.service --since '2026-09-15 19:30:00 UTC' --no-pager -l | tail -n 1000 > '$AUDIT_ROOT/evidence/lane3/service-journal.txt'"
+
+          sudo env OUT="$AUDIT_ROOT/evidence/market" python3 - <<'PY'
+          import os, shutil
+          from pathlib import Path
+          root = Path('/mnt/HC_Volume_106576526/hyperliquid/market-shadow')
+          out = Path(os.environ['OUT'])
+          rows=[]
+          if root.is_dir():
+              for p in root.rglob('*'):
+                  try:
+                      if p.is_file() and not p.is_symlink() and p.stat().st_size <= 4*1024*1024:
+                          rows.append((p.stat().st_mtime_ns,p))
+                  except FileNotFoundError:
+                      pass
+          selected=sorted(rows, reverse=True)[:8]
+          for _,p in selected:
+              dst=out/p.relative_to(root)
+              dst.parent.mkdir(parents=True,exist_ok=True)
+              shutil.copy2(p,dst)
+          print('MARKET_SAMPLE_FILES='+str(len(selected)))
+          PY
+
+          printf '%s\n' "$LANE3_POSTFIX_BASELINE_SHA" | sudo tee "$AUDIT_ROOT/evidence/lane3/postfix-baseline-sha.txt" >/dev/null
+          git rev-parse HEAD | sudo tee "$AUDIT_ROOT/evidence/lane3/audit-main-sha.txt" >/dev/null
+          sudo find "$AUDIT_ROOT/evidence" -type f -printf '%TY-%Tm-%TdT%TH:%TM:%TSZ %s %p\n' | sudo sort | sudo tee "$AUDIT_ROOT/evidence/MANIFEST.txt" >/dev/null
+          sudo chown -R "$CLAUDE_USER:$CLAUDE_USER" "$AUDIT_ROOT"
+          sudo chmod -R u=rwX,go= "$AUDIT_ROOT"
+          avail_kb="$(df -Pk / | awk 'NR==2 {print $4}')"
+          echo "ROOT_AVAILABLE_KB=$avail_kb"
+          test "$avail_kb" -ge 524288
+
+      - name: Verify Claude Opus authentication
+        shell: bash
+        run: |
+          set -euo pipefail
+          auth_out="$AUDIT_ROOT/auth-stdout.txt"
+          auth_err="$AUDIT_ROOT/auth-stderr.txt"
+          set +e
+          sudo -u "$CLAUDE_USER" env -i HOME="$CLAUDE_HOME" CLAUDE_CONFIG_DIR="$CLAUDE_HOME/.claude" XDG_CONFIG_HOME="$CLAUDE_HOME/.config" XDG_CACHE_HOME="$CLAUDE_HOME/.cache" PATH=/usr/local/bin:/usr/bin:/bin /usr/bin/claude -p --model opus --max-turns 1 --output-format text 'Reply exactly OPUS_AUTH_OK' > "$auth_out" 2> "$auth_err"
+          auth_rc=$?
+          set -e
+          echo "OPUS_AUTH_EXIT_CODE=$auth_rc"
+          test -s "$auth_out" && cat "$auth_out" || true
+          test -s "$auth_err" && cat "$auth_err" || true
+          test "$auth_rc" -eq 0
+          grep -Fx OPUS_AUTH_OK "$auth_out"
+
+      - name: Run independent Opus post-fix Lane 3 re-check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          prompt="$AUDIT_ROOT/prompt.txt"
+          result="$AUDIT_ROOT/result.txt"
+          stderr_file="$AUDIT_ROOT/claude-stderr.txt"
+          cat > /tmp/p0-350-opus-prompt <<'PROMPT'
+          You are Claude Opus acting as the independent senior quant/reliability reviewer for Hyperliquid Lane 3 repair issue #350, following your earlier #341 INTERIM_INTEGRITY_PASS with HIGH/MEDIUM defects. Audit ONLY the repaired Lane 3 code and current runtime evidence in repo/ and evidence/. Read-only. Do not modify code or state. Do not inspect or discuss Polymarket. Real trading must remain OFF.
+
+          The current post-fix baseline is 748a05a86ec03f93ea6c31f32ca0c64b17ce0dc7. This baseline includes the MTM concurrency/book-receipt fix, deterministic funding-boundary alignment with fail-closed duplicate/ambiguity handling, legacy unresolved-source-close recovery, and deploy readiness/health separation. The workflow has already proved no Lane 3 executor/deploy files changed after that baseline.
+
+          Re-check your prior findings specifically and independently:
+          1) HIGH-1 MTM: confirm portfolio marks are now actually usable at runtime, concurrency is bounded, book receipt age is not inflated by unrelated metadata latency, and no future/stale book can pass.
+          2) HIGH-2 funding: confirm Hyperliquid delayed funding timestamps align to exactly one captured nominal boundary within a tight deterministic tolerance; missing/out-of-tolerance, duplicate, or ambiguous rows still fail closed; inspect current runtime marks/closed economics for non-null funding across boundary-crossing positions.
+          3) MEDIUM orphan: confirm legacy unresolved source-close exposure is deterministically retried/reconciled, current unresolvedSourceCloseExposureCount is zero if evidence says so, and unresolved exposure cannot leak into profitability aggregates.
+          4) Verify lifecycle/accounting identities, dedupe/idempotency, partial-close behavior, evidence epoch continuity, version/SHA provenance, and that REAL_TRADING_ENABLED=NO / health live=false.
+          5) Recompute a representative sample of current marked net PnL/funding/cost arithmetic from evidence. Distinguish integrity from profitability. This is NOT the final 7-day profitability/live-readiness decision.
+
+          FIRST LINE must be exactly one of:
+          POSTFIX_INTEGRITY_PASS
+          FAIL
+          INSUFFICIENT_EVIDENCE
+
+          Then state: evidence sampled; independent recomputations; each prior defect PASS/FAIL; any new defects with severity; whether the existing evidence epoch remains clean; whether collection can continue without reset; exact repair required if not; and explicit confirmation REAL_TRADING_ENABLED=NO. A PASS means the repaired collection/accounting path is trustworthy to continue collecting, not that profitability/live-readiness is proven.
+          PROMPT
+          sudo mv /tmp/p0-350-opus-prompt "$prompt"
+          sudo chown "$CLAUDE_USER:$CLAUDE_USER" "$prompt"
+          cd "$AUDIT_ROOT"
+          set +e
+          sudo -u "$CLAUDE_USER" env -i HOME="$CLAUDE_HOME" CLAUDE_CONFIG_DIR="$CLAUDE_HOME/.claude" XDG_CONFIG_HOME="$CLAUDE_HOME/.config" XDG_CACHE_HOME="$CLAUDE_HOME/.cache" PATH=/usr/local/bin:/usr/bin:/bin /usr/bin/claude -p --model opus --max-turns 90 --output-format text --permission-mode dontAsk --allowedTools Read Glob Grep Bash < "$prompt" > "$result" 2> "$stderr_file"
+          claude_rc=$?
+          set -e
+          echo "CLAUDE_EXIT_CODE=$claude_rc"
+          test -s "$stderr_file" && cat "$stderr_file" || true
+          test -s "$result" || exit "${claude_rc:-1}"
+          cat "$result"
+          first="$(head -n1 "$result" | tr -d '\r')"
+          case "$first" in POSTFIX_INTEGRITY_PASS|FAIL|INSUFFICIENT_EVIDENCE) ;; *) exit 3;; esac
+          gh issue comment 350 --repo aliezzat4321/hyperliquid-copy-engine --body-file "$result"
+          { echo '## Lane 3 post-fix Opus re-check (#350)'; echo; cat "$result"; } > "$AUDIT_ROOT/issue-341-comment.md"
+          gh issue comment 341 --repo aliezzat4321/hyperliquid-copy-engine --body-file "$AUDIT_ROOT/issue-341-comment.md"
+          echo OPUS_LANE3_POSTFIX_RECHECK_POSTED=YES
+
+      - name: Remove disposable audit copy
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf -- "$AUDIT_ROOT"
+          df -h /
