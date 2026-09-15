@@ -44,6 +44,32 @@ test('asset book receipt timestamp is captured at l2 completion before metadata 
   }
 });
 
+test('asset book fails closed when Hyperliquid returns a different coin', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url, init) => {
+    const body = JSON.parse(String(init?.body ?? '{}'));
+    if (body.type === 'l2Book') {
+      return jsonResponse({
+        coin: 'ETH', time: Date.now(),
+        levels: [[{ px: '100', sz: '2' }], [{ px: '101', sz: '2' }]],
+      });
+    }
+    if (body.type === 'meta') {
+      return jsonResponse({ universe: [{ name: 'BTC', szDecimals: 3, maxLeverage: 50 }] });
+    }
+    throw new Error(`unexpected info request: ${body.type}`);
+  }) as typeof fetch;
+
+  try {
+    await assert.rejects(
+      () => fetchAssetBook('BTC'),
+      /l2Book coin mismatch: requested BTC, received ETH/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('funding failures expose exact query boundaries and raw-enough returned rows while failing closed', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (_url, init) => {

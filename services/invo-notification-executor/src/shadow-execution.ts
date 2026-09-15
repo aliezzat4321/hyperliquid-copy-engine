@@ -151,7 +151,14 @@ export function roundSizeDown(rawSize: number, szDecimals: number): number {
     throw new Error(`Invalid szDecimals: ${szDecimals}`);
   }
   const factor = 10 ** szDecimals;
-  return Math.floor((rawSize + Number.EPSILON) * factor) / factor;
+  const scaled = rawSize * factor;
+  // Correct only multiplication error within a few relative ULPs of an exact lot.
+  // The cap keeps a genuinely sub-lot request from ever being rounded up.
+  const relativeUlpAllowance = Math.min(
+    0.25,
+    Number.EPSILON * Math.max(1, Math.abs(scaled)) * 4,
+  );
+  return Math.floor(scaled + relativeUlpAllowance) / factor;
 }
 
 export function simulateL2Fill(
@@ -231,7 +238,10 @@ export function simulateL2Fill(
   const adversePx = action === 'buy' ? avgPx - midPx : midPx - avgPx;
   const slippageBps = Math.max(0, (adversePx / midPx) * 10_000);
   const slippageUsd = Math.max(0, adversePx * filledSize);
-  const unfilledSize = Math.max(0, requestedRoundedSize - filledSize);
+  // Preserve the caller's true exposure, including any residue below one lot. The
+  // rounded quantity is the order-sized portion, not the accounting exposure.
+  const unfilledSize = Math.max(0, rawSize - filledSize);
+  const residualTolerance = Number.EPSILON * Math.max(1, rawSize, filledSize) * 8;
 
   return {
     ok: true,
@@ -240,7 +250,7 @@ export function simulateL2Fill(
       requestedRoundedSize,
       filledSize,
       unfilledSize,
-      partial: unfilledSize > Math.max(1e-12, requestedRoundedSize * 1e-12),
+      partial: unfilledSize > residualTolerance,
       avgPx,
       notionalUsd,
       midPx,
