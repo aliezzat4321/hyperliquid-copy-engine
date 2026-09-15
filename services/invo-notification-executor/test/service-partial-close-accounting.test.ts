@@ -14,7 +14,7 @@ test('production partial-close path allocates costs proportionally and resets fu
   assert.match(closeBranch, /entryFeeUsd: Number\(managed\.entryFeeUsd \?\? 0\) \* fraction/);
   assert.match(closeBranch, /entryNotionalUsd: Number\(managed\.entryNotionalExecutedUsd\) \* fraction/);
 
-  assert.match(closeBranch, /const remainingSize = Math\.max\(0, size - fill\.filledSize\)/);
+  assert.match(closeBranch, /const remainingSize = fill\.unfilledSize/);
   assert.match(closeBranch, /const remainingFraction = remainingSize \/ size/);
   assert.match(closeBranch, /entryFeeUsd: Number\(managed\.entryFeeUsd \?\? 0\) \* remainingFraction/);
   assert.match(closeBranch, /entrySlippageUsd: Number\(managed\.entrySlippageUsd \?\? 0\) \* remainingFraction/);
@@ -49,7 +49,58 @@ test('transient source-close book failures remain unseen and retry with bounded 
   assert.match(serviceSource, /SOURCE_CLOSE_RETRY_MAX_MS = 30_000/);
   assert.match(serviceSource, /Math\.min\(SOURCE_CLOSE_RETRY_MAX_MS/);
   assert.match(closeBranch, /pendingSourceClose: signal/);
-  assert.match(closeBranch, /if \(remainingSize <= 1e-12\) state\.markSeen\(signal\.key\)/);
+  assert.doesNotMatch(closeBranch, /allowBelowMinNotional/);
+  assert.match(closeBranch, /INCOMPLETE_DUST_RECONCILIATION/);
+  assert.match(closeBranch, /shadow_close_dust_reconciled/);
+  assert.match(closeBranch, /if \(!fill\.partial \|\| residualDustReason\) state\.markSeen\(signal\.key\)/);
+  assert.match(closeBranch, /state\.clearManagedBySource\(signal\.sourceBaseId\)/);
   assert.match(closeBranch, /sourceCloseNextRetryAtMs/);
   assert.match(serviceSource, /source_close_reconciliation/);
+});
+
+test('below-minimum source close is quarantined without fabricated execution or orphan state', () => {
+  const serviceSource = readFileSync(new URL('../../src/service.ts', import.meta.url), 'utf8');
+  const dustStart = serviceSource.indexOf('const dustReason =');
+  const retryStart = serviceSource.indexOf('const retryable = true;', dustStart);
+  assert.ok(dustStart >= 0 && retryStart > dustStart, 'dust branch must precede ordinary retry');
+  const dustBranch = serviceSource.slice(dustStart, retryStart);
+
+  assert.match(dustBranch, /lot_rounded_to_zero/);
+  assert.match(dustBranch, /below_min_notional/);
+  assert.match(dustBranch, /result\.detail\?\.requestedNotionalUsd != null/);
+  assert.match(dustBranch, /state\.clearManagedBySource\(signal\.sourceBaseId\)/);
+  assert.match(dustBranch, /state\.markSeen\(signal\.key\)/);
+  assert.match(dustBranch, /type: 'shadow_close_dust_reconciled'/);
+  assert.match(dustBranch, /economicsCompleteness: 'INCOMPLETE_DUST_RECONCILIATION'/);
+  assert.match(dustBranch, /executionSimulated: false/);
+  assert.match(dustBranch, /grossPnlUsd: null, grossReturnBps: null/);
+  assert.match(dustBranch, /totalExplicitCostUsd: null, netPnlUsd: null, netReturnBps: null/);
+  assert.doesNotMatch(dustBranch, /simulateL2Fill\(/);
+  assert.doesNotMatch(dustBranch, /setManaged\(/);
+});
+
+test('post-partial non-executable residue is quarantined while executable residue keeps retrying', () => {
+  const serviceSource = readFileSync(new URL('../../src/service.ts', import.meta.url), 'utf8');
+  const residualStart = serviceSource.indexOf('const residualDustReason =');
+  const liveCloseStart = serviceSource.indexOf('const sameCoinManaged =', residualStart);
+  assert.ok(residualStart >= 0 && liveCloseStart > residualStart, 'residual dust branch must exist');
+  const residualBranch = serviceSource.slice(residualStart, liveCloseStart);
+
+  assert.match(residualBranch, /if \(fill\.partial && !residualDustReason\) \{[\s\S]*state\.setManaged\(/);
+  assert.match(residualBranch, /else \{[\s\S]*state\.clearManagedBySource\(signal\.sourceBaseId\)/);
+  assert.match(residualBranch, /if \(!fill\.partial \|\| residualDustReason\) state\.markSeen\(signal\.key\)/);
+  assert.match(residualBranch, /method: 'post_partial_close_residual_dust_quarantine'/);
+  assert.match(residualBranch, /dustReconciledSize: remainingSize/);
+  assert.match(residualBranch, /executableClosedSize: fill\.filledSize/);
+  assert.match(residualBranch, /economicsCompleteness: 'INCOMPLETE_DUST_RECONCILIATION'/);
+});
+
+test('health and startup evidence expose the deployment-backed book-age changeover', () => {
+  const serviceSource = readFileSync(new URL('../../src/service.ts', import.meta.url), 'utf8');
+  assert.match(serviceSource, /priorMaxBookAgeMs: 750/);
+  assert.match(serviceSource, /currentMaxBookAgeMs: 1000/);
+  assert.match(serviceSource, /deployRun: '34992024173'/);
+  assert.match(serviceSource, /effectiveUtc: '2026-09-15T15:59:18Z'/);
+  assert.match(serviceSource, /commit: '90ee58d679a093c86543e09a6afc6e3238bc3a74'/);
+  assert.equal((serviceSource.match(/bookAgePolicyChangeover: BOOK_AGE_POLICY_CHANGEOVER/g) ?? []).length, 2);
 });

@@ -80,13 +80,35 @@ test('rejects stale, excessive-spread, zero-depth and below-min-notional books e
 
   const tiny = simulateL2Fill(book(), 'buy', 0.01, 3, policy);
   assert.deepEqual(tiny.ok ? null : tiny.reason, 'below_min_notional');
+  assert.ok(!tiny.ok && tiny.detail?.requestedNotionalUsd != null);
+
+  const shallow = normalizeL2Book(
+    { coin: 'X', time: 10_000, levels: [[{ px: 99.9, sz: 0.01 }], [{ px: 100.1, sz: 0.01 }]] },
+    10_100,
+    10_100,
+  );
+  const shallowResult = simulateL2Fill(shallow, 'buy', 1, 3, policy);
+  assert.deepEqual(shallowResult.ok ? null : shallowResult.reason, 'below_min_notional');
+  assert.ok(!shallowResult.ok && shallowResult.detail?.filledNotionalUsd != null);
+  assert.ok(!shallowResult.ok && shallowResult.detail?.requestedNotionalUsd == null);
 });
 
 test('enforces Hyperliquid size decimals by rounding down', () => {
   assert.equal(roundSizeDown(1.23456, 3), 1.234);
+  assert.equal(roundSizeDown(2.01, 2), 2.01);
+  assert.equal(roundSizeDown(2.05, 2), 2.05);
   assert.equal(roundSizeDown(0.0009, 3), 0);
   const result = simulateL2Fill(book(), 'buy', 0.0009, 3, policy);
   assert.deepEqual(result.ok ? null : result.reason, 'lot_rounded_to_zero');
+});
+
+test('reports sub-lot residual against raw requested exposure', () => {
+  const result = simulateL2Fill(book(), 'buy', 2.0009, 3, policy);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.fill.requestedRoundedSize, 2);
+  assert.ok(Math.abs(result.fill.unfilledSize - 0.0009) < 1e-12);
+  assert.equal(result.fill.partial, true);
 });
 
 test('computes funding from position size times prospective oracle price times funding rate', () => {

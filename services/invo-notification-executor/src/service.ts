@@ -22,6 +22,7 @@ import {
   closeAction,
   computePositionEconomics,
   openAction,
+  roundSizeDown,
   simulateL2Fill,
   type ShadowExecutionPolicy,
 } from './shadow-execution.js';
@@ -128,6 +129,13 @@ const FUNDING_INTERVAL_MS = 60 * 60 * 1000;
 const SOURCE_CLOSE_RETRY_BASE_MS = 250;
 const SOURCE_CLOSE_RETRY_MAX_MS = 30_000;
 const HEALTH_MTM_CONCURRENCY = 4;
+const BOOK_AGE_POLICY_CHANGEOVER = {
+  priorMaxBookAgeMs: 750,
+  currentMaxBookAgeMs: 1000,
+  deployRun: '34992024173',
+  effectiveUtc: '2026-09-15T15:59:18Z',
+  commit: '90ee58d679a093c86543e09a6afc6e3238bc3a74',
+};
 
 function closeRetryDelayMs(attempt: number) {
   return Math.min(SOURCE_CLOSE_RETRY_MAX_MS, SOURCE_CLOSE_RETRY_BASE_MS * (2 ** Math.min(7, Math.max(0, attempt - 1))));
@@ -178,8 +186,7 @@ function chaseBps(signal: InvoSignal, mid: number): number | null {
 }
 
 function roundSize(raw: number, decimals: number): string {
-  const factor = 10 ** decimals;
-  const rounded = Math.floor(raw * factor) / factor;
+  const rounded = roundSizeDown(raw, decimals);
   if (!(rounded > 0)) throw new Error(`Rounded size is zero: ${raw} @ ${decimals} decimals`);
   return rounded.toFixed(decimals).replace(/\.?0+$/, '');
 }
@@ -539,6 +546,48 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
           shadowPolicy,
         );
         if (!result.ok) {
+          // A filled-notional rejection means current depth is insufficient and must
+          // retry. Only the requested-position rejection proves the exposure itself is
+          // below the minimum and can be quarantined as dust.
+          const dustReason = result.reason === 'lot_rounded_to_zero'
+            || (result.reason === 'below_min_notional' && result.detail?.requestedNotionalUsd != null)
+            ? result.reason
+            : null;
+          if (dustReason) {
+            const bestBid = assetBook.book?.bids[0]?.px;
+            const bestAsk = assetBook.book?.asks[0]?.px;
+            const estimatedMidPx = bestBid && bestAsk ? (bestBid + bestAsk) / 2 : null;
+            const estimatedDustNotionalUsd = estimatedMidPx == null ? null : size * estimatedMidPx;
+            state.clearManagedBySource(signal.sourceBaseId);
+            state.markSeen(signal.key);
+            log({
+              type: 'shadow_close_dust_reconciled',
+              economicsCompleteness: 'INCOMPLETE_DUST_RECONCILIATION',
+              dustReconciledSize: size,
+              estimatedDustNotionalUsd,
+              reason: dustReason,
+              provenance: {
+                method: 'source_close_non_executable_dust_quarantine',
+                executionSimulated: false,
+                sourceSignalKey: signal.key,
+                sourceBaseId: managed.sourceBaseId,
+                coin: signal.coin,
+                szDecimals: assetBook.asset.szDecimals,
+                minNotionalUsd: shadowPolicy.minNotionalUsd,
+                bookTimeMs: assetBook.book?.bookTimeMs ?? null,
+                bookRequestedAtMs: assetBook.requestedAtMs,
+                bookReceivedAtMs: assetBook.receivedAtMs,
+                executionEvidenceVersion: managed.executionEvidenceVersion ?? null,
+                costModelVersion: managed.costModelVersion ?? null,
+              },
+              grossPnlUsd: null, grossReturnBps: null,
+              entryFeeUsd: null, exitFeeUsd: null, fundingUsd: null,
+              totalExplicitCostUsd: null, netPnlUsd: null, netReturnBps: null,
+              managed, signal, wakeSource, decisionAtMs,
+              ...closeFreshness(signal, receivedAtMs),
+            });
+            return;
+          }
           const retryable = true;
           const attempt = (managed.sourceCloseRetryAttempts ?? 0) + 1;
           state.setManaged({
@@ -606,8 +655,16 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
           });
         }
 
-        const remainingSize = Math.max(0, size - fill.filledSize);
-        if (remainingSize > 1e-12) {
+        const remainingSize = fill.unfilledSize;
+        const roundedResidualSize = roundSizeDown(remainingSize, assetBook.asset.szDecimals);
+        const residualDustReason = fill.partial
+          ? !(roundedResidualSize > 0)
+            ? 'lot_rounded_to_zero'
+            : roundedResidualSize * fill.midPx < shadowPolicy.minNotionalUsd
+              ? 'below_min_notional'
+              : null
+          : null;
+        if (fill.partial && !residualDustReason) {
           const remainingFraction = remainingSize / size;
           state.setManaged({
             ...managed,
@@ -635,7 +692,7 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
         } else {
           state.clearManagedBySource(signal.sourceBaseId);
         }
-        if (remainingSize <= 1e-12) state.markSeen(signal.key);
+        if (!fill.partial || residualDustReason) state.markSeen(signal.key);
         log({
           type: remainingSize > 1e-12 ? 'shadow_partially_closed' : 'shadow_closed',
           economicsCompleteness: legacy
@@ -671,6 +728,35 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
           marketDataLatencyMs: fill.receivedAtMs - fill.requestedAtMs,
           ...closeFreshness(signal, receivedAtMs),
         });
+        if (residualDustReason) {
+          log({
+            type: 'shadow_close_dust_reconciled',
+            economicsCompleteness: 'INCOMPLETE_DUST_RECONCILIATION',
+            dustReconciledSize: remainingSize,
+            estimatedDustNotionalUsd: remainingSize * fill.midPx,
+            reason: residualDustReason,
+            provenance: {
+              method: 'post_partial_close_residual_dust_quarantine',
+              executionSimulated: false,
+              sourceSignalKey: signal.key,
+              sourceBaseId: managed.sourceBaseId,
+              coin: signal.coin,
+              szDecimals: assetBook.asset.szDecimals,
+              minNotionalUsd: shadowPolicy.minNotionalUsd,
+              executableClosedSize: fill.filledSize,
+              bookTimeMs: fill.bookTimeMs,
+              bookRequestedAtMs: fill.requestedAtMs,
+              bookReceivedAtMs: fill.receivedAtMs,
+              executionEvidenceVersion: managed.executionEvidenceVersion ?? null,
+              costModelVersion: managed.costModelVersion ?? null,
+            },
+            grossPnlUsd: null, grossReturnBps: null,
+            entryFeeUsd: null, exitFeeUsd: null, fundingUsd: null,
+            totalExplicitCostUsd: null, netPnlUsd: null, netReturnBps: null,
+            signal, wakeSource, decisionAtMs,
+            ...closeFreshness(signal, receivedAtMs),
+          });
+        }
         return;
       }
 
@@ -1222,6 +1308,7 @@ function startServer() {
         healthMtmConcurrency: HEALTH_MTM_CONCURRENCY,
         closedOnlyProfitabilityForbidden: true,
         shadowExecutionPolicy: shadowPolicy,
+        bookAgePolicyChangeover: BOOK_AGE_POLICY_CHANGEOVER,
         executionEvidenceVersion: EXECUTION_EVIDENCE_VERSION,
         costModelVersion: COST_MODEL_VERSION,
         traderFunnel: population.funnel,
@@ -1306,6 +1393,7 @@ async function main() {
     feedLimit: cfg.feedLimit,
     feedMaxPages: cfg.feedMaxPages,
     shadowExecutionPolicy: shadowPolicy,
+    bookAgePolicyChangeover: BOOK_AGE_POLICY_CHANGEOVER,
     fundingOracleMaxDelayMs: cfg.shadowFundingOracleMaxDelayMs,
     executionEvidenceVersion: EXECUTION_EVIDENCE_VERSION,
     costModelVersion: COST_MODEL_VERSION,

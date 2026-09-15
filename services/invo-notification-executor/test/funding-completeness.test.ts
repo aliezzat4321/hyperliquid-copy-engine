@@ -70,6 +70,17 @@ test('duplicate funding rows that collapse onto one boundary fail closed', () =>
   );
 });
 
+test('funding row equidistant from two captured boundaries fails as ambiguous', () => {
+  assert.throws(
+    () => alignFundingHistoryToCapturedBoundaries(
+      [{ timeMs: 2_000, rate: 0.001 }],
+      [1_000, 3_000],
+      1_000,
+    ),
+    /Ambiguous funding-history boundary alignment for row 2000/,
+  );
+});
+
 test('funding row outside tolerance is not silently snapped to a captured boundary', () => {
   const history = alignFundingHistoryToCapturedBoundaries(
     [{ timeMs: 3_602_000, rate: 0.001 }],
