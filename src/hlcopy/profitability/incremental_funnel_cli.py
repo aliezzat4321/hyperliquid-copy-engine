@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import json
 import os
@@ -11,11 +12,26 @@ from decimal import Decimal
 from pathlib import Path
 
 from hlcopy.profitability.causal_book import CausalParquetL2BookProvider
+from hlcopy.profitability.lane1_funding import (
+    FundingEvidenceError,
+    completed_episode_funding_boundaries,
+    funding_cashflows,
+    resolve_funding_settlements,
+    validate_completed_episode_funding_coverage,
+)
+from hlcopy.profitability.lane1_funding_source import (
+    fetch_official_funding_history,
+    funding_ranges_for_event_groups,
+    required_history_rows,
+)
 from hlcopy.profitability.lane1_handoff import (
     LANE1_SELECTION_CONTRACT_V1,
     build_challenger_queue,
 )
-from hlcopy.profitability.lane1_metrics import completed_round_trip_metrics
+from hlcopy.profitability.lane1_metrics import (
+    LANE1_RETURN_BASIS_FUNDING_V2,
+    completed_round_trip_metrics,
+)
 from hlcopy.profitability.portfolio_position_copy import simulate_copy_with_portfolio_capital
 from hlcopy.profitability.position_copy import CopyFillEvent, load_wide_events
 from hlcopy.profitability.position_live_cli import NOTIONALS, SCENARIOS, _summary
@@ -29,7 +45,10 @@ DEFAULT_UNIVERSE_STATE = Path(
     "/mnt/HC_Volume_106576526/hyperliquid/discovery/universe_state.json"
 )
 DEFAULT_PROSPECTIVE_REPORT = Path("/root/hyperliquid-audit/prospective-champions/report.json")
-RETURN_BASIS = "COMPLETED_ROUND_TRIP_NET_RETURN_ON_EPISODE_PEAK_GROSS_V1"
+RETURN_BASIS = LANE1_RETURN_BASIS_FUNDING_V2
+FUNDING_COMPLETE = "COMPLETE"
+FUNDING_NOT_REQUIRED = "NOT_REQUIRED"
+FUNDING_UNAVAILABLE = "UNAVAILABLE"
 
 
 def _write_jsonl_atomic(path: Path, rows: list[dict[str, object]]) -> None:
@@ -151,6 +170,8 @@ def _simulate(
     taker_fee_bps: Decimal,
     max_slippage_bps: Decimal,
     max_book_forward_ms: int,
+    funding_history_rows: list[dict[str, object]],
+    funding_fetch_error: str | None,
 ) -> tuple[dict[str, object], list[dict[str, object]]]:
     provider = CausalParquetL2BookProvider(market_dir)
     provider.prime(events, (scenario,))
@@ -164,13 +185,54 @@ def _simulate(
         max_book_forward_ms=max(1, max_book_forward_ms),
     )
     summary = _summary(sim)
-    metrics = completed_round_trip_metrics(sim)
+    trade_only_metrics = completed_round_trip_metrics(sim)
+    required_boundaries = completed_episode_funding_boundaries(sim)
+    funding_state = FUNDING_NOT_REQUIRED
+    funding_error: str | None = None
+    settlements = ()
+    cashflows = ()
+    metrics = trade_only_metrics
+
+    if required_boundaries:
+        if funding_fetch_error is not None:
+            funding_state = FUNDING_UNAVAILABLE
+            funding_error = funding_fetch_error
+        else:
+            try:
+                rows = required_history_rows(funding_history_rows, required_boundaries)
+                coin = events[0].coin if events else ""
+                settlements = resolve_funding_settlements(market_dir, coin, rows)
+                validate_completed_episode_funding_coverage(sim, settlements)
+                cashflows = funding_cashflows(sim, settlements)
+                metrics = completed_round_trip_metrics(sim, funding_cashflows=cashflows)
+                funding_state = FUNDING_COMPLETE
+            except FundingEvidenceError as exc:
+                funding_state = FUNDING_UNAVAILABLE
+                funding_error = str(exc)
+
     summary["selection_return_bps"] = (
-        str(metrics.return_bps) if metrics.return_bps is not None else None
+        str(metrics.return_bps)
+        if funding_state != FUNDING_UNAVAILABLE and metrics.return_bps is not None
+        else None
     )
-    summary["completed_round_trips"] = metrics.completed_round_trips
-    summary["completed_round_trip_net_pnl_usd"] = str(metrics.completed_net_pnl_usd)
-    summary["completed_round_trip_peak_gross_usd"] = str(metrics.completed_peak_gross_usd)
+    summary["completed_round_trips"] = trade_only_metrics.completed_round_trips
+    summary["completed_round_trip_net_pnl_usd"] = (
+        str(metrics.completed_net_pnl_usd) if funding_state != FUNDING_UNAVAILABLE else None
+    )
+    summary["trade_only_completed_round_trip_net_pnl_usd"] = str(
+        trade_only_metrics.completed_net_pnl_usd
+    )
+    summary["completed_round_trip_peak_gross_usd"] = str(
+        trade_only_metrics.completed_peak_gross_usd
+    )
+    summary["funding_net_pnl_usd"] = (
+        str(metrics.funding_net_pnl_usd) if funding_state != FUNDING_UNAVAILABLE else None
+    )
+    summary["funding_evidence_state"] = funding_state
+    summary["funding_evidence_error"] = funding_error
+    summary["funding_required_settlements"] = len(required_boundaries)
+    summary["funding_settlement_count"] = len(settlements)
+    summary["funding_cashflow_count"] = len(cashflows)
     summary["selection_return_basis"] = RETURN_BASIS
     summary["legacy_cumulative_return_bps"] = summary.get("net_return_bps")
     slices = [
@@ -178,6 +240,8 @@ def _simulate(
         | {
             "scenario": scenario.name,
             "notional_usd": str(notional),
+            "selection_return_basis": RETURN_BASIS,
+            "funding_evidence_state": funding_state,
         }
         for item in sim.realized_slices
     ]
@@ -270,6 +334,15 @@ def main() -> None:
     if args.screen_limit > 0:
         cohort_windows = cohort_windows[: args.screen_limit]
 
+    funding_event_groups = [
+        event_group
+        for _wallet, _coin, screen_events, confirm_events, _window_id_value in cohort_windows
+        for event_group in (screen_events, confirm_events)
+    ]
+    official_funding, funding_fetch_errors = asyncio.run(
+        fetch_official_funding_history(funding_ranges_for_event_groups(funding_event_groups))
+    )
+
     screen_path = args.output_dir / "screening.jsonl"
     confirm_path = args.output_dir / "confirmation.jsonl"
     slice_path = args.output_dir / "realized_slices.jsonl"
@@ -280,6 +353,7 @@ def main() -> None:
         row
         for row in _load_jsonl(screen_path)
         if str(row.get("window_id", "")) in active_windows
+        and row.get("selection_return_basis") == RETURN_BASIS
     ]
     screened_keys = {
         _screen_key(
@@ -311,6 +385,8 @@ def main() -> None:
             taker_fee_bps=args.taker_fee_bps,
             max_slippage_bps=args.max_slippage_bps,
             max_book_forward_ms=args.max_book_forward_ms,
+            funding_history_rows=official_funding.get(coin, []),
+            funding_fetch_error=funding_fetch_errors.get(coin),
         )
         row = summary | {
             "coin": coin,
@@ -326,6 +402,7 @@ def main() -> None:
         print(
             f"screen {index}/{len(cohort_windows)} wallet={wallet[:14]} coin={coin} "
             f"screen_events={len(screen_events)} held_out={len(confirm_events)} "
+            f"funding={row['funding_evidence_state']} "
             f"round_trips={row['completed_round_trips']} "
             f"selection_return_bps={row['selection_return_bps']}",
             flush=True,
@@ -335,7 +412,8 @@ def main() -> None:
     positive = [
         row
         for row in screened
-        if int(row.get("completed_round_trips") or 0) >= min_completed_round_trips
+        if row.get("funding_evidence_state") != FUNDING_UNAVAILABLE
+        and int(row.get("completed_round_trips") or 0) >= min_completed_round_trips
         and row.get("selection_return_bps") is not None
         and D(str(row["selection_return_bps"])) > ZERO
     ]
@@ -351,6 +429,7 @@ def main() -> None:
         row
         for row in _load_jsonl(confirm_path)
         if str(row.get("window_id", "")) in finalist_windows
+        and row.get("selection_return_basis") == RETURN_BASIS
     ]
     confirmed_keys = {
         _confirmation_key(
@@ -367,6 +446,7 @@ def main() -> None:
         row
         for row in _load_jsonl(slice_path)
         if str(row.get("window_id", "")) in finalist_windows
+        and row.get("selection_return_basis") == RETURN_BASIS
     ]
 
     print(
@@ -395,6 +475,8 @@ def main() -> None:
                     taker_fee_bps=args.taker_fee_bps,
                     max_slippage_bps=args.max_slippage_bps,
                     max_book_forward_ms=args.max_book_forward_ms,
+                    funding_history_rows=official_funding.get(coin, []),
+                    funding_fetch_error=funding_fetch_errors.get(coin),
                 )
                 row = summary | {
                     "coin": coin,
@@ -415,7 +497,8 @@ def main() -> None:
                 confirmed_keys.add(key)
                 print(
                     f"confirm wallet={wallet[:14]} coin={coin} scenario={scenario.name} "
-                    f"notional={notional} round_trips={row['completed_round_trips']} "
+                    f"notional={notional} funding={row['funding_evidence_state']} "
+                    f"round_trips={row['completed_round_trips']} "
                     f"selection_return_bps={row['selection_return_bps']}",
                     flush=True,
                 )
@@ -442,6 +525,11 @@ def main() -> None:
             by_notional[str(row["notional_usd"])].append(row)
         for notional, scenario_rows in by_notional.items():
             if len({str(row["scenario"]) for row in scenario_rows}) != len(SCENARIOS):
+                continue
+            if any(
+                row.get("funding_evidence_state") == FUNDING_UNAVAILABLE
+                for row in scenario_rows
+            ):
                 continue
             returns = [
                 D(str(row["selection_return_bps"]))
@@ -478,11 +566,18 @@ def main() -> None:
     robust_cohorts = {
         _cohort_key(str(row["wallet_address"]), str(row["coin"])) for row in robust
     }
+    screen_funding_unavailable = sum(
+        1 for row in screened if row.get("funding_evidence_state") == FUNDING_UNAVAILABLE
+    )
+    confirmation_funding_unavailable = sum(
+        1 for row in confirmed if row.get("funding_evidence_state") == FUNDING_UNAVAILABLE
+    )
     report: dict[str, object] = {
-        "mode": "INCREMENTAL_PROFITABILITY_FUNNEL_V3_DISJOINT_COMPLETED_ROUND_TRIPS",
+        "mode": "INCREMENTAL_PROFITABILITY_FUNNEL_V4_DISJOINT_FUNDING_ADJUSTED",
         "real_trading": False,
         "return_basis": RETURN_BASIS,
-        "selection_evidence_unit": "COMPLETED_FOLLOWER_ROUND_TRIP",
+        "selection_evidence_unit": "COMPLETED_FOLLOWER_ROUND_TRIP_AFTER_FUNDING",
+        "funding_fetch_errors": funding_fetch_errors,
         "wide_event_count": len(events),
         "eligible_disjoint_cohort_count": len(cohort_windows),
         "screened_cohort_count": len(screened),
@@ -498,6 +593,8 @@ def main() -> None:
             "min_completed_round_trips": min_completed_round_trips,
             "screen_and_confirmation_disjoint": True,
             "stale_window_rows_expired": True,
+            "stale_return_basis_rows_expired": True,
+            "funding_evidence_fail_closed": True,
         },
         "boundary_counts": {
             "fetched": int(universe_payload.get("screened_wallets", 0)),
@@ -509,7 +606,11 @@ def main() -> None:
         },
         "rejection_counts": {
             "insufficient_disjoint_events": len(grouped) - len(cohort_windows),
-            "screen_non_positive_or_too_few_actions": len(screened) - len(positive),
+            "screen_funding_evidence_unavailable": screen_funding_unavailable,
+            "screen_non_positive_or_too_few_round_trips": (
+                len(screened) - len(positive) - screen_funding_unavailable
+            ),
+            "confirmation_funding_evidence_unavailable_rows": confirmation_funding_unavailable,
             "confirmation_not_robust": len(finalists)
             - len(
                 {
