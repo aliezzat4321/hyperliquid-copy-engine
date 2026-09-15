@@ -26,15 +26,30 @@ test('production partial-close path allocates costs proportionally and resets fu
   assert.match(closeBranch, /unresolvedAfterSourceClose: true/);
 });
 
-test('health marks each paper position independently so one failure cannot fail the endpoint', () => {
+test('health bounds MTM concurrency and excludes unresolved source-close exposure', () => {
   const serviceSource = readFileSync(new URL('../../src/service.ts', import.meta.url), 'utf8');
   const healthStart = serviceSource.indexOf("req.method === 'GET' && req.url === '/health'");
   const tradersStart = serviceSource.indexOf("req.method === 'GET' && req.url === '/traders'", healthStart);
   assert.ok(healthStart >= 0 && tradersStart > healthStart, 'health handler must exist');
   const healthBranch = serviceSource.slice(healthStart, tradersStart);
 
-  assert.match(healthBranch, /Promise\.all\(paperPositions\.map\(async position => \{/);
+  assert.match(healthBranch, /mapConcurrent\(markablePaperPositions, HEALTH_MTM_CONCURRENCY, async position => \{/);
   assert.match(healthBranch, /try \{[\s\S]*return await markShadowPosition\(position, shadowPolicy\);[\s\S]*\} catch \(err\) \{/);
   assert.match(healthBranch, /shadowOpenExposureCount: paperPositions\.length/);
+  assert.match(healthBranch, /shadowMtmEligibleCount: markablePaperPositions\.length/);
+  assert.match(healthBranch, /unresolvedSourceCloseExposureCount: unresolvedPaperPositions\.length/);
   assert.match(healthBranch, /closedOnlyProfitabilityForbidden: true/);
+});
+
+test('transient source-close book failures remain unseen and retry with bounded backoff', () => {
+  const serviceSource = readFileSync(new URL('../../src/service.ts', import.meta.url), 'utf8');
+  const closeStart = serviceSource.indexOf("if (signal.action === 'close')");
+  const liveCloseStart = serviceSource.indexOf('const sameCoinManaged =', closeStart);
+  const closeBranch = serviceSource.slice(closeStart, liveCloseStart);
+  assert.match(serviceSource, /SOURCE_CLOSE_RETRY_MAX_MS = 30_000/);
+  assert.match(serviceSource, /Math\.min\(SOURCE_CLOSE_RETRY_MAX_MS/);
+  assert.match(closeBranch, /pendingSourceClose: signal/);
+  assert.match(closeBranch, /if \(remainingSize <= 1e-12\) state\.markSeen\(signal\.key\)/);
+  assert.match(closeBranch, /sourceCloseNextRetryAtMs/);
+  assert.match(serviceSource, /source_close_reconciliation/);
 });

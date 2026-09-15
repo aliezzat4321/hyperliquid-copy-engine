@@ -4,7 +4,12 @@
   "tape_root": "/mnt/HC_Volume_106576526/hyperliquid/market-shadow",
   "funding_cache_path": "/var/lib/hyperliquid-copy-engine/invo-notification-executor/funding_history.jsonl",
   "promotion_policy_path": "docs/ai-team/promotion_policy.json",
-  "max_book_age_ms": 5000,
+  "max_book_age_ms": 1000,
+  "max_book_age_policy": {
+    "source": "Opus transport-lag measurement 2026-09-15",
+    "transport_lag_ms": {"p50": 586, "p90": 753, "p99": 799},
+    "rule": "ceil p99 to 1000ms; no fill-yield optimization"
+  },
   "follower_submit_latency_ms": 0,
   "transport_latency_ms": 0,
   "max_slippage_bps": "40",
