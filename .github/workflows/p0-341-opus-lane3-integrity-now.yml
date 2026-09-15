@@ -115,6 +115,7 @@ jobs:
           set -euo pipefail
           prompt="$AUDIT_ROOT/prompt.txt"
           result="$AUDIT_ROOT/result.txt"
+          stderr_file="$AUDIT_ROOT/claude-stderr.txt"
           cat > /tmp/p0-341-opus-prompt <<'PROMPT'
           You are Claude Opus acting as the independent senior quant and reliability auditor for Hyperliquid Lane 3, issue #341 / repair parent #314. Audit ONLY Lane 3 using repo/ and evidence/ in the current directory. This is a read-only integrity/data-quality audit of the repaired production collection path. Do not modify code or production state. Do not inspect or discuss Polymarket. Real trading must remain OFF.
 
@@ -135,27 +136,44 @@ jobs:
           sudo chown "$CLAUDE_USER:$CLAUDE_USER" "$prompt"
           cd "$AUDIT_ROOT"
 
+          set +e
           sudo -u "$CLAUDE_USER" env -i \
             HOME="$CLAUDE_HOME" \
             CLAUDE_CONFIG_DIR="$CLAUDE_HOME/.claude" \
             XDG_CONFIG_HOME="$CLAUDE_HOME/.config" \
             XDG_CACHE_HOME="$CLAUDE_HOME/.cache" \
             PATH=/usr/local/bin:/usr/bin:/bin \
-            /usr/bin/claude -p --model opus --max-turns 45 --output-format text \
+            /usr/bin/claude -p --model opus --max-turns 90 --output-format text \
             --permission-mode dontAsk --allowedTools Read Glob Grep Bash \
-            < "$prompt" > "$result"
+            < "$prompt" > "$result" 2> "$stderr_file"
+          claude_rc=$?
+          set -e
 
-          test -s "$result"
+          echo "CLAUDE_EXIT_CODE=$claude_rc"
+          if test -s "$stderr_file"; then
+            echo '=== CLAUDE STDERR ==='
+            cat "$stderr_file"
+          fi
+          if ! test -s "$result"; then
+            echo 'CLAUDE_RESULT_EMPTY=YES'
+            exit "${claude_rc:-1}"
+          fi
+
+          echo '=== CLAUDE RESULT ==='
+          cat "$result"
           first="$(head -n1 "$result" | tr -d '\r')"
           case "$first" in
             INTERIM_INTEGRITY_PASS|FAIL|INSUFFICIENT_EVIDENCE) ;;
-            *) echo "Malformed Opus verdict: $first" >&2; cat "$result"; exit 3 ;;
+            *) echo "Malformed Opus verdict: $first" >&2; exit 3 ;;
           esac
-          cat "$result"
+
           gh issue comment 341 --repo aliezzat4321/hyperliquid-copy-engine --body-file "$result"
           { echo '## Repaired Lane 3 interim Opus re-audit (#341)'; echo; cat "$result"; } > "$AUDIT_ROOT/issue-273-comment.md"
           gh issue comment 273 --repo aliezzat4321/hyperliquid-copy-engine --body-file "$AUDIT_ROOT/issue-273-comment.md"
           echo OPUS_LANE3_INTEGRITY_AUDIT_POSTED=YES
+          if test "$claude_rc" -ne 0; then
+            echo "Opus returned a valid verdict with non-zero CLI status $claude_rc" >&2
+          fi
 
       - name: Remove disposable audit copy
         if: always()
