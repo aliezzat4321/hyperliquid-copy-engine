@@ -2,11 +2,16 @@
 set -euo pipefail
 
 REPO=/root/hyperliquid-copy-engine
-SERVICE_DIR="$REPO/services/invo-notification-executor"
+SERVICE_REL=services/invo-notification-executor
+SERVICE_DIR="$REPO/$SERVICE_REL"
 UNIT=hyperliquid-invo-notification-executor.service
 STATE=/var/lib/hyperliquid-copy-engine/invo-notification-executor
 INVO_ENV=/etc/hyperliquid-copy-engine/invo.env
 EXEC_ENV=/etc/hyperliquid-copy-engine/invo-notification-executor.env
+# Reset prospective Lane-3 evidence exactly once for the repaired causal-L2/funding-completeness model.
+# Subsequent code/config deploys must preserve the accumulating observation window.
+EVIDENCE_EPOCH=lane3-causal-l2-v2-funding-complete-20260915
+EVIDENCE_MARKER="$STATE/evidence-epoch"
 
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "invo notification executor deployment requires root" >&2
@@ -37,6 +42,13 @@ fi
 cd "$REPO"
 git fetch origin main
 git checkout main
+# npm/build output is disposable. Clean only known generated paths before fast-forwarding so
+# locally generated files (including ignored node_modules/dist) cannot block tracked files
+# arriving from main. Tracked files are never removed by git clean, even with -x.
+git clean -fdx -- \
+  "$SERVICE_REL/package-lock.json" \
+  "$SERVICE_REL/node_modules" \
+  "$SERVICE_REL/dist"
 git merge --ff-only origin/main
 
 install -d -m 0700 "$STATE" /etc/hyperliquid-copy-engine
@@ -91,13 +103,25 @@ cd "$SERVICE_DIR"
 npm install --ignore-scripts --no-audit --no-fund
 npm run check
 
-# Start the widened experiment from a clean ledger while preserving the old evidence.
-stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-if [[ -f "$STATE/state.json" ]]; then
-  mv "$STATE/state.json" "$STATE/state.pre-wide-shadow-${stamp}.json"
+# Start a clean prospective evidence epoch only when the evidence model changes. Preserve
+# future deploys inside the same epoch so the >=7-day / >=20-event observation window accrues.
+reset_evidence=0
+current_epoch=""
+if [[ -f "$EVIDENCE_MARKER" ]]; then
+  current_epoch="$(cat "$EVIDENCE_MARKER")"
 fi
-if [[ -f "$STATE/audit.jsonl" ]]; then
-  mv "$STATE/audit.jsonl" "$STATE/audit.pre-wide-shadow-${stamp}.jsonl"
+if [[ "$current_epoch" != "$EVIDENCE_EPOCH" ]]; then
+  reset_evidence=1
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  if [[ -f "$STATE/state.json" ]]; then
+    mv "$STATE/state.json" "$STATE/state.pre-${EVIDENCE_EPOCH}-${stamp}.json"
+  fi
+  if [[ -f "$STATE/audit.jsonl" ]]; then
+    mv "$STATE/audit.jsonl" "$STATE/audit.pre-${EVIDENCE_EPOCH}-${stamp}.jsonl"
+  fi
+  if [[ -f "$STATE/trader-population.json" ]]; then
+    mv "$STATE/trader-population.json" "$STATE/trader-population.pre-${EVIDENCE_EPOCH}-${stamp}.json"
+  fi
 fi
 
 install -m 0644 "$REPO/deploy/systemd/$UNIT" "/etc/systemd/system/$UNIT"
@@ -114,5 +138,10 @@ if [[ "$(systemctl is-active "$UNIT")" != "active" ]]; then
 fi
 
 health="$(curl -fsS --max-time 3 http://127.0.0.1:8787/health)"
+# Mark the evidence epoch only after the service is healthy, so a failed deployment cannot
+# falsely claim that the fresh observation window has started.
+printf '%s\n' "$EVIDENCE_EPOCH" > "$EVIDENCE_MARKER"
+printf 'INVO_NOTIFICATION_EXECUTOR_EVIDENCE_RESET=%s\n' "$reset_evidence"
+printf 'INVO_NOTIFICATION_EXECUTOR_EVIDENCE_EPOCH=%s\n' "$EVIDENCE_EPOCH"
 printf 'INVO_NOTIFICATION_EXECUTOR_HEALTH=%s\n' "$health"
 systemctl --no-pager --full status "$UNIT" | head -30 || true
