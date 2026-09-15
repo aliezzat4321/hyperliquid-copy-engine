@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
-  "snapshot_at": "2026-09-11T16:55:29Z",
+  "snapshot_at": "2026-09-14T23:13:00Z",
   "updated_by": "CODEX_CHATGPT",
-  "head_observed": "a657ca172d8bbc7e151e8d862ca18150ad3d51d2",
+  "head_observed": "4653f0d86650d42fea6062ddfd1fcce0ced0f746",
   "mission": "Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.",
   "live_trading": {
     "authorized": false,
@@ -10,62 +10,63 @@
     "authorization": null
   },
   "priorities": [
-    {"priority":"P0","issue":90,"title":"Restore market-data capture and storage headroom","owner":"CODEX_CHATGPT","reviewer":"CLAUDE","status":"OPEN","profitability_critical":true},
-    {"priority":"P0","issue":91,"title":"Expand Invo trader discovery/tracking before profitability gate","owner":"CODEX_CHATGPT","reviewer":"CLAUDE","status":"OPEN","profitability_critical":true},
-    {"priority":"P0","issue":92,"title":"Make Invo→Hyperliquid resolver fast, high-yield and safe","owner":"CODEX_CHATGPT","reviewer":"CLAUDE","status":"OPEN","profitability_critical":true},
-    {"priority":"P0","issue":93,"title":"Restore fresh leaderboard candidates into autonomous funnel","owner":"CODEX_CHATGPT","reviewer":"CLAUDE","status":"OPEN","profitability_critical":true}
+    {"priority":"P0","issue":330,"title":"Complete Lane 3 causal L2 execution and net-cost repair","owner":"CODEX_CHATGPT","reviewer":"CLAUDE","status":"IN_REVIEW","profitability_critical":true},
+    {"priority":"P0","issue":328,"title":"Run integrated Lane 3 pre-Opus challenge after #330 + #320","owner":"CODEX_CHATGPT","reviewer":"CLAUDE","status":"OPEN","profitability_critical":true},
+    {"priority":"P0","issue":327,"title":"Challenge Lane 2 repair #318 vs every Opus finding","owner":"CODEX_CHATGPT","reviewer":"CLAUDE","status":"OPEN","profitability_critical":true},
+    {"priority":"P0","issue":334,"title":"Restore truthful repository-wide CI baseline","owner":"CODEX_CHATGPT","reviewer":"CLAUDE","status":"IN_PROGRESS","profitability_critical":false}
   ],
   "lanes": {
     "lane_1": {
       "name":"Hyperliquid native discovery and prospective copying research",
       "status":"SHADOW_EVIDENCE_MEASUREMENT_INCOMPLETE",
       "facts":[
-        {"key":"robust_candidates","label":"robust candidates","value":185,"unit":"count","observed_at":"2026-09-11T16:55:17Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"},
-        {"key":"challenger_candidates","label":"challenger candidates","value":177,"unit":"count","observed_at":"2026-09-11T16:55:17Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"},
-        {"key":"prospective_shadow_candidates","label":"candidates with prospective shadow events","value":24,"unit":"count","observed_at":"2026-09-11T16:55:17Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"},
-        {"key":"approved_candidates","label":"approved prospective candidates","value":0,"unit":"count","observed_at":"2026-09-11T16:55:17Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"},
-        {"key":"real_trading","label":"real trading enabled","value":false,"unit":"bool","observed_at":"2026-09-11T16:55:29Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"}
+        {"key":"repair_pr_open","label":"Lane 1 Opus-repair PR open","value":true,"unit":"bool","observed_at":"2026-09-14T23:02:08Z","source_type":"PULL_REQUEST","source_ref":"#317"},
+        {"key":"repair_head","label":"Lane 1 repair head","value":"c47bc6854534dd41c620bca69054d4ed9b764940","unit":"text","observed_at":"2026-09-14T23:02:08Z","source_type":"PULL_REQUEST","source_ref":"#317"},
+        {"key":"approved_candidates_last_measured","label":"last measured approved prospective candidates","value":0,"unit":"count","observed_at":"2026-09-11T16:55:17Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"},
+        {"key":"real_trading","label":"real trading enabled","value":false,"unit":"bool","observed_at":"2026-09-14T22:39:38Z","source_type":"ISSUE","source_ref":"#130"}
       ],
-      "blocker":"Prospective events now accrue, but final #267 record-level proof is incomplete and the subsequent Lane 1 runtime-repair run hit the shared storage/infrastructure failure at universe-scout.",
-      "next":"Issue #93"
+      "blocker":"PR #317 contains the proposed Opus repair but is still open and unaccepted; fresh prospective replay/runtime evidence and an exact-SHA lane-specific Opus PASS remain required before profitability conclusions.",
+      "next":"Issue #313"
     },
     "lane_2": {
       "name":"Third-party identity resolution",
       "status":"SHADOW_EVIDENCE_MEASUREMENT_INCOMPLETE",
       "facts":[
-        {"key":"verified_identities","label":"published verified identities","value":26,"unit":"count","observed_at":"2026-09-11T16:55:20Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"},
-        {"key":"quarantined_identities","label":"quarantined identities","value":9,"unit":"count","observed_at":"2026-09-11T16:55:20Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"},
-        {"key":"verified_shadow_sync_state","label":"verified-wallet shadow sync state","value":"ENOSPC_REGISTRY_WRITE","unit":"text","observed_at":"2026-09-11T16:55:19Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"},
-        {"key":"auto_trading_promotion","label":"automatic real-trading promotion","value":false,"unit":"bool","observed_at":"2026-09-11T16:55:20Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"}
+        {"key":"durable_verified_identities_last_measured","label":"last measured durable verified identities","value":26,"unit":"count","observed_at":"2026-09-11T16:55:20Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"},
+        {"key":"repair_pr_open","label":"Lane 2 Opus-repair PR open","value":true,"unit":"bool","observed_at":"2026-09-14T23:02:08Z","source_type":"PULL_REQUEST","source_ref":"#318"},
+        {"key":"repair_head","label":"Lane 2 repair head","value":"d30772140f20cc5a6aa9d8bc9d8f02f372517863","unit":"text","observed_at":"2026-09-14T23:02:08Z","source_type":"PULL_REQUEST","source_ref":"#318"},
+        {"key":"real_trading","label":"real trading enabled","value":false,"unit":"bool","observed_at":"2026-09-14T22:39:38Z","source_type":"ISSUE","source_ref":"#130"}
       ],
-      "blocker":"Identity publication is producing verified rows, but automatic handoff into the shadow wallet registry is blocked by ENOSPC on the Hyperliquid data volume; restore reviewed storage headroom under #90 without lowering identity safeguards.",
-      "next":"Issue #92"
+      "blocker":"PR #318 contains the proposed identity-safety and capacity repair but remains open; actual post-repair Lane 2 shadow throughput/runtime proof and an exact-SHA lane-specific Opus PASS are still required.",
+      "next":"Issue #312"
     },
     "lane_3": {
       "name":"Direct Invo notification shadow copying",
       "status":"SHADOW_EVIDENCE_MEASUREMENT_INCOMPLETE",
       "facts":[
-        {"key":"discovered_traders","label":"discovered traders","value":155,"unit":"count","observed_at":"2026-09-11T16:55:28Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"},
-        {"key":"trackable_traders","label":"trackable traders","value":96,"unit":"count","observed_at":"2026-09-11T16:55:28Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"},
-        {"key":"notification_traders","label":"traders receiving notifications","value":96,"unit":"count","observed_at":"2026-09-11T16:55:28Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"},
-        {"key":"managed_paper_positions","label":"managed paper positions","value":39,"unit":"count","observed_at":"2026-09-11T16:55:28Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"},
-        {"key":"real_trading","label":"real trading enabled","value":false,"unit":"bool","observed_at":"2026-09-11T16:55:28Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"}
+        {"key":"execution_repair_head","label":"Lane 3 execution-repair head","value":"976c5e2364f9f40b45a3b0a56b31339b3c5036bb","unit":"text","observed_at":"2026-09-14T23:02:08Z","source_type":"PULL_REQUEST","source_ref":"#332"},
+        {"key":"executor_ci","label":"exact-head Lane 3 executor CI","value":"PASS","unit":"text","observed_at":"2026-09-14T23:00:30Z","source_type":"WORKFLOW_RUN","source_ref":"34906771193"},
+        {"key":"live_sensitive_guard","label":"exact-head live-sensitive classification guard","value":"PASS","unit":"text","observed_at":"2026-09-14T23:00:30Z","source_type":"WORKFLOW_RUN","source_ref":"34906771110"},
+        {"key":"restart_repair_head","label":"reviewer-driven #320 restart repair head","value":"efbff8897c4ef27c6ef8b35270af1554b83328c4","unit":"text","observed_at":"2026-09-14T23:11:28Z","source_type":"PULL_REQUEST","source_ref":"#321"},
+        {"key":"second_codex_review_old_320","label":"second Codex verdict on superseded #320 SHA","value":"FAIL_REPAIRED_PENDING_REREVIEW","unit":"text","observed_at":"2026-09-14T23:11:28Z","source_type":"ISSUE","source_ref":"#331"},
+        {"key":"real_trading","label":"real trading enabled","value":false,"unit":"bool","observed_at":"2026-09-14T22:39:38Z","source_type":"ISSUE","source_ref":"#130"}
       ],
-      "blocker":"Fresh causal shadow opens, closes and rejects are accruing, but the full #267 execution-cost/net-PnL record contract and the independent #273 validity audit are still required before profitability conclusions.",
-      "next":"Issue #91"
+      "blocker":"Second Codex found an owned-close reconciliation defect in the original #320 SHA; reviewer-driven repair head efbff8897c4ef27c6ef8b35270af1554b83328c4 passed the full executor check and now requires exact-SHA re-review plus integration into #332 before the final #328 challenge.",
+      "next":"Issue #331"
     }
   },
   "infrastructure": {
-    "name":"Research VM, market tape and storage",
-    "status":"P0_STORAGE_PRESSURE",
+    "name":"Research VM, market tape, autonomy and CI",
+    "status":"DEGRADED",
     "facts":[
-      {"key":"last_measured_data_volume_usage_pct","label":"last measured Hyperliquid data-volume usage","value":100.0,"unit":"pct","observed_at":"2026-08-31T11:40:40Z","source_type":"WORKFLOW_RUN","source_ref":"33388075503"},
-      {"key":"lane2_registry_write_blocked","label":"Lane 2 shadow-registry write blocked by ENOSPC","value":true,"unit":"bool","observed_at":"2026-09-11T16:55:19Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"},
-      {"key":"lane1_universe_scout_repair","label":"Lane 1 universe-scout runtime repair","value":"FAILED_AFTER_STORAGE_PRESSURE","unit":"text","observed_at":"2026-09-11T16:56:05Z","source_type":"WORKFLOW_RUN","source_ref":"34624217974"},
-      {"key":"external_supervisor_timer","label":"external autonomy supervisor timer active","value":true,"unit":"bool","observed_at":"2026-09-11T16:55:28Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"},
-      {"key":"real_trading","label":"real trading enabled","value":false,"unit":"bool","observed_at":"2026-09-11T16:55:29Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"}
+      {"key":"ci_baseline_targeted_validation_pct","label":"targeted #334 renderer + contract + Ruff checks passed","value":100.0,"unit":"pct","observed_at":"2026-09-14T23:09:49Z","source_type":"WORKFLOW_RUN","source_ref":"34907540686"},
+      {"key":"market_shadow_reset_authorized","label":"owner-authorized market-shadow reset task exists","value":true,"unit":"bool","observed_at":"2026-09-14T17:28:43Z","source_type":"ISSUE","source_ref":"#310"},
+      {"key":"old_storage_measurement_stale","label":"previous 100% storage measurement is no longer a current-state proof","value":true,"unit":"bool","observed_at":"2026-09-14T23:02:08Z","source_type":"ISSUE","source_ref":"#310"},
+      {"key":"ci_baseline_unblock_open","label":"repository CI baseline repair open","value":true,"unit":"bool","observed_at":"2026-09-14T23:10:55Z","source_type":"PULL_REQUEST","source_ref":"#335"},
+      {"key":"unrelated_work_continuing","label":"runtime reports unrelated work continuing","value":true,"unit":"bool","observed_at":"2026-09-14T22:39:38Z","source_type":"ISSUE","source_ref":"#130"},
+      {"key":"real_trading","label":"real trading enabled","value":false,"unit":"bool","observed_at":"2026-09-14T22:39:38Z","source_type":"ISSUE","source_ref":"#130"}
     ],
-    "blocker":"The last measured data-volume usage was 100%, and current production now confirms insufficient write headroom via ENOSPC. This is directly blocking Lane 2 registry persistence and a Lane 1 runtime repair path. Reclaim only data covered by the reviewed retention policy/manifest; no blind deletion.",
-    "next":"Issue #90"
+    "blocker":"PR #335 has already cleared the obsolete Opus-script Ruff debt and stale generated-state contract failure. Its first full CI run exposed only typed-fact ordering assumptions in two contract tests; this snapshot restores the expected percentage/count ordering while keeping facts current and sourced.",
+    "next":"Issue #334"
   }
 }
