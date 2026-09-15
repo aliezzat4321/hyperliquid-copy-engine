@@ -35,8 +35,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # This namespace contains disposable read-only audit copies created by this workflow.
-          # Concurrency is serialized above, so no active p0-341 audit can be removed here.
           sudo find "$CLAUDE_WORKTREE_ROOT" -mindepth 1 -maxdepth 1 -type d -name 'p0-341-lane3-*' -print -exec rm -rf -- {} +
           df -h /
 
@@ -61,7 +59,6 @@ jobs:
           sudo sh -c "systemctl status hyperliquid-invo-notification-executor.service --no-pager -l > '$AUDIT_ROOT/evidence/lane3/service-status.txt' 2>&1"
           sudo sh -c "journalctl -u hyperliquid-invo-notification-executor.service --since '2026-09-15 07:30:00 UTC' --no-pager -l | tail -n 1200 > '$AUDIT_ROOT/evidence/lane3/service-journal.txt'"
 
-          # Keep the copied market sample intentionally small. The production market tape is untouched.
           sudo env OUT="$AUDIT_ROOT/evidence/market" python3 - <<'PY'
           import os, shutil
           from pathlib import Path
@@ -98,6 +95,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          auth_out="$AUDIT_ROOT/auth-stdout.txt"
+          auth_err="$AUDIT_ROOT/auth-stderr.txt"
+          set +e
           sudo -u "$CLAUDE_USER" env -i \
             HOME="$CLAUDE_HOME" \
             CLAUDE_CONFIG_DIR="$CLAUDE_HOME/.claude" \
@@ -105,7 +105,20 @@ jobs:
             XDG_CACHE_HOME="$CLAUDE_HOME/.cache" \
             PATH=/usr/local/bin:/usr/bin:/bin \
             /usr/bin/claude -p --model opus --max-turns 1 --output-format text 'Reply exactly OPUS_AUTH_OK' \
-            | grep -Fx OPUS_AUTH_OK
+            > "$auth_out" 2> "$auth_err"
+          auth_rc=$?
+          set -e
+          echo "OPUS_AUTH_EXIT_CODE=$auth_rc"
+          if test -s "$auth_out"; then
+            echo '=== OPUS AUTH STDOUT ==='
+            cat "$auth_out"
+          fi
+          if test -s "$auth_err"; then
+            echo '=== OPUS AUTH STDERR ==='
+            cat "$auth_err"
+          fi
+          test "$auth_rc" -eq 0
+          grep -Fx OPUS_AUTH_OK "$auth_out"
 
       - name: Run independent Lane 3 Opus integrity audit now
         env:
