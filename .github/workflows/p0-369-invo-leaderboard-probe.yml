@@ -1,0 +1,35 @@
+name: p0-369-invo-leaderboard-probe
+
+on:
+  push:
+    branches: [codex/369-invo-leaderboard-probe]
+    paths:
+      - scripts/probe_invo_leaderboards.mjs
+      - .github/workflows/p0-369-invo-leaderboard-probe.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p0-369-invo-leaderboard-probe
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Probe Invo leaderboard request semantics (read-only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s /etc/hyperliquid-copy-engine/invo.env
+          set -a
+          source /etc/hyperliquid-copy-engine/invo.env
+          set +a
+          export REAL_TRADING_ENABLED=NO
+          node scripts/probe_invo_leaderboards.mjs
