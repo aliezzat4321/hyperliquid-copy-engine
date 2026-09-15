@@ -129,19 +129,45 @@ systemctl daemon-reload
 systemd-analyze verify "/etc/systemd/system/$UNIT"
 systemctl enable "$UNIT"
 systemctl restart "$UNIT"
-sleep 2
 
-if [[ "$(systemctl is-active "$UNIT")" != "active" ]]; then
+# Startup performs token/feed hydration before binding HTTP. Use the lightweight /traders
+# endpoint for readiness; /health performs portfolio-wide MTM/funding I/O and is intentionally
+# checked separately with a much larger timeout. This separation keeps deployment verification
+# strict without confusing slow economic diagnostics with service unavailability.
+readiness=""
+for attempt in $(seq 1 30); do
+  if [[ "$(systemctl is-active "$UNIT")" != "active" ]]; then
+    echo "Lane 3 service became inactive during readiness attempt ${attempt}" >&2
+    systemctl --no-pager --full status "$UNIT" || true
+    journalctl -u "$UNIT" -n 100 --no-pager || true
+    exit 1
+  fi
+  if readiness="$(curl -fsS --max-time 3 http://127.0.0.1:8787/traders 2>/dev/null)"; then
+    break
+  fi
+  sleep 1
+done
+
+if [[ -z "$readiness" ]]; then
+  echo "Lane 3 service stayed active but HTTP readiness never completed within the bounded startup window" >&2
   systemctl --no-pager --full status "$UNIT" || true
   journalctl -u "$UNIT" -n 100 --no-pager || true
   exit 1
 fi
 
-health="$(curl -fsS --max-time 3 http://127.0.0.1:8787/health)"
-# Mark the evidence epoch only after the service is healthy, so a failed deployment cannot
-# falsely claim that the fresh observation window has started.
+health=""
+if ! health="$(curl -fsS --max-time 60 http://127.0.0.1:8787/health)"; then
+  echo "Lane 3 service is ready, but full portfolio health/MTM proof did not complete within 60s" >&2
+  systemctl --no-pager --full status "$UNIT" || true
+  journalctl -u "$UNIT" -n 100 --no-pager || true
+  exit 1
+fi
+
+# Mark the evidence epoch only after the service is ready and full portfolio health succeeds,
+# so a failed deployment cannot falsely claim that the observation window is healthy.
 printf '%s\n' "$EVIDENCE_EPOCH" > "$EVIDENCE_MARKER"
 printf 'INVO_NOTIFICATION_EXECUTOR_EVIDENCE_RESET=%s\n' "$reset_evidence"
 printf 'INVO_NOTIFICATION_EXECUTOR_EVIDENCE_EPOCH=%s\n' "$EVIDENCE_EPOCH"
+printf 'INVO_NOTIFICATION_EXECUTOR_READINESS=%s\n' "$readiness"
 printf 'INVO_NOTIFICATION_EXECUTOR_HEALTH=%s\n' "$health"
 systemctl --no-pager --full status "$UNIT" | head -30 || true
