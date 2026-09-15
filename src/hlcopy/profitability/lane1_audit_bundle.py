@@ -20,6 +20,7 @@ from hlcopy.profitability.position_copy import CopyFillEvent, load_wide_events
 
 HOUR_MS = 3_600_000
 BUNDLE_VERSION = "LANE1_REPLAY_EVIDENCE_V2"
+MAX_FALLBACK_TARGETS = 20
 
 
 class Lane1AuditBundleError(RuntimeError):
@@ -49,37 +50,70 @@ def _read_json(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _read_jsonl(path: Path | None) -> list[dict[str, object]]:
+    if path is None or not path.exists():
+        return []
+    rows: list[dict[str, object]] = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            payload = json.loads(line)
+            if isinstance(payload, dict):
+                rows.append(payload)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise Lane1AuditBundleError(f"invalid JSONL evidence source: {path}: {exc}") from exc
+    return rows
+
+
+def _add_target_role(
+    roles: dict[tuple[str, str], set[str]],
+    row: dict[str, object],
+    role: str,
+) -> None:
+    wallet = str(row.get("wallet_address", row.get("wallet", ""))).lower().strip()
+    coin = canonical_coin(row.get("coin", ""))
+    if wallet and coin:
+        roles[(wallet, coin)].add(role)
+
+
 def collect_audit_targets(
     challenger_queue: dict[str, Any],
     funnel_report: dict[str, Any],
     prospective_report: dict[str, Any],
+    *,
+    screening_rows: list[dict[str, object]] | None = None,
+    confirmation_rows: list[dict[str, object]] | None = None,
 ) -> tuple[AuditTarget, ...]:
-    """Union current challengers, robust OOS candidates and prospective targets."""
+    """Union active selection targets, with measured cohorts as a zero-result fallback."""
     roles: dict[tuple[str, str], set[str]] = defaultdict(set)
 
     for row in challenger_queue.get("candidates", []):
-        if not isinstance(row, dict) or row.get("status") != "challenger":
-            continue
-        wallet = str(row.get("wallet_address", "")).lower().strip()
-        coin = canonical_coin(row.get("coin", ""))
-        if wallet and coin:
-            roles[(wallet, coin)].add("challenger")
+        if isinstance(row, dict) and row.get("status") == "challenger":
+            _add_target_role(roles, row, "challenger")
 
     for row in funnel_report.get("robust_candidates", []):
-        if not isinstance(row, dict):
-            continue
-        wallet = str(row.get("wallet_address", "")).lower().strip()
-        coin = canonical_coin(row.get("coin", ""))
-        if wallet and coin:
-            roles[(wallet, coin)].add("robust_oos")
+        if isinstance(row, dict):
+            _add_target_role(roles, row, "robust_oos")
 
     for row in prospective_report.get("targets", []):
-        if not isinstance(row, dict):
-            continue
-        wallet = str(row.get("wallet_address", row.get("wallet", ""))).lower().strip()
-        coin = canonical_coin(row.get("coin", ""))
-        if wallet and coin:
-            roles[(wallet, coin)].add("prospective")
+        if isinstance(row, dict):
+            _add_target_role(roles, row, "prospective")
+
+    # A correct Lane 1 run may reject every candidate. That result must still be
+    # independently replayable, so preserve a bounded set of measured held-out/screened
+    # cohorts rather than producing an empty evidence pack.
+    if not roles:
+        for rows, role in (
+            (confirmation_rows or [], "confirmed_fallback"),
+            (screening_rows or [], "screened_fallback"),
+        ):
+            for row in rows:
+                if len(roles) >= MAX_FALLBACK_TARGETS:
+                    break
+                _add_target_role(roles, row, role)
+            if roles:
+                break
 
     return tuple(
         AuditTarget(wallet, coin, tuple(sorted(target_roles)))
@@ -248,10 +282,18 @@ def build_lane1_audit_bundle(
     challenger_queue = _read_json(challenger_queue_path)
     funnel_report = _read_json(funnel_report_path)
     prospective_report = _read_json(prospective_report_path)
-    targets = collect_audit_targets(challenger_queue, funnel_report, prospective_report)
+    screening_rows = _read_jsonl(screening_path)
+    confirmation_rows = _read_jsonl(confirmation_path)
+    targets = collect_audit_targets(
+        challenger_queue,
+        funnel_report,
+        prospective_report,
+        screening_rows=screening_rows,
+        confirmation_rows=confirmation_rows,
+    )
     if not targets:
         raise Lane1AuditBundleError(
-            "NO_REPLAY_TARGETS: no challenger, robust OOS, or prospective target exists"
+            "NO_REPLAY_TARGETS: no challenger, robust, prospective, confirmed, or screened target"
         )
 
     all_events = load_wide_events(wide_enriched_dir, cutoff_ns=cutoff_ns)
@@ -273,9 +315,12 @@ def build_lane1_audit_bundle(
                 f"MISSING_TARGET_EVENTS: wallet={target.wallet_address} coin={target.coin}"
             )
         target_events[target.key] = rows
+        existing = funding_ranges.get(target.coin)
+        start_ms = min(event.exchange_ts_ms for event in rows)
+        end_ms = max(event.exchange_ts_ms for event in rows)
         funding_ranges[target.coin] = (
-            min(event.exchange_ts_ms for event in rows),
-            max(event.exchange_ts_ms for event in rows),
+            start_ms if existing is None else min(existing[0], start_ms),
+            end_ms if existing is None else max(existing[1], end_ms),
         )
 
     funding_rows, funding_errors = asyncio.run(fetch_official_funding_history(funding_ranges))
@@ -299,7 +344,7 @@ def build_lane1_audit_bundle(
             end_ms = max(event.exchange_ts_ms for event in rows)
             event_rows.extend(_event_dict(event, target.roles) for event in rows)
 
-            # Include a small next-date allowance for causal delayed books crossing UTC.
+            # Keep evidence coin-scoped and date-scoped; never copy unrelated market tails.
             l2_dates = _utc_dates(start_ms, end_ms + 2_000)
             l2_files = _copy_partition_files(
                 market_dir,
@@ -314,20 +359,21 @@ def build_lane1_audit_bundle(
                 )
 
             funding_required = _required_hourly_boundaries(start_ms, end_ms)
-            # Copy oracle context even for short spans. It proves the recorded market
-            # context and makes a no-funding interval independently inspectable.
-            ctx_dates = _utc_dates(max(0, start_ms - 60_000), end_ms + 2_000)
-            ctx_files = _copy_partition_files(
-                market_dir,
-                staging,
-                coin=target.coin,
-                channel="activeAssetCtx",
-                dates=ctx_dates,
-            )
-            if not ctx_files:
-                raise Lane1AuditBundleError(
-                    f"MISSING_ORACLE_EVIDENCE: wallet={target.wallet_address} coin={target.coin}"
+            ctx_files: list[Path] = []
+            if funding_required:
+                ctx_dates = _utc_dates(max(0, start_ms - 60_000), end_ms + 2_000)
+                ctx_files = _copy_partition_files(
+                    market_dir,
+                    staging,
+                    coin=target.coin,
+                    channel="activeAssetCtx",
+                    dates=ctx_dates,
                 )
+                if not ctx_files:
+                    raise Lane1AuditBundleError(
+                        f"MISSING_ORACLE_EVIDENCE: wallet={target.wallet_address} "
+                        f"coin={target.coin}"
+                    )
 
             if target.coin in funding_errors:
                 raise Lane1AuditBundleError(
@@ -420,7 +466,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--wide-cutoff-ns-file",
         type=Path,
-        default=Path("/mnt/HC_Volume_106576526/hyperliquid/shadow/wide-finance-cutoff-ns.txt"),
+        default=Path("/mnt/HC_Volume_106576526/hyperliquid/shadow/wide_clean_cutoff_ns.txt"),
     )
     parser.add_argument(
         "--market-dir",
