@@ -17,40 +17,73 @@ jobs:
         with:
           ref: codex/359-lane3-dust-rounding-fix
           fetch-depth: 0
-      - name: Apply deterministic dust reconciliation patch
+      - name: Tighten dust evidence and policy provenance
         shell: bash
         run: |
           python3 - <<'PY'
           from pathlib import Path
-
           p = Path('services/invo-notification-executor/src/service.ts')
           s = p.read_text()
-          old = """  closeAction,\n  computePositionEconomics,\n  openAction,\n  simulateL2Fill,\n"""
-          new = """  closeAction,\n  computePositionEconomics,\n  isNonExecutableDust,\n  openAction,\n  simulateL2Fill,\n"""
+
+          old = "const HEALTH_MTM_CONCURRENCY = 4;\n"
+          new = """const HEALTH_MTM_CONCURRENCY = 4;
+const BOOK_AGE_POLICY_CHANGEOVER = {
+  priorMaxBookAgeMs: 750,
+  currentMaxBookAgeMs: 1000,
+  deployRun: 34992024173,
+  effectiveAtUtc: '2026-09-15T15:59:18Z',
+  commit: '90ee58d679a093c86543e09a6afc6e3238bc3a74',
+};
+"""
+          assert old in s and 'BOOK_AGE_POLICY_CHANGEOVER' not in s
+          s = s.replace(old, new, 1)
+
+          old = """        if (!result.ok) {
+          const dustRejected = result.reason === 'below_min_notional' || result.reason === 'lot_rounded_to_zero';
+          if (dustRejected) {
+"""
+          new = """        if (!result.ok) {
+          const dustRejected = result.reason === 'below_min_notional' || result.reason === 'lot_rounded_to_zero';
+          if (dustRejected) {
+            const dustBestBid = assetBook.book?.bids[0]?.px;
+            const dustBestAsk = assetBook.book?.asks[0]?.px;
+            const dustMidPx = dustBestBid && dustBestAsk ? (dustBestBid + dustBestAsk) / 2 : null;
+"""
           assert old in s
           s = s.replace(old, new, 1)
 
-          old = """        if (!result.ok) {\n          const retryable = true;\n          const attempt = (managed.sourceCloseRetryAttempts ?? 0) + 1;\n"""
-          new = """        if (!result.ok) {\n          const dustRejected = result.reason === 'below_min_notional' || result.reason === 'lot_rounded_to_zero';\n          if (dustRejected) {\n            state.clearManagedBySource(signal.sourceBaseId);\n            state.markSeen(signal.key);\n            log({\n              type: 'shadow_close_dust_reconciled', reason: result.reason, detail: result.detail ?? null,\n              economicsCompleteness: 'INCOMPLETE_DUST_RECONCILIATION', managed, signal, wakeSource,\n              dustReconciledSize: size, unresolvedSize: 0, decisionAtMs,\n              bookRequestedAtMs: assetBook.requestedAtMs, bookReceivedAtMs: assetBook.receivedAtMs,\n              ...closeFreshness(signal, receivedAtMs),\n            });\n            return;\n          }\n          const retryable = true;\n          const attempt = (managed.sourceCloseRetryAttempts ?? 0) + 1;\n"""
+          old = """              dustReconciledSize: size, unresolvedSize: 0, decisionAtMs,
+              bookRequestedAtMs: assetBook.requestedAtMs, bookReceivedAtMs: assetBook.receivedAtMs,
+"""
+          new = """              dustReconciledSize: size,
+              dustEstimatedNotionalUsd: dustMidPx == null ? null : size * dustMidPx,
+              unresolvedSize: 0,
+              grossPnlUsd: null, grossReturnBps: null,
+              entryFeeUsd: null, exitFeeUsd: null, fundingUsd: null,
+              totalExplicitCostUsd: null, netPnlUsd: null, netReturnBps: null,
+              decisionAtMs,
+              bookRequestedAtMs: assetBook.requestedAtMs, bookReceivedAtMs: assetBook.receivedAtMs,
+"""
           assert old in s
           s = s.replace(old, new, 1)
 
-          old = """        const remainingSize = Math.max(0, size - fill.filledSize);\n        if (remainingSize > 1e-12) {\n          const remainingFraction = remainingSize / size;\n          state.setManaged({\n            ...managed,\n            size: remainingSize,\n"""
-          new = """        const remainingSize = Math.max(0, size - fill.filledSize);\n        const dustReconciled = remainingSize > 1e-12 && isNonExecutableDust(\n          remainingSize, assetBook.asset.szDecimals, fill.midPx, shadowPolicy.minNotionalUsd,\n        );\n        const unresolvedSize = dustReconciled ? 0 : remainingSize;\n        if (unresolvedSize > 1e-12) {\n          const remainingFraction = unresolvedSize / size;\n          state.setManaged({\n            ...managed,\n            size: unresolvedSize,\n"""
+          old = "        shadowExecutionPolicy: shadowPolicy,\n        executionEvidenceVersion: EXECUTION_EVIDENCE_VERSION,\n"
+          new = "        shadowExecutionPolicy: shadowPolicy,\n        bookAgePolicyChangeover: BOOK_AGE_POLICY_CHANGEOVER,\n        executionEvidenceVersion: EXECUTION_EVIDENCE_VERSION,\n"
           assert old in s
           s = s.replace(old, new, 1)
 
-          s = s.replace("exposureCheckpoints: [{ atMs: fill.receivedAtMs, size: remainingSize }],", "exposureCheckpoints: [{ atMs: fill.receivedAtMs, size: unresolvedSize }],", 1)
-          s = s.replace("        if (remainingSize <= 1e-12) state.markSeen(signal.key);", "        if (unresolvedSize <= 1e-12) state.markSeen(signal.key);", 1)
-          s = s.replace("          type: remainingSize > 1e-12 ? 'shadow_partially_closed' : 'shadow_closed',", "          type: dustReconciled ? 'shadow_close_dust_reconciled' : unresolvedSize > 1e-12 ? 'shadow_partially_closed' : 'shadow_closed',", 1)
-          s = s.replace("          economicsCompleteness: legacy\n            ? 'INCOMPLETE_LEGACY_ENTRY'", "          economicsCompleteness: dustReconciled\n            ? 'INCOMPLETE_DUST_RECONCILIATION'\n            : legacy\n            ? 'INCOMPLETE_LEGACY_ENTRY'", 1)
-          s = s.replace("          closedSize: fill.filledSize, unresolvedSize: remainingSize,", "          closedSize: fill.filledSize, unresolvedSize,\n          dustReconciledSize: dustReconciled ? remainingSize : 0,\n          dustEstimatedNotionalUsd: dustReconciled ? remainingSize * fill.midPx : null,", 1)
+          old = "    shadowExecutionPolicy: shadowPolicy,\n    fundingOracleMaxDelayMs: cfg.shadowFundingOracleMaxDelayMs,\n"
+          new = "    shadowExecutionPolicy: shadowPolicy,\n    bookAgePolicyChangeover: BOOK_AGE_POLICY_CHANGEOVER,\n    fundingOracleMaxDelayMs: cfg.shadowFundingOracleMaxDelayMs,\n"
+          assert old in s
+          s = s.replace(old, new, 1)
           p.write_text(s)
 
           p = Path('services/invo-notification-executor/test/service-partial-close-accounting.test.ts')
           s = p.read_text()
-          s = s.replace("assert.match(closeBranch, /const remainingFraction = remainingSize \\/ size/);", "assert.match(closeBranch, /const dustReconciled = remainingSize > 1e-12 && isNonExecutableDust/);\n  assert.match(closeBranch, /const unresolvedSize = dustReconciled \\? 0 : remainingSize/);\n  assert.match(closeBranch, /const remainingFraction = unresolvedSize \\/ size/);")
-          s = s.replace("assert.match(closeBranch, /if \\(remainingSize <= 1e-12\\) state\\.markSeen\\(signal\\.key\\)/);", "assert.match(closeBranch, /if \\(unresolvedSize <= 1e-12\\) state\\.markSeen\\(signal\\.key\\)/);\n  assert.match(closeBranch, /INCOMPLETE_DUST_RECONCILIATION/);\n  assert.match(closeBranch, /shadow_close_dust_reconciled/);")
+          marker = "  assert.match(closeBranch, /shadow_close_dust_reconciled/);\n"
+          addition = marker + "  assert.match(closeBranch, /dustEstimatedNotionalUsd/);\n  assert.match(closeBranch, /netPnlUsd: null/);\n"
+          assert marker in s and 'assert.match(closeBranch, /dustEstimatedNotionalUsd/)' not in s
+          s = s.replace(marker, addition, 1)
           p.write_text(s)
           PY
       - name: Run Lane 3 executor tests
@@ -65,5 +98,5 @@ jobs:
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add services/invo-notification-executor/src/service.ts services/invo-notification-executor/test/service-partial-close-accounting.test.ts
           git diff --cached --check
-          git commit -m 'fix(lane3): reconcile non-executable close dust (#359)'
+          git commit -m 'fix(lane3): make dust evidence explicitly incomplete (#361)'
           git push origin HEAD:codex/359-lane3-dust-rounding-fix
