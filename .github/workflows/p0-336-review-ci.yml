@@ -1,0 +1,31 @@
+name: p0-336-review-ci
+
+on:
+  push:
+    branches: [codex/336-review-ci]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/auto-320-b8096982
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: services/invo-notification-executor/package-lock.json
+      - name: Install executor dependencies
+        working-directory: services/invo-notification-executor
+        run: npm ci
+      - name: Full executor check
+        working-directory: services/invo-notification-executor
+        run: npm run check
+      - name: Verify reviewed SHA
+        run: |
+          test "$(git rev-parse HEAD)" = "c61b8d0dae8ff513f5c30820351f542a869aff7d"
