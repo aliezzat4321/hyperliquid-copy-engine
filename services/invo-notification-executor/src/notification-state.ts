@@ -69,12 +69,43 @@ export interface FeedCursor {
   source: string;
 }
 
+export function synthesizeLegacyPendingSourceClose(position: ManagedPosition): InvoSignal | null {
+  if (!position.unresolvedAfterSourceClose || position.pendingSourceClose) return position.pendingSourceClose ?? null;
+  const size = Number(position.size);
+  if (!position.sourceBaseId || !position.coin || !(size > 0)) return null;
+  const leverage = Number(position.leverage);
+  const sourcePostId = position.sourcePostId || `legacy-${position.sourceBaseId}`;
+  return {
+    key: `${sourcePostId}:close:${position.sourceBaseId}:legacy-reconcile`,
+    postId: sourcePostId,
+    action: 'close',
+    // Persisted provenance only: this migration must be identical on every restart.
+    observedAtMs: position.openedAtMs,
+    sourceTimeMs: null,
+    sourceTimeField: 'legacy_unresolved_source_close',
+    ownerId: '',
+    username: position.username ?? '',
+    portfolioId: '',
+    sourceBaseId: position.sourceBaseId,
+    sourceBaseShortId: position.sourceBaseShortId ?? '',
+    coin: position.coin,
+    side: position.side,
+    leverage: Number.isFinite(leverage) && leverage > 0 ? Math.max(1, Math.trunc(leverage)) : 1,
+    entryPrice: Number.isFinite(Number(position.entryPrice)) ? Number(position.entryPrice) : null,
+    closingPrice: null,
+    entrySize: Number.isFinite(Number(position.sourceSize)) ? Number(position.sourceSize) : null,
+  };
+}
+
 function normalizeManaged(raw: Record<string, ManagedPosition> | undefined): Record<string, ManagedPosition> {
   const normalized: Record<string, ManagedPosition> = {};
   for (const [legacyKey, position] of Object.entries(raw ?? {})) {
     if (!position || !position.sourceBaseId) continue;
     // v1 keyed by coin. v2 keys by sourceBaseId so many traders may hold BTC simultaneously.
-    normalized[position.sourceBaseId || legacyKey] = position;
+    const pendingSourceClose = synthesizeLegacyPendingSourceClose(position);
+    normalized[position.sourceBaseId || legacyKey] = pendingSourceClose && !position.pendingSourceClose
+      ? { ...position, pendingSourceClose }
+      : position;
   }
   return normalized;
 }

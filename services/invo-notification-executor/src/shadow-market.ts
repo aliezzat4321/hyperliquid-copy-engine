@@ -1,5 +1,6 @@
 import * as hl from './hl-client.js';
 import type { ManagedPosition } from './notification-state.js';
+import { alignFundingHistoryToCapturedBoundaries } from './funding-alignment.js';
 import {
   closeAction,
   computePositionEconomics,
@@ -106,9 +107,13 @@ export async function fundingForPosition(
   const accruedThroughMs = Number(position.fundingAccruedThroughMs ?? position.openedAtMs);
   const startTimeMs = accruedThroughMs > position.openedAtMs ? accruedThroughMs + 1 : position.openedAtMs;
   const query = await hl.getFundingHistory(position.coin, startTimeMs, endTimeMs);
-  const history: FundingPoint[] = query.rows
+  const rawHistory: FundingPoint[] = query.rows
     .map(row => ({ timeMs: Number(row.time), rate: Number(row.fundingRate) }))
     .filter(row => Number.isFinite(row.timeMs) && Number.isFinite(row.rate));
+  const history = alignFundingHistoryToCapturedBoundaries(
+    rawHistory,
+    position.fundingOracleCheckpoints.map(checkpoint => checkpoint.fundingTimeMs),
+  );
   let calculated;
   try {
     calculated = fundingCostUsd(
