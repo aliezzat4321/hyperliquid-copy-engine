@@ -10,15 +10,11 @@ import tempfile
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from hlcopy.market.symbols import wire_coin
-from hlcopy.profitability.lane1_funding_source import (
-    fetch_official_funding_history,
-    funding_ranges_for_event_groups,
-)
+from hlcopy.market.symbols import canonical_coin, wire_coin
+from hlcopy.profitability.lane1_funding_source import fetch_official_funding_history
 from hlcopy.profitability.lane1_metrics import LANE1_RETURN_BASIS_FUNDING_V2
 from hlcopy.profitability.position_copy import CopyFillEvent, load_wide_events
 
@@ -65,7 +61,7 @@ def collect_audit_targets(
         if not isinstance(row, dict) or row.get("status") != "challenger":
             continue
         wallet = str(row.get("wallet_address", "")).lower().strip()
-        coin = str(row.get("coin", "")).strip()
+        coin = canonical_coin(row.get("coin", ""))
         if wallet and coin:
             roles[(wallet, coin)].add("challenger")
 
@@ -73,7 +69,7 @@ def collect_audit_targets(
         if not isinstance(row, dict):
             continue
         wallet = str(row.get("wallet_address", "")).lower().strip()
-        coin = str(row.get("coin", "")).strip()
+        coin = canonical_coin(row.get("coin", ""))
         if wallet and coin:
             roles[(wallet, coin)].add("robust_oos")
 
@@ -81,7 +77,7 @@ def collect_audit_targets(
         if not isinstance(row, dict):
             continue
         wallet = str(row.get("wallet_address", row.get("wallet", ""))).lower().strip()
-        coin = str(row.get("coin", "")).strip()
+        coin = canonical_coin(row.get("coin", ""))
         if wallet and coin:
             roles[(wallet, coin)].add("prospective")
 
@@ -261,9 +257,10 @@ def build_lane1_audit_bundle(
     all_events = load_wide_events(wide_enriched_dir, cutoff_ns=cutoff_ns)
     grouped: dict[tuple[str, str], list[CopyFillEvent]] = defaultdict(list)
     for event in all_events:
-        grouped[(event.wallet_address.lower(), event.coin)].append(event)
+        grouped[(event.wallet_address.lower(), canonical_coin(event.coin))].append(event)
 
     target_events: dict[tuple[str, str], tuple[CopyFillEvent, ...]] = {}
+    funding_ranges: dict[str, tuple[int, int]] = {}
     for target in targets:
         rows = tuple(
             sorted(
@@ -276,8 +273,11 @@ def build_lane1_audit_bundle(
                 f"MISSING_TARGET_EVENTS: wallet={target.wallet_address} coin={target.coin}"
             )
         target_events[target.key] = rows
+        funding_ranges[target.coin] = (
+            min(event.exchange_ts_ms for event in rows),
+            max(event.exchange_ts_ms for event in rows),
+        )
 
-    funding_ranges = funding_ranges_for_event_groups(target_events.values())
     funding_rows, funding_errors = asyncio.run(fetch_official_funding_history(funding_ranges))
 
     output_dir.parent.mkdir(parents=True, exist_ok=True)
