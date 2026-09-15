@@ -1,0 +1,37 @@
+name: p0-341-root-journal-reclaim
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p0-341-root-journal-reclaim.yml
+
+permissions:
+  contents: read
+
+jobs:
+  reclaim-journal-headroom:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 5
+    steps:
+      - name: Bound system journal retention only
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'TARGET_PROJECT=HYPERLIQUID_CONTROL_PLANE_ONLY'
+          echo 'MARKET_DATA_MUTATION=NO'
+          echo 'TRADING_STATE_MUTATION=NO'
+          echo 'POLYMARKET_INSPECTION=NO'
+          echo 'POLYMARKET_MUTATION=NO'
+          echo '=== before ==='
+          df -h /
+          sudo journalctl --disk-usage || true
+          sudo journalctl --rotate
+          sudo journalctl --vacuum-size=768M
+          echo '=== after ==='
+          sudo journalctl --disk-usage || true
+          df -h /
+          avail_kb="$(df -Pk / | awk 'NR==2 {print $4}')"
+          echo "ROOT_AVAILABLE_KB=$avail_kb"
+          test "$avail_kb" -ge 1048576
+          echo 'REAL_TRADING_TOUCHED=NO'
