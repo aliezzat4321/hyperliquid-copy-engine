@@ -11,6 +11,20 @@ import { TraderTracker } from './trader-tracker.js';
 import { liveScopeSkipReason } from './live-scope.js';
 import { fetchFeedBackfill } from './feed-backfill.js';
 import { planUnrecoverableGap } from './gap-reconciliation.js';
+import {
+  COST_MODEL_VERSION,
+  EXECUTION_EVIDENCE_VERSION,
+  fetchAssetBook,
+  fundingForPosition,
+  markShadowPosition,
+} from './shadow-market.js';
+import {
+  closeAction,
+  computePositionEconomics,
+  openAction,
+  simulateL2Fill,
+  type ShadowExecutionPolicy,
+} from './shadow-execution.js';
 
 if (INVO_TOKEN) invo.setToken(INVO_TOKEN);
 if (INVO_REFRESH_TOKEN) invo.setRefreshToken(INVO_REFRESH_TOKEN);
@@ -51,6 +65,11 @@ function loadConfig() {
     discoverySurfaces: [...new Set(discoverySurfaces)],
     feedLimit: Math.max(1, Math.min(100, Math.trunc(n('NOTIFICATION_TRADER_FEED_LIMIT', 100)))),
     feedMaxPages: Math.max(1, Math.min(100, Math.trunc(n('NOTIFICATION_TRADER_FEED_MAX_PAGES', 20)))),
+    shadowMaxBookAgeMs: Math.max(50, n('NOTIFICATION_TRADER_SHADOW_MAX_BOOK_AGE_MS', 750)),
+    shadowMaxSpreadBps: Math.max(0, n('NOTIFICATION_TRADER_SHADOW_MAX_SPREAD_BPS', 50)),
+    shadowTakerFeeBps: Math.max(0, n('NOTIFICATION_TRADER_SHADOW_TAKER_FEE_BPS', 4.5)),
+    shadowFundingOracleMaxDelayMs: Math.max(500, n('NOTIFICATION_TRADER_SHADOW_FUNDING_ORACLE_MAX_DELAY_MS', 10_000)),
+    shadowMinNotionalUsd: Math.max(1, n('NOTIFICATION_TRADER_SHADOW_MIN_NOTIONAL_USD', 10)),
     marginPct: Math.max(0.01, n('NOTIFICATION_TRADER_MARGIN_PCT', 1)),
     // These are live-account safety controls only. Shadow research is intentionally uncapped.
     maxNotionalUsd: Math.max(10, n('NOTIFICATION_TRADER_MAX_NOTIONAL_USD', 500)),
@@ -72,6 +91,13 @@ function loadConfig() {
 }
 
 const cfg = loadConfig();
+const shadowPolicy: ShadowExecutionPolicy = {
+  maxBookAgeMs: cfg.shadowMaxBookAgeMs,
+  maxSpreadBps: cfg.shadowMaxSpreadBps,
+  minNotionalUsd: cfg.shadowMinNotionalUsd,
+  takerFeeBps: cfg.shadowTakerFeeBps,
+  fundingOracleMaxDelayMs: cfg.shadowFundingOracleMaxDelayMs,
+};
 if (cfg.live && (process.env.REAL_TRADING_ENABLED ?? 'NO').trim().toUpperCase() !== 'YES') {
   throw new Error('NOTIFICATION_TRADER_LIVE=true requires REAL_TRADING_ENABLED=YES');
 }
@@ -95,6 +121,8 @@ let pendingWake: { source: string; hints?: NotificationHints; receivedAtMs: numb
 let lastSuccessPollMs = 0;
 let backoffMs = 0;
 let discoverySurfaceIndex = 0;
+let lastFundingOracleBoundaryMs = -1;
+const FUNDING_INTERVAL_MS = 60 * 60 * 1000;
 
 function log(event: Record<string, unknown>) {
   const row = { ts: new Date().toISOString(), ...event };
@@ -186,24 +214,60 @@ async function marketSnapshot(signal: InvoSignal) {
   return { meta, mids, assetIndex, asset, mid };
 }
 
-async function shadowOpen(signal: InvoSignal, wakeSource: string, receivedAtMs: number, openedFromIncrease: boolean) {
-  const snap = await marketSnapshot(signal);
-  if (!snap) {
+async function shadowOpen(
+  signal: InvoSignal,
+  wakeSource: string,
+  receivedAtMs: number,
+  openedFromIncrease: boolean,
+  decisionAtMs: number,
+) {
+  const assetBook = await fetchAssetBook(signal.coin);
+  if (!assetBook) {
     state.markSeen(signal.key);
     log({ type: 'skip', reason: 'unknown_hl_asset', signal, wakeSource });
     return;
   }
-  const leverage = validateSourceLeverage(signal, snap.asset);
+  const leverage = validateSourceLeverage(signal, assetBook.asset);
   if (leverage == null) {
     state.markSeen(signal.key);
-    log({ type: 'skip', reason: 'source_leverage_unexecutable_on_hl', sourceLeverage: signal.leverage, assetMaxLeverage: snap.asset.maxLeverage, signal, wakeSource });
+    log({
+      type: 'skip', reason: 'source_leverage_unexecutable_on_hl',
+      sourceLeverage: signal.leverage, assetMaxLeverage: assetBook.asset.maxLeverage,
+      signal, wakeSource,
+    });
+    return;
+  }
+  const bestBid = assetBook.book?.bids[0]?.px;
+  const bestAsk = assetBook.book?.asks[0]?.px;
+  const mid = bestBid && bestAsk ? (bestBid + bestAsk) / 2 : 0;
+  if (!(mid > 0)) {
+    state.markSeen(signal.key);
+    log({ type: 'skip', reason: 'shadow_missing_book', signal, wakeSource, decisionAtMs });
     return;
   }
 
   const equity = await hl.getAccountEquity(WALLET_ADDRESS);
-  const sizing = baseShadowSlice(equity, snap.mid, leverage);
-  const chase = chaseBps(signal, snap.mid);
+  const sizing = baseShadowSlice(equity, mid, leverage);
+  const result = simulateL2Fill(
+    assetBook.book,
+    openAction(signal.side),
+    sizing.size,
+    assetBook.asset.szDecimals,
+    shadowPolicy,
+  );
+  if (!result.ok) {
+    state.markSeen(signal.key);
+    log({
+      type: 'skip', reason: `shadow_${result.reason}`, detail: result.detail ?? null,
+      signal, wakeSource, decisionAtMs, bookRequestedAtMs: assetBook.requestedAtMs,
+      bookReceivedAtMs: assetBook.receivedAtMs,
+    });
+    return;
+  }
+
+  const fill = result.fill;
   const sourceSize = positive(signal.entrySize) ?? undefined;
+  const marginUsd = fill.notionalUsd / leverage;
   state.setManaged({
     coin: signal.coin,
     sourceBaseId: signal.sourceBaseId,
@@ -211,105 +275,181 @@ async function shadowOpen(signal: InvoSignal, wakeSource: string, receivedAtMs: 
     sourcePostId: signal.postId,
     username: signal.username,
     side: signal.side,
-    openedAtMs: Date.now(),
+    openedAtMs: fill.receivedAtMs,
     paper: true,
-    entryMid: snap.mid,
-    notionalUsd: sizing.notionalUsd,
-    marginUsd: sizing.marginUsd,
+    entryMid: fill.midPx,
+    entryPrice: fill.avgPx,
+    entryBookMid: fill.midPx,
+    entryBookTimeMs: fill.bookTimeMs,
+    entryBookReceivedAtMs: fill.receivedAtMs,
+    entryBookAgeMs: fill.bookAgeMs,
+    entrySpreadBps: fill.spreadBps,
+    entrySlippageBps: fill.slippageBps,
+    entrySlippageUsd: fill.slippageUsd,
+    entryFeeUsd: fill.feeUsd,
+    entryNotionalExecutedUsd: fill.notionalUsd,
+    notionalUsd: fill.notionalUsd,
+    marginUsd,
     leverage,
-    size: sizing.size,
+    size: fill.filledSize,
     sourceSize,
     addCount: 0,
+    estimatedOpenCostUsd: fill.feeUsd + fill.slippageUsd,
+    unfilledOpenSize: fill.unfilledSize,
+    exposureCheckpoints: [{ atMs: fill.receivedAtMs, size: fill.filledSize }],
+    fundingOracleCheckpoints: [],
+    fundingCarryUsd: 0,
+    fundingAccruedThroughMs: fill.receivedAtMs,
+    executionEvidenceVersion: EXECUTION_EVIDENCE_VERSION,
+    costModelVersion: COST_MODEL_VERSION,
   });
   state.markSeen(signal.key);
   log({
     type: openedFromIncrease ? 'shadow_opened_from_increase' : 'shadow_opened',
-    signal,
-    wakeSource,
-    equity,
-    entryMid: snap.mid,
-    chaseBps: chase,
-    leverage,
-    marginUsd: sizing.marginUsd,
-    notionalUsd: sizing.notionalUsd,
-    size: sizing.size,
-    sourceSize,
+    signal, wakeSource, decisionAtMs, equity, leverage, marginUsd,
+    sourceSize, requestedSize: fill.requestedRoundedSize, filledSize: fill.filledSize,
+    unfilledSize: fill.unfilledSize, partialFill: fill.partial,
+    entryPrice: fill.avgPx, entryBookMid: fill.midPx, entryNotionalUsd: fill.notionalUsd,
+    entryFeeUsd: fill.feeUsd, entrySlippageUsd: fill.slippageUsd,
+    entrySlippageBps: fill.slippageBps, spreadBps: fill.spreadBps,
+    bookTimeMs: fill.bookTimeMs, bookRequestedAtMs: fill.requestedAtMs,
+    bookReceivedAtMs: fill.receivedAtMs, bookAgeMs: fill.bookAgeMs,
+    executionEvidenceVersion: EXECUTION_EVIDENCE_VERSION,
+    costModelVersion: COST_MODEL_VERSION,
+    fundingModel: 'Hyperliquid fundingHistory rate x prospective oraclePx x position size; missing oracle fails closed',
     detectionLatencyMs: detectionLatencyMs(signal, receivedAtMs),
-    decisionLatencyMs: Date.now() - receivedAtMs,
+    decisionLatencyMs: fill.requestedAtMs - receivedAtMs,
+    marketDataLatencyMs: fill.receivedAtMs - fill.requestedAtMs,
   });
 }
 
-async function shadowReup(managed: ManagedPosition, signal: InvoSignal, wakeSource: string, receivedAtMs: number) {
+async function shadowReup(
+  managed: ManagedPosition,
+  signal: InvoSignal,
+  wakeSource: string,
+  receivedAtMs: number,
+  decisionAtMs: number,
+) {
   if (managed.side !== signal.side || managed.coin !== signal.coin) {
     state.markSeen(signal.key);
     log({ type: 'skip', reason: 'source_reup_direction_or_coin_mismatch', managed, signal, wakeSource });
     return;
   }
-  const snap = await marketSnapshot(signal);
-  if (!snap) {
+  if (managed.executionEvidenceVersion !== EXECUTION_EVIDENCE_VERSION || !(Number(managed.entryPrice) > 0)) {
+    state.markSeen(signal.key);
+    log({
+      type: 'skip', reason: 'shadow_legacy_position_reup_incomplete',
+      economicsCompleteness: 'INCOMPLETE_LEGACY_ENTRY', managed, signal, wakeSource,
+    });
+    return;
+  }
+
+  const assetBook = await fetchAssetBook(signal.coin);
+  if (!assetBook) {
     state.markSeen(signal.key);
     log({ type: 'skip', reason: 'unknown_hl_asset', signal, wakeSource });
     return;
   }
-  const leverage = validateSourceLeverage(signal, snap.asset);
+  const leverage = validateSourceLeverage(signal, assetBook.asset);
   if (leverage == null) {
     state.markSeen(signal.key);
-    log({ type: 'skip', reason: 'source_leverage_unexecutable_on_hl', sourceLeverage: signal.leverage, assetMaxLeverage: snap.asset.maxLeverage, signal, wakeSource });
+    log({
+      type: 'skip', reason: 'source_leverage_unexecutable_on_hl',
+      sourceLeverage: signal.leverage, assetMaxLeverage: assetBook.asset.maxLeverage,
+      signal, wakeSource,
+    });
+    return;
+  }
+  const bestBid = assetBook.book?.bids[0]?.px;
+  const bestAsk = assetBook.book?.asks[0]?.px;
+  const mid = bestBid && bestAsk ? (bestBid + bestAsk) / 2 : 0;
+  if (!(mid > 0)) {
+    state.markSeen(signal.key);
+    log({ type: 'skip', reason: 'shadow_missing_book', signal, wakeSource, decisionAtMs });
     return;
   }
 
   const equity = await hl.getAccountEquity(WALLET_ADDRESS);
-  const fallback = baseShadowSlice(equity, snap.mid, leverage);
+  const fallback = baseShadowSlice(equity, mid, leverage);
   const reup = shadowReupSize(managed, signal, fallback.size);
+  const result = simulateL2Fill(
+    assetBook.book,
+    openAction(signal.side),
+    reup.addSize,
+    assetBook.asset.szDecimals,
+    shadowPolicy,
+  );
+  if (!result.ok) {
+    state.markSeen(signal.key);
+    log({
+      type: 'skip', reason: `shadow_${result.reason}`, detail: result.detail ?? null,
+      signal, wakeSource, decisionAtMs,
+    });
+    return;
+  }
+
+  const fill = result.fill;
   const priorSize = positive(managed.size) ?? 0;
-  const priorEntryMid = positive(managed.entryMid) ?? snap.mid;
-  if (!(priorSize > 0) || !(reup.addSize > 0)) throw new Error('Invalid shadow re-up size');
-  const newSize = priorSize + reup.addSize;
-  const newEntryMid = ((priorEntryMid * priorSize) + (snap.mid * reup.addSize)) / newSize;
-  const addNotionalUsd = snap.mid * reup.addSize;
-  const addMarginUsd = addNotionalUsd / leverage;
+  const priorEntry = positive(managed.entryPrice) ?? 0;
+  if (!(priorSize > 0) || !(priorEntry > 0)) throw new Error('Invalid shadow re-up basis');
+  const newSize = priorSize + fill.filledSize;
+  const newEntryPrice = ((priorEntry * priorSize) + (fill.avgPx * fill.filledSize)) / newSize;
   const newSourceSize = reup.sourceIncrementSize
     ? (positive(managed.sourceSize) ?? 0) + reup.sourceIncrementSize
     : managed.sourceSize;
+  const newEntryNotional = Number(managed.entryNotionalExecutedUsd ?? priorEntry * priorSize) + fill.notionalUsd;
+  const newMargin = Number(managed.marginUsd ?? 0) + fill.notionalUsd / leverage;
+  const checkpoints = [
+    ...(managed.exposureCheckpoints ?? []),
+    { atMs: fill.receivedAtMs, size: newSize },
+  ];
 
   state.setManaged({
     ...managed,
     sourcePostId: signal.postId,
     sourceBaseShortId: signal.sourceBaseShortId || managed.sourceBaseShortId,
     leverage,
-    entryMid: newEntryMid,
+    entryMid: newEntryPrice,
+    entryPrice: newEntryPrice,
+    entryBookMid: fill.midPx,
+    entryBookTimeMs: fill.bookTimeMs,
+    entryBookReceivedAtMs: fill.receivedAtMs,
+    entryBookAgeMs: fill.bookAgeMs,
+    entrySpreadBps: fill.spreadBps,
+    entrySlippageBps: fill.slippageBps,
+    entrySlippageUsd: Number(managed.entrySlippageUsd ?? 0) + fill.slippageUsd,
+    entryFeeUsd: Number(managed.entryFeeUsd ?? 0) + fill.feeUsd,
+    entryNotionalExecutedUsd: newEntryNotional,
     size: newSize,
     sourceSize: newSourceSize,
-    notionalUsd: (managed.notionalUsd ?? priorEntryMid * priorSize) + addNotionalUsd,
-    marginUsd: (managed.marginUsd ?? 0) + addMarginUsd,
+    notionalUsd: newEntryNotional,
+    marginUsd: newMargin,
     addCount: (managed.addCount ?? 0) + 1,
+    unfilledOpenSize: Number(managed.unfilledOpenSize ?? 0) + fill.unfilledSize,
+    exposureCheckpoints: checkpoints,
+    executionEvidenceVersion: EXECUTION_EVIDENCE_VERSION,
+    costModelVersion: COST_MODEL_VERSION,
   });
   state.markSeen(signal.key);
   log({
-    type: 'shadow_reupped',
-    username: managed.username ?? signal.username,
-    coin: signal.coin,
-    side: signal.side,
-    sourceBaseId: signal.sourceBaseId,
-    leverage,
-    priorSize,
-    addedSize: reup.addSize,
-    newSize,
-    priorEntryMid,
-    addMid: snap.mid,
-    newEntryMid,
-    addNotionalUsd,
-    addMarginUsd,
-    sourceIncrementSize: reup.sourceIncrementSize,
-    priorSourceSize: managed.sourceSize,
-    newSourceSize,
-    sizingModel: reup.sizingModel,
-    copyPerSourceUnit: reup.copyPerSourceUnit,
-    chaseBps: chaseBps(signal, snap.mid),
-    signal,
-    wakeSource,
+    type: 'shadow_reupped', username: managed.username ?? signal.username,
+    coin: signal.coin, side: signal.side, sourceBaseId: signal.sourceBaseId,
+    leverage, priorSize, requestedAddSize: fill.requestedRoundedSize,
+    addedSize: fill.filledSize, unfilledAddSize: fill.unfilledSize,
+    partialFill: fill.partial, newSize, priorEntryPrice: priorEntry,
+    addPrice: fill.avgPx, newEntryPrice, addNotionalUsd: fill.notionalUsd,
+    addMarginUsd: fill.notionalUsd / leverage, entryFeeAddedUsd: fill.feeUsd,
+    slippageAddedUsd: fill.slippageUsd, sourceIncrementSize: reup.sourceIncrementSize,
+    priorSourceSize: managed.sourceSize, newSourceSize, sizingModel: reup.sizingModel,
+    copyPerSourceUnit: reup.copyPerSourceUnit, signal, wakeSource, decisionAtMs,
+    spreadBps: fill.spreadBps, slippageBps: fill.slippageBps,
+    bookTimeMs: fill.bookTimeMs, bookRequestedAtMs: fill.requestedAtMs,
+    bookReceivedAtMs: fill.receivedAtMs, bookAgeMs: fill.bookAgeMs,
+    executionEvidenceVersion: EXECUTION_EVIDENCE_VERSION,
+    costModelVersion: COST_MODEL_VERSION,
     detectionLatencyMs: detectionLatencyMs(signal, receivedAtMs),
-    decisionLatencyMs: Date.now() - receivedAtMs,
+    decisionLatencyMs: fill.requestedAtMs - receivedAtMs,
+    marketDataLatencyMs: fill.receivedAtMs - fill.requestedAtMs,
   });
 }
 
@@ -346,48 +486,142 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
       }
 
       if (!cfg.live) {
-        const mids = await hl.getAllMids();
-        const exitMid = Number(mids[signal.coin]);
-        const entryMid = Number(managed.entryMid);
         const size = Number(managed.size);
-        if (!(exitMid > 0) || !(entryMid > 0) || !(size > 0)) {
-          state.clearManagedBySource(signal.sourceBaseId);
+        const assetBook = await fetchAssetBook(signal.coin);
+        if (!assetBook || !(size > 0)) {
+          state.setManaged({ ...managed, unresolvedAfterSourceClose: true });
           state.markSeen(signal.key);
-          log({ type: 'shadow_close_unpriced', reason: 'missing_shadow_economics', managed, signal, exitMid, wakeSource, ...closeFreshness(signal, receivedAtMs) });
+          log({
+            type: 'shadow_close_incomplete', reason: !assetBook ? 'missing_book' : 'invalid_managed_size',
+            economicsCompleteness: 'INCOMPLETE', managed, signal, wakeSource,
+            ...closeFreshness(signal, receivedAtMs),
+          });
           return;
         }
-        const direction = managed.side === 'long' ? 1 : -1;
-        const grossPnlUsd = (exitMid - entryMid) * size * direction;
-        const grossReturnBps = ((exitMid - entryMid) / entryMid) * direction * 10_000;
-        const returnOnMarginPct = managed.marginUsd && managed.marginUsd > 0
-          ? (grossPnlUsd / managed.marginUsd) * 100
-          : null;
-        const heldMs = Date.now() - managed.openedAtMs;
-        state.clearManagedBySource(signal.sourceBaseId);
+        const result = simulateL2Fill(
+          assetBook.book,
+          closeAction(managed.side),
+          size,
+          assetBook.asset.szDecimals,
+          shadowPolicy,
+        );
+        if (!result.ok) {
+          state.setManaged({ ...managed, unresolvedAfterSourceClose: true });
+          state.markSeen(signal.key);
+          log({
+            type: 'shadow_close_rejected', reason: result.reason, detail: result.detail ?? null,
+            economicsCompleteness: 'UNRESOLVED_EXPOSURE', managed, signal, wakeSource,
+            decisionAtMs, bookRequestedAtMs: assetBook.requestedAtMs,
+            bookReceivedAtMs: assetBook.receivedAtMs,
+            ...closeFreshness(signal, receivedAtMs),
+          });
+          return;
+        }
+
+        const fill = result.fill;
+        const legacy = managed.executionEvidenceVersion !== EXECUTION_EVIDENCE_VERSION
+          || !(Number(managed.entryPrice) > 0)
+          || !(Number(managed.entryNotionalExecutedUsd) > 0)
+          || !Array.isArray(managed.exposureCheckpoints)
+          || !Array.isArray(managed.fundingOracleCheckpoints);
+        const fraction = Math.min(1, fill.filledSize / size);
+        let fundingUsd: number | null = null;
+        let fullPositionFundingUsd: number | null = null;
+        let fundingPoints: number | null = null;
+        let fundingOraclePointsMatched: number | null = null;
+        let fundingCarryUsd: number | null = null;
+        let fundingModel: string | null = null;
+        let fundingError: string | null = null;
+        if (!legacy) {
+          try {
+            const funding = await fundingForPosition(
+              managed,
+              fill.receivedAtMs,
+              cfg.shadowFundingOracleMaxDelayMs,
+            );
+            fullPositionFundingUsd = funding.fundingUsd;
+            fundingUsd = funding.fundingUsd * fraction;
+            fundingPoints = funding.fundingPoints;
+            fundingOraclePointsMatched = funding.oraclePointsMatched;
+            fundingCarryUsd = funding.carryUsd;
+            fundingModel = funding.model;
+          } catch (err) {
+            fundingError = err instanceof Error ? err.message : String(err);
+          }
+        }
+
+        let economics = null;
+        if (!legacy && fundingUsd != null) {
+          economics = computePositionEconomics({
+            side: managed.side,
+            entryAvgPx: Number(managed.entryPrice),
+            size: fill.filledSize,
+            entryFeeUsd: Number(managed.entryFeeUsd ?? 0) * fraction,
+            entryNotionalUsd: Number(managed.entryNotionalExecutedUsd) * fraction,
+            exitFill: fill,
+            fundingUsd,
+          });
+        }
+
+        const remainingSize = Math.max(0, size - fill.filledSize);
+        if (remainingSize > 1e-12) {
+          const remainingFraction = remainingSize / size;
+          state.setManaged({
+            ...managed,
+            size: remainingSize,
+            entryFeeUsd: Number(managed.entryFeeUsd ?? 0) * remainingFraction,
+            entrySlippageUsd: Number(managed.entrySlippageUsd ?? 0) * remainingFraction,
+            entryNotionalExecutedUsd: Number(managed.entryNotionalExecutedUsd ?? 0) * remainingFraction,
+            notionalUsd: Number(managed.notionalUsd ?? 0) * remainingFraction,
+            marginUsd: Number(managed.marginUsd ?? 0) * remainingFraction,
+            unresolvedAfterSourceClose: true,
+            exposureCheckpoints: [{ atMs: fill.receivedAtMs, size: remainingSize }],
+            fundingOracleCheckpoints: [],
+            fundingCarryUsd: fullPositionFundingUsd == null
+              ? Number(managed.fundingCarryUsd ?? 0)
+              : fullPositionFundingUsd * remainingFraction,
+            fundingAccruedThroughMs: fill.receivedAtMs,
+            fundingIncompleteReason: fullPositionFundingUsd == null
+              ? (fundingError ?? managed.fundingIncompleteReason ?? 'funding evidence incomplete at partial close')
+              : undefined,
+          });
+        } else {
+          state.clearManagedBySource(signal.sourceBaseId);
+        }
         state.markSeen(signal.key);
         log({
-          type: 'shadow_closed',
+          type: remainingSize > 1e-12 ? 'shadow_partially_closed' : 'shadow_closed',
+          economicsCompleteness: legacy
+            ? 'INCOMPLETE_LEGACY_ENTRY'
+            : fundingUsd == null ? 'INCOMPLETE_FUNDING' : 'COMPLETE_EXECUTION_REALISTIC',
+          fundingError,
           username: managed.username ?? signal.username,
-          coin: signal.coin,
-          side: managed.side,
-          sourceBaseId: managed.sourceBaseId,
-          entryMid,
-          exitMid,
-          sourceClosingPrice: signal.closingPrice,
-          size,
-          sourceSize: managed.sourceSize,
-          addCount: managed.addCount ?? 0,
-          notionalUsd: managed.notionalUsd,
-          marginUsd: managed.marginUsd,
-          leverage: managed.leverage,
-          grossPnlUsd,
-          grossReturnBps,
-          returnOnMarginPct,
-          heldMs,
-          signal,
-          wakeSource,
+          coin: signal.coin, side: managed.side, sourceBaseId: managed.sourceBaseId,
+          entryPrice: managed.entryPrice ?? null, entryBookMid: managed.entryBookMid ?? null,
+          exitPrice: fill.avgPx, exitBookMid: fill.midPx,
+          sourceClosingPrice: signal.closingPrice, requestedCloseSize: fill.requestedRoundedSize,
+          closedSize: fill.filledSize, unresolvedSize: remainingSize,
+          partialFill: fill.partial, sourceSize: managed.sourceSize,
+          addCount: managed.addCount ?? 0, leverage: managed.leverage,
+          grossPnlUsd: economics?.grossPnlUsd ?? null,
+          grossReturnBps: economics?.grossReturnBps ?? null,
+          entryFeeUsd: economics?.entryFeeUsd ?? null,
+          exitFeeUsd: economics?.exitFeeUsd ?? fill.feeUsd,
+          fundingUsd: economics?.fundingUsd ?? fundingUsd,
+          fundingPoints, fundingOraclePointsMatched, fundingCarryUsd, fundingModel,
+          totalExplicitCostUsd: economics?.totalExplicitCostUsd ?? null,
+          netPnlUsd: economics?.netPnlUsd ?? null,
+          netReturnBps: economics?.netReturnBps ?? null,
+          exitSlippageUsd: fill.slippageUsd, exitSlippageBps: fill.slippageBps,
+          spreadBps: fill.spreadBps, heldMs: fill.receivedAtMs - managed.openedAtMs,
+          bookTimeMs: fill.bookTimeMs, bookRequestedAtMs: fill.requestedAtMs,
+          bookReceivedAtMs: fill.receivedAtMs, bookAgeMs: fill.bookAgeMs,
+          executionEvidenceVersion: managed.executionEvidenceVersion ?? null,
+          costModelVersion: managed.costModelVersion ?? null,
+          signal, wakeSource, decisionAtMs,
           detectionLatencyMs: detectionLatencyMs(signal, receivedAtMs),
-          decisionLatencyMs: Date.now() - receivedAtMs,
+          decisionLatencyMs: fill.requestedAtMs - receivedAtMs,
+          marketDataLatencyMs: fill.receivedAtMs - fill.requestedAtMs,
           ...closeFreshness(signal, receivedAtMs),
         });
         return;
@@ -448,7 +682,7 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
     const existingManaged = state.getManagedBySource(signal.sourceBaseId);
     if (signal.action === 'increase' && existingManaged) {
       if (!cfg.live) {
-        await shadowReup(existingManaged, signal, wakeSource, receivedAtMs);
+        await shadowReup(existingManaged, signal, wakeSource, receivedAtMs, decisionAtMs);
         return;
       }
 
@@ -526,7 +760,7 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
     }
 
     if (!cfg.live) {
-      await shadowOpen(signal, wakeSource, receivedAtMs, signal.action === 'increase');
+      await shadowOpen(signal, wakeSource, receivedAtMs, signal.action === 'increase', decisionAtMs);
       return;
     }
 
@@ -660,6 +894,86 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
   } finally {
     inFlight.delete(signal.key);
   }
+}
+
+
+async function captureFundingOracleCheckpoints(nowMs = Date.now()) {
+  if (cfg.live) return;
+  const fundingTimeMs = Math.floor(nowMs / FUNDING_INTERVAL_MS) * FUNDING_INTERVAL_MS;
+  if (fundingTimeMs === lastFundingOracleBoundaryMs) return;
+
+  const snapshot = state.snapshot();
+  const targets = Object.values(snapshot.managed).filter(position => (
+    position.paper
+    && position.executionEvidenceVersion === EXECUTION_EVIDENCE_VERSION
+    && position.openedAtMs < fundingTimeMs
+    && !position.fundingIncompleteReason
+    && !(position.fundingOracleCheckpoints ?? []).some(point => point.fundingTimeMs === fundingTimeMs)
+  ));
+  const delayAtStartMs = nowMs - fundingTimeMs;
+  if (delayAtStartMs > cfg.shadowFundingOracleMaxDelayMs) {
+    lastFundingOracleBoundaryMs = fundingTimeMs;
+    for (const position of targets) {
+      const latest = state.getManagedBySource(position.sourceBaseId);
+      if (!latest || latest.fundingIncompleteReason) continue;
+      state.setManaged({
+        ...latest,
+        fundingIncompleteReason: `missed oracle checkpoint for funding interval ${fundingTimeMs}`,
+      });
+    }
+    if (targets.length) {
+      log({
+        type: 'funding_oracle_capture_missed',
+        fundingTimeMs,
+        delayMs: delayAtStartMs,
+        maxDelayMs: cfg.shadowFundingOracleMaxDelayMs,
+        affectedSourceBaseIds: targets.map(position => position.sourceBaseId),
+      });
+    }
+    return;
+  }
+  if (!targets.length) {
+    lastFundingOracleBoundaryMs = fundingTimeMs;
+    return;
+  }
+
+  const requestedAtMs = Date.now();
+  const oraclePrices = await hl.getOraclePrices();
+  const observedAtMs = Date.now();
+  const delayMs = observedAtMs - fundingTimeMs;
+  lastFundingOracleBoundaryMs = fundingTimeMs;
+
+  for (const position of targets) {
+    const latest = state.getManagedBySource(position.sourceBaseId);
+    if (!latest || latest.fundingIncompleteReason || latest.openedAtMs >= fundingTimeMs) continue;
+    if ((latest.fundingOracleCheckpoints ?? []).some(point => point.fundingTimeMs === fundingTimeMs)) continue;
+    const oraclePx = Number(oraclePrices[latest.coin]);
+    if (!(oraclePx > 0) || delayMs > cfg.shadowFundingOracleMaxDelayMs) {
+      state.setManaged({
+        ...latest,
+        fundingIncompleteReason: !(oraclePx > 0)
+          ? `missing oraclePx for ${latest.coin} at funding interval ${fundingTimeMs}`
+          : `oracle checkpoint too late for funding interval ${fundingTimeMs}: ${delayMs}ms`,
+      });
+      continue;
+    }
+    state.setManaged({
+      ...latest,
+      fundingOracleCheckpoints: [
+        ...(latest.fundingOracleCheckpoints ?? []),
+        { fundingTimeMs, observedAtMs, oraclePx },
+      ],
+    });
+  }
+  log({
+    type: 'funding_oracle_checkpoint',
+    fundingTimeMs,
+    requestedAtMs,
+    observedAtMs,
+    delayMs,
+    maxDelayMs: cfg.shadowFundingOracleMaxDelayMs,
+    targetCount: targets.length,
+  });
 }
 
 async function fetchAndProcess(source: string, hints: NotificationHints | undefined, receivedAtMs: number, feedFilter = cfg.feedFilter): Promise<number> {
@@ -807,6 +1121,23 @@ function startServer() {
   const server = createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/health') {
       const population = tracker.report();
+      const snapshot = state.snapshot();
+      const paperPositions = Object.values(snapshot.managed).filter(position => position.paper);
+      const shadowMarks = cfg.live ? [] : await Promise.all(paperPositions.map(async position => {
+        try {
+          return await markShadowPosition(position, shadowPolicy);
+        } catch (err) {
+          return {
+            sourceBaseId: position.sourceBaseId,
+            coin: position.coin,
+            side: position.side,
+            size: position.size ?? null,
+            status: 'BOOK_REJECTED',
+            reason: err instanceof Error ? err.message : String(err),
+            markedAtMs: Date.now(),
+          };
+        }
+      }));
       return json(res, 200, {
         ok: true,
         initialized,
@@ -818,7 +1149,13 @@ function startServer() {
         maxSignalAgeMs: cfg.maxSignalAgeMs,
         lastSuccessPollMs,
         managedCount: state.managedCount(),
-        managed: state.snapshot().managed,
+        managed: snapshot.managed,
+        shadowMarks,
+        shadowOpenExposureCount: paperPositions.length,
+        closedOnlyProfitabilityForbidden: true,
+        shadowExecutionPolicy: shadowPolicy,
+        executionEvidenceVersion: EXECUTION_EVIDENCE_VERSION,
+        costModelVersion: COST_MODEL_VERSION,
         traderFunnel: population.funnel,
         evidencePolicy: population.policy,
         assessmentQueue: population.assessmentQueue,
@@ -864,6 +1201,13 @@ async function pollLoop() {
     await new Promise(r => setTimeout(r, wait));
     const surface = cfg.discoverySurfaces[discoverySurfaceIndex % cfg.discoverySurfaces.length];
     discoverySurfaceIndex += 1;
+    if (!cfg.live) {
+      try {
+        await captureFundingOracleCheckpoints(Date.now());
+      } catch (err) {
+        log({ type: 'funding_oracle_capture_error', error: err instanceof Error ? err.message : String(err) });
+      }
+    }
     await wake(`api_poll:${surface}`, undefined, Date.now(), surface);
   }
 }
@@ -873,6 +1217,13 @@ async function main() {
   if (cfg.live) {
     await hl.connect(HL_AGENT_KEY, WALLET_ADDRESS);
     await invo.checkAccountReady();
+  }
+  if (!cfg.live) {
+    try {
+      await captureFundingOracleCheckpoints(Date.now());
+    } catch (err) {
+      log({ type: 'funding_oracle_capture_error', phase: 'startup', error: err instanceof Error ? err.message : String(err) });
+    }
   }
   await wake('startup_baseline', undefined, Date.now());
   startServer();
@@ -886,6 +1237,11 @@ async function main() {
     discoverySurfaces: cfg.discoverySurfaces,
     feedLimit: cfg.feedLimit,
     feedMaxPages: cfg.feedMaxPages,
+    shadowExecutionPolicy: shadowPolicy,
+    fundingOracleMaxDelayMs: cfg.shadowFundingOracleMaxDelayMs,
+    executionEvidenceVersion: EXECUTION_EVIDENCE_VERSION,
+    costModelVersion: COST_MODEL_VERSION,
+    closedOnlyProfitabilityForbidden: true,
     evidencePolicy: tracker.report().policy,
     leverageMode: 'source_exact_up_to_hl_asset_max',
     reups: true,

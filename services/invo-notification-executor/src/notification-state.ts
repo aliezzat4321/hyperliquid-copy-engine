@@ -1,6 +1,17 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
 import { dirname } from 'path';
 
+export interface ExposureCheckpoint {
+  atMs: number;
+  size: number;
+}
+
+export interface FundingOracleCheckpoint {
+  fundingTimeMs: number;
+  observedAtMs: number;
+  oraclePx: number;
+}
+
 export interface ManagedPosition {
   coin: string;
   sourceBaseId: string;
@@ -12,6 +23,16 @@ export interface ManagedPosition {
   localBaseShortId?: string;
   paper?: boolean;
   entryMid?: number;
+  entryPrice?: number;
+  entryBookMid?: number;
+  entryBookTimeMs?: number;
+  entryBookReceivedAtMs?: number;
+  entryBookAgeMs?: number;
+  entrySpreadBps?: number;
+  entrySlippageBps?: number;
+  entrySlippageUsd?: number;
+  entryFeeUsd?: number;
+  entryNotionalExecutedUsd?: number;
   notionalUsd?: number;
   marginUsd?: number;
   leverage?: number;
@@ -19,6 +40,15 @@ export interface ManagedPosition {
   sourceSize?: number;
   addCount?: number;
   estimatedOpenCostUsd?: number;
+  unfilledOpenSize?: number;
+  unresolvedAfterSourceClose?: boolean;
+  exposureCheckpoints?: ExposureCheckpoint[];
+  fundingOracleCheckpoints?: FundingOracleCheckpoint[];
+  fundingCarryUsd?: number;
+  fundingAccruedThroughMs?: number;
+  fundingIncompleteReason?: string;
+  executionEvidenceVersion?: string;
+  costModelVersion?: string;
 }
 
 interface DiskState {

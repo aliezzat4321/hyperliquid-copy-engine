@@ -36,6 +36,88 @@ export async function getAllMids(): Promise<Record<string, string>> {
   return info({ type: 'allMids' });
 }
 
+export interface HyperliquidAssetContext {
+  oraclePx?: string | number;
+  markPx?: string | number;
+  midPx?: string | number | null;
+  funding?: string | number;
+}
+
+export async function getOraclePrices(): Promise<Record<string, number>> {
+  const payload = await info({ type: 'metaAndAssetCtxs' });
+  if (!Array.isArray(payload) || payload.length < 2) {
+    throw new Error('Invalid Hyperliquid metaAndAssetCtxs payload');
+  }
+  const meta = payload[0];
+  const contexts = payload[1];
+  if (!Array.isArray(meta?.universe) || !Array.isArray(contexts)) {
+    throw new Error('Invalid Hyperliquid metaAndAssetCtxs shape');
+  }
+  const prices: Record<string, number> = {};
+  for (let i = 0; i < meta.universe.length; i += 1) {
+    const coin = String(meta.universe[i]?.name ?? '');
+    const oraclePx = Number((contexts[i] as HyperliquidAssetContext | undefined)?.oraclePx);
+    if (coin && Number.isFinite(oraclePx) && oraclePx > 0) prices[coin] = oraclePx;
+  }
+  return prices;
+}
+
+export interface HyperliquidL2Level {
+  px: string;
+  sz: string;
+  n?: number;
+}
+
+export interface HyperliquidL2Book {
+  coin: string;
+  time: number;
+  levels: [HyperliquidL2Level[], HyperliquidL2Level[]];
+}
+
+export async function getL2Book(coin: string): Promise<HyperliquidL2Book> {
+  return info({ type: 'l2Book', coin });
+}
+
+export interface HyperliquidFundingPoint {
+  coin?: string;
+  fundingRate?: string | number;
+  premium?: string | number;
+  time?: number;
+}
+
+export async function getFundingHistory(
+  coin: string,
+  startTime: number,
+  endTime: number,
+): Promise<HyperliquidFundingPoint[]> {
+  const rows: HyperliquidFundingPoint[] = [];
+  const seen = new Set<number>();
+  let cursor = startTime;
+  const maxPages = 20;
+  for (let page = 0; page < maxPages && cursor <= endTime; page += 1) {
+    const batch = await info({ type: 'fundingHistory', coin, startTime: cursor, endTime });
+    if (!Array.isArray(batch)) throw new Error(`Invalid funding history for ${coin}`);
+    let maxTime = -1;
+    for (const row of batch) {
+      const time = Number(row?.time);
+      if (!Number.isFinite(time)) continue;
+      maxTime = Math.max(maxTime, time);
+      if (!seen.has(time)) {
+        seen.add(time);
+        rows.push(row);
+      }
+    }
+    if (batch.length < 500 || maxTime >= endTime) break;
+    if (!(maxTime >= cursor)) throw new Error(`Funding history pagination made no progress for ${coin}`);
+    if (page === maxPages - 1) {
+      throw new Error(`Funding history pagination limit reached for ${coin}; economics incomplete`);
+    }
+    cursor = maxTime + 1;
+  }
+  rows.sort((a, b) => Number(a.time ?? 0) - Number(b.time ?? 0));
+  return rows;
+}
+
 export async function getClearinghouseState(wallet: string) {
   if (!wallet) throw new Error('Hyperliquid wallet address is required for account state');
   return info({ type: 'clearinghouseState', user: wallet });
