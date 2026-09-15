@@ -184,7 +184,9 @@ def _copy_partition_files(
         source_dir = market_dir / f"date={day}" / f"coin={wire}" / f"channel={channel}"
         if not source_dir.exists():
             continue
-        target_dir = destination / "market" / f"date={day}" / f"coin={wire}" / f"channel={channel}"
+        target_dir = (
+            destination / "market" / f"date={day}" / f"coin={wire}" / f"channel={channel}"
+        )
         target_dir.mkdir(parents=True, exist_ok=True)
         for source in sorted(source_dir.glob("*.parquet")):
             target = target_dir / source.name
@@ -351,9 +353,14 @@ def build_lane1_audit_bundle(
             end_ms = max(event.exchange_ts_ms for event in rows)
             event_rows.extend(_event_dict(event, target.roles) for event in rows)
             target_id = hashlib.sha256(
-                f"{target.wallet_address}|{target.coin}".encode("utf-8")
+                f"{target.wallet_address}|{target.coin}".encode()
             ).hexdigest()[:16]
-            target_market = staging / "market" / f"target={target_id}" / f"coin={wire_coin(target.coin)}"
+            target_market = (
+                staging
+                / "market"
+                / f"target={target_id}"
+                / f"coin={wire_coin(target.coin)}"
+            )
 
             l2_windows = l2_replay_windows(rows)
             l2_path, l2_row_count = extract_market_window_rows(
@@ -400,7 +407,7 @@ def build_lane1_audit_bundle(
                     f"MISSING_FUNDING_EVIDENCE: coin={target.coin} "
                     f"required={','.join(str(value) for value in funding_required)}"
                 )
-            funding_name = hashlib.sha256(target.coin.encode("utf-8")).hexdigest()[:16]
+            funding_name = hashlib.sha256(target.coin.encode()).hexdigest()[:16]
             funding_path = staging / "funding_history" / f"{funding_name}.json"
             _write_json(
                 funding_path,
