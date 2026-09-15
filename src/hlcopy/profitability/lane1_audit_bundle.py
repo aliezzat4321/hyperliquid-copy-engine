@@ -14,6 +14,12 @@ from pathlib import Path
 from typing import Any
 
 from hlcopy.market.symbols import canonical_coin, wire_coin
+from hlcopy.profitability.lane1_audit_market import (
+    extract_market_window_rows,
+    l2_replay_windows,
+    oracle_replay_windows,
+    replay_window_summary,
+)
 from hlcopy.profitability.lane1_funding_source import fetch_official_funding_history
 from hlcopy.profitability.lane1_metrics import LANE1_RETURN_BASIS_FUNDING_V2
 from hlcopy.profitability.position_copy import CopyFillEvent, load_wide_events
@@ -171,6 +177,7 @@ def _copy_partition_files(
     channel: str,
     dates: tuple[str, ...],
 ) -> list[Path]:
+    """Compatibility helper retained for focused symbol/path unit tests only."""
     copied: list[Path] = []
     wire = wire_coin(coin)
     for day in dates:
@@ -343,33 +350,37 @@ def build_lane1_audit_bundle(
             start_ms = min(event.exchange_ts_ms for event in rows)
             end_ms = max(event.exchange_ts_ms for event in rows)
             event_rows.extend(_event_dict(event, target.roles) for event in rows)
+            target_id = hashlib.sha256(
+                f"{target.wallet_address}|{target.coin}".encode("utf-8")
+            ).hexdigest()[:16]
+            target_market = staging / "market" / f"target={target_id}" / f"coin={wire_coin(target.coin)}"
 
-            # Keep evidence coin-scoped and date-scoped; never copy unrelated market tails.
-            l2_dates = _utc_dates(start_ms, end_ms + 2_000)
-            l2_files = _copy_partition_files(
+            l2_windows = l2_replay_windows(rows)
+            l2_path, l2_row_count = extract_market_window_rows(
                 market_dir,
-                staging,
+                target_market / "l2Book.parquet",
                 coin=target.coin,
                 channel="l2Book",
-                dates=l2_dates,
+                windows=l2_windows,
             )
-            if not l2_files:
+            if l2_path is None or l2_row_count <= 0:
                 raise Lane1AuditBundleError(
                     f"MISSING_L2_EVIDENCE: wallet={target.wallet_address} coin={target.coin}"
                 )
 
             funding_required = _required_hourly_boundaries(start_ms, end_ms)
-            ctx_files: list[Path] = []
+            oracle_windows = oracle_replay_windows(funding_required)
+            oracle_path: Path | None = None
+            oracle_row_count = 0
             if funding_required:
-                ctx_dates = _utc_dates(max(0, start_ms - 60_000), end_ms + 2_000)
-                ctx_files = _copy_partition_files(
+                oracle_path, oracle_row_count = extract_market_window_rows(
                     market_dir,
-                    staging,
+                    target_market / "activeAssetCtx.parquet",
                     coin=target.coin,
                     channel="activeAssetCtx",
-                    dates=ctx_dates,
+                    windows=oracle_windows,
                 )
-                if not ctx_files:
+                if oracle_path is None or oracle_row_count <= 0:
                     raise Lane1AuditBundleError(
                         f"MISSING_ORACLE_EVIDENCE: wallet={target.wallet_address} "
                         f"coin={target.coin}"
@@ -405,6 +416,7 @@ def build_lane1_audit_bundle(
 
             target_manifest.append(
                 {
+                    "target_id": target_id,
                     "wallet_address": target.wallet_address,
                     "coin": target.coin,
                     "wire_coin": wire_coin(target.coin),
@@ -414,8 +426,14 @@ def build_lane1_audit_bundle(
                     "end_exchange_ts_ms": end_ms,
                     "crosses_funding_boundary": _crosses_hourly_boundary(start_ms, end_ms),
                     "required_hourly_funding_boundaries": list(funding_required),
-                    "l2_file_count": len(l2_files),
-                    "active_asset_ctx_file_count": len(ctx_files),
+                    "l2_replay_windows": replay_window_summary(l2_windows),
+                    "l2_row_count": l2_row_count,
+                    "l2_path": l2_path.relative_to(staging).as_posix(),
+                    "oracle_replay_windows": replay_window_summary(oracle_windows),
+                    "active_asset_ctx_row_count": oracle_row_count,
+                    "active_asset_ctx_path": (
+                        oracle_path.relative_to(staging).as_posix() if oracle_path else None
+                    ),
                     "funding_history_row_count": len(rows_for_coin),
                 }
             )
