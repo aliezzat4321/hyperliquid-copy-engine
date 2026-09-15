@@ -129,15 +129,31 @@ systemctl daemon-reload
 systemd-analyze verify "/etc/systemd/system/$UNIT"
 systemctl enable "$UNIT"
 systemctl restart "$UNIT"
-sleep 2
 
-if [[ "$(systemctl is-active "$UNIT")" != "active" ]]; then
+# Startup performs token/feed hydration before binding /health, so a fixed 2s sleep creates
+# false deploy failures under normal API latency. Wait a bounded period for actual readiness,
+# while still failing immediately if systemd reports the service dead.
+health=""
+for attempt in $(seq 1 30); do
+  if [[ "$(systemctl is-active "$UNIT")" != "active" ]]; then
+    echo "Lane 3 service became inactive during readiness attempt ${attempt}" >&2
+    systemctl --no-pager --full status "$UNIT" || true
+    journalctl -u "$UNIT" -n 100 --no-pager || true
+    exit 1
+  fi
+  if health="$(curl -fsS --max-time 3 http://127.0.0.1:8787/health 2>/dev/null)"; then
+    break
+  fi
+  sleep 1
+done
+
+if [[ -z "$health" ]]; then
+  echo "Lane 3 service stayed active but /health never became ready within 30s" >&2
   systemctl --no-pager --full status "$UNIT" || true
   journalctl -u "$UNIT" -n 100 --no-pager || true
   exit 1
 fi
 
-health="$(curl -fsS --max-time 3 http://127.0.0.1:8787/health)"
 # Mark the evidence epoch only after the service is healthy, so a failed deployment cannot
 # falsely claim that the fresh observation window has started.
 printf '%s\n' "$EVIDENCE_EPOCH" > "$EVIDENCE_MARKER"
