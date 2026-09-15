@@ -1,0 +1,81 @@
+# Trusted shadow-only Lane 1 review harness. Real trading must remain disabled.
+name: lane1-shadow-pr-review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "src/hlcopy/profitability/**"
+      - "scripts/prospective_champion_lane.py"
+      - "scripts/run_prospective_champion_review.py"
+      - "scripts/run_lane1_shadow_review.sh"
+      - "tests/test_lane1_*.py"
+      - "tests/test_prospective_challenger_queue_v2.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lane1-shadow-pr-review-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: >-
+      github.repository == 'aliezzat4321/hyperliquid-copy-engine' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.pull_request.head.repo.full_name == github.repository &&
+        startsWith(github.head_ref, 'codex/313-lane1')))
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 360
+    steps:
+      - name: Checkout exact review head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          clean: true
+
+      - name: Verify shadow-only review contract
+        shell: bash
+        env:
+          REVIEW_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test -n "$REVIEW_SHA"
+          test -x scripts/run_lane1_shadow_review.sh || test -f scripts/run_lane1_shadow_review.sh
+          if [[ "${REAL_TRADING_ENABLED:-NO}" == "YES" ]]; then
+            echo "REAL_TRADING_ENABLED must remain NO" >&2
+            exit 1
+          fi
+          echo "review_sha=$REVIEW_SHA"
+          echo "real_trading=NO"
+
+      - name: Run exact-head Lane 1 shadow evidence pipeline
+        shell: bash
+        env:
+          REVIEW_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          REAL_TRADING_ENABLED: "NO"
+        run: |
+          set -euo pipefail
+          if [[ "$(id -u)" -eq 0 ]]; then
+            bash scripts/run_lane1_shadow_review.sh "$REVIEW_SHA"
+          else
+            sudo -n env \
+              REVIEW_SHA="$REVIEW_SHA" \
+              REAL_TRADING_ENABLED=NO \
+              GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+              bash scripts/run_lane1_shadow_review.sh "$REVIEW_SHA"
+          fi
+
+      - name: Show replay evidence manifest
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f /root/hyperliquid-audit/evidence/manifest.json ]]; then
+            cat /root/hyperliquid-audit/evidence/manifest.json
+          else
+            echo "no canonical Lane 1 evidence manifest produced"
+          fi
