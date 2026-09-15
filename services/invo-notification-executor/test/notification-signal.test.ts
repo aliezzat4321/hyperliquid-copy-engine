@@ -26,10 +26,21 @@ test('parses a verified open without a wallet identifier', () => {
 });
 
 test('parses close and increase actions', () => {
-  const close = signalFromFeedPost({ ...basePost, id: 'post-close', update: { ...basePost.update, isOpen: false, closingPrice: 160 } });
+  const close = signalFromFeedPost({ ...basePost, id: 'post-close', update: { ...basePost.update, createdAt: '2026-01-01T00:00:00Z', closedAt: '2026-08-26T18:05:00Z', isOpen: false, closingPrice: 160 } });
   assert.equal(close?.action, 'close');
+  assert.equal(close?.sourceTimeMs, Date.parse('2026-08-26T18:05:00Z'));
+  assert.equal(close?.sourceTimeField, 'update.closedAt');
   const increase = signalFromFeedPost({ ...basePost, id: 'post-inc', update: { ...basePost.update, changes: { isAdded: false }, isOpen: true } });
   assert.equal(increase?.action, 'increase');
+});
+
+test('close never falls back to the original open creation timestamp', () => {
+  const close = signalFromFeedPost({
+    ...basePost,
+    update: { ...basePost.update, createdAt: '2026-01-01T00:00:00Z', isOpen: false, closingPrice: 160 },
+  });
+  assert.equal(close?.sourceTimeMs, null);
+  assert.equal(close?.sourceTimeField, null);
 });
 
 test('rejects unverified or ambiguous trade data', () => {

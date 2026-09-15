@@ -9,6 +9,8 @@ import { extractNotificationHints, hintsMatchSignal, InvoSignal, NotificationHin
 import { ManagedPosition, NotificationState } from './notification-state.js';
 import { TraderTracker } from './trader-tracker.js';
 import { liveScopeSkipReason } from './live-scope.js';
+import { fetchFeedBackfill } from './feed-backfill.js';
+import { planUnrecoverableGap } from './gap-reconciliation.js';
 
 if (INVO_TOKEN) invo.setToken(INVO_TOKEN);
 if (INVO_REFRESH_TOKEN) invo.setRefreshToken(INVO_REFRESH_TOKEN);
@@ -48,6 +50,7 @@ function loadConfig() {
     feedFilter,
     discoverySurfaces: [...new Set(discoverySurfaces)],
     feedLimit: Math.max(1, Math.min(100, Math.trunc(n('NOTIFICATION_TRADER_FEED_LIMIT', 100)))),
+    feedMaxPages: Math.max(1, Math.min(100, Math.trunc(n('NOTIFICATION_TRADER_FEED_MAX_PAGES', 20)))),
     marginPct: Math.max(0.01, n('NOTIFICATION_TRADER_MARGIN_PCT', 1)),
     // These are live-account safety controls only. Shadow research is intentionally uncapped.
     maxNotionalUsd: Math.max(10, n('NOTIFICATION_TRADER_MAX_NOTIONAL_USD', 500)),
@@ -106,6 +109,15 @@ function log(event: Record<string, unknown>) {
 
 function detectionLatencyMs(signal: InvoSignal, receivedAtMs: number): number | null {
   return signal.sourceTimeMs == null ? null : receivedAtMs - signal.sourceTimeMs;
+}
+
+function closeFreshness(signal: InvoSignal, receivedAtMs: number) {
+  const latencyMs = detectionLatencyMs(signal, receivedAtMs);
+  return {
+    closeFreshnessStatus: latencyMs == null ? 'unknown' : latencyMs > cfg.maxSignalAgeMs ? 'stale' : 'fresh',
+    closeLatencyMs: latencyMs,
+    closeSourceTimeField: signal.sourceTimeField,
+  };
 }
 
 function chaseBps(signal: InvoSignal, mid: number): number | null {
@@ -329,7 +341,7 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
       const managed = state.getManagedBySource(signal.sourceBaseId);
       if (!managed) {
         state.markSeen(signal.key);
-        log({ type: 'skip', reason: 'close_not_owned_by_service', managed: null, signal, wakeSource });
+        log({ type: 'close_ownership_gap', reason: 'close_not_owned_by_service', managed: null, signal, wakeSource, ...closeFreshness(signal, receivedAtMs) });
         return;
       }
 
@@ -341,7 +353,7 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
         if (!(exitMid > 0) || !(entryMid > 0) || !(size > 0)) {
           state.clearManagedBySource(signal.sourceBaseId);
           state.markSeen(signal.key);
-          log({ type: 'shadow_close_unpriced', reason: 'missing_shadow_economics', managed, signal, exitMid, wakeSource });
+          log({ type: 'shadow_close_unpriced', reason: 'missing_shadow_economics', managed, signal, exitMid, wakeSource, ...closeFreshness(signal, receivedAtMs) });
           return;
         }
         const direction = managed.side === 'long' ? 1 : -1;
@@ -376,6 +388,7 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
           wakeSource,
           detectionLatencyMs: detectionLatencyMs(signal, receivedAtMs),
           decisionLatencyMs: Date.now() - receivedAtMs,
+          ...closeFreshness(signal, receivedAtMs),
         });
         return;
       }
@@ -389,7 +402,7 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
       if (!pos) {
         state.clearManagedBySource(signal.sourceBaseId);
         state.markSeen(signal.key);
-        log({ type: 'close_already_flat', signal, wakeSource });
+        log({ type: 'close_already_flat', signal, wakeSource, ...closeFreshness(signal, receivedAtMs) });
         return;
       }
 
@@ -427,6 +440,7 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
         detectionLatencyMs: detectionLatencyMs(signal, receivedAtMs),
         decisionLatencyMs: decisionAtMs - receivedAtMs,
         executionLatencyMs: Date.now() - orderAtMs,
+        ...closeFreshness(signal, receivedAtMs),
       });
       return;
     }
@@ -638,15 +652,61 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
       executionLatencyMs: Date.now() - orderAtMs,
     });
   } catch (err) {
-    log({ type: 'execution_error', signal, wakeSource, error: err instanceof Error ? err.message : String(err) });
+    log({
+      type: 'execution_error', signal, wakeSource,
+      error: err instanceof Error ? err.message : String(err),
+      ...(signal.action === 'close' ? closeFreshness(signal, receivedAtMs) : {}),
+    });
   } finally {
     inFlight.delete(signal.key);
   }
 }
 
 async function fetchAndProcess(source: string, hints: NotificationHints | undefined, receivedAtMs: number, feedFilter = cfg.feedFilter): Promise<number> {
-  const data = await invo.getFeed(feedFilter, null, cfg.feedLimit);
-  const posts = data?.items ?? [];
+  const saved = state.getFeedCursor(feedFilter);
+  const backfill = await fetchFeedBackfill(
+    lastPostId => invo.getFeed(feedFilter, lastPostId, cfg.feedLimit),
+    saved?.postId ?? null,
+    cfg.feedMaxPages,
+  );
+  const posts = backfill.posts;
+  if (saved && !backfill.cursorReached) {
+    const gapPlan = planUnrecoverableGap(
+      posts,
+      post => signalFromFeedPost(post, receivedAtMs),
+      sourceBaseId => Boolean(state.getManagedBySource(sourceBaseId)),
+      key => state.hasSeen(key),
+    );
+    log({
+      type: 'unrecoverable_feed_gap',
+      feedFilter,
+      savedCursor: saved,
+      newestPostId: backfill.newestPostId,
+      pagesFetched: backfill.pagesFetched,
+      maxPages: cfg.feedMaxPages,
+      exhausted: backfill.exhausted,
+      managedCount: state.managedCount(),
+      unresolvedManaged: state.snapshot().managed,
+      cursorAdvanceAllowed: gapPlan.cursorAdvanceAllowed,
+      recoverableOwnedCloses: gapPlan.ownedCloses.length,
+    });
+    // A missing historical cursor must never make a close already visible on a fetched
+    // page disappear. Reconcile only closes for exposure this service still owns; leave
+    // all other gap posts unseen and never advance the cursor across the missing range.
+    for (const signal of gapPlan.ownedCloses) {
+      await execute(signal, `${source}:gap_recovery`, receivedAtMs, feedFilter);
+    }
+    log({
+      type: 'unrecoverable_feed_gap_reconciliation',
+      feedFilter,
+      savedCursor: saved,
+      ownedCloseKeys: gapPlan.ownedCloses.map(signal => signal.key),
+      reconciledOwnedCloses: gapPlan.ownedCloses.filter(signal => state.hasSeen(signal.key)).length,
+      cursorAdvanceAllowed: false,
+    });
+    lastSuccessPollMs = Date.now();
+    return gapPlan.ownedCloses.length;
+  }
   const tracked = (posts as any[]).map((post: any) => {
     const signal = signalFromFeedPost(post);
     tracker.observe(post, feedFilter, signal, receivedAtMs, false);
@@ -666,6 +726,8 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
     lastSuccessPollMs = Date.now();
     log({ type: 'baseline_indexed', posts: posts.length, recoverableCloses: recoverableCloses.length, live: cfg.live, feedFilter, feedLimit: cfg.feedLimit, traderFunnel: tracker.report().funnel });
     for (const signal of recoverableCloses) await execute(signal, 'startup_recovery', receivedAtMs, feedFilter);
+    const startupHandled = recoverableCloses.every(signal => state.hasSeen(signal.key));
+    if (startupHandled && backfill.newestPostId) state.setFeedCursor(feedFilter, { postId: backfill.newestPostId, observedAtMs: Date.now(), source: 'startup_baseline' });
     return recoverableCloses.length;
   }
 
@@ -684,6 +746,8 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
   } else {
     await Promise.all(ordered.map(signal => execute(signal, source, receivedAtMs, feedFilter)));
   }
+  const allHandled = ordered.every(signal => state.hasSeen(signal.key));
+  if (allHandled && backfill.newestPostId) state.setFeedCursor(feedFilter, { postId: backfill.newestPostId, observedAtMs: Date.now(), source });
   lastSuccessPollMs = Date.now();
   return ordered.length;
 }
@@ -749,6 +813,8 @@ function startServer() {
         live: cfg.live,
         researchWide: !cfg.live,
         feedFilter: cfg.feedFilter,
+        feedMaxPages: cfg.feedMaxPages,
+        feedCursors: state.snapshot().feedCursors,
         maxSignalAgeMs: cfg.maxSignalAgeMs,
         lastSuccessPollMs,
         managedCount: state.managedCount(),
@@ -819,6 +885,7 @@ async function main() {
     feedFilter: cfg.feedFilter,
     discoverySurfaces: cfg.discoverySurfaces,
     feedLimit: cfg.feedLimit,
+    feedMaxPages: cfg.feedMaxPages,
     evidencePolicy: tracker.report().policy,
     leverageMode: 'source_exact_up_to_hl_asset_max',
     reups: true,
