@@ -35,6 +35,7 @@ VENV="$RUNTIME_ROOT/.venv"
 AUDIT_ROOT="/root/hyperliquid-audit/reviews/$REVIEW_SHA"
 FUNNEL_OUT="$AUDIT_ROOT/funnel"
 PROSPECTIVE_OUT="$AUDIT_ROOT/prospective"
+IMMUTABLE_EVIDENCE="$AUDIT_ROOT/evidence"
 
 mkdir -p "$RUNTIME_ROOT" "$AUDIT_ROOT"
 rsync -a --delete \
@@ -52,7 +53,7 @@ PY="$VENV/bin/python"
 export REAL_TRADING_ENABLED=NO
 export HLCOPY_DEPLOYED_GIT_SHA="$REVIEW_SHA"
 
-rm -rf "$FUNNEL_OUT" "$PROSPECTIVE_OUT"
+rm -rf "$FUNNEL_OUT" "$PROSPECTIVE_OUT" "$IMMUTABLE_EVIDENCE"
 mkdir -p "$FUNNEL_OUT" "$PROSPECTIVE_OUT"
 
 run_stage() {
@@ -103,9 +104,12 @@ run_stage evidence \
   --output-dir "$CANONICAL_EVIDENCE" \
   --git-sha "$REVIEW_SHA"
 
-cp "$CANONICAL_EVIDENCE/manifest.json" "$AUDIT_ROOT/evidence-manifest.json"
+# Preserve the complete replay evidence under the exact reviewed SHA before any
+# later run can replace the canonical evidence path.
+cp -a "$CANONICAL_EVIDENCE" "$IMMUTABLE_EVIDENCE"
+cp "$IMMUTABLE_EVIDENCE/manifest.json" "$AUDIT_ROOT/evidence-manifest.json"
 
-"$PY" - "$FUNNEL_OUT/funnel_report.json" "$PROSPECTIVE_OUT/report.json" "$CANONICAL_EVIDENCE/manifest.json" <<'PY'
+"$PY" - "$FUNNEL_OUT/funnel_report.json" "$PROSPECTIVE_OUT/report.json" "$IMMUTABLE_EVIDENCE/manifest.json" <<'PY'
 import json
 import sys
 from pathlib import Path
