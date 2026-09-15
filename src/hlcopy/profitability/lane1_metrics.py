@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Iterable
 
 from hlcopy.profitability.lane1_funding import FundingCashflow
 from hlcopy.profitability.portfolio_position_copy import PortfolioCopySimulation
@@ -11,7 +11,13 @@ from hlcopy.profitability.portfolio_position_copy import PortfolioCopySimulation
 D = Decimal
 ZERO = D("0")
 BPS = D("10000")
-LANE1_RETURN_BASIS = "COMPLETED_ROUND_TRIP_NET_RETURN_ON_EPISODE_PEAK_GROSS_AFTER_FUNDING_V2"
+LANE1_RETURN_BASIS_V1 = "COMPLETED_ROUND_TRIP_NET_RETURN_ON_EPISODE_PEAK_GROSS_V1"
+LANE1_RETURN_BASIS_FUNDING_V2 = (
+    "COMPLETED_ROUND_TRIP_NET_RETURN_ON_EPISODE_PEAK_GROSS_AFTER_FUNDING_V2"
+)
+# The production evaluator continues to import this alias until it explicitly supplies
+# exact funding cashflows. Never relabel unfunded evidence as funding-adjusted evidence.
+LANE1_RETURN_BASIS = LANE1_RETURN_BASIS_V1
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,10 +34,10 @@ def completed_round_trip_metrics(
     *,
     funding_cashflows: Iterable[FundingCashflow] = (),
 ) -> CompletedRoundTripMetrics:
-    """Measure completed follower episodes after fees and exact funding cashflows.
+    """Measure completed follower episodes after fees and supplied funding cashflows.
 
     A realized slice is not a round trip: partial reductions may create many slices for
-    one position. Lane 1 accumulates all realized trade PnL and funding cashflows inside
+    one position. Lane 1 accumulates all realized trade PnL and supplied funding inside
     a follower coin episode and recognizes them only when that episode returns to flat.
     The denominator is the sum of each completed episode's peak gross exposure, so the
     score cannot rise mechanically merely because the window contains more trades or a
