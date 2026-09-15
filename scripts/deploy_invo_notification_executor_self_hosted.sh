@@ -132,7 +132,8 @@ systemctl restart "$UNIT"
 
 # Startup performs token/feed hydration before binding HTTP. Use the lightweight /traders
 # endpoint for readiness; /health performs portfolio-wide MTM/funding I/O and is intentionally
-# checked separately with a much larger timeout.
+# checked separately with a much larger timeout. This separation keeps deployment verification
+# strict without confusing slow economic diagnostics with service unavailability.
 readiness=""
 for attempt in $(seq 1 30); do
   if [[ "$(systemctl is-active "$UNIT")" != "active" ]]; then
