@@ -1,0 +1,161 @@
+name: lane1-opus-runtime-review
+
+on:
+  workflow_run:
+    workflows: [lane1-shadow-pr-review]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      review_sha:
+        description: Exact Lane 1 SHA with completed shadow evidence
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: lane1-opus-runtime-review
+  cancel-in-progress: false
+
+jobs:
+  opus-review:
+    if: >-
+      github.repository == 'aliezzat4321/hyperliquid-copy-engine' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        startsWith(github.event.workflow_run.head_branch, 'codex/313-lane1')))
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 90
+    env:
+      CLAUDE_USER: hl-claude-agent
+      CLAUDE_HOME: /var/lib/hyperliquid-ai-team/agents/claude/home
+      REVIEW_SHA: ${{ github.event.inputs.review_sha || github.event.workflow_run.head_sha }}
+      AUDIT_ROOT: /var/lib/hyperliquid-ai-team/agents/claude/worktrees/lane1-opus-${{ github.run_id }}
+    steps:
+      - name: Checkout exact reviewed Lane 1 SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REVIEW_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build immutable read-only Opus audit copy
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$REVIEW_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "invalid REVIEW_SHA=$REVIEW_SHA" >&2
+            exit 2
+          fi
+          evidence_root="/root/hyperliquid-audit/reviews/$REVIEW_SHA"
+          test -f "$evidence_root/evidence/manifest.json"
+          test -f "$evidence_root/funnel/funnel_report.json"
+          test -f "$evidence_root/prospective/report.json"
+
+          python3 - "$evidence_root/evidence/manifest.json" "$REVIEW_SHA" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          manifest = json.loads(Path(sys.argv[1]).read_text())
+          assert manifest.get("git_sha") == sys.argv[2], (manifest.get("git_sha"), sys.argv[2])
+          assert manifest.get("real_trading") is False
+          assert manifest.get("target_count", 0) > 0
+          PY
+
+          sudo rm -rf -- "$AUDIT_ROOT"
+          sudo mkdir -p "$AUDIT_ROOT/repo" "$AUDIT_ROOT/evidence"
+          sudo tar -C "$GITHUB_WORKSPACE" \
+            --exclude=.git --exclude=.venv --exclude=node_modules --exclude=dist \
+            --exclude='*.env' --exclude='*credential*' --exclude='*secret*' \
+            -cf - . | sudo tar -C "$AUDIT_ROOT/repo" -xf -
+          sudo cp -a "$evidence_root/." "$AUDIT_ROOT/evidence/"
+          printf '%s\n' "$REVIEW_SHA" | sudo tee "$AUDIT_ROOT/review-sha.txt" >/dev/null
+          printf 'REAL_TRADING_ENABLED=NO\n' | sudo tee "$AUDIT_ROOT/safety.txt" >/dev/null
+          sudo chown -R "$CLAUDE_USER:$CLAUDE_USER" "$AUDIT_ROOT"
+          sudo chmod -R u=rwX,go= "$AUDIT_ROOT"
+
+      - name: Verify Opus authentication
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          sudo -u "$CLAUDE_USER" env -i \
+            HOME="$CLAUDE_HOME" CLAUDE_CONFIG_DIR="$CLAUDE_HOME/.claude" \
+            XDG_CONFIG_HOME="$CLAUDE_HOME/.config" XDG_CACHE_HOME="$CLAUDE_HOME/.cache" \
+            PATH=/usr/local/bin:/usr/bin:/bin \
+            /usr/bin/claude -p --model opus --max-turns 1 --output-format text \
+            'Reply exactly OPUS_AUTH_OK' > "$AUDIT_ROOT/auth.txt" 2> "$AUDIT_ROOT/auth.err"
+          rc=$?
+          set -e
+          cat "$AUDIT_ROOT/auth.txt" || true
+          cat "$AUDIT_ROOT/auth.err" || true
+          test "$rc" -eq 0
+          grep -Fx OPUS_AUTH_OK "$AUDIT_ROOT/auth.txt"
+
+      - name: Run independent Lane 1 Opus review
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/lane1-opus-prompt <<PROMPT
+          You are Claude Opus acting as the independent senior quant/reliability reviewer for Hyperliquid Lane 1, issues #313 and #326. Audit the exact reviewed SHA $REVIEW_SHA read-only. Do not modify code, evidence, GitHub, or runtime state. Do not inspect or discuss Polymarket. REAL_TRADING_ENABLED must remain NO.
+
+          The exact source is in repo/. The exact immutable runtime evidence produced by that SHA is in evidence/. The bundle manifest is evidence/evidence/manifest.json; funnel and prospective outputs are under evidence/funnel/ and evidence/prospective/. Do not trust PR descriptions or prior conclusions. Recompute/check claims from source and evidence.
+
+          Independently challenge every #326 requirement and the later funding blocker:
+          1. Canonical notional grid includes 10k/25k/50k and missing evidence is explicit NOT_EVALUATED, never fabricated loss/profit.
+          2. Prospective outcomes persist and performance demotion does not reset/falsify frozen history.
+          3. Prospective-shadow counts are measured outcomes, never challenger-count assertions.
+          4. Realized/prospective evidence semantics do not turn zero actions/open episodes into false failures.
+          5. Screen and confirmation event sets are genuinely chronological/disjoint and stale confirmation evidence expires.
+          6. Selection return is completed follower round-trip net PnL divided by completed-episode peak gross exposure; partial exits/action count/window length cannot mechanically inflate it.
+          7. Causality/no-lookahead, frozen prospective start, and idempotency invariants hold.
+          8. The audit bundle contains the actual reviewed wallet/coin targets and bounded causal L2 rows, causal oracle rows where funding is required, finalized funding history, funnel/prospective source reports, and hashes sufficient for independent replay. Missing required evidence must fail closed.
+          9. OOS window IDs cannot collide across wallet/coin candidates.
+          10. Focused deterministic tests in the exact source cover these contracts; identify any meaningful untested edge.
+          11. Hyperliquid funding sign, hourly boundary semantics, partial reductions, multiple funding intervals, and exact-boundary ordering are correct; missing/stale funding or oracle evidence cannot approve a candidate.
+          12. Historical screen, held-out confirmation, and prospective evaluation use the same funding-adjusted V2 return basis and stale V1 evidence cannot leak in.
+
+          Then audit the actual runtime result quantitatively. State exact robust candidate count, challenger count, prospective evaluated count, prospective approved count, completed-round-trip evidence available for each evaluated candidate, worst primary return after fees/slippage/latency/funding, and any evidence coverage failures. Distinguish integrity correctness from demonstrated profitability. A code-correct pipeline with insufficient or negative prospective evidence is NOT proof of profitable/live-ready Lane 1.
+
+          FIRST LINE must be exactly one of:
+          LANE1_OPUS_PASS
+          FAIL
+          INSUFFICIENT_EVIDENCE
+
+          LANE1_OPUS_PASS means the measurement/evidence implementation and exact runtime bundle pass this independent integrity challenge. It does NOT authorize live trading and does not by itself assert profitability. If FAIL, give each concrete defect, severity, exact evidence, and required repair. If INSUFFICIENT_EVIDENCE, state precisely what runtime evidence is absent and why it prevents the integrity or profitability conclusion.
+          PROMPT
+          sudo mv /tmp/lane1-opus-prompt "$AUDIT_ROOT/prompt.txt"
+          sudo chown "$CLAUDE_USER:$CLAUDE_USER" "$AUDIT_ROOT/prompt.txt"
+          cd "$AUDIT_ROOT"
+          set +e
+          sudo -u "$CLAUDE_USER" env -i \
+            HOME="$CLAUDE_HOME" CLAUDE_CONFIG_DIR="$CLAUDE_HOME/.claude" \
+            XDG_CONFIG_HOME="$CLAUDE_HOME/.config" XDG_CACHE_HOME="$CLAUDE_HOME/.cache" \
+            PATH=/usr/local/bin:/usr/bin:/bin \
+            /usr/bin/claude -p --model opus --max-turns 80 --output-format text \
+            --permission-mode dontAsk --allowedTools Read Glob Grep Bash \
+            < "$AUDIT_ROOT/prompt.txt" > "$AUDIT_ROOT/result.txt" 2> "$AUDIT_ROOT/claude.err"
+          rc=$?
+          set -e
+          echo "CLAUDE_EXIT_CODE=$rc"
+          test -s "$AUDIT_ROOT/claude.err" && cat "$AUDIT_ROOT/claude.err" || true
+          test -s "$AUDIT_ROOT/result.txt" || exit "${rc:-1}"
+          cat "$AUDIT_ROOT/result.txt"
+          first="$(head -n1 "$AUDIT_ROOT/result.txt" | tr -d '\r')"
+          case "$first" in LANE1_OPUS_PASS|FAIL|INSUFFICIENT_EVIDENCE) ;; *) exit 3;; esac
+          gh issue comment 326 --repo aliezzat4321/hyperliquid-copy-engine --body-file "$AUDIT_ROOT/result.txt"
+          { echo '## Independent Lane 1 Opus runtime review (#326)'; echo; cat "$AUDIT_ROOT/result.txt"; } > "$AUDIT_ROOT/issue-313.md"
+          gh issue comment 313 --repo aliezzat4321/hyperliquid-copy-engine --body-file "$AUDIT_ROOT/issue-313.md"
+          echo LANE1_OPUS_REVIEW_POSTED=YES
+
+      - name: Cleanup Opus audit copy
+        if: always()
+        shell: bash
+        run: |
+          sudo rm -rf -- "$AUDIT_ROOT"
+          df -h /
