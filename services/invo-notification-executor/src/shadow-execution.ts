@@ -275,9 +275,6 @@ export function fundingCostUsd(
   if (!Number.isFinite(maxOracleDelayMs) || maxOracleDelayMs < 0) {
     throw new Error(`Invalid maxOracleDelayMs: ${maxOracleDelayMs}`);
   }
-  if (!history.length) {
-    return { fundingUsd: 0, fundingPoints: 0, oraclePointsMatched: 0, maxOracleDelayMs };
-  }
   const orderedExposure = [...checkpoints]
     .filter(p => Number.isFinite(p.atMs) && Number.isFinite(p.size) && p.size >= 0)
     .sort((a, b) => a.atMs - b.atMs);
@@ -298,12 +295,34 @@ export function fundingCostUsd(
     }
   }
 
+  const validHistory = history
+    .filter(point => Number.isFinite(point.timeMs) && Number.isFinite(point.rate))
+    .sort((a, b) => a.timeMs - b.timeMs);
+  const historyTimes = new Set(validHistory.map(point => point.timeMs));
+
+  // Funding evidence must be complete in both directions. A prospective oracle checkpoint
+  // proves that an active position crossed a funding boundary; silently accepting a missing
+  // funding-history row would turn an unknown cost/credit into optimistic zero.
+  for (const fundingTimeMs of oracleByFundingTime.keys()) {
+    let active: ExposureCheckpoint | null = null;
+    for (const checkpoint of orderedExposure) {
+      if (checkpoint.atMs <= fundingTimeMs) active = checkpoint;
+      else break;
+    }
+    if (active && active.size > 0 && !historyTimes.has(fundingTimeMs)) {
+      throw new Error(`Missing funding-history row for captured oracle interval ${fundingTimeMs}`);
+    }
+  }
+
+  if (!validHistory.length) {
+    return { fundingUsd: 0, fundingPoints: 0, oraclePointsMatched: 0, maxOracleDelayMs };
+  }
+
   const sign = side === 'long' ? 1 : -1;
   let total = 0;
   let fundingPoints = 0;
   let oraclePointsMatched = 0;
-  for (const point of history) {
-    if (!Number.isFinite(point.timeMs) || !Number.isFinite(point.rate)) continue;
+  for (const point of validHistory) {
     let active: ExposureCheckpoint | null = null;
     for (const checkpoint of orderedExposure) {
       if (checkpoint.atMs <= point.timeMs) active = checkpoint;
