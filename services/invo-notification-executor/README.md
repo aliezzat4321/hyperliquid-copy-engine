@@ -62,7 +62,8 @@ The deployed service starts dry:
 - explicit trader allowlist required for live mode unless `COPY_ALL_FOLLOWED=true` is deliberately enabled
 - research source-age window is configurable and defaults to 25s
 - target margin: 1% of account equity (or paper equity in walletless shadow mode)
-- shadow books older than 750ms are rejected by default
+- shadow books older than 1000ms are rejected by default (changed from 750ms at
+  `2026-09-15T15:55:19Z`, source commit `09218e1798a19b3011e50f913844103a6dec82d5`)
 - shadow spread above 50 bps is rejected by default
 - shadow minimum executed notional is $10 by default
 - shadow taker-fee assumption is explicit/configurable (4.5 bps per executed side by default)
@@ -82,7 +83,7 @@ Dry mode is an execution-realistic trade-lifecycle ledger, not a mid-price entry
 1. At an eligible Invo open or increase, fetch the Hyperliquid `l2Book` after the decision, reject missing/stale/wide/zero-depth books, round size down to the asset's `szDecimals`, enforce minimum notional, and walk actual displayed depth. Partial fills preserve their unfilled remainder instead of fabricating a full fill.
 2. Persist the average executed entry price, book/request/arrival timestamps and age, spread/book-walk slippage, executed notional, entry taker fee, source size/leverage, copy size, and exposure checkpoints. Legacy positions without causal entry-book provenance remain explicitly `INCOMPLETE_LEGACY_ENTRY`.
 3. Each feed surface has a durable high-water cursor. Restart and normal polling page backward from newest to the saved cursor. If bounded pagination cannot reach it, the service emits `unrecoverable_feed_gap`, keeps unresolved exposure, and refuses to advance the checkpoint.
-4. Owned source closes are reconciled even when late. Close time comes from close/update provenance, not the original open timestamp. The shadow close walks the causal L2 book. A rejected or partial close does **not** erase the remaining position.
+4. Owned source closes are reconciled even when late. Close time comes from close/update provenance, not the original open timestamp. The shadow close walks the causal L2 book; valid residual lots below minimum notional use the same causal walk and are explicitly labeled as dust reconciliation. A rejected, partial, or non-executable sub-lot close does **not** erase the remaining position.
 5. Complete close economics emit gross PnL, entry/exit taker fees, and Hyperliquid funding computed as position size × prospective `oraclePx` × funding rate at each hourly interval. Missing/stale oracle evidence is `INCOMPLETE_FUNDING`, never silently zero or reconstructed from entry/mark prices.
 6. `/health` marks every still-open paper position through executable L2 depth. Closed-only profitability is explicitly forbidden; unresolved exposure remains visible in the dataset.
 

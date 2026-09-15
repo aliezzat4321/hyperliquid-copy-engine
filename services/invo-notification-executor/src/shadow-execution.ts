@@ -41,6 +41,7 @@ export interface ShadowFill {
   filledSize: number;
   unfilledSize: number;
   partial: boolean;
+  dustCloseReconciled: boolean;
   avgPx: number;
   notionalUsd: number;
   midPx: number;
@@ -151,15 +152,21 @@ export function roundSizeDown(rawSize: number, szDecimals: number): number {
     throw new Error(`Invalid szDecimals: ${szDecimals}`);
   }
   const factor = 10 ** szDecimals;
-  return Math.floor((rawSize + Number.EPSILON) * factor) / factor;
+  const scaled = rawSize * factor;
+  // Multiplication can put an exact decimal lot immediately below its integer
+  // (for example 2.01 * 100). Move only a few relative ULPs before flooring;
+  // this repairs representation error without rounding a genuine fractional lot up.
+  const relativeUlpAllowance = Math.min(0.25, Number.EPSILON * Math.max(1, Math.abs(scaled)) * 4);
+  return Math.floor(scaled + relativeUlpAllowance) / factor;
 }
 
-export function simulateL2Fill(
+function simulateL2FillInternal(
   book: BookSnapshot | null,
   action: BookAction,
   rawSize: number,
   szDecimals: number,
   policy: ShadowExecutionPolicy,
+  allowBelowMinNotional: boolean,
 ): ShadowFillResult {
   if (!book) return { ok: false, reason: 'missing_book' };
   const bookAgeMs = book.receivedAtMs - book.bookTimeMs;
@@ -192,7 +199,7 @@ export function simulateL2Fill(
       detail: { rawSize, szDecimals },
     };
   }
-  if (requestedRoundedSize * midPx < policy.minNotionalUsd) {
+  if (!allowBelowMinNotional && requestedRoundedSize * midPx < policy.minNotionalUsd) {
     return {
       ok: false,
       reason: 'below_min_notional',
@@ -221,7 +228,7 @@ export function simulateL2Fill(
 
   const avgPx = quoteUsd / filledSize;
   const notionalUsd = quoteUsd;
-  if (notionalUsd < policy.minNotionalUsd) {
+  if (!allowBelowMinNotional && notionalUsd < policy.minNotionalUsd) {
     return {
       ok: false,
       reason: 'below_min_notional',
@@ -231,7 +238,10 @@ export function simulateL2Fill(
   const adversePx = action === 'buy' ? avgPx - midPx : midPx - avgPx;
   const slippageBps = Math.max(0, (adversePx / midPx) * 10_000);
   const slippageUsd = Math.max(0, adversePx * filledSize);
-  const unfilledSize = Math.max(0, requestedRoundedSize - filledSize);
+  // The caller owns rawSize, not merely its executable rounded-down portion. Any
+  // sub-lot remainder must therefore stay explicit and make the fill partial.
+  const unfilledSize = Math.max(0, rawSize - filledSize);
+  const partialTolerance = Number.EPSILON * Math.max(1, Math.abs(rawSize), Math.abs(filledSize)) * 8;
 
   return {
     ok: true,
@@ -240,7 +250,8 @@ export function simulateL2Fill(
       requestedRoundedSize,
       filledSize,
       unfilledSize,
-      partial: unfilledSize > Math.max(1e-12, requestedRoundedSize * 1e-12),
+      partial: unfilledSize > partialTolerance,
+      dustCloseReconciled: allowBelowMinNotional && notionalUsd < policy.minNotionalUsd,
       avgPx,
       notionalUsd,
       midPx,
@@ -255,6 +266,31 @@ export function simulateL2Fill(
       receivedAtMs: book.receivedAtMs,
     },
   };
+}
+
+export function simulateL2Fill(
+  book: BookSnapshot | null,
+  action: BookAction,
+  rawSize: number,
+  szDecimals: number,
+  policy: ShadowExecutionPolicy,
+): ShadowFillResult {
+  return simulateL2FillInternal(book, action, rawSize, szDecimals, policy, false);
+}
+
+/**
+ * Reconcile already-owned exposure on a source close. Hyperliquid's minimum order
+ * notional must not turn a valid residual lot into a permanent shadow orphan; the
+ * close remains a causal book walk and is explicitly identified as dust evidence.
+ */
+export function simulateSourceCloseL2Fill(
+  book: BookSnapshot | null,
+  action: BookAction,
+  rawSize: number,
+  szDecimals: number,
+  policy: ShadowExecutionPolicy,
+): ShadowFillResult {
+  return simulateL2FillInternal(book, action, rawSize, szDecimals, policy, true);
 }
 
 export function closeAction(side: ShadowSide): BookAction {

@@ -6,6 +6,7 @@ import {
   normalizeL2Book,
   roundSizeDown,
   simulateL2Fill,
+  simulateSourceCloseL2Fill,
   type ShadowExecutionPolicy,
 } from '../src/shadow-execution.js';
 
@@ -85,8 +86,32 @@ test('rejects stale, excessive-spread, zero-depth and below-min-notional books e
 test('enforces Hyperliquid size decimals by rounding down', () => {
   assert.equal(roundSizeDown(1.23456, 3), 1.234);
   assert.equal(roundSizeDown(0.0009, 3), 0);
+  assert.equal(roundSizeDown(2.01, 2), 2.01);
+  assert.equal(roundSizeDown(2.05, 2), 2.05);
   const result = simulateL2Fill(book(), 'buy', 0.0009, 3, policy);
   assert.deepEqual(result.ok ? null : result.reason, 'lot_rounded_to_zero');
+});
+
+test('partial and unfilled size retain the caller-owned sub-lot remainder', () => {
+  const result = simulateL2Fill(book(), 'buy', 2.0009, 3, policy);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.fill.requestedRoundedSize, 2);
+  assert.ok(Math.abs(result.fill.unfilledSize - 0.0009) < 1e-12);
+  assert.equal(result.fill.partial, true);
+});
+
+test('source-close reconciliation executes a valid residual below minimum notional', () => {
+  const normal = simulateL2Fill(book(), 'sell', 0.05, 2, policy);
+  assert.deepEqual(normal.ok ? null : normal.reason, 'below_min_notional');
+
+  const close = simulateSourceCloseL2Fill(book(), 'sell', 0.05, 2, policy);
+  assert.equal(close.ok, true);
+  if (!close.ok) return;
+  assert.equal(close.fill.filledSize, 0.05);
+  assert.equal(close.fill.unfilledSize, 0);
+  assert.equal(close.fill.partial, false);
+  assert.equal(close.fill.dustCloseReconciled, true);
 });
 
 test('computes funding from position size times prospective oracle price times funding rate', () => {
