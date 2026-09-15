@@ -1,0 +1,142 @@
+name: p0-341-opus-lane3-integrity-now
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p0-341-opus-lane3-integrity-now.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: p0-341-opus-lane3-integrity-now
+  cancel-in-progress: false
+
+jobs:
+  lane3-opus-integrity:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 90
+    env:
+      CLAUDE_USER: hl-claude-agent
+      CLAUDE_HOME: /var/lib/hyperliquid-ai-team/agents/claude/home
+      AUDIT_ROOT: /var/lib/hyperliquid-ai-team/agents/claude/worktrees/p0-341-lane3-${{ github.run_id }}
+      LANE3_REPAIRED_SHA: 59d5966bae6fd50c827874c8a182f99c7bf67b2c
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Assert repaired Lane 3 lineage and build read-only evidence bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor "$LANE3_REPAIRED_SHA" HEAD
+          test "$(git diff --name-only "$LANE3_REPAIRED_SHA"..HEAD -- services/invo-notification-executor scripts/deploy_invo_notification_executor_self_hosted.sh | wc -l)" -eq 0
+
+          sudo rm -rf "$AUDIT_ROOT"
+          sudo mkdir -p "$AUDIT_ROOT/repo" "$AUDIT_ROOT/evidence/lane3" "$AUDIT_ROOT/evidence/market"
+          sudo tar -C "$GITHUB_WORKSPACE" --exclude=.git --exclude=.venv --exclude='*.env' --exclude='*credential*' --exclude='*secret*' -cf - . | sudo tar -C "$AUDIT_ROOT/repo" -xf -
+
+          state_root=/var/lib/hyperliquid-copy-engine/invo-notification-executor
+          sudo tail -n 10000 "$state_root/audit.jsonl" | sudo tee "$AUDIT_ROOT/evidence/lane3/audit_tail.jsonl" >/dev/null || true
+          for f in state.json trader-population.json evidence-epoch; do
+            if sudo test -f "$state_root/$f"; then
+              sudo cp -f "$state_root/$f" "$AUDIT_ROOT/evidence/lane3/$f"
+            fi
+          done
+          curl -fsS --max-time 4 http://127.0.0.1:8787/health | sudo tee "$AUDIT_ROOT/evidence/lane3/health.json" >/dev/null
+          sudo sh -c "systemctl status hyperliquid-invo-notification-executor.service --no-pager -l > '$AUDIT_ROOT/evidence/lane3/service-status.txt' 2>&1"
+          sudo sh -c "journalctl -u hyperliquid-invo-notification-executor.service --since '2026-09-15 07:30:00 UTC' --no-pager -l | tail -n 3000 > '$AUDIT_ROOT/evidence/lane3/service-journal.txt'"
+
+          sudo env OUT="$AUDIT_ROOT/evidence/market" python3 - <<'PY'
+          import os, shutil
+          from pathlib import Path
+          root = Path('/mnt/HC_Volume_106576526/hyperliquid/market-shadow')
+          out = Path(os.environ['OUT'])
+          rows = []
+          if root.is_dir():
+              for p in root.rglob('*'):
+                  try:
+                      if p.is_file() and not p.is_symlink() and p.stat().st_size <= 20 * 1024 * 1024:
+                          rows.append((p.stat().st_mtime_ns, p))
+                  except FileNotFoundError:
+                      pass
+          for _, p in sorted(rows, reverse=True)[:100]:
+              dst = out / p.relative_to(root)
+              dst.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copy2(p, dst)
+          print('MARKET_SAMPLE_FILES=' + str(min(100, len(rows))))
+          PY
+
+          printf '%s\n' "$LANE3_REPAIRED_SHA" | sudo tee "$AUDIT_ROOT/evidence/lane3/repaired-sha.txt" >/dev/null
+          git rev-parse HEAD | sudo tee "$AUDIT_ROOT/evidence/lane3/audit-main-sha.txt" >/dev/null
+          sudo find "$AUDIT_ROOT/evidence" -type f -printf '%TY-%Tm-%TdT%TH:%TM:%TSZ %s %p\n' | sudo sort | sudo tee "$AUDIT_ROOT/evidence/MANIFEST.txt" >/dev/null
+          sudo chown -R "$CLAUDE_USER:$CLAUDE_USER" "$AUDIT_ROOT"
+          sudo chmod -R u=rwX,go= "$AUDIT_ROOT"
+
+      - name: Verify Claude Opus authentication
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo -u "$CLAUDE_USER" env -i \
+            HOME="$CLAUDE_HOME" \
+            CLAUDE_CONFIG_DIR="$CLAUDE_HOME/.claude" \
+            XDG_CONFIG_HOME="$CLAUDE_HOME/.config" \
+            XDG_CACHE_HOME="$CLAUDE_HOME/.cache" \
+            PATH=/usr/local/bin:/usr/bin:/bin \
+            /usr/bin/claude -p --model opus --max-turns 1 --output-format text 'Reply exactly OPUS_AUTH_OK' \
+            | grep -Fx OPUS_AUTH_OK
+
+      - name: Run independent Lane 3 Opus integrity audit now
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          prompt="$AUDIT_ROOT/prompt.txt"
+          result="$AUDIT_ROOT/result.txt"
+          cat > /tmp/p0-341-opus-prompt <<'PROMPT'
+          You are Claude Opus acting as the independent senior quant and reliability auditor for Hyperliquid Lane 3, issue #341 / repair parent #314. Audit ONLY Lane 3 using repo/ and evidence/ in the current directory. This is a read-only integrity/data-quality audit of the repaired production collection path. Do not modify code or production state. Do not inspect or discuss Polymarket. Real trading must remain OFF.
+
+          The repaired Lane 3 implementation baseline is 59d5966bae6fd50c827874c8a182f99c7bf67b2c. The workflow has already proved no Lane 3 executor/deploy files changed between that baseline and the audit checkout. The fresh evidence epoch is lane3-causal-l2-v2-funding-complete-20260915.
+
+          Check end-to-end source-notification coverage with no silent drops; causal source/signal/receipt/decision/order-arrival/book timestamps and no future-book leakage; stale/missing/future book rejection; executable L2 spread/depth/VWAP, partial fills, lot/min-notional rules and sizing; complete fees, book-walk/slippage and funding with missing economics failing closed; open/add/reduce/close lifecycle, unresolved exposure and MTM; restart/backfill/cursor reconciliation; dedupe/idempotency; policy/evidence/version/SHA provenance; and aggregate accounting identities. Sample raw records and independently recompute fills and net economics wherever current evidence permits. Explicitly inspect current coverage/reject/gap counts and whether avoidable opportunities are being lost. Confirm live=false and REAL_TRADING_ENABLED=NO.
+
+          This is NOT the final profitability/live-readiness decision. Do not require seven days or twenty events merely to decide whether the collection path is trustworthy. If current records are insufficient for a specific empirical check, distinguish that from a code/data-integrity defect.
+
+          FIRST LINE must be exactly one of:
+          INTERIM_INTEGRITY_PASS
+          FAIL
+          INSUFFICIENT_EVIDENCE
+
+          Then provide: exact evidence paths/record identifiers sampled; independent recomputations; defects with severity; current coverage and opportunity-loss concerns; whether the current evidence epoch is clean or contaminated; exact scoped repair/additional evidence required; whether collection should continue; and explicit confirmation REAL_TRADING_ENABLED=NO. A PASS means only that continuing to collect this epoch is trustworthy, not that profitability or live-readiness is proven.
+          PROMPT
+          sudo mv /tmp/p0-341-opus-prompt "$prompt"
+          sudo chown "$CLAUDE_USER:$CLAUDE_USER" "$prompt"
+          cd "$AUDIT_ROOT"
+
+          sudo -u "$CLAUDE_USER" env -i \
+            HOME="$CLAUDE_HOME" \
+            CLAUDE_CONFIG_DIR="$CLAUDE_HOME/.claude" \
+            XDG_CONFIG_HOME="$CLAUDE_HOME/.config" \
+            XDG_CACHE_HOME="$CLAUDE_HOME/.cache" \
+            PATH=/usr/local/bin:/usr/bin:/bin \
+            /usr/bin/claude -p --model opus --max-turns 60 --output-format text \
+            --permission-mode dontAsk --allowedTools Read Glob Grep Bash \
+            < "$prompt" > "$result"
+
+          test -s "$result"
+          first="$(head -n1 "$result" | tr -d '\r')"
+          case "$first" in
+            INTERIM_INTEGRITY_PASS|FAIL|INSUFFICIENT_EVIDENCE) ;;
+            *) echo "Malformed Opus verdict: $first" >&2; cat "$result"; exit 3 ;;
+          esac
+          cat "$result"
+          gh issue comment 341 --repo aliezzat4321/hyperliquid-copy-engine --body-file "$result"
+          { echo '## Repaired Lane 3 interim Opus re-audit (#341)'; echo; cat "$result"; } > "$AUDIT_ROOT/issue-273-comment.md"
+          gh issue comment 273 --repo aliezzat4321/hyperliquid-copy-engine --body-file "$AUDIT_ROOT/issue-273-comment.md"
+          echo OPUS_LANE3_INTEGRITY_AUDIT_POSTED=YES
