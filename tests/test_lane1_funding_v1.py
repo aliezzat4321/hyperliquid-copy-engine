@@ -8,6 +8,7 @@ import pytest
 from hlcopy.profitability.lane1_funding import (
     FundingEvidenceError,
     FundingSettlement,
+    completed_episode_funding_boundaries,
     funding_cashflows,
     resolve_funding_settlements,
     validate_completed_episode_funding_coverage,
@@ -88,6 +89,18 @@ def test_completed_round_trip_return_includes_funding() -> None:
     assert metrics.completed_net_pnl_usd == D("49")
     assert metrics.completed_peak_gross_usd == D("1000")
     assert metrics.return_bps == D("490")
+
+
+def test_completed_episode_reports_only_exact_crossed_hourly_boundaries() -> None:
+    sim = _sim(
+        _state(ts=HOUR // 2, action="INCREASE", qty="1", avg="100"),
+        _state(ts=2 * HOUR + 1, action="CLOSE", qty="0", avg=None),
+    )
+
+    assert completed_episode_funding_boundaries(sim) == (
+        ("HYPE", HOUR),
+        ("HYPE", 2 * HOUR),
+    )
 
 
 def test_completed_episode_missing_hourly_funding_fails_closed() -> None:
