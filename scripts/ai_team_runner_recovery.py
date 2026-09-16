@@ -2,9 +2,9 @@
 """Bounded recovery for an already-installed GitHub Actions runner.
 
 This helper is invoked by the independent host supervisor before the AI-team
-orchestrator. It may restart an existing inactive/failed Actions runner systemd
-unit. It must never register, remove, reconfigure, or rotate credentials for a
-runner and never touches trading state.
+orchestrator. It may restart an existing enabled, inactive/failed Actions runner
+systemd unit. It must never register, remove, reconfigure, or rotate credentials
+for a runner, revive disabled/obsolete runner services, or touch trading state.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ COOLDOWN_SECONDS = int(os.environ.get("AI_TEAM_RUNNER_RECOVERY_COOLDOWN_SECONDS"
 VERIFY_SECONDS = int(os.environ.get("AI_TEAM_RUNNER_RECOVERY_VERIFY_SECONDS", "12"))
 MAX_RUNNER_UNITS = int(os.environ.get("AI_TEAM_RUNNER_RECOVERY_MAX_UNITS", "8"))
 RUNNER_UNIT_RE = re.compile(r"^actions\.runner\..+\.service$")
+ENABLED_RUNNER_STATES = frozenset({"enabled", "enabled-runtime"})
 
 
 def utcnow() -> dt.datetime:
@@ -77,6 +78,12 @@ def save_state(state: dict[str, Any]) -> None:
 
 
 def discover_runner_units() -> list[str]:
+    """Return only enabled existing Actions runner services.
+
+    Disabled, masked, static, and otherwise non-enabled units are intentionally out
+    of recovery scope so an obsolete installation cannot be revived by the root
+    supervisor. Cooldown remains per unit for the enabled units that are in scope.
+    """
     cp = run(
         [
             "systemctl",
@@ -92,10 +99,14 @@ def discover_runner_units() -> list[str]:
     units: list[str] = []
     for line in cp.stdout.splitlines():
         fields = line.split()
-        if not fields:
+        if len(fields) < 2:
             continue
-        unit = fields[0]
-        if RUNNER_UNIT_RE.fullmatch(unit) and unit not in units:
+        unit, enablement = fields[0], fields[1]
+        if (
+            RUNNER_UNIT_RE.fullmatch(unit)
+            and enablement in ENABLED_RUNNER_STATES
+            and unit not in units
+        ):
             units.append(unit)
     return units[:MAX_RUNNER_UNITS]
 
@@ -181,7 +192,9 @@ def main() -> int:
 
     results = [recover_unit(unit, state, now) for unit in units]
     state["last_results"] = results
-    failed = [row for row in results if row.get("action") == "restart" and not row.get("recovered")]
+    failed = [
+        row for row in results if row.get("action") == "restart" and not row.get("recovered")
+    ]
     recovered = [row for row in results if row.get("recovered")]
     if failed:
         state["status"] = "RECOVERY_FAILED"

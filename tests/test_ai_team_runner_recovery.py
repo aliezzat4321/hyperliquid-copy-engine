@@ -13,7 +13,7 @@ def completed(cmd: list[str], rc: int = 0, stdout: str = "") -> subprocess.Compl
     return subprocess.CompletedProcess(cmd, rc, stdout, "")
 
 
-def test_discovery_accepts_only_existing_actions_runner_units(monkeypatch):
+def test_discovery_accepts_only_enabled_existing_actions_runner_units(monkeypatch):
     def fake_run(cmd, *, timeout=20):
         del timeout
         assert cmd[:2] == ["systemctl", "list-unit-files"]
@@ -21,15 +21,18 @@ def test_discovery_accepts_only_existing_actions_runner_units(monkeypatch):
             cmd,
             stdout=(
                 "actions.runner.aliezzat4321-hyperliquid-copy-engine.vm.service enabled enabled\n"
+                "actions.runner.runtime.service enabled-runtime enabled\n"
                 "ssh.service enabled enabled\n"
                 "actions.runner.other.service disabled enabled\n"
+                "actions.runner.old.service masked enabled\n"
+                "actions.runner.static.service static enabled\n"
             ),
         )
 
     monkeypatch.setattr(recovery, "run", fake_run)
     assert recovery.discover_runner_units() == [
         "actions.runner.aliezzat4321-hyperliquid-copy-engine.vm.service",
-        "actions.runner.other.service",
+        "actions.runner.runtime.service",
     ]
 
 
@@ -77,6 +80,40 @@ def test_inactive_existing_runner_gets_bounded_restart(monkeypatch):
     assert ["systemctl", "reset-failed", "actions.runner.repo.vm.service"] in calls
     assert ["systemctl", "restart", "actions.runner.repo.vm.service"] in calls
     assert state["attempts"]["actions.runner.repo.vm.service"]["epoch"] > 0
+
+
+def test_disabled_unrelated_runner_is_never_restarted(monkeypatch, tmp_path):
+    calls: list[list[str]] = []
+    active_checks = 0
+    enabled = "actions.runner.aliezzat4321-hyperliquid-copy-engine.vm.service"
+    disabled = "actions.runner.obsolete.service"
+
+    def fake_run(cmd, *, timeout=20):
+        nonlocal active_checks
+        del timeout
+        calls.append(cmd)
+        if cmd[:2] == ["systemctl", "list-unit-files"]:
+            return completed(
+                cmd,
+                stdout=f"{disabled} disabled enabled\n{enabled} enabled enabled\n",
+            )
+        if cmd[1] == "is-active":
+            assert cmd[2] == enabled
+            active_checks += 1
+            return completed(cmd, stdout="inactive\n" if active_checks == 1 else "active\n")
+        if cmd[1] in {"reset-failed", "restart"}:
+            assert cmd[2] == enabled
+            return completed(cmd)
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(recovery, "run", fake_run)
+    monkeypatch.setattr(recovery.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(recovery, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(recovery, "STATE_FILE", tmp_path / "runner-recovery.json")
+
+    assert recovery.main() == 0
+    assert ["systemctl", "restart", enabled] in calls
+    assert not any(disabled in cmd for cmd in calls if cmd[:2] != ["systemctl", "list-unit-files"])
 
 
 def test_restart_cooldown_prevents_restart_storm(monkeypatch):
