@@ -118,7 +118,7 @@ run_stage() {
 echo "lane1_review_start sha=$REVIEW_SHA real_trading=NO"
 
 run_stage funnel \
-  "$PY" -m hlcopy.profitability.incremental_funnel_cli \
+  "$PY" "$RUNTIME_REPO/scripts/run_incremental_funnel_review.py" \
   --wide-enriched-dir "$WIDE_DIR" \
   --wide-cutoff-ns-file "$CUTOFF_FILE" \
   --market-dir "$MARKET_DIR" \
@@ -134,7 +134,7 @@ run_stage prospective \
   --market-dir "$MARKET_DIR"
 
 run_stage evidence \
-  "$PY" -m hlcopy.profitability.lane1_audit_bundle \
+  "$PY" "$RUNTIME_REPO/scripts/run_lane1_audit_review.py" \
   --challenger-queue "$FUNNEL_OUT/challenger_queue.json" \
   --funnel-report "$FUNNEL_OUT/funnel_report.json" \
   --prospective-report "$PROSPECTIVE_OUT/report.json" \
