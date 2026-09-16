@@ -6,6 +6,7 @@ on:
       - codex/lane3-elite-admission-thin-depth-361-369
     paths:
       - .github/workflows/p0-373-direct-opus-review.yml
+      - services/invo-notification-executor/**
   workflow_dispatch:
 
 permissions:
@@ -52,14 +53,24 @@ jobs:
 
           Review the exact checked-out tree. Do not modify tracked files. Do not inspect or touch Polymarket. This review is for shadow-only Lane 3.
 
-          Context and required behavior:
-          - Broad Invo discovery and exact CROWN/1D/1W/1M/1Y/AT leaderboard collection must remain independent and broad.
+          Required selector/admission behavior:
+          - Broad Invo discovery and exact CROWN/1D/1W/1M/1Y/AT leaderboard collection remains independent and broad.
           - Leaderboard membership/rank alone must NOT authorize a shadow copy.
+          - Selector version invo-portfolio-elite-v2-20260916 must use a low floor plus weighted score, not oversized minimums.
+          - Hard floor: >=20 closed positions, >=7 active days when known, >=50% win rate, positive displayed historical return, not liquidated, weighted quality score >=60.
+          - 500% displayed return is excellent/near-max score credit, NOT a minimum gate.
+          - Sample confidence must increase above 20 closes; 30+ is rewarded rather than required.
+          - One week can qualify; two weeks/month add confidence rather than being hard requirements.
+          - Daily closed-trade frequency contributes positive weight.
+          - Explicit recent trade/activity recency contributes weight when trustworthy data exists; missing recency must be neutral, not guessed.
+          - The wins/losses count ratio must not be double-counted as an independent payout-ratio profitability metric.
+          - Multiple portfolios from the same owner may all qualify if EACH independently passes; eligibility must never be inherited between sibling portfolios.
+          - A selector-version change must not backdate first-elite timestamps or rewrite historical outcomes.
           - Dry NEW/ADD exposure must require the signal's exact portfolioId to have been ELITE_CANDIDATE using candidate evidence available before the source trade/decision.
           - Candidate state missing, malformed, stale, future-dated, absent, or non-elite must fail closed with an explicit reason.
-          - No owner-level eligibility inheritance between portfolios.
-          - No retroactive backfill or hindsight promotion.
           - Existing managed exposure must still CLOSE after demotion; demotion may stop NEW/ADD but cannot orphan exposure.
+
+          Required #361 execution-integrity behavior:
           - A requested close that is itself executable but sees < minimum total displayed causal depth must remain UNRESOLVED_EXPOSURE with bounded retry. It must NOT be terminally dust-reconciled/deleted.
           - True non-executable requested residual dust may terminate only as incomplete dust reconciliation and must not enter COMPLETE economics.
           - Missing, empty, or mismatched Hyperliquid L2 returned coin identity must fail closed.
@@ -71,12 +82,13 @@ jobs:
           services/invo-notification-executor/src/close-rejection.ts
           services/invo-notification-executor/src/shadow-market.ts
           services/invo-notification-executor/src/portfolio-candidates.ts
+          services/invo-notification-executor/test/portfolio-candidates.test.ts
           services/invo-notification-executor/test/elite-admission.test.ts
           services/invo-notification-executor/test/close-rejection.test.ts
           services/invo-notification-executor/test/service-elite-admission-wiring.test.ts
           services/invo-notification-executor/test/shadow-market-integrity.test.ts
 
-          CI on the prior code-only head passed executor tests, repo CI, ai-team-contract and safety guard. Re-check source semantics independently; you may run focused tests if useful. Do not accept merely because tests exist.
+          Run focused tests if useful. Do not accept merely because tests exist.
 
           If ANY material issue exists, explain it and end with exactly:
           LANE3_REVIEW=FAIL
@@ -90,8 +102,10 @@ jobs:
           MODEL_CLASS=OPUS
           TARGET_SHA=$TARGET_SHA
           PR_NUMBER=$PR_NUMBER
+          SELECTOR_V2=PASS
           ELITE_ADMISSION=PASS
           PORTFOLIO_IDENTITY=PASS
+          MULTI_PORTFOLIO_OWNER=PASS
           NO_HINDSIGHT=PASS
           CLOSE_UNWIND=PASS
           THIN_DEPTH_INTEGRITY=PASS
@@ -144,8 +158,10 @@ Claude direct review process failed with rc=$rc. No merge/deploy authorization w
             'MODEL_CLASS=OPUS'
             "TARGET_SHA=$TARGET_SHA"
             "PR_NUMBER=$PR_NUMBER"
+            'SELECTOR_V2=PASS'
             'ELITE_ADMISSION=PASS'
             'PORTFOLIO_IDENTITY=PASS'
+            'MULTI_PORTFOLIO_OWNER=PASS'
             'NO_HINDSIGHT=PASS'
             'CLOSE_UNWIND=PASS'
             'THIN_DEPTH_INTEGRITY=PASS'
