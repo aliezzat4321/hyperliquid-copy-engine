@@ -68,7 +68,7 @@ def test_memory_bounded_stream_matches_legacy_loader_on_fixture(tmp_path: Path) 
     actual = list(stream)
 
     assert sorted(actual, key=_sort_key) == list(expected)
-    assert len(stream) == len(expected)
+    assert stream.count == len(expected)
     try:
         list(stream)
     except RuntimeError as exc:
@@ -108,4 +108,4 @@ def test_target_filtered_stream_is_line_streaming_and_excludes_unrelated_rows(
     assert [(event.wallet_address, event.coin, event.tid) for event in events] == [
         (WALLET_A, "BTC", 2)
     ]
-    assert len(stream) == 1
+    assert stream.count == 1
