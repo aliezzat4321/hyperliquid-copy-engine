@@ -41,23 +41,43 @@ New dry-run `open` and `increase` signals are admitted only when the signal's ex
 `portfolioId` was already classified `ELITE_CANDIDATE` by the persisted portfolio
 candidate ledger using evidence available before the source trade. Candidate state that
 is missing, malformed, stale, future-dated, absent for that portfolio, or non-elite fails
-closed with an explicit skip reason. The same owner cannot transfer eligibility from one
-portfolio to another.
+closed with an explicit skip reason.
 
-The current frozen selector version is `invo-portfolio-elite-v1-20260916`. Its current
-quality gate requires, using pre-trade information:
+Portfolio identity is the qualification unit. Multiple portfolios belonging to the same
+owner may all enter shadow research if **each portfolio independently qualifies**. A strong
+portfolio does not automatically transfer eligibility to a weaker sibling portfolio.
 
-- at least 100 closed positions;
-- at least 90 active days when portfolio age is known;
-- win rate at least 80%;
-- historical displayed return / `percentChange` at least 500%;
-- win/loss ratio at least 3;
-- not liquidated.
+The current selector version is `invo-portfolio-elite-v2-20260916`. It is intentionally a
+**low admission floor plus weighted quality score**, not a set of oversized hard minimums.
+The prospective hard floors are:
 
-These thresholds are frozen for the current prospective cohort. They must not be tuned
-from later shadow outcomes. Future selector versions may incorporate stronger causal
-features such as cross-horizon leaderboard persistence, drawdown/tail loss, concentration,
-latency and execution capacity, but only prospectively after review.
+- at least **20** closed positions;
+- at least **7 active days** when portfolio age is known;
+- win rate at least **50%**;
+- positive historical displayed return / `percentChange`;
+- not liquidated;
+- weighted quality score at least **60/100**.
+
+The weighted score then gives additional credit for stronger evidence rather than turning
+it into another hard gate:
+
+- win rate quality;
+- historical return magnitude, with **500% treated as excellent / near-max credit, not a minimum**;
+- sample size, so 30+ / 50+ / 100+ closes progressively increase confidence;
+- active-day maturity, where one week can qualify and two weeks / one month add confidence;
+- closed-trades-per-day frequency;
+- explicit recent trade/activity recency when Invo exposes a trustworthy activity timestamp.
+
+Missing explicit recency data is neutral rather than guessed: its weight is removed from
+the available score. The derived wins/losses **count** ratio is retained for observability
+but is not treated as independent payout-ratio evidence because it largely duplicates win
+rate.
+
+Selector changes are prospective. A new selector version resets its first-elite timestamp,
+so previously collected outcomes cannot be retroactively re-labelled as if the trader had
+already qualified. Future improvements may incorporate cross-horizon leaderboard
+persistence, drawdown/tail loss, concentration, latency and execution capacity, but only
+prospectively after review.
 
 Demotion blocks new exposure and adds. It never blocks a close: already-managed positions
 remain owned, marked and closeable until fully reconciled. This prevents a portfolio from
