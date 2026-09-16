@@ -27,6 +27,7 @@ jobs:
           ORCH=/opt/hyperliquid-ai-team/scripts/ai_team_orchestrator.py
           LOCK=/run/hyperliquid-ai-team/external-supervisor.lock
           STATE=/var/lib/hyperliquid-ai-team/external-supervisor
+          RUNNER_RESTART_COOLDOWN_SEC=600
           mkdir -p "$(dirname "$LOCK")" "$STATE"
 
           exec 9>"$LOCK"
@@ -34,6 +35,69 @@ jobs:
 
           now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           printf '%s start\n' "$now" >> "$STATE/supervisor.log"
+
+          recover_actions_runner() {
+            local unit active now_epoch last_epoch last_file rc
+            local found=0
+            now_epoch="$(date +%s)"
+            last_file="$STATE/last_runner_restart_epoch"
+            last_epoch=0
+            if [ -r "$last_file" ]; then
+              read -r last_epoch < "$last_file" || last_epoch=0
+            fi
+            case "$last_epoch" in
+              ''|*[!0-9]*) last_epoch=0 ;;
+            esac
+
+            while read -r unit _; do
+              [ -n "$unit" ] || continue
+              found=1
+              active="$(systemctl is-active "$unit" 2>/dev/null || true)"
+              printf '%s runner_state unit=%s active=%s\n' \
+                "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$unit" "$active" >> "$STATE/supervisor.log"
+
+              if [ "$active" = "active" ]; then
+                continue
+              fi
+
+              if [ $((now_epoch - last_epoch)) -lt "$RUNNER_RESTART_COOLDOWN_SEC" ]; then
+                printf '%s runner_restart_cooldown unit=%s seconds_since_last=%s\n' \
+                  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$unit" "$((now_epoch - last_epoch))" \
+                  >> "$STATE/supervisor.log"
+                continue
+              fi
+
+              # Recovery is intentionally limited to restarting an already-installed
+              # runner service. Never register/reconfigure a runner or touch tokens.
+              printf '%s runner_restart_attempt unit=%s prior_state=%s\n' \
+                "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$unit" "$active" >> "$STATE/supervisor.log"
+              printf '%s\n' "$now_epoch" > "$last_file"
+              systemctl reset-failed "$unit" >/dev/null 2>&1 || true
+              systemctl restart "$unit" >/dev/null 2>&1
+              rc=$?
+              sleep 3
+              active="$(systemctl is-active "$unit" 2>/dev/null || true)"
+              if [ "$rc" -eq 0 ] && [ "$active" = "active" ]; then
+                printf '%s runner_recovered unit=%s\n' \
+                  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$unit" >> "$STATE/supervisor.log"
+                date -u +%Y-%m-%dT%H:%M:%SZ > "$STATE/last_runner_recovery_at"
+              else
+                printf '%s runner_recovery_failed unit=%s rc=%s active=%s\n' \
+                  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$unit" "$rc" "$active" \
+                  >> "$STATE/supervisor.log"
+              fi
+            done < <(systemctl list-unit-files 'actions.runner.*.service' --type=service --no-legend 2>/dev/null || true)
+
+            if [ "$found" -eq 0 ]; then
+              printf '%s runner_unit_not_found action=none\n' \
+                "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$STATE/supervisor.log"
+            fi
+          }
+
+          # The host-level timer must be able to recover the existing Actions runner
+          # without depending on a GitHub Actions job. This breaks the circular failure
+          # where all self-hosted recovery workflows queue behind an unavailable runner.
+          recover_actions_runner
 
           if [ ! -x "$ORCH" ]; then
             printf '%s preflight_fail orchestrator_missing\n' "$now" >> "$STATE/supervisor.log"
@@ -122,4 +186,4 @@ jobs:
           sudo systemctl is-enabled --quiet hyperliquid-ai-external-supervisor.timer
           sudo systemctl is-active --quiet hyperliquid-ai-external-supervisor.timer
           sudo systemctl show hyperliquid-ai-external-supervisor.timer -p NextElapseUSecRealtime -p LastTriggerUSec --no-pager
-          sudo tail -n 40 /var/lib/hyperliquid-ai-team/external-supervisor/supervisor.log || true
+          sudo tail -n 60 /var/lib/hyperliquid-ai-team/external-supervisor/supervisor.log || true
