@@ -148,7 +148,12 @@ def record_attempt(state: dict[str, Any], unit: str, now: dt.datetime) -> None:
 
 def recover_unit(unit: str, state: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
     if not intended_runner_unit(unit):
-        return {"unit": unit, "before": "not_checked", "action": "out_of_scope", "after": "not_checked"}
+        return {
+            "unit": unit,
+            "before": "not_checked",
+            "action": "out_of_scope",
+            "after": "not_checked",
+        }
 
     before = active_state(unit)
     row: dict[str, Any] = {"unit": unit, "before": before, "action": "none"}
