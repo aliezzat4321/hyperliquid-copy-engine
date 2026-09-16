@@ -18,7 +18,7 @@ const portfolioId = 'elite-portfolio';
 
 function validState(overrides: Record<string, unknown> = {}) {
   return {
-    selectorVersion: 'invo-portfolio-elite-v1-20260916',
+    selectorVersion: 'invo-portfolio-elite-v2-20260916',
     lastObservedAtMs: candidateObservedAtMs,
     firstEliteAtMs: { [portfolioId]: candidateObservedAtMs - 1_000 },
     portfolios: {
@@ -26,14 +26,16 @@ function validState(overrides: Record<string, unknown> = {}) {
         portfolioId,
         observedAtMs: candidateObservedAtMs,
         bucket: 'ELITE_CANDIDATE',
-        closedPositions: 140,
-        winRatePct: 86,
-        percentChange: 820,
-        winLossRatio: 5.4,
-        daysActive: 180,
+        closedPositions: 24,
+        closedPositionsPerDay: 3,
+        winRatePct: 70.8,
+        percentChange: 120,
+        winLossRatio: 2.43,
+        daysActive: 8,
+        recentActivityDaysAgo: 0.25,
         liquidated: false,
-        sourceFilter: '1M',
-        score: 512.2,
+        sourceFilter: '1W',
+        score: 63.4,
       },
     },
     ...overrides,
@@ -45,9 +47,9 @@ test('admits only a portfolio proven elite before the decision', () => {
   assert.equal(decision.allowed, true);
   assert.equal(decision.reason, 'elite_candidate_pretrade_qualified');
   assert.equal(decision.portfolioId, portfolioId);
-  assert.equal(decision.closedPositions, 140);
-  assert.equal(decision.winRatePct, 86);
-  assert.equal(decision.selectorVersion, 'invo-portfolio-elite-v1-20260916');
+  assert.equal(decision.closedPositions, 24);
+  assert.equal(decision.winRatePct, 70.8);
+  assert.equal(decision.selectorVersion, 'invo-portfolio-elite-v2-20260916');
 });
 
 test('leaderboard/discovery presence without elite bucket is rejected', () => {
