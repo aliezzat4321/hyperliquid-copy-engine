@@ -7,6 +7,8 @@ import os
 import sys
 from pathlib import Path
 
+from hlcopy.profitability.memory_bounded_wide import WideEventStream
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
@@ -34,6 +36,20 @@ def main() -> None:
     module.REPORT = args.output_dir / "report.json"
     module.WIDE = args.wide_enriched_dir
     module.MARKET = args.market_dir
+
+    frozen_targets = module.load_frozen_targets(args.challenger_queue)
+    target_keys = {
+        (str(target["wallet"]).lower(), str(target["coin"])) for target in frozen_targets
+    }
+
+    def target_filtered_loader(enriched_dir, *, cutoff_ns):
+        return WideEventStream(
+            enriched_dir,
+            cutoff_ns=cutoff_ns,
+            target_keys=target_keys,
+        )
+
+    module.load_wide_events = target_filtered_loader
 
     original_argv = sys.argv
     try:
