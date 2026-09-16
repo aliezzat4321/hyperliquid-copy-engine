@@ -46,12 +46,11 @@ DELETE_FILES = (
 )
 
 # Earlier deployment logic archived contaminated runtime state instead of
-# deleting it. Those archives are not valid measurement inputs for the clean
-# prospective epoch and are intentionally removed as obsolete data.
+# deleting it. Remove only derived/shadow archives. Historical trader-population
+# archives remain source discovery evidence and are deliberately preserved.
 DELETE_ARCHIVE_PATTERNS = (
     "state.pre-*.json",
     "audit.pre-*.jsonl",
-    "trader-population.pre-*.json",
     "portfolio-candidates.pre-*.json",
     "portfolio-candidate-snapshots.pre-*.jsonl",
     "elite-shadow-report.pre-*.json",
