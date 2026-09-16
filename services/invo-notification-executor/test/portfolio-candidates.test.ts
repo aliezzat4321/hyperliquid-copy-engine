@@ -42,9 +42,9 @@ test('a strong newer trader with 20-30 closes and sub-500 percent return can ent
     createdAt: '2026-09-08T00:00:00Z',
     lastTradeAt: '2026-09-15T06:00:00Z',
     closedPositions: 24,
-    wonPositions: 17,
-    lostPositions: 7,
-    winRate: 70.8,
+    wonPositions: 20,
+    lostPositions: 4,
+    winRate: 83.3,
     percentChange: 120,
   }), now, '1W');
   assert.ok(result);
@@ -56,23 +56,53 @@ test('a strong newer trader with 20-30 closes and sub-500 percent return can ent
   assert.ok((result.scoreBreakdown.recentActivity ?? 0) > 0);
 });
 
+test('win rate below 80 percent never enters elite shadow even with exceptional return', () => {
+  const result = classifyPortfolio(portfolio({
+    id: 'p-79-9',
+    createdAt: '2026-08-01T00:00:00Z',
+    closedPositions: 100,
+    wonPositions: 79,
+    lostPositions: 21,
+    winRate: 79.9,
+    percentChange: 5000,
+  }), now, '1M');
+  assert.ok(result);
+  assert.notEqual(result.bucket, 'ELITE_CANDIDATE');
+  assert.ok(result.reasons.includes('win_rate_below_floor'));
+});
+
+test('80 percent can qualify when the rest of the portfolio evidence is strong', () => {
+  const result = classifyPortfolio(portfolio({
+    id: 'p-80-floor',
+    createdAt: '2026-09-01T00:00:00Z',
+    lastTradeAt: '2026-09-15T12:00:00Z',
+    closedPositions: 35,
+    wonPositions: 28,
+    lostPositions: 7,
+    winRate: 80,
+    percentChange: 500,
+  }), now, '1M');
+  assert.ok(result);
+  assert.equal(result.bucket, 'ELITE_CANDIDATE');
+});
+
 test('500 percent return is rewarded strongly but is not a minimum gate', () => {
   const moderateReturn = classifyPortfolio(portfolio({
     id: 'p-120',
     createdAt: '2026-09-01T00:00:00Z',
     closedPositions: 35,
-    wonPositions: 27,
-    lostPositions: 8,
-    winRate: 77.1,
+    wonPositions: 30,
+    lostPositions: 5,
+    winRate: 85.7,
     percentChange: 120,
   }), now, '1M');
   const idealReturn = classifyPortfolio(portfolio({
     id: 'p-500',
     createdAt: '2026-09-01T00:00:00Z',
     closedPositions: 35,
-    wonPositions: 27,
-    lostPositions: 8,
-    winRate: 77.1,
+    wonPositions: 30,
+    lostPositions: 5,
+    winRate: 85.7,
     percentChange: 500,
   }), now, '1M');
   assert.ok(moderateReturn);
@@ -88,9 +118,9 @@ test('explicit recent activity and daily frequency add weight rather than acting
     createdAt: '2026-09-02T00:00:00Z',
     lastTradeAt: '2026-09-15T18:00:00Z',
     closedPositions: 42,
-    wonPositions: 31,
-    lostPositions: 11,
-    winRate: 73.8,
+    wonPositions: 36,
+    lostPositions: 6,
+    winRate: 85.7,
     percentChange: 180,
   }), now, '1W');
   const stale = classifyPortfolio(portfolio({
@@ -98,9 +128,9 @@ test('explicit recent activity and daily frequency add weight rather than acting
     createdAt: '2026-09-02T00:00:00Z',
     lastTradeAt: '2026-08-20T00:00:00Z',
     closedPositions: 42,
-    wonPositions: 31,
-    lostPositions: 11,
-    winRate: 73.8,
+    wonPositions: 36,
+    lostPositions: 6,
+    winRate: 85.7,
     percentChange: 180,
   }), now, '1W');
   assert.ok(recent);
