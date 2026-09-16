@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Iterator
+from json import JSONDecodeError, loads
 from pathlib import Path
 
 from hlcopy.market.symbols import canonical_coin
-from hlcopy.profitability.position_copy import CopyFillEvent, _event_from_fill
+from hlcopy.profitability import position_copy
 
 
 TargetKey = tuple[str, str]
@@ -22,7 +22,7 @@ def iter_wide_events_memory_bounded(
     *,
     cutoff_ns: int,
     target_keys: set[TargetKey] | None = None,
-) -> Iterator[CopyFillEvent]:
+) -> Iterator[position_copy.CopyFillEvent]:
     """Stream deduplicated Lane 1 wide events without retaining decoded JSON rows.
 
     `target_keys` is optional and is applied before an event is retained by the caller.
@@ -42,8 +42,8 @@ def iter_wide_events_memory_bounded(
                 if not line.strip():
                     continue
                 try:
-                    row = json.loads(line)
-                except json.JSONDecodeError:
+                    row = loads(line)
+                except JSONDecodeError:
                     continue
                 if not isinstance(row, dict) or row.get("kind") != "wide_official_fill":
                     continue
@@ -57,7 +57,7 @@ def iter_wide_events_memory_bounded(
                 if not isinstance(raw, dict):
                     continue
                 address = str(row.get("wallet_address") or "").lower()
-                event = _event_from_fill(
+                event = position_copy._event_from_fill(
                     lane="WIDE",
                     wallet_id=str(row.get("wallet_id") or address),
                     wallet_address=address,
@@ -66,7 +66,10 @@ def iter_wide_events_memory_bounded(
                 )
                 if event is None:
                     continue
-                if normalized_targets is not None and (address, event.coin) not in normalized_targets:
+                if (
+                    normalized_targets is not None
+                    and (address, event.coin) not in normalized_targets
+                ):
                     continue
                 key = (address, event.exchange_ts_ms, event.tid)
                 if key in seen:
@@ -91,7 +94,7 @@ class WideEventStream:
         self._consumed = False
         self._count: int | None = None
 
-    def __iter__(self) -> Iterator[CopyFillEvent]:
+    def __iter__(self) -> Iterator[position_copy.CopyFillEvent]:
         if self._consumed:
             raise RuntimeError("WideEventStream is single-pass")
         self._consumed = True
