@@ -25,7 +25,7 @@ from hlcopy.profitability.lane1_metrics import LANE1_RETURN_BASIS_FUNDING_V2
 from hlcopy.profitability.position_copy import CopyFillEvent, load_wide_events
 
 HOUR_MS = 3_600_000
-BUNDLE_VERSION = "LANE1_REPLAY_EVIDENCE_V2"
+BUNDLE_VERSION = "LANE1_REPLAY_EVIDENCE_V3_TARGET_SCOPED_FUNDING"
 MAX_FALLBACK_TARGETS = 20
 
 
@@ -407,11 +407,17 @@ def build_lane1_audit_bundle(
                     f"MISSING_FUNDING_EVIDENCE: coin={target.coin} "
                     f"required={','.join(str(value) for value in funding_required)}"
                 )
-            funding_name = hashlib.sha256(target.coin.encode()).hexdigest()[:16]
-            funding_path = staging / "funding_history" / f"{funding_name}.json"
+
+            # Funding rows are fetched once per coin, but the replay interval and
+            # required settlement boundaries are target-specific. Persist one file
+            # per wallet/coin target so two wallets on the same coin cannot overwrite
+            # each other's audit metadata.
+            funding_path = staging / "funding_history" / f"target={target_id}.json"
             _write_json(
                 funding_path,
                 {
+                    "target_id": target_id,
+                    "wallet_address": target.wallet_address,
                     "coin": target.coin,
                     "wire_coin": wire_coin(target.coin),
                     "start_ms": start_ms,
@@ -442,6 +448,7 @@ def build_lane1_audit_bundle(
                         oracle_path.relative_to(staging).as_posix() if oracle_path else None
                     ),
                     "funding_history_row_count": len(rows_for_coin),
+                    "funding_history_path": funding_path.relative_to(staging).as_posix(),
                 }
             )
 
