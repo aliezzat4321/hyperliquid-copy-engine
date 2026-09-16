@@ -27,6 +27,9 @@ install -d -o root -g root -m 0755 "$OPT/scripts"
 install -o root -g root -m 0755 \
   "$ROOT/scripts/ai_team_external_supervisor.py" \
   "$OPT/scripts/ai_team_external_supervisor.py"
+install -o root -g root -m 0755 \
+  "$ROOT/scripts/ai_team_runner_recovery.py" \
+  "$OPT/scripts/ai_team_runner_recovery.py"
 install -o root -g root -m 0644 \
   "$ROOT/deploy/systemd/hyperliquid-ai-team-supervisor.service" \
   /etc/systemd/system/hyperliquid-ai-team-supervisor.service
@@ -35,10 +38,12 @@ install -o root -g root -m 0644 \
   /etc/systemd/system/hyperliquid-ai-team-supervisor.timer
 
 python3 -m py_compile "$OPT/scripts/ai_team_external_supervisor.py"
+python3 -m py_compile "$OPT/scripts/ai_team_runner_recovery.py"
 systemctl daemon-reload
 systemctl enable --now hyperliquid-ai-team-supervisor.timer >/dev/null
 
 echo 'AI_TEAM_EXTERNAL_SUPERVISOR_INSTALL=OK'
+echo 'RUNNER_RECOVERY_HELPER_INSTALLED=YES'
 echo 'SUPERVISOR_STATE_ROOT=/var/lib/hyperliquid-ai-team-supervisor'
 echo 'SUPERVISOR_TIMER_ENABLED_AND_ACTIVE=YES'
 echo 'MODEL_CALLS=NONE'
