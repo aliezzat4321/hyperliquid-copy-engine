@@ -46,6 +46,7 @@ AUDIT_ROOT="/root/hyperliquid-audit/reviews/$REVIEW_SHA"
 FUNNEL_OUT="$AUDIT_ROOT/funnel"
 PROSPECTIVE_OUT="$AUDIT_ROOT/prospective"
 IMMUTABLE_EVIDENCE="$AUDIT_ROOT/evidence"
+FAILURE_SUMMARY="$AUDIT_ROOT/failure-summary.txt"
 
 mkdir -p "$RUNTIME_ROOT" "$AUDIT_ROOT"
 rsync -a --delete \
@@ -72,14 +73,21 @@ export REAL_TRADING_ENABLED=NO
 export HLCOPY_DEPLOYED_GIT_SHA="$REVIEW_SHA"
 
 rm -rf "$FUNNEL_OUT" "$PROSPECTIVE_OUT" "$IMMUTABLE_EVIDENCE"
+rm -f "$FAILURE_SUMMARY"
 mkdir -p "$FUNNEL_OUT" "$PROSPECTIVE_OUT"
 
 run_stage() {
   local stage="$1"
   shift
   local unit="hlcopy-lane1-review-${stage}-${SHORT_SHA}"
+  local stage_log="$AUDIT_ROOT/${stage}.log"
   systemctl stop "$unit.service" >/dev/null 2>&1 || true
   systemctl reset-failed "$unit.service" >/dev/null 2>&1 || true
+
+  # Keep the Actions log compact and deterministic. On failure, emit only the
+  # stage name, exit code and a bounded tail so the exact runtime defect is
+  # visible instead of being buried in a multi-megabyte replay log.
+  set +e
   systemd-run \
     --quiet \
     --wait \
@@ -90,7 +98,21 @@ run_stage() {
     --property=MemoryMax=1400M \
     --property=Environment=REAL_TRADING_ENABLED=NO \
     --property=Environment=HLCOPY_DEPLOYED_GIT_SHA="$REVIEW_SHA" \
-    "$@"
+    "$@" >"$stage_log" 2>&1
+  local rc=$?
+  set -e
+
+  if (( rc != 0 )); then
+    {
+      echo "lane1_review_failed stage=$stage exit_code=$rc sha=$REVIEW_SHA real_trading=NO"
+      echo "--- ${stage} log tail ---"
+      tail -n 160 "$stage_log" || true
+    } | tee "$FAILURE_SUMMARY" >&2
+    return "$rc"
+  fi
+
+  echo "lane1_review_stage_complete stage=$stage sha=$REVIEW_SHA"
+  tail -n 20 "$stage_log" || true
 }
 
 echo "lane1_review_start sha=$REVIEW_SHA real_trading=NO"
