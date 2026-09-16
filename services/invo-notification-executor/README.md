@@ -48,20 +48,25 @@ owner may all enter shadow research if **each portfolio independently qualifies*
 portfolio does not automatically transfer eligibility to a weaker sibling portfolio.
 
 The current selector version is `invo-portfolio-elite-v2-20260916`. It is intentionally a
-**low admission floor plus weighted quality score**, not a set of oversized hard minimums.
+**low sample/age floor plus strict trader-quality gate plus weighted score**. The system
+keeps broad research data, but it does not spend shadow capacity on mediocre traders.
 The prospective hard floors are:
 
 - at least **20** closed positions;
 - at least **7 active days** when portfolio age is known;
-- win rate at least **50%**;
+- win rate at least **80%**;
 - positive historical displayed return / `percentChange`;
 - not liquidated;
 - weighted quality score at least **60/100**.
 
+A portfolio below 80% win rate cannot become `ELITE_CANDIDATE` regardless of return or
+leaderboard rank. Within the eligible band, 85% / 90% / 95% win rates progressively earn
+more score credit rather than treating all strong win rates equally.
+
 The weighted score then gives additional credit for stronger evidence rather than turning
 it into another hard gate:
 
-- win rate quality;
+- win rate quality above the 80% hard floor;
 - historical return magnitude, with **500% treated as excellent / near-max credit, not a minimum**;
 - sample size, so 30+ / 50+ / 100+ closes progressively increase confidence;
 - active-day maturity, where one week can qualify and two weeks / one month add confidence;
@@ -110,6 +115,7 @@ The deployed service starts dry:
 - `REAL_TRADING_ENABLED=NO`
 - `NOTIFICATION_TRADER_LIVE=false`
 - new/add shadow exposure: exact pre-trade `ELITE_CANDIDATE` portfolio only
+- elite candidate win-rate hard floor: **80%**
 - candidate state older than 20 minutes fails closed by default
 - research source-age window defaults to 25s
 - target margin: 1% of account equity (or paper equity in walletless shadow mode)
