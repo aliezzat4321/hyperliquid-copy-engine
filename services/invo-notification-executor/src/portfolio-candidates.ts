@@ -25,7 +25,7 @@ export const DEFAULT_PORTFOLIO_SELECTOR: PortfolioSelectorPolicy = Object.freeze
   // admission floors, not targets: confidence continues to rise above them.
   minClosedPositions: 20,
   minDaysActive: 7,
-  minWinRatePct: 50,
+  minWinRatePct: 80,
   minPercentChange: 0.01,
   minQualityScore: 60,
   sparseMinClosedPositions: 8,
@@ -132,8 +132,13 @@ function scorePortfolio(input: {
     ? input.closedPositions / Math.max(input.daysActive, 1)
     : null;
 
-  // 30 points: win quality. 50% is only the floor; 80-90% gets much more credit.
-  const winRate = input.winRatePct == null ? 0 : linearPoints(input.winRatePct, 45, 90, 30);
+  // 30 points: only 80%+ can enter elite shadow. Within that high-quality band,
+  // 85/90/95% progressively earn more credit rather than treating all strong win rates equally.
+  const winRate = input.winRatePct == null
+    ? 0
+    : input.winRatePct < 80
+      ? linearPoints(input.winRatePct, 50, 80, 20)
+      : 20 + linearPoints(input.winRatePct, 80, 95, 10);
 
   // 30 points: historical return, deliberately saturating. 500% is excellent and
   // receives near-maximum credit, but it is not a minimum admission threshold.
