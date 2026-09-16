@@ -112,36 +112,51 @@ npm run check
 # ordinary redeploys. The reset preserves source discovery plus seen/feed cursors,
 # clears simulated managed exposure, and deletes superseded derived economics.
 reset_evidence=0
+reset_deferred=0
 current_epoch=""
 if [[ -f "$EVIDENCE_MARKER" ]]; then
   current_epoch="$(cat "$EVIDENCE_MARKER")"
 fi
+selector_ready=0
+if grep -Fq "$EXPECTED_SELECTOR" "$SERVICE_DIR/src/portfolio-candidates.ts"; then
+  selector_ready=1
+fi
+
+# A rollback after the clean epoch has started must never silently resume an old
+# selector against v3 evidence.
+if [[ "$current_epoch" == "$EVIDENCE_EPOCH" && "$selector_ready" -ne 1 ]]; then
+  echo "refusing Lane 3 selector rollback after clean v3 epoch started" >&2
+  exit 3
+fi
+
 if [[ "$current_epoch" != "$EVIDENCE_EPOCH" ]]; then
-  if [[ ! -x "$RESET_SCRIPT" ]]; then
-    echo "missing executable Lane 3 reset helper: $RESET_SCRIPT" >&2
-    exit 2
-  fi
-  if ! grep -Fq "$EXPECTED_SELECTOR" "$SERVICE_DIR/src/portfolio-candidates.ts"; then
-    echo "refusing Lane 3 reset before repaired selector is deployed" >&2
-    exit 3
-  fi
+  if [[ "$selector_ready" -ne 1 ]]; then
+    # It is safe to merge/deploy this guard before PR #373: keep the current
+    # epoch untouched until the repaired selector arrives on canonical main.
+    reset_deferred=1
+    echo "INVO_NOTIFICATION_EXECUTOR_EVIDENCE_RESET_DEFERRED=selector_v3_not_deployed"
+  else
+    if [[ ! -f "$RESET_SCRIPT" ]]; then
+      echo "missing Lane 3 reset helper: $RESET_SCRIPT" >&2
+      exit 2
+    fi
 
-  # Quiesce only Lane 3 writers while the epoch boundary is cut. Do not touch
-  # market-data, trading, other lanes, credentials, or host services.
-  systemctl stop "$RESEARCH_TIMER" 2>/dev/null || true
-  systemctl stop "$RESEARCH_SERVICE" 2>/dev/null || true
-  systemctl stop "$UNIT" 2>/dev/null || true
+    # Quiesce only Lane 3 writers while the epoch boundary is cut. Do not touch
+    # market-data, trading, other lanes, credentials, or host services.
+    systemctl stop "$RESEARCH_TIMER" 2>/dev/null || true
+    systemctl stop "$RESEARCH_SERVICE" 2>/dev/null || true
+    systemctl stop "$UNIT" 2>/dev/null || true
 
-  python3 "$RESET_SCRIPT" \
-    --state-root "$STATE" \
-    --env-file "$EXEC_ENV" \
-    --epoch "$EVIDENCE_EPOCH"
-  reset_evidence=1
+    python3 "$RESET_SCRIPT" \
+      --state-root "$STATE" \
+      --env-file "$EXEC_ENV" \
+      --epoch "$EVIDENCE_EPOCH"
+    reset_evidence=1
 
-  # Seed selector-v3 eligibility before the executor can accept a NEW/ADD event.
-  # This creates fresh candidate state/snapshots while retaining raw leaderboard history.
-  node dist/src/portfolio-candidate-cli.js
-  node - "$STATE/portfolio-candidates.json" "$EXPECTED_SELECTOR" <<'NODE'
+    # Seed selector-v3 eligibility before the executor can accept a NEW/ADD event.
+    # This creates fresh candidate state/snapshots while retaining raw leaderboard history.
+    node dist/src/portfolio-candidate-cli.js
+    node - "$STATE/portfolio-candidates.json" "$EXPECTED_SELECTOR" <<'NODE'
 const fs = require('fs');
 const [candidatePath, expectedSelector] = process.argv.slice(2);
 const candidate = JSON.parse(fs.readFileSync(candidatePath, 'utf8'));
@@ -151,6 +166,7 @@ if (candidate.selectorVersion !== expectedSelector) {
   );
 }
 NODE
+  fi
 fi
 
 install -m 0644 "$REPO/deploy/systemd/$UNIT" "/etc/systemd/system/$UNIT"
@@ -192,19 +208,24 @@ if ! health="$(curl -fsS --max-time 60 http://127.0.0.1:8787/health)"; then
   exit 1
 fi
 
-# If portfolio research is already installed, resume it only after the repaired
-# executor is healthy. A separate deployment owns installation of these units.
-if systemctl cat "$RESEARCH_SERVICE" >/dev/null 2>&1; then
-  systemctl start "$RESEARCH_SERVICE"
-fi
-if systemctl cat "$RESEARCH_TIMER" >/dev/null 2>&1; then
-  systemctl restart "$RESEARCH_TIMER"
+# If this deploy cut the clean epoch, resume installed portfolio research only
+# after the repaired executor is healthy. A separate deployment owns installation.
+if [[ "$reset_evidence" -eq 1 ]]; then
+  if systemctl cat "$RESEARCH_SERVICE" >/dev/null 2>&1; then
+    systemctl start "$RESEARCH_SERVICE"
+  fi
+  if systemctl cat "$RESEARCH_TIMER" >/dev/null 2>&1; then
+    systemctl restart "$RESEARCH_TIMER"
+  fi
 fi
 
-# Mark the evidence epoch only after the service is ready and full portfolio health succeeds,
-# so a failed deployment cannot falsely claim that the observation window is healthy.
-printf '%s\n' "$EVIDENCE_EPOCH" > "$EVIDENCE_MARKER"
+# Mark the evidence epoch only after a real v3 reset plus successful service
+# health. A pre-v3 deployment deliberately leaves the previous marker untouched.
+if [[ "$reset_deferred" -eq 0 ]]; then
+  printf '%s\n' "$EVIDENCE_EPOCH" > "$EVIDENCE_MARKER"
+fi
 printf 'INVO_NOTIFICATION_EXECUTOR_EVIDENCE_RESET=%s\n' "$reset_evidence"
+printf 'INVO_NOTIFICATION_EXECUTOR_EVIDENCE_RESET_DEFERRED=%s\n' "$reset_deferred"
 printf 'INVO_NOTIFICATION_EXECUTOR_EVIDENCE_EPOCH=%s\n' "$EVIDENCE_EPOCH"
 printf 'INVO_NOTIFICATION_EXECUTOR_READINESS=%s\n' "$readiness"
 printf 'INVO_NOTIFICATION_EXECUTOR_HEALTH=%s\n' "$health"
