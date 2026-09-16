@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from 'fs';
+import { ELITE_SELECTOR_VERSION } from './portfolio-candidates.js';
 
 export const ELITE_ADMISSION_VERSION = 'lane3-elite-admission-v1-20260916';
 
@@ -56,7 +57,8 @@ function base(portfolioId: string): EliteAdmissionDecision {
 /**
  * Fail-closed, decision-time portfolio admission for Lane 3 shadow opens/adds.
  * The portfolio research collector writes this state independently every 10 minutes.
- * No future observation or retroactive elite membership can authorize an earlier signal.
+ * No future observation, retroactive elite membership, or stale selector policy can
+ * authorize an earlier signal.
  */
 export function eliteAdmissionFromState(
   statePath: string,
@@ -84,6 +86,9 @@ export function eliteAdmissionFromState(
   };
 
   if (!selectorVersion) return { ...common, reason: 'candidate_selector_version_missing' };
+  if (selectorVersion !== ELITE_SELECTOR_VERSION) {
+    return { ...common, reason: 'candidate_selector_version_mismatch' };
+  }
   if (stateObservedAtMs == null || stateObservedAtMs <= 0) return { ...common, reason: 'candidate_state_timestamp_missing' };
   if (stateObservedAtMs > decisionAtMs) return { ...common, reason: 'candidate_state_from_future' };
   if (decisionAtMs - stateObservedAtMs > maxStateAgeMs) return { ...common, reason: 'candidate_state_stale' };

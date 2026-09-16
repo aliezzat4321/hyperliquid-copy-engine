@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { eliteAdmissionFromState } from '../src/elite-admission.js';
+import { ELITE_SELECTOR_VERSION } from '../src/portfolio-candidates.js';
 
 function stateFile(state: unknown) {
   const dir = mkdtempSync(join(tmpdir(), 'lane3-elite-admission-'));
@@ -18,7 +19,7 @@ const portfolioId = 'elite-portfolio';
 
 function validState(overrides: Record<string, unknown> = {}) {
   return {
-    selectorVersion: 'invo-portfolio-elite-v2-20260916',
+    selectorVersion: ELITE_SELECTOR_VERSION,
     lastObservedAtMs: candidateObservedAtMs,
     firstEliteAtMs: { [portfolioId]: candidateObservedAtMs - 1_000 },
     portfolios: {
@@ -28,9 +29,9 @@ function validState(overrides: Record<string, unknown> = {}) {
         bucket: 'ELITE_CANDIDATE',
         closedPositions: 24,
         closedPositionsPerDay: 3,
-        winRatePct: 70.8,
+        winRatePct: 83.3,
         percentChange: 120,
-        winLossRatio: 2.43,
+        winLossRatio: 4.99,
         daysActive: 8,
         recentActivityDaysAgo: 0.25,
         liquidated: false,
@@ -42,14 +43,29 @@ function validState(overrides: Record<string, unknown> = {}) {
   };
 }
 
-test('admits only a portfolio proven elite before the decision', () => {
+test('admits only a portfolio proven elite under the exact current selector before the decision', () => {
   const decision = eliteAdmissionFromState(stateFile(validState()), portfolioId, decisionAtMs, 20 * 60_000);
   assert.equal(decision.allowed, true);
   assert.equal(decision.reason, 'elite_candidate_pretrade_qualified');
   assert.equal(decision.portfolioId, portfolioId);
   assert.equal(decision.closedPositions, 24);
-  assert.equal(decision.winRatePct, 70.8);
+  assert.equal(decision.winRatePct, 83.3);
+  assert.equal(decision.selectorVersion, ELITE_SELECTOR_VERSION);
+});
+
+test('obsolete v2 selector state cannot authorize v3 NEW/ADD exposure', () => {
+  const state = validState({ selectorVersion: 'invo-portfolio-elite-v2-20260916' });
+  const decision = eliteAdmissionFromState(stateFile(state), portfolioId, decisionAtMs, 20 * 60_000);
+  assert.equal(decision.allowed, false);
+  assert.equal(decision.reason, 'candidate_selector_version_mismatch');
   assert.equal(decision.selectorVersion, 'invo-portfolio-elite-v2-20260916');
+});
+
+test('unknown selector state cannot authorize NEW/ADD exposure', () => {
+  const state = validState({ selectorVersion: 'unknown-selector' });
+  const decision = eliteAdmissionFromState(stateFile(state), portfolioId, decisionAtMs, 20 * 60_000);
+  assert.equal(decision.allowed, false);
+  assert.equal(decision.reason, 'candidate_selector_version_mismatch');
 });
 
 test('leaderboard/discovery presence without elite bucket is rejected', () => {
