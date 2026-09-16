@@ -52,10 +52,8 @@ def test_reset_clears_derived_shadow_data_but_preserves_source_evidence(
         write(tmp_path / name, f"old derived data for {name}\n")
     write(tmp_path / "state.pre-old-epoch-1.json", "old state\n")
     write(tmp_path / "audit.pre-old-epoch-1.jsonl", "old audit\n")
-    write(
-        tmp_path / "trader-population.pre-old-epoch-1.json",
-        "obsolete duplicate tracker\n",
-    )
+    historical_tracker = tmp_path / "trader-population.pre-old-epoch-1.json"
+    write(historical_tracker, "historical discovery evidence\n")
 
     result = reset_state_root(
         tmp_path,
@@ -73,7 +71,9 @@ def test_reset_clears_derived_shadow_data_but_preserves_source_evidence(
         assert not (tmp_path / name).exists()
     assert not (tmp_path / "state.pre-old-epoch-1.json").exists()
     assert not (tmp_path / "audit.pre-old-epoch-1.jsonl").exists()
-    assert not (tmp_path / "trader-population.pre-old-epoch-1.json").exists()
+    assert historical_tracker.read_text(encoding="utf-8") == (
+        "historical discovery evidence\n"
+    )
 
     assert result["managedPositionsRemoved"] == 1
     assert result["seenKeysPreserved"] == 2
