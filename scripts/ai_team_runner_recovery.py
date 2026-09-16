@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Bounded recovery for an already-installed GitHub Actions runner.
+"""Bounded recovery for the intended installed GitHub Actions runner.
 
 This helper is invoked by the independent host supervisor before the AI-team
-orchestrator. It may restart an existing enabled, inactive/failed Actions runner
-systemd unit. It must never register, remove, reconfigure, or rotate credentials
-for a runner, revive disabled/obsolete runner services, or touch trading state.
+orchestrator. It may restart only the configured, already-installed, enabled
+Actions runner systemd unit. It must never register, remove, reconfigure, or
+rotate credentials for a runner, revive disabled/obsolete/unrelated runner
+services, or touch trading state.
 """
 
 from __future__ import annotations
@@ -26,6 +27,9 @@ STATE_FILE = STATE_ROOT / "runner-recovery.json"
 COOLDOWN_SECONDS = int(os.environ.get("AI_TEAM_RUNNER_RECOVERY_COOLDOWN_SECONDS", "600"))
 VERIFY_SECONDS = int(os.environ.get("AI_TEAM_RUNNER_RECOVERY_VERIFY_SECONDS", "12"))
 MAX_RUNNER_UNITS = int(os.environ.get("AI_TEAM_RUNNER_RECOVERY_MAX_UNITS", "8"))
+EXPECTED_RUNNER_NAME = os.environ.get(
+    "AI_TEAM_RUNNER_RECOVERY_NAME", "signal-engine-hyperliquid"
+).strip()
 RUNNER_UNIT_RE = re.compile(r"^actions\.runner\..+\.service$")
 ENABLED_RUNNER_STATES = frozenset({"enabled", "enabled-runtime"})
 
@@ -77,12 +81,18 @@ def save_state(state: dict[str, Any]) -> None:
     os.replace(tmp, STATE_FILE)
 
 
-def discover_runner_units() -> list[str]:
-    """Return only enabled existing Actions runner services.
+def intended_runner_unit(unit: str) -> bool:
+    """Bind recovery to the known production Actions runner identity."""
+    return bool(EXPECTED_RUNNER_NAME) and EXPECTED_RUNNER_NAME in unit
 
-    Disabled, masked, static, and otherwise non-enabled units are intentionally out
-    of recovery scope so an obsolete installation cannot be revived by the root
-    supervisor. Cooldown remains per unit for the enabled units that are in scope.
+
+def discover_runner_units() -> list[str]:
+    """Return only enabled units matching the configured production runner identity.
+
+    Disabled, masked, static, unrelated, and otherwise non-enabled units are
+    intentionally out of recovery scope so an obsolete installation cannot be
+    revived by the root supervisor. Cooldown remains per unit for the intended
+    runner that is in scope.
     """
     cp = run(
         [
@@ -105,6 +115,7 @@ def discover_runner_units() -> list[str]:
         if (
             RUNNER_UNIT_RE.fullmatch(unit)
             and enablement in ENABLED_RUNNER_STATES
+            and intended_runner_unit(unit)
             and unit not in units
         ):
             units.append(unit)
@@ -136,6 +147,9 @@ def record_attempt(state: dict[str, Any], unit: str, now: dt.datetime) -> None:
 
 
 def recover_unit(unit: str, state: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
+    if not intended_runner_unit(unit):
+        return {"unit": unit, "before": "not_checked", "action": "out_of_scope", "after": "not_checked"}
+
     before = active_state(unit)
     row: dict[str, Any] = {"unit": unit, "before": before, "action": "none"}
     if before == "active":
@@ -172,6 +186,7 @@ def main() -> int:
     now = utcnow()
     state = load_state()
     state["last_check_at"] = iso(now)
+    state["expected_runner_name"] = EXPECTED_RUNNER_NAME
     state["real_trading_change"] = "NO"
     state["polymarket_touched"] = "NO"
 
@@ -184,10 +199,10 @@ def main() -> int:
     units = discover_runner_units()
     state["discovered_units"] = units
     if not units:
-        state["status"] = "NO_EXISTING_RUNNER_UNIT"
+        state["status"] = "NO_INTENDED_RUNNER_UNIT"
         state["last_results"] = []
         save_state(state)
-        print("RUNNER_RECOVERY=NO_EXISTING_RUNNER_UNIT")
+        print("RUNNER_RECOVERY=NO_INTENDED_RUNNER_UNIT")
         return 0
 
     results = [recover_unit(unit, state, now) for unit in units]
@@ -206,6 +221,7 @@ def main() -> int:
     save_state(state)
 
     print(f"RUNNER_RECOVERY={state['status']}")
+    print(f"RUNNER_NAME={EXPECTED_RUNNER_NAME}")
     print(f"RUNNER_UNITS={','.join(units)}")
     print("REAL_TRADING_CHANGE=NO")
     print("POLYMARKET_TOUCHED=NO")
