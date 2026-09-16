@@ -5,13 +5,17 @@ REPO=/root/hyperliquid-copy-engine
 SERVICE_REL=services/invo-notification-executor
 SERVICE_DIR="$REPO/$SERVICE_REL"
 UNIT=hyperliquid-invo-notification-executor.service
+RESEARCH_SERVICE=hyperliquid-invo-portfolio-research.service
+RESEARCH_TIMER=hyperliquid-invo-portfolio-research.timer
 STATE=/var/lib/hyperliquid-copy-engine/invo-notification-executor
 INVO_ENV=/etc/hyperliquid-copy-engine/invo.env
 EXEC_ENV=/etc/hyperliquid-copy-engine/invo-notification-executor.env
-# Reset prospective Lane-3 evidence exactly once for the repaired causal-L2/funding-completeness model.
-# Subsequent code/config deploys must preserve the accumulating observation window.
-EVIDENCE_EPOCH=lane3-causal-l2-v2-funding-complete-20260915
+RESET_SCRIPT="$REPO/scripts/reset_lane3_shadow_epoch.py"
+# Start the repaired selector/execution model from one clean prospective epoch.
+# Subsequent deploys inside this same epoch must preserve the observation window.
+EVIDENCE_EPOCH=lane3-hybrid-v3-clean-20260916
 EVIDENCE_MARKER="$STATE/evidence-epoch"
+EXPECTED_SELECTOR=invo-portfolio-hybrid-v3-20260916
 
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "invo notification executor deployment requires root" >&2
@@ -92,6 +96,7 @@ set_env NOTIFICATION_TRADER_PORT 8787
 set_env NOTIFICATION_TRADER_STATE_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/state.json
 set_env NOTIFICATION_TRADER_AUDIT_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/audit.jsonl
 set_env NOTIFICATION_TRADER_TRACKER_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/trader-population.json
+set_env NOTIFICATION_TRADER_CANDIDATE_STATE_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/portfolio-candidates.json
 # Current Invo feed API accepts following/trending; `all` returns HTTP 500 Invalid feed type.
 # Keep discovery broad across valid surfaces without flooding the executor with known-bad requests.
 set_env NOTIFICATION_TRADER_DISCOVERY_SURFACES following,trending
@@ -103,25 +108,49 @@ cd "$SERVICE_DIR"
 npm install --ignore-scripts --no-audit --no-fund
 npm run check
 
-# Start a clean prospective evidence epoch only when the evidence model changes. Preserve
-# future deploys inside the same epoch so the >=7-day / >=20-event observation window accrues.
+# Reset only when crossing into the repaired v3 measurement epoch. Never reset on
+# ordinary redeploys. The reset preserves source discovery plus seen/feed cursors,
+# clears simulated managed exposure, and deletes superseded derived economics.
 reset_evidence=0
 current_epoch=""
 if [[ -f "$EVIDENCE_MARKER" ]]; then
   current_epoch="$(cat "$EVIDENCE_MARKER")"
 fi
 if [[ "$current_epoch" != "$EVIDENCE_EPOCH" ]]; then
+  if [[ ! -x "$RESET_SCRIPT" ]]; then
+    echo "missing executable Lane 3 reset helper: $RESET_SCRIPT" >&2
+    exit 2
+  fi
+  if ! grep -Fq "$EXPECTED_SELECTOR" "$SERVICE_DIR/src/portfolio-candidates.ts"; then
+    echo "refusing Lane 3 reset before repaired selector is deployed" >&2
+    exit 3
+  fi
+
+  # Quiesce only Lane 3 writers while the epoch boundary is cut. Do not touch
+  # market-data, trading, other lanes, credentials, or host services.
+  systemctl stop "$RESEARCH_TIMER" 2>/dev/null || true
+  systemctl stop "$RESEARCH_SERVICE" 2>/dev/null || true
+  systemctl stop "$UNIT" 2>/dev/null || true
+
+  python3 "$RESET_SCRIPT" \
+    --state-root "$STATE" \
+    --env-file "$EXEC_ENV" \
+    --epoch "$EVIDENCE_EPOCH"
   reset_evidence=1
-  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-  if [[ -f "$STATE/state.json" ]]; then
-    mv "$STATE/state.json" "$STATE/state.pre-${EVIDENCE_EPOCH}-${stamp}.json"
-  fi
-  if [[ -f "$STATE/audit.jsonl" ]]; then
-    mv "$STATE/audit.jsonl" "$STATE/audit.pre-${EVIDENCE_EPOCH}-${stamp}.jsonl"
-  fi
-  if [[ -f "$STATE/trader-population.json" ]]; then
-    mv "$STATE/trader-population.json" "$STATE/trader-population.pre-${EVIDENCE_EPOCH}-${stamp}.json"
-  fi
+
+  # Seed selector-v3 eligibility before the executor can accept a NEW/ADD event.
+  # This creates fresh candidate state/snapshots while retaining raw leaderboard history.
+  node dist/src/portfolio-candidate-cli.js
+  node - "$STATE/portfolio-candidates.json" "$EXPECTED_SELECTOR" <<'NODE'
+const fs = require('fs');
+const [candidatePath, expectedSelector] = process.argv.slice(2);
+const candidate = JSON.parse(fs.readFileSync(candidatePath, 'utf8'));
+if (candidate.selectorVersion !== expectedSelector) {
+  throw new Error(
+    `clean epoch seeded unexpected selector ${candidate.selectorVersion}; expected ${expectedSelector}`,
+  );
+}
+NODE
 fi
 
 install -m 0644 "$REPO/deploy/systemd/$UNIT" "/etc/systemd/system/$UNIT"
@@ -161,6 +190,15 @@ if ! health="$(curl -fsS --max-time 60 http://127.0.0.1:8787/health)"; then
   systemctl --no-pager --full status "$UNIT" || true
   journalctl -u "$UNIT" -n 100 --no-pager || true
   exit 1
+fi
+
+# If portfolio research is already installed, resume it only after the repaired
+# executor is healthy. A separate deployment owns installation of these units.
+if systemctl cat "$RESEARCH_SERVICE" >/dev/null 2>&1; then
+  systemctl start "$RESEARCH_SERVICE"
+fi
+if systemctl cat "$RESEARCH_TIMER" >/dev/null 2>&1; then
+  systemctl restart "$RESEARCH_TIMER"
 fi
 
 # Mark the evidence epoch only after the service is ready and full portfolio health succeeds,
