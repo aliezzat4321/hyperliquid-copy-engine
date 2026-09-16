@@ -5,8 +5,10 @@ import { PortfolioCandidateLedger } from './portfolio-candidates.js';
 import {
   CANONICAL_INVO_HORIZONS,
   InvoLeaderboardLedger,
+  apiFilterForLeaderboardSurface,
   normalizeLeaderboardHorizon,
   type InvoLeaderboardHorizon,
+  type InvoLeaderboardSurface,
 } from './invo-leaderboards.js';
 
 if (INVO_TOKEN) invo.setToken(INVO_TOKEN);
@@ -24,12 +26,12 @@ function discoveryFilters() {
   return [...new Set(raw.split(',').map(v => v.trim().toLowerCase()).filter(Boolean))];
 }
 
-function leaderboardHorizons(): InvoLeaderboardHorizon[] {
+function leaderboardSurfaces(): InvoLeaderboardSurface[] {
   const raw = process.env.INVO_PORTFOLIO_LEADERBOARD_HORIZONS ?? CANONICAL_INVO_HORIZONS.join(',');
   const horizons = raw.split(',').map(normalizeLeaderboardHorizon).filter((v): v is InvoLeaderboardHorizon => Boolean(v));
-  const unique = [...new Set(horizons)];
-  if (!unique.length) throw new Error('INVO_PORTFOLIO_LEADERBOARD_HORIZONS resolved to no supported horizons');
-  return unique;
+  const uniqueHorizons = [...new Set(horizons)];
+  if (!uniqueHorizons.length) throw new Error('INVO_PORTFOLIO_LEADERBOARD_HORIZONS resolved to no supported horizons');
+  return ['CROWN', ...uniqueHorizons];
 }
 
 async function main() {
@@ -48,29 +50,30 @@ async function main() {
   const leaderboardLedger = new InvoLeaderboardLedger(leaderboardStatePath, leaderboardSnapshotsPath);
   const observedAtMs = Date.now();
 
-  // Exact Invo UI Top Portfolios surfaces. Runtime probing on 2026-09-15 proved
-  // the horizon is the `filter` enum itself: 1D, 1W, 1M, 1Y, AT.
+  // Authenticated runtime probing proved the default crown Top 10 is filter=trending,
+  // while the explicit UI horizons are filter=1D/1W/1M/1Y/AT. Persist all six
+  // as independent ranked surfaces so crown rank history cannot disappear into broad research.
   const leaderboardResults: Array<Record<string, unknown>> = [];
-  for (const horizon of leaderboardHorizons()) {
+  for (const surface of leaderboardSurfaces()) {
+    const sourceFilter = apiFilterForLeaderboardSurface(surface);
     let accepted = 0;
     let failure: string | null = null;
     for (let page = 1; page <= leaderboardPages; page++) {
       try {
-        const data = await invo.discoverPortfolios(horizon, page, leaderboardPageSize);
+        const data = await invo.discoverPortfolios(sourceFilter, page, leaderboardPageSize);
         const items = Array.isArray(data?.items) ? data.items : [];
         if (!items.length) break;
-        accepted += leaderboardLedger.observePage(items, horizon, observedAtMs, (page - 1) * leaderboardPageSize).length;
+        accepted += leaderboardLedger.observePage(items, surface, observedAtMs, (page - 1) * leaderboardPageSize).length;
         if (items.length < leaderboardPageSize) break;
       } catch (err) {
         failure = err instanceof Error ? err.message : String(err);
         break;
       }
     }
-    leaderboardResults.push({ horizon, accepted, failure });
+    leaderboardResults.push({ surface, sourceFilter, accepted, failure });
   }
 
-  // Broad discovery remains separate from leaderboard rank evidence and from elite-shadow PnL.
-  // This preserves the existing prospective selector while the new cross-horizon methodology is reviewed.
+  // Broad discovery remains separate from ranked leaderboard evidence and from elite-shadow PnL.
   const endpointResults: Array<Record<string, unknown>> = [];
   let rawItems = 0;
   for (const filter of discoveryFilters()) {
@@ -101,10 +104,25 @@ async function main() {
     leaderboardResults,
     leaderboards: {
       leaderboardVersion: leaderboards.leaderboardVersion,
+      surfaces: leaderboards.surfaces,
       horizons: leaderboards.horizons,
+      countsBySurface: leaderboards.countsBySurface,
       countsByHorizon: leaderboards.countsByHorizon,
       uniquePortfolioCount: leaderboards.uniquePortfolioCount,
       uniqueOwnerCount: leaderboards.uniqueOwnerCount,
+      top10BySurface: Object.fromEntries(leaderboards.surfaces.map(surface => [
+        surface,
+        leaderboards.latestBySurface[surface].slice(0, 10).map(row => ({
+          rank: row.rank,
+          portfolioId: row.portfolioId,
+          portfolioName: row.portfolioName,
+          username: row.username,
+          percentChange: row.percentChange,
+          closedPositions: row.closedPositions,
+          winRatePct: row.winRatePct,
+          sourceFilter: row.sourceFilter,
+        })),
+      ])),
       top10ByHorizon: Object.fromEntries(leaderboards.horizons.map(horizon => [
         horizon,
         leaderboards.latestByHorizon[horizon].slice(0, 10).map(row => ({
@@ -117,6 +135,7 @@ async function main() {
           winRatePct: row.winRatePct,
         })),
       ])),
+      crossSurfaceTop: leaderboards.crossSurface.slice(0, 50),
       crossHorizonTop: leaderboards.crossHorizon.slice(0, 50),
     },
     broadDiscovery: {
