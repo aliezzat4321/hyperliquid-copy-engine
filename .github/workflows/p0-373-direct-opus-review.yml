@@ -48,8 +48,10 @@ jobs:
           Selector/admission requirements:
           - Broad Invo CROWN/1D/1W/1M/1Y/AT plus research discovery remains broad and independent.
           - Leaderboard membership alone never authorizes a copy.
-          - Selector invo-portfolio-elite-v2-20260916 uses low floors plus weighted quality, not oversized hard thresholds.
-          - Hard floors: at least 20 closed positions; at least 7 portfolio-age days when known; at least 50% win rate; positive displayed historical return; not liquidated; score at least 60/100.
+          - Selector invo-portfolio-elite-v2-20260916 uses low sample/age floors plus strict trader-quality gating.
+          - Hard floors: at least 20 closed positions; at least 7 portfolio-age days when known; at least 80% win rate; positive displayed historical return; not liquidated; score at least 60/100.
+          - A portfolio below 80% win rate must never be ELITE_CANDIDATE regardless of return or leaderboard rank.
+          - Within the eligible 80%+ band, 85/90/95% win rates progressively earn more score credit.
           - 500% return is excellent high score credit, not a minimum.
           - More sample history above 20 and more portfolio age above 7 increase confidence without becoming hard requirements.
           - Daily closed-trade frequency contributes weight.
