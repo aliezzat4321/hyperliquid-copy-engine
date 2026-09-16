@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-const serviceSource = readFileSync(new URL('../src/service.ts', import.meta.url), 'utf8');
+const serviceSource = readFileSync(new URL('../../src/service.ts', import.meta.url), 'utf8');
 
 test('dry new exposure is gated by exact portfolio elite admission before open/reup execution', () => {
   const gate = serviceSource.indexOf("if (!cfg.live && signal.action !== 'close')");
