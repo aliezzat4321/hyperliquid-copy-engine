@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - "scripts/ai_team_external_supervisor.py"
+      - "scripts/ai_team_runner_recovery.py"
       - "scripts/install_ai_team_supervisor.sh"
       - "deploy/systemd/hyperliquid-ai-team-supervisor.service"
       - "deploy/systemd/hyperliquid-ai-team-supervisor.timer"
@@ -45,6 +46,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m py_compile scripts/ai_team_external_supervisor.py
+          python3 -m py_compile scripts/ai_team_runner_recovery.py
           bash -n scripts/install_ai_team_supervisor.sh
           python3 - <<'PY'
           import importlib.util
@@ -100,12 +102,16 @@ jobs:
           set -euo pipefail
           bash scripts/install_ai_team_supervisor.sh
           test -x /opt/hyperliquid-ai-team/scripts/ai_team_external_supervisor.py
+          test -x /opt/hyperliquid-ai-team/scripts/ai_team_runner_recovery.py
           python3 -m py_compile /opt/hyperliquid-ai-team/scripts/ai_team_external_supervisor.py
+          python3 -m py_compile /opt/hyperliquid-ai-team/scripts/ai_team_runner_recovery.py
           systemctl is-enabled hyperliquid-ai-team-supervisor.timer
           systemctl is-active hyperliquid-ai-team-supervisor.timer
           systemctl start hyperliquid-ai-team-supervisor.service
           systemctl --no-pager --full status hyperliquid-ai-team-supervisor.service || true
           test -s /var/lib/hyperliquid-ai-team-supervisor/state.json
+          test -s /var/lib/hyperliquid-ai-team-supervisor/runner-recovery.json
           echo 'EXTERNAL_SUPERVISOR_RUNTIME=PROVEN'
+          echo 'RUNNER_RECOVERY_RUNTIME=PROVEN'
           echo 'POLYMARKET_TOUCHED=NO'
           echo 'REAL_TRADING_TOUCHED=NO'
