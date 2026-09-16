@@ -80,7 +80,7 @@ def iter_wide_events_memory_bounded(
 
 
 class WideEventStream:
-    """Single-pass sequence adapter for legacy callers that only iterate then call len()."""
+    """Single-pass iterable that records its final count after consumption."""
 
     def __init__(
         self,
@@ -111,7 +111,6 @@ class WideEventStream:
         finally:
             self._count = count
 
-    def __len__(self) -> int:
-        if self._count is None:
-            raise RuntimeError("WideEventStream length is available only after iteration")
+    @property
+    def count(self) -> int | None:
         return self._count
