@@ -58,7 +58,7 @@
     "CAPITAL_SENSITIVE_METHODOLOGY"
   ],
   "max_attempts": 3,
-  "poll_seconds": 60,
+  "poll_seconds": 180,
   "default_rate_limit_retry_seconds": 3600,
   "claude_readiness_probe_seconds": 300,
   "claude_readiness_probe_timeout_seconds": 20,
