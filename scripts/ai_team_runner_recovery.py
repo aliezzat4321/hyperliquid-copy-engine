@@ -47,8 +47,16 @@ def run(cmd: list[str], *, timeout: int = 20) -> subprocess.CompletedProcess[str
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-        stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        stdout = (
+            exc.stdout.decode(errors="replace")
+            if isinstance(exc.stdout, bytes)
+            else (exc.stdout or "")
+        )
+        stderr = (
+            exc.stderr.decode(errors="replace")
+            if isinstance(exc.stderr, bytes)
+            else (exc.stderr or "")
+        )
         return subprocess.CompletedProcess(cmd, 124, stdout, stderr or "command timed out")
 
 
