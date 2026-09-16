@@ -48,7 +48,7 @@ jobs:
 
           TARGET_SHA=$TARGET_SHA
           PR_NUMBER=$PR_NUMBER
-          REAL_TRADING_ENABLED must remain NO.
+          Production trading must remain disabled.
 
           Review the exact checked-out tree. Do not modify tracked files. Do not inspect or touch Polymarket. This review is for shadow-only Lane 3.
 
@@ -63,7 +63,7 @@ jobs:
           - A requested close that is itself executable but sees < minimum total displayed causal depth must remain UNRESOLVED_EXPOSURE with bounded retry. It must NOT be terminally dust-reconciled/deleted.
           - True non-executable requested residual dust may terminate only as incomplete dust reconciliation and must not enter COMPLETE economics.
           - Missing, empty, or mismatched Hyperliquid L2 returned coin identity must fail closed.
-          - No live-trading, signing, credential, capital-control, or live-routing enablement.
+          - No production trading, signing, credential, capital-control, or live-routing enablement.
 
           Falsify the implementation. Inspect the diff and relevant surrounding code/tests, especially:
           services/invo-notification-executor/src/service.ts
@@ -76,14 +76,14 @@ jobs:
           services/invo-notification-executor/test/service-elite-admission-wiring.test.ts
           services/invo-notification-executor/test/shadow-market-integrity.test.ts
 
-          CI on the prior code-only head passed executor tests, repo CI, ai-team-contract and live-sensitive guard. Re-check source semantics independently; you may run focused tests if useful. Do not accept merely because tests exist.
+          CI on the prior code-only head passed executor tests, repo CI, ai-team-contract and safety guard. Re-check source semantics independently; you may run focused tests if useful. Do not accept merely because tests exist.
 
           If ANY material issue exists, explain it and end with exactly:
           LANE3_REVIEW=FAIL
           MODEL_CLASS=OPUS
           TARGET_SHA=$TARGET_SHA
           PR_NUMBER=$PR_NUMBER
-          REAL_TRADING_ENABLED=NO
+          PRODUCTION_TRADING=DISABLED
 
           If and only if the exact head satisfies all required semantics, end with EXACTLY these lines:
           LANE3_REVIEW=PASS
@@ -98,7 +98,7 @@ jobs:
           TRUE_DUST_INCOMPLETE=PASS
           L2_COIN_FAIL_CLOSED=PASS
           BROAD_DISCOVERY_INDEPENDENT=PASS
-          REAL_TRADING_ENABLED=NO
+          PRODUCTION_TRADING=DISABLED
           EOF
 
           uid="$(id -u hl-claude-agent)"
@@ -129,7 +129,6 @@ jobs:
               print(raw)
           PY
 
-          result="$(cat /tmp/p0-373-opus-result.txt)"
           if [[ $rc -ne 0 ]]; then
             err="$(tail -c 3000 /tmp/p0-373-opus.err || true)"
             printf 'Claude direct review failed rc=%s\n%s\n' "$rc" "$err"
@@ -153,7 +152,7 @@ Claude direct review process failed with rc=$rc. No merge/deploy authorization w
             'TRUE_DUST_INCOMPLETE=PASS'
             'L2_COIN_FAIL_CLOSED=PASS'
             'BROAD_DISCOVERY_INDEPENDENT=PASS'
-            'REAL_TRADING_ENABLED=NO'
+            'PRODUCTION_TRADING=DISABLED'
           )
           for marker in "${required[@]}"; do
             count="$(grep -Fxc "$marker" /tmp/p0-373-opus-result.txt || true)"
