@@ -30,6 +30,7 @@ MAX_RUNNER_UNITS = int(os.environ.get("AI_TEAM_RUNNER_RECOVERY_MAX_UNITS", "8"))
 EXPECTED_RUNNER_NAME = os.environ.get(
     "AI_TEAM_RUNNER_RECOVERY_NAME", "signal-engine-hyperliquid"
 ).strip()
+RUNNER_REPO_SYSTEMD_SCOPE = "aliezzat4321-hyperliquid-copy-engine"
 RUNNER_UNIT_RE = re.compile(r"^actions\.runner\..+\.service$")
 ENABLED_RUNNER_STATES = frozenset({"enabled", "enabled-runtime"})
 
@@ -82,8 +83,13 @@ def save_state(state: dict[str, Any]) -> None:
 
 
 def intended_runner_unit(unit: str) -> bool:
-    """Bind recovery to the known production Actions runner identity."""
-    return bool(EXPECTED_RUNNER_NAME) and EXPECTED_RUNNER_NAME in unit
+    """Bind recovery to the exact canonical production runner systemd unit."""
+    if not EXPECTED_RUNNER_NAME:
+        return False
+    expected_unit = (
+        f"actions.runner.{RUNNER_REPO_SYSTEMD_SCOPE}.{EXPECTED_RUNNER_NAME}.service"
+    )
+    return unit == expected_unit
 
 
 def discover_runner_units() -> list[str]:
