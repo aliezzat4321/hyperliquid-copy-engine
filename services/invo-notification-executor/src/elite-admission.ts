@@ -13,10 +13,12 @@ export interface EliteAdmissionDecision {
   firstEliteAtMs: number | null;
   bucket: string | null;
   closedPositions: number | null;
+  closedPositionsPerDay: number | null;
   winRatePct: number | null;
   percentChange: number | null;
   winLossRatio: number | null;
   daysActive: number | null;
+  recentActivityDaysAgo: number | null;
   liquidated: boolean | null;
   sourceFilter: string | null;
   score: number | null;
@@ -39,10 +41,12 @@ function base(portfolioId: string): EliteAdmissionDecision {
     firstEliteAtMs: null,
     bucket: null,
     closedPositions: null,
+    closedPositionsPerDay: null,
     winRatePct: null,
     percentChange: null,
     winLossRatio: null,
     daysActive: null,
+    recentActivityDaysAgo: null,
     liquidated: null,
     sourceFilter: null,
     score: null,
@@ -95,10 +99,12 @@ export function eliteAdmissionFromState(
     firstEliteAtMs,
     bucket: typeof candidate.bucket === 'string' ? candidate.bucket : null,
     closedPositions: finite(candidate.closedPositions),
+    closedPositionsPerDay: finite(candidate.closedPositionsPerDay),
     winRatePct: finite(candidate.winRatePct),
     percentChange: finite(candidate.percentChange),
     winLossRatio: finite(candidate.winLossRatio),
     daysActive: finite(candidate.daysActive),
+    recentActivityDaysAgo: finite(candidate.recentActivityDaysAgo),
     liquidated: typeof candidate.liquidated === 'boolean' ? candidate.liquidated : null,
     sourceFilter: typeof candidate.sourceFilter === 'string' ? candidate.sourceFilter : null,
     score: finite(candidate.score),
