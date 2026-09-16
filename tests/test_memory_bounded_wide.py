@@ -1,7 +1,5 @@
-import json
+from json import dumps
 from pathlib import Path
-
-import pytest
 
 from hlcopy.profitability.memory_bounded_wide import WideEventStream
 from hlcopy.profitability.position_copy import load_wide_events
@@ -43,7 +41,7 @@ def _row(
 
 
 def _write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
-    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    path.write_text("".join(dumps(row) + "\n" for row in rows), encoding="utf-8")
 
 
 def _sort_key(event):
@@ -70,8 +68,12 @@ def test_memory_bounded_stream_matches_legacy_loader_on_fixture(tmp_path: Path) 
 
     assert sorted(actual, key=_sort_key) == list(expected)
     assert len(stream) == len(expected)
-    with pytest.raises(RuntimeError, match="single-pass"):
+    try:
         list(stream)
+    except RuntimeError as exc:
+        assert "single-pass" in str(exc)
+    else:
+        raise AssertionError("second iteration must fail")
 
 
 def test_target_filtered_stream_is_line_streaming_and_excludes_unrelated_rows(
