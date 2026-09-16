@@ -8,25 +8,37 @@ assert spec and spec.loader
 recovery = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(recovery)
 
+CANONICAL_RUNNER_UNIT = (
+    "actions.runner.aliezzat4321-hyperliquid-copy-engine."
+    "signal-engine-hyperliquid.service"
+)
+STALE_NEAR_NAME_UNIT = (
+    "actions.runner.aliezzat4321-hyperliquid-copy-engine."
+    "signal-engine-hyperliquid-old.service"
+)
+
 
 def completed(cmd: list[str], rc: int = 0, stdout: str = "") -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(cmd, rc, stdout, "")
 
 
-def test_discovery_accepts_only_enabled_intended_runner(monkeypatch):
-    intended = (
-        "actions.runner.aliezzat4321-hyperliquid-copy-engine."
-        "signal-engine-hyperliquid.service"
+def test_intended_runner_unit_requires_exact_canonical_identity():
+    assert recovery.intended_runner_unit(CANONICAL_RUNNER_UNIT)
+    assert not recovery.intended_runner_unit(STALE_NEAR_NAME_UNIT)
+    assert not recovery.intended_runner_unit(
+        "actions.runner.other-owner-other-repo.signal-engine-hyperliquid.service"
     )
 
+
+def test_discovery_accepts_only_enabled_intended_runner(monkeypatch):
     def fake_run(cmd, *, timeout=20):
         del timeout
         assert cmd[:2] == ["systemctl", "list-unit-files"]
         return completed(
             cmd,
             stdout=(
-                f"{intended} enabled enabled\n"
-                "actions.runner.signal-engine-hyperliquid-old.service disabled enabled\n"
+                f"{STALE_NEAR_NAME_UNIT} enabled enabled\n"
+                f"{CANONICAL_RUNNER_UNIT} enabled enabled\n"
                 "actions.runner.signal-engine-hyperliquid-static.service static enabled\n"
                 "actions.runner.other-enabled.service enabled enabled\n"
                 "ssh.service enabled enabled\n"
@@ -34,12 +46,22 @@ def test_discovery_accepts_only_enabled_intended_runner(monkeypatch):
         )
 
     monkeypatch.setattr(recovery, "run", fake_run)
-    assert recovery.discover_runner_units() == [intended]
+    assert recovery.discover_runner_units() == [CANONICAL_RUNNER_UNIT]
+
+
+def test_discovery_with_only_enabled_near_name_returns_empty(monkeypatch):
+    def fake_run(cmd, *, timeout=20):
+        del timeout
+        assert cmd[:2] == ["systemctl", "list-unit-files"]
+        return completed(cmd, stdout=f"{STALE_NEAR_NAME_UNIT} enabled enabled\n")
+
+    monkeypatch.setattr(recovery, "run", fake_run)
+    assert recovery.discover_runner_units() == []
 
 
 def test_active_runner_is_never_restarted(monkeypatch):
     calls: list[list[str]] = []
-    unit = "actions.runner.repo.signal-engine-hyperliquid.service"
+    unit = CANONICAL_RUNNER_UNIT
 
     def fake_run(cmd, *, timeout=20):
         del timeout
@@ -58,7 +80,7 @@ def test_active_runner_is_never_restarted(monkeypatch):
 def test_inactive_intended_runner_gets_bounded_restart(monkeypatch):
     calls: list[list[str]] = []
     active_checks = 0
-    unit = "actions.runner.repo.signal-engine-hyperliquid.service"
+    unit = CANONICAL_RUNNER_UNIT
 
     def fake_run(cmd, *, timeout=20):
         nonlocal active_checks
@@ -97,11 +119,25 @@ def test_unrelated_runner_is_out_of_scope_even_if_directly_passed(monkeypatch):
     assert calls == []
 
 
+def test_enabled_near_name_runner_is_out_of_scope_even_if_directly_passed(monkeypatch):
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *, timeout=20):
+        del timeout
+        calls.append(cmd)
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(recovery, "run", fake_run)
+    row = recovery.recover_unit(STALE_NEAR_NAME_UNIT, {}, recovery.utcnow())
+    assert row["action"] == "out_of_scope"
+    assert calls == []
+
+
 def test_disabled_or_unrelated_runner_is_never_restarted(monkeypatch, tmp_path):
     calls: list[list[str]] = []
     active_checks = 0
-    intended = "actions.runner.repo.signal-engine-hyperliquid.service"
-    disabled = "actions.runner.repo.signal-engine-hyperliquid-old.service"
+    intended = CANONICAL_RUNNER_UNIT
+    disabled = STALE_NEAR_NAME_UNIT
     unrelated = "actions.runner.repo.other-enabled.service"
 
     def fake_run(cmd, *, timeout=20):
@@ -140,7 +176,7 @@ def test_disabled_or_unrelated_runner_is_never_restarted(monkeypatch, tmp_path):
 def test_restart_cooldown_prevents_restart_storm(monkeypatch):
     calls: list[list[str]] = []
     now = recovery.utcnow()
-    unit = "actions.runner.repo.signal-engine-hyperliquid.service"
+    unit = CANONICAL_RUNNER_UNIT
     state = {
         "attempts": {
             unit: {
