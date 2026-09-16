@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import datetime as dt
+import importlib.util
 import json
 from pathlib import Path
 
 import pytest
 
-from scripts.reset_lane3_shadow_epoch import (
-    DELETE_FILES,
-    SELECTOR_VERSION,
-    assert_shadow_only_env,
-    reset_state_root,
-)
+SCRIPT_PATH = Path(__file__).parents[1] / "scripts" / "reset_lane3_shadow_epoch.py"
+SPEC = importlib.util.spec_from_file_location("reset_lane3_shadow_epoch", SCRIPT_PATH)
+if SPEC is None or SPEC.loader is None:
+    raise RuntimeError(f"unable to load Lane 3 reset helper from {SCRIPT_PATH}")
+RESET_MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(RESET_MODULE)
+
+DELETE_FILES = RESET_MODULE.DELETE_FILES
+SELECTOR_VERSION = RESET_MODULE.SELECTOR_VERSION
+assert_shadow_only_env = RESET_MODULE.assert_shadow_only_env
+reset_state_root = RESET_MODULE.reset_state_root
 
 
 def write(path: Path, value: str) -> None:
