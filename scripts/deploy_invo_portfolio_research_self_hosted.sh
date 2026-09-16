@@ -43,7 +43,7 @@ systemctl daemon-reload
 systemd-analyze verify "/etc/systemd/system/$SERVICE_UNIT" "/etc/systemd/system/$TIMER_UNIT"
 systemctl enable "$TIMER_UNIT"
 
-# Run immediately once; the timer then keeps both broad discovery and exact UI leaderboards current.
+# Run immediately once; the timer then keeps broad discovery and all ranked Invo leaderboard surfaces current.
 systemctl start "$SERVICE_UNIT"
 systemctl restart "$TIMER_UNIT"
 
@@ -68,25 +68,27 @@ const elite = JSON.parse(fs.readFileSync(elitePath, 'utf8'));
 const portfolios = Object.values(candidate.portfolios || {});
 if (!portfolios.length) throw new Error('Invo portfolio discovery returned zero portfolios');
 if (candidate.selectorVersion !== 'invo-portfolio-elite-v1-20260916') throw new Error(`unexpected selector version ${candidate.selectorVersion}`);
-if (leaderboards.leaderboardVersion !== 'invo-top-portfolios-horizons-v1-20260916') throw new Error(`unexpected leaderboard version ${leaderboards.leaderboardVersion}`);
-const requiredHorizons = ['1D', '1W', '1M', '1Y', 'AT'];
-const countsByHorizon = {};
-for (const horizon of requiredHorizons) {
-  const rows = leaderboards.latestByHorizon?.[horizon];
-  if (!Array.isArray(rows) || rows.length === 0) throw new Error(`missing/non-populated Invo leaderboard horizon ${horizon}`);
-  if (!rows.every((row, index) => row.horizon === horizon && row.rank === index + 1 && row.sourceEndpoint === '/v1_0/trending/get_portfolios_pl')) {
-    throw new Error(`invalid rank/horizon provenance for ${horizon}`);
+if (leaderboards.leaderboardVersion !== 'invo-top-portfolios-surfaces-v2-20260916') throw new Error(`unexpected leaderboard version ${leaderboards.leaderboardVersion}`);
+const requiredSurfaces = ['CROWN', '1D', '1W', '1M', '1Y', 'AT'];
+const countsBySurface = {};
+for (const surface of requiredSurfaces) {
+  const rows = leaderboards.latestBySurface?.[surface];
+  if (!Array.isArray(rows) || rows.length === 0) throw new Error(`missing/non-populated Invo leaderboard surface ${surface}`);
+  const expectedFilter = surface === 'CROWN' ? 'trending' : surface;
+  if (!rows.every((row, index) => row.surface === surface && row.sourceFilter === expectedFilter && row.rank === index + 1 && row.sourceEndpoint === '/v1_0/trending/get_portfolios_pl')) {
+    throw new Error(`invalid rank/surface/filter provenance for ${surface}`);
   }
-  countsByHorizon[horizon] = rows.length;
+  countsBySurface[surface] = rows.length;
 }
 if (elite.liveTrading !== false) throw new Error('elite shadow report must prove live trading false');
 console.log(JSON.stringify({
   PORTFOLIO_RESEARCH_DEPLOYED: true,
   EXACT_INVO_LEADERBOARDS: true,
+  CROWN_INVO_LEADERBOARD: true,
   leaderboardVersion: leaderboards.leaderboardVersion,
   leaderboardEndpoint: leaderboards.sourceEndpoint,
-  leaderboardCountsByHorizon: countsByHorizon,
-  leaderboardUniquePortfolios: new Set(requiredHorizons.flatMap(h => leaderboards.latestByHorizon[h].map(row => row.portfolioId))).size,
+  leaderboardCountsBySurface: countsBySurface,
+  leaderboardUniquePortfolios: new Set(requiredSurfaces.flatMap(s => leaderboards.latestBySurface[s].map(row => row.portfolioId))).size,
   selectorVersion: candidate.selectorVersion,
   discoveredPortfolios: portfolios.length,
   uniqueOwners: new Set(portfolios.map(p => p.ownerId).filter(Boolean)).size,
