@@ -17,7 +17,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-UTC = dt.timezone.utc
+UTC = dt.UTC
 CANONICAL_STATE_ROOT = Path(
     "/var/lib/hyperliquid-copy-engine/invo-notification-executor"
 )
