@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
 import { dirname } from 'path';
 
-export const ELITE_SELECTOR_VERSION = 'invo-portfolio-elite-v2-20260916';
+export const ELITE_SELECTOR_VERSION = 'invo-portfolio-hybrid-v3-20260916';
 
 export type PortfolioBucket =
   | 'ELITE_CANDIDATE'
@@ -21,17 +21,24 @@ export interface PortfolioSelectorPolicy {
 }
 
 export const DEFAULT_PORTFOLIO_SELECTOR: PortfolioSelectorPolicy = Object.freeze({
-  // Shadow research should be able to discover strong newer traders. These are
-  // admission floors, not targets: confidence continues to rise above them.
+  // Broad discovery stays permissive, but shadow admission uses a hybrid
+  // win-rate/return curve plus sample confidence. 60% is the absolute quality floor.
   minClosedPositions: 20,
   minDaysActive: 7,
-  minWinRatePct: 80,
+  minWinRatePct: 60,
   minPercentChange: 0.01,
   minQualityScore: 60,
   sparseMinClosedPositions: 8,
   sparseMinWinRatePct: 60,
   sparseMinPercentChange: 100,
 });
+
+// Hybrid admission anchors. Return requirements decay exponentially as win rate rises,
+// while sample requirements rise linearly as win rate falls below 80%.
+const HYBRID_REFERENCE_WIN_RATE_PCT = 80;
+const HYBRID_REFERENCE_RETURN_PCT = 100;
+const HYBRID_RETURN_AT_WIN_RATE_FLOOR_PCT = 1000;
+const HYBRID_CLOSED_AT_WIN_RATE_FLOOR = 50;
 
 export interface PortfolioScoreBreakdown {
   winRate: number;
@@ -62,6 +69,8 @@ export interface PortfolioSnapshot {
   lostPositions: number;
   winRatePct: number | null;
   percentChange: number | null;
+  hybridRequiredReturnPct: number | null;
+  hybridRequiredClosedPositions: number | null;
   winLossRatio: number | null;
   currentWinStreak: number | null;
   followerCount: number | null;
@@ -121,32 +130,72 @@ function linearPoints(value: number, from: number, to: number, maxPoints: number
   return clamp((value - from) / (to - from), 0, 1) * maxPoints;
 }
 
+/**
+ * Continuous trade-off between win rate and historical return.
+ * Default anchors: 60% WR -> 1000% return, 80% WR -> 100% return.
+ * Above 80%, required return keeps decaying smoothly; below 60%, admission is impossible.
+ */
+export function requiredReturnPctForWinRate(
+  winRatePct: number,
+  policy: PortfolioSelectorPolicy = DEFAULT_PORTFOLIO_SELECTOR,
+): number | null {
+  if (!Number.isFinite(winRatePct) || winRatePct < policy.minWinRatePct) return null;
+  const floorWin = policy.minWinRatePct;
+  const referenceWin = Math.max(HYBRID_REFERENCE_WIN_RATE_PCT, floorWin + 1);
+  const floorReturn = Math.max(HYBRID_RETURN_AT_WIN_RATE_FLOOR_PCT, policy.minPercentChange);
+  const referenceReturn = Math.max(HYBRID_REFERENCE_RETURN_PCT, policy.minPercentChange);
+  const t = (winRatePct - floorWin) / (referenceWin - floorWin);
+  const logRequired = Math.log1p(floorReturn)
+    + (Math.log1p(referenceReturn) - Math.log1p(floorReturn)) * t;
+  return round2(Math.max(policy.minPercentChange, Math.expm1(logRequired)));
+}
+
+/**
+ * Lower-win-rate strategies need more closed-trade evidence before consuming shadow capacity.
+ * Default: 60% WR needs 50 closes, declining linearly to the normal 20-close floor at 80% WR.
+ */
+export function requiredClosedPositionsForWinRate(
+  winRatePct: number,
+  policy: PortfolioSelectorPolicy = DEFAULT_PORTFOLIO_SELECTOR,
+): number | null {
+  if (!Number.isFinite(winRatePct) || winRatePct < policy.minWinRatePct) return null;
+  if (winRatePct >= HYBRID_REFERENCE_WIN_RATE_PCT) return policy.minClosedPositions;
+  const span = HYBRID_REFERENCE_WIN_RATE_PCT - policy.minWinRatePct;
+  if (span <= 0) return policy.minClosedPositions;
+  const t = clamp((winRatePct - policy.minWinRatePct) / span, 0, 1);
+  return Math.ceil(HYBRID_CLOSED_AT_WIN_RATE_FLOOR
+    + (policy.minClosedPositions - HYBRID_CLOSED_AT_WIN_RATE_FLOOR) * t);
+}
+
 function scorePortfolio(input: {
   closedPositions: number;
   daysActive: number | null;
   winRatePct: number | null;
   percentChange: number | null;
   recentActivityDaysAgo: number | null;
-}): { score: number; breakdown: PortfolioScoreBreakdown; closedPositionsPerDay: number | null } {
+}, policy: PortfolioSelectorPolicy): { score: number; breakdown: PortfolioScoreBreakdown; closedPositionsPerDay: number | null } {
   const closedPositionsPerDay = input.daysActive != null && input.daysActive > 0
     ? input.closedPositions / Math.max(input.daysActive, 1)
     : null;
 
-  // 30 points: only 80%+ can enter elite shadow. Within that high-quality band,
-  // 85/90/95% progressively earn more credit rather than treating all strong win rates equally.
+  // 30 points: win rate is one half of the core quality pair. 60% is only the absolute
+  // floor; 80/90/95% progressively earn stronger credit. Return can compensate for a
+  // lower (but still >=60%) win rate through the hybrid admission curve below.
   const winRate = input.winRatePct == null
     ? 0
-    : input.winRatePct < 80
-      ? linearPoints(input.winRatePct, 50, 80, 20)
-      : 20 + linearPoints(input.winRatePct, 80, 95, 10);
+    : input.winRatePct < policy.minWinRatePct
+      ? linearPoints(input.winRatePct, 40, policy.minWinRatePct, 10)
+      : 10 + linearPoints(input.winRatePct, policy.minWinRatePct, 95, 20);
 
-  // 30 points: historical return, deliberately saturating. 500% is excellent and
-  // receives near-maximum credit, but it is not a minimum admission threshold.
+  // 30 points: historical return is equally important and deliberately saturating.
+  // 500% is excellent; 1000% reaches maximum return credit, while the hybrid curve
+  // separately determines how much return is required for a given win rate.
   const historicalReturn = input.percentChange == null || input.percentChange <= 0
     ? 0
     : clamp(Math.log1p(input.percentChange) / Math.log1p(1000), 0, 1) * 30;
 
-  // 15 points: 20 trades can qualify; 30+ earns more confidence, 100+ approaches max.
+  // 15 points: 20 trades can qualify at high win rates; lower win rates are separately
+  // required to bring a deeper sample before admission.
   const sampleSize = input.closedPositions < 20
     ? linearPoints(input.closedPositions, 0, 20, 5)
     : 5 + linearPoints(input.closedPositions, 20, 100, 10);
@@ -254,7 +303,7 @@ export function classifyPortfolio(
     winRatePct,
     percentChange,
     recentActivityDaysAgo,
-  });
+  }, policy);
 
   const reasons: string[] = [];
   let bucket: PortfolioBucket;
@@ -263,19 +312,28 @@ export function classifyPortfolio(
     || (closedPositions >= policy.minClosedPositions && winRatePct != null && winRatePct < 40)
     || (closedPositions >= policy.minClosedPositions && percentChange != null && percentChange < 0);
   const enoughAge = daysActive == null || daysActive >= policy.minDaysActive;
-  const enoughSample = closedPositions >= policy.minClosedPositions;
+  const enoughBaseSample = closedPositions >= policy.minClosedPositions;
   const positiveReturn = percentChange != null && percentChange >= policy.minPercentChange;
   const enoughWinRate = winRatePct != null && winRatePct >= policy.minWinRatePct;
+  const hybridRequiredReturnPct = winRatePct == null ? null : requiredReturnPctForWinRate(winRatePct, policy);
+  const hybridRequiredClosedPositions = winRatePct == null ? null : requiredClosedPositionsForWinRate(winRatePct, policy);
+  const enoughHybridReturn = hybridRequiredReturnPct != null
+    && percentChange != null
+    && percentChange >= hybridRequiredReturnPct;
+  const enoughHybridSample = hybridRequiredClosedPositions != null
+    && closedPositions >= hybridRequiredClosedPositions;
   const elite = !hardReject
-    && enoughSample
+    && enoughBaseSample
     && enoughAge
     && enoughWinRate
     && positiveReturn
+    && enoughHybridReturn
+    && enoughHybridSample
     && scored.score >= policy.minQualityScore;
 
   if (elite) {
     bucket = 'ELITE_CANDIDATE';
-    reasons.push('meets_weighted_quality_gate_v2');
+    reasons.push('meets_hybrid_win_rate_return_gate_v3');
   } else if (
     !hardReject
     && closedPositions >= policy.sparseMinClosedPositions
@@ -292,12 +350,14 @@ export function classifyPortfolio(
     if (closedPositions >= policy.minClosedPositions && percentChange != null && percentChange < 0) reasons.push('negative_historical_return');
   } else {
     bucket = 'RESEARCH_WIDE';
-    if (!enoughSample) reasons.push('below_20_closed_sample');
+    if (!enoughBaseSample) reasons.push('below_20_closed_sample');
     if (!enoughAge) reasons.push('below_7_active_days');
     if (winRatePct == null) reasons.push('missing_win_rate');
-    else if (!enoughWinRate) reasons.push('win_rate_below_floor');
+    else if (!enoughWinRate) reasons.push('win_rate_below_absolute_floor');
     if (percentChange == null) reasons.push('missing_return');
     else if (!positiveReturn) reasons.push('return_not_positive');
+    if (enoughWinRate && hybridRequiredReturnPct != null && !enoughHybridReturn) reasons.push('return_below_win_rate_tradeoff');
+    if (enoughWinRate && hybridRequiredClosedPositions != null && !enoughHybridSample) reasons.push('sample_below_win_rate_tradeoff');
     if (scored.score < policy.minQualityScore) reasons.push('weighted_quality_score_below_gate');
   }
 
@@ -320,6 +380,8 @@ export function classifyPortfolio(
     lostPositions,
     winRatePct,
     percentChange,
+    hybridRequiredReturnPct,
+    hybridRequiredClosedPositions,
     winLossRatio: winLossRatio == null ? null : Math.round(winLossRatio * 1000) / 1000,
     currentWinStreak,
     followerCount,

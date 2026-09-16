@@ -48,12 +48,14 @@ jobs:
           Selector/admission requirements:
           - Broad Invo CROWN/1D/1W/1M/1Y/AT plus research discovery remains broad and independent.
           - Leaderboard membership alone never authorizes a copy.
-          - Selector invo-portfolio-elite-v2-20260916 uses low sample/age floors plus strict trader-quality gating.
-          - Hard floors: at least 20 closed positions; at least 7 portfolio-age days when known; at least 80% win rate; positive displayed historical return; not liquidated; score at least 60/100.
-          - A portfolio below 80% win rate must never be ELITE_CANDIDATE regardless of return or leaderboard rank.
-          - Within the eligible 80%+ band, 85/90/95% win rates progressively earn more score credit.
-          - 500% return is excellent high score credit, not a minimum.
-          - More sample history above 20 and more portfolio age above 7 increase confidence without becoming hard requirements.
+          - Selector invo-portfolio-hybrid-v3-20260916 jointly values win rate and historical return instead of using 80% as a universal hard boundary.
+          - Absolute win-rate floor is 60%; anything below 60% can remain in broad research but must never become ELITE_CANDIDATE regardless of return.
+          - Base floors remain at least 20 closed positions, at least 7 portfolio-age days when known, positive displayed historical return, not liquidated, and score at least 60/100.
+          - Hybrid return curve is continuous/logarithmic: approximately 60% WR -> 1000% required return, 70% -> 317%, 80% -> 100%, 90% -> 31%, with still lower required return above 90%.
+          - Hybrid sample curve requires more evidence below 80%: 60% WR -> 50 closes, 70% -> 35, 80%+ -> the normal 20-close floor.
+          - Therefore a very high-return trader below 80% may qualify, but only if both the return trade-off and the deeper sample requirement are met.
+          - A high-win-rate trader with weak return must fail the hybrid return requirement; neither metric alone is sufficient.
+          - Win rate and historical return each carry 30 score points; 500% remains excellent return credit while 1000% saturates return score.
           - Daily closed-trade frequency contributes weight.
           - Explicit recent trade/activity recency contributes weight when trustworthy data exists; missing recency is neutral, never guessed.
           - Wins/losses count ratio is observability only and is not double-counted as payout-ratio evidence.
@@ -83,7 +85,7 @@ jobs:
           MODEL_CLASS=OPUS
           TARGET_SHA=$TARGET_SHA
           PR_NUMBER=$PR_NUMBER
-          SELECTOR_V2=PASS
+          SELECTOR_V3=PASS
           ELITE_ADMISSION=PASS
           PORTFOLIO_IDENTITY=PASS
           MULTI_PORTFOLIO_OWNER=PASS
@@ -100,16 +102,19 @@ jobs:
           gid="$(id -g hl-claude-agent)"
           home=/var/lib/hyperliquid-ai-team/agents/claude/home
           set +e
-          timeout --foreground 900s setpriv \
-            --reuid="$uid" --regid="$gid" --init-groups \
-            env -i HOME="$home" CLAUDE_CONFIG_DIR="$home/.claude" \
-            XDG_CONFIG_HOME="$home/.config" XDG_CACHE_HOME="$home/.cache" \
-            PATH=/usr/local/bin:/usr/bin:/bin \
-            /usr/bin/claude -p --model opus --max-turns 40 \
-            --output-format json --permission-mode dontAsk \
-            --allowedTools Read,Glob,Grep,Bash \
-            "$(cat /tmp/p0-373-opus-prompt.txt)" \
-            > /tmp/p0-373-opus.json 2> /tmp/p0-373-opus.err
+          (
+            cd "$REVIEW_WORKDIR"
+            timeout --foreground 900s setpriv \
+              --reuid="$uid" --regid="$gid" --init-groups \
+              env -i HOME="$home" CLAUDE_CONFIG_DIR="$home/.claude" \
+              XDG_CONFIG_HOME="$home/.config" XDG_CACHE_HOME="$home/.cache" \
+              PATH=/usr/local/bin:/usr/bin:/bin \
+              /usr/bin/claude -p --model opus --max-turns 40 \
+              --output-format json --permission-mode dontAsk \
+              --allowedTools Read,Glob,Grep,Bash \
+              "$(cat /tmp/p0-373-opus-prompt.txt)" \
+              > /tmp/p0-373-opus.json 2> /tmp/p0-373-opus.err
+          )
           rc=$?
           set -e
           if [[ $rc -ne 0 ]]; then
@@ -133,7 +138,7 @@ jobs:
             'MODEL_CLASS=OPUS'
             "TARGET_SHA=$TARGET_SHA"
             "PR_NUMBER=$PR_NUMBER"
-            'SELECTOR_V2=PASS'
+            'SELECTOR_V3=PASS'
             'ELITE_ADMISSION=PASS'
             'PORTFOLIO_IDENTITY=PASS'
             'MULTI_PORTFOLIO_OWNER=PASS'

@@ -47,31 +47,52 @@ Portfolio identity is the qualification unit. Multiple portfolios belonging to t
 owner may all enter shadow research if **each portfolio independently qualifies**. A strong
 portfolio does not automatically transfer eligibility to a weaker sibling portfolio.
 
-The current selector version is `invo-portfolio-elite-v2-20260916`. It is intentionally a
-**low sample/age floor plus strict trader-quality gate plus weighted score**. The system
-keeps broad research data, but it does not spend shadow capacity on mediocre traders.
-The prospective hard floors are:
+The current selector version is `invo-portfolio-hybrid-v3-20260916`. It deliberately treats
+**win rate and return as a pair** rather than making 80% win rate a universal hard boundary.
+Broad discovery remains broad, while shadow admission uses all of the following:
 
-- at least **20** closed positions;
+- at least **20** closed positions as the base sample floor;
 - at least **7 active days** when portfolio age is known;
-- win rate at least **80%**;
+- an absolute win-rate floor of **60%**;
 - positive historical displayed return / `percentChange`;
 - not liquidated;
-- weighted quality score at least **60/100**.
+- weighted quality score at least **60/100**;
+- a continuous win-rate/return trade-off;
+- extra sample confidence when win rate is below 80%.
 
-A portfolio below 80% win rate cannot become `ELITE_CANDIDATE` regardless of return or
-leaderboard rank. Within the eligible band, 85% / 90% / 95% win rates progressively earn
-more score credit rather than treating all strong win rates equally.
+The default hybrid trade-off is approximately:
 
-The weighted score then gives additional credit for stronger evidence rather than turning
-it into another hard gate:
+| Win rate | Minimum displayed return | Minimum closed positions |
+| ---: | ---: | ---: |
+| 60% | 1000% | 50 |
+| 65% | 563% | 43 |
+| 70% | 317% | 35 |
+| 75% | 178% | 28 |
+| 80% | 100% | 20 |
+| 85% | 56% | 20 |
+| 90% | 31% | 20 |
+| 95% | 17% | 20 |
 
-- win rate quality above the 80% hard floor;
-- historical return magnitude, with **500% treated as excellent / near-max credit, not a minimum**;
-- sample size, so 30+ / 50+ / 100+ closes progressively increase confidence;
+The return threshold is continuous/logarithmic rather than a staircase, so values between
+those examples are handled smoothly. The sample threshold rises linearly from 20 closes at
+80% win rate to 50 closes at the 60% absolute floor. This means a 76% win-rate portfolio
+with exceptional return can qualify, while a 60-70% win-rate portfolio needs both much
+larger return and materially deeper history. Below 60% win rate, headline return cannot
+authorize shadow exposure.
+
+The weighted score gives **30 points to win rate and 30 points to historical return**, then
+adds confidence from:
+
+- sample size;
 - active-day maturity, where one week can qualify and two weeks / one month add confidence;
 - closed-trades-per-day frequency;
 - explicit recent trade/activity recency when Invo exposes a trustworthy activity timestamp.
+
+Historical return scoring is logarithmic: **500% is excellent / near-max credit, not a
+minimum**, and 1000% saturates the return component so a single giant headline number
+cannot dominate the selector indefinitely. A high win rate with weak return can still fail
+the hybrid return requirement; similarly, huge return cannot rescue a portfolio below the
+60% absolute win-rate floor.
 
 Missing explicit recency data is neutral rather than guessed: its weight is removed from
 the available score. The derived wins/losses **count** ratio is retained for observability
@@ -115,7 +136,8 @@ The deployed service starts dry:
 - `REAL_TRADING_ENABLED=NO`
 - `NOTIFICATION_TRADER_LIVE=false`
 - new/add shadow exposure: exact pre-trade `ELITE_CANDIDATE` portfolio only
-- elite candidate win-rate hard floor: **80%**
+- selector absolute win-rate floor: **60%**, with higher required return/sample below 80%
+- default hybrid anchors: **60% WR -> 1000% return + 50 closes; 80% WR -> 100% return + 20 closes**
 - candidate state older than 20 minutes fails closed by default
 - research source-age window defaults to 25s
 - target margin: 1% of account equity (or paper equity in walletless shadow mode)
