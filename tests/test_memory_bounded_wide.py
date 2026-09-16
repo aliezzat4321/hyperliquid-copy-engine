@@ -1,3 +1,4 @@
+# ruff: noqa: I001
 from json import dumps
 from pathlib import Path
 
