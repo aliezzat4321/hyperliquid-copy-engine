@@ -657,23 +657,27 @@ class Ledger:
                         " WHERE remediation_id=?", [*kw.values(), remediation_id])
         self.db.commit()
 
-    def recover_interrupted(self) -> list[dict[str, Any]]:
+    def running_tasks(self) -> list[sqlite3.Row]:
+        return self.db.execute(
+            "SELECT * FROM tasks WHERE status='RUNNING' ORDER BY created_at"
+        ).fetchall()
+
+    def reclaim_vanished_worker(self, task_id: str, systemd_unit: str) -> bool:
+        """Atomically release one ownership claim that was verified as vanished."""
         now = utcnow()
-        rows = [dict(row) for row in self.db.execute("SELECT * FROM tasks WHERE status='RUNNING'")]
-        self.db.execute(
+        reason = f"recorded worker inactive or vanished: {systemd_unit}"
+        cur = self.db.execute(
             """
             UPDATE tasks
-               SET status='RETRY',
-                   retry_at=?,
-                   systemd_unit=NULL,
-                   last_error=COALESCE(last_error,'orchestrator restarted during task'),
-                   updated_at=?
-             WHERE status='RUNNING'
+               SET status='RETRY', retry_at=?, systemd_unit=NULL,
+                   last_error=?, last_progress_at=?,
+                   next_action='retry from preserved checkpoint/session', updated_at=?
+             WHERE id=? AND status='RUNNING' AND systemd_unit=?
             """,
-            (now, now),
+            (now, reason, now, now, task_id, systemd_unit),
         )
         self.db.commit()
-        return rows
+        return cur.rowcount == 1
 
     def create_task(self, **kw: Any) -> str:
         task_id = kw.get("id") or uuid.uuid4().hex[:16]
@@ -791,7 +795,7 @@ class Ledger:
     def phase_task(self, issue_number: int, requirement: str) -> sqlite3.Row | None:
         return self.db.execute(
             "SELECT * FROM tasks WHERE issue_number=? AND lifecycle_phase=? "
-            "ORDER BY created_at DESC LIMIT 1", (issue_number, requirement)
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1", (issue_number, requirement)
         ).fetchone()
 
     def handoff_candidates(self) -> list[sqlite3.Row]:
@@ -839,6 +843,11 @@ class Ledger:
                  WHEN 'WAITING_EVIDENCE_WINDOW' THEN 4
                  ELSE 5
                END,
+               CASE WHEN task_type IN (
+                 'POST_MERGE_EVIDENCE','DEPLOY','PRODUCTION_VALIDATION','MEASUREMENT',
+                 'PRODUCTION_AUDIT','IMMUTABLE_PLAN','DESTRUCTIVE_REVIEW',
+                 'AUTHORIZED_APPLY','EVIDENCE_AUDIT','FINAL_VERDICT'
+               ) THEN 1 ELSE 0 END ASC,
                CASE WHEN status='PENDING' THEN COALESCE(queue_priority, 0) END ASC,
                CASE WHEN status='PENDING' THEN created_at END ASC,
                CASE WHEN status!='PENDING' THEN COALESCE(retry_at,updated_at,created_at) END ASC,
@@ -906,6 +915,50 @@ class Ledger:
             if re.fullmatch(r"[0-9a-f]{40}", sha):
                 return sha
         return None
+
+    def supersede_acceptance_tasks(self, issue_number: int, canonical_sha: str) -> list[str]:
+        """Retire only phases bound to an older canonical SHA for this same issue."""
+        phases = sorted({phase for values in COMPLETION_REQUIREMENTS.values() for phase in values})
+        placeholders = ",".join("?" for _ in phases)
+        now = utcnow()
+        rows = self.db.execute(
+            f"SELECT id,target_sha FROM tasks WHERE issue_number=? "
+            f"AND lifecycle_phase IN ({placeholders}) "
+            "AND status IN ('PENDING','RETRY','WAITING_RATE_LIMIT','WAITING_CI',"
+            "'WAITING_EVIDENCE_WINDOW','RUNNING') AND target_sha IS NOT NULL "
+            "AND target_sha!=? ORDER BY created_at",
+            (issue_number, *phases, canonical_sha),
+        ).fetchall()
+        retired: list[str] = []
+        for row in rows:
+            old_sha = str(row["target_sha"])
+            old_checkpoint = self.db.execute(
+                "SELECT rowid FROM tasks WHERE issue_number=? AND target_sha=? "
+                "AND status='DONE' AND last_error IS NULL AND pr_number IS NOT NULL "
+                "AND lifecycle_phase IN ('MERGED','PROVEN','DONE') "
+                "ORDER BY rowid DESC LIMIT 1", (issue_number, old_sha),
+            ).fetchone()
+            new_checkpoint = self.db.execute(
+                "SELECT rowid FROM tasks WHERE issue_number=? AND target_sha=? "
+                "AND status='DONE' AND last_error IS NULL AND pr_number IS NOT NULL "
+                "AND lifecycle_phase IN ('MERGED','PROVEN','DONE') "
+                "ORDER BY rowid DESC LIMIT 1", (issue_number, canonical_sha),
+            ).fetchone()
+            if not old_checkpoint or not new_checkpoint \
+                    or int(new_checkpoint["rowid"]) <= int(old_checkpoint["rowid"]):
+                continue
+            cur = self.db.execute(
+                "UPDATE tasks SET status='STALE',retry_at=NULL,systemd_unit=NULL,"
+                "last_error=?,next_action=?,updated_at=? "
+                "WHERE id=? AND status IN ('PENDING','RETRY','WAITING_RATE_LIMIT',"
+                "'WAITING_CI','WAITING_EVIDENCE_WINDOW','RUNNING')",
+                (f"SUPERSEDED_BY_SAME_ISSUE_ACCEPTANCE_SHA:{canonical_sha}",
+                 f"continue acceptance at canonical SHA {canonical_sha}", now, row["id"]),
+            )
+            if cur.rowcount == 1:
+                retired.append(str(row["id"]))
+        self.db.commit()
+        return retired
 
     def record_acceptance_evidence(self, *, issue_number: int, requirement: str,
                                    phase: str, evidence: dict[str, Any],
@@ -1926,8 +1979,6 @@ class Orchestrator:
         """Resume named reopened incidents from merged checkpoints, idempotently."""
         for raw_number in self.cfg.get("completion_reconciliation", {}):
             number = int(raw_number)
-            if self.ledger.active_for_issue(number):
-                continue
             try:
                 merged_sha = self.ledger.latest_merged_sha(number)
                 if merged_sha is None and number in HISTORICAL_MERGE_CHECKPOINTS:
@@ -1939,6 +1990,20 @@ class Orchestrator:
                         failure_class="MISSING_EXACT_MERGED_SHA",
                         unrelated_work_continuing=True,
                     )
+                    continue
+                running = {
+                    str(row["id"]): row for row in self.ledger.running_tasks()
+                    if int(row["issue_number"]) == number
+                }
+                for assignment_id in self.ledger.supersede_acceptance_tasks(number, merged_sha):
+                    if assignment_id in running:
+                        self.reap_stale_child(running[assignment_id])
+                    self.runtime.event(
+                        "ACCEPTANCE_SHA_SUPERSEDED", issue=number,
+                        assignment_id=assignment_id, target_sha=merged_sha,
+                        status="STALE", unrelated_work_continuing=True,
+                    )
+                if self.ledger.active_for_issue(number):
                     continue
                 issue = self.gh.issue(number)
                 if str(issue.get("state") or "open").lower() != "open":
@@ -2652,13 +2717,7 @@ class Orchestrator:
         return retired
 
     def cycle(self) -> None:
-        for stale in self.ledger.recover_interrupted():
-            self.reap_stale_child(stale)
-            self.runtime.event(
-                "STALE_RUN_REQUEUED", assignment_id=stale["id"],
-                issue=stale["issue_number"], pr=stale["pr_number"],
-                target_sha=stale["target_sha"], session_id=stale["session_id"],
-            )
+        self.reconcile_running_workers()
         self.migrate_legacy_remediation()
         self.reconcile_recovery()
         self.reconcile_closed_issue_tasks()
@@ -2738,6 +2797,35 @@ class Orchestrator:
         ):
             return
         run(["systemctl", "stop", str(unit)], timeout=15)
+
+    def reconcile_running_workers(self) -> None:
+        """Preserve live workers and reclaim only verified dead allowlisted units."""
+        for task in self.ledger.running_tasks():
+            unit = str(task["systemd_unit"] or "")
+            if not re.fullmatch(r"hl-ai-(?:claude|codex)(?:-probe)?-[A-Za-z0-9-]+", unit):
+                self.runtime.event(
+                    "RUNNING_WORKER_OWNERSHIP_UNVERIFIED", assignment_id=task["id"],
+                    issue=task["issue_number"], reason="missing or non-allowlisted unit",
+                )
+                continue
+            check = run(["systemctl", "is-active", unit], timeout=15)
+            state = (check.stdout or "").strip()
+            if check.returncode == 0 and state == "active":
+                continue
+            if state not in {"inactive", "failed", "unknown"}:
+                self.runtime.event(
+                    "RUNNING_WORKER_OWNERSHIP_UNVERIFIED", assignment_id=task["id"],
+                    issue=task["issue_number"], unit=unit,
+                    reason=f"systemctl is-active rc={check.returncode} state={state or 'empty'}",
+                )
+                continue
+            if self.ledger.reclaim_vanished_worker(str(task["id"]), unit):
+                self.runtime.event(
+                    "VANISHED_WORKER_REQUEUED", assignment_id=task["id"],
+                    issue=task["issue_number"], pr=task["pr_number"],
+                    target_sha=task["target_sha"], session_id=task["session_id"],
+                    unit=unit, status="RETRY",
+                )
 
     def handle_claude_probe(self, task: sqlite3.Row) -> None:
         """Make a bounded, repo-free availability check; never spend an attempt."""
