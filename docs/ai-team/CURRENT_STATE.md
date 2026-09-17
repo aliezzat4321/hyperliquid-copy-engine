@@ -2,9 +2,9 @@
 
 Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
-**Snapshot:** 2026-09-14T23:13:00Z  
+**Snapshot:** 2026-09-17T23:46:12Z  
 **Updated by:** CODEX_CHATGPT  
-**Observed main head:** `4653f0d86650d42fea6062ddfd1fcce0ced0f746`  
+**Observed main head:** `fd63de5c60fc9d19ec643a2c491d5a815581765a`  
 **Mission:** Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.
 
 ## Live trading
@@ -13,10 +13,10 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 ## Active priorities
 | Priority | Issue | Objective | Builder | Reviewer | Status | Profit-critical |
 |---|---:|---|---|---|---|---|
-| P0 | #330 | Complete Lane 3 causal L2 execution and net-cost repair | CODEX_CHATGPT | CLAUDE | IN_REVIEW | yes |
-| P0 | #328 | Run integrated Lane 3 pre-Opus challenge after #330 + #320 | CODEX_CHATGPT | CLAUDE | OPEN | yes |
-| P0 | #327 | Challenge Lane 2 repair #318 vs every Opus finding | CODEX_CHATGPT | CLAUDE | OPEN | yes |
-| P0 | #334 | Restore truthful repository-wide CI baseline | CODEX_CHATGPT | CLAUDE | IN_PROGRESS | no |
+| P0 | #400 | Complete Lane 3 selected-elite Invo trade-source capture | CODEX_CHATGPT | CLAUDE | IN_REVIEW | yes |
+| P0 | #403 | Assimilate Moves/Recent discovered portfolios into selector prospectively | CODEX_CHATGPT | CLAUDE | OPEN | yes |
+| P0 | #397 | Arbitrate shared Invo API quota without starving Lane 3 | CODEX_CHATGPT | CLAUDE | OPEN | yes |
+| P0 | #401 | Enforce Lane 3 source-completeness and event-recall merge gate | CODEX_CHATGPT | CLAUDE | IN_PROGRESS | yes |
 
 ## Lane 1 — Hyperliquid native discovery and prospective copying research
 **Status:** `SHADOW_EVIDENCE_MEASUREMENT_INCOMPLETE`
@@ -49,15 +49,16 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
 | Fact | Value | Observed | Source |
 |---|---:|---|---|
-| Lane 3 execution-repair head | 976c5e2364f9f40b45a3b0a56b31339b3c5036bb | `2026-09-14T23:02:08Z` | PR `#332` |
-| exact-head Lane 3 executor CI | PASS | `2026-09-14T23:00:30Z` | run `34906771193` |
-| exact-head live-sensitive classification guard | PASS | `2026-09-14T23:00:30Z` | run `34906771110` |
-| reviewer-driven #320 restart repair head | efbff8897c4ef27c6ef8b35270af1554b83328c4 | `2026-09-14T23:11:28Z` | PR `#321` |
-| second Codex verdict on superseded #320 SHA | FAIL_REPAIRED_PENDING_REREVIEW | `2026-09-14T23:11:28Z` | issue `#331` |
-| real trading enabled | False | `2026-09-14T22:39:38Z` | issue `#130` |
+| Lane 3 selected-elite source-capture PR head | 90c078e806f32934b1785099e98f95abdd8c4ee5 | `2026-09-17T23:46:12Z` | PR `#404` |
+| exact-head Lane 3 executor CI | PASS | `2026-09-17T23:46:12Z` | run `35288176104` |
+| exact-head live-sensitive classification guard | PASS | `2026-09-17T23:46:12Z` | run `35288176010` |
+| verified Invo trade-feed surfaces | 4 | `2026-09-17T23:46:12Z` | issue `#400` |
+| exploratory feed-exposed portfolios missing from current selector | 109 | `2026-09-17T23:46:12Z` | issue `#403` |
+| exploratory missing portfolios meeting frozen selector on visible evidence | 53 | `2026-09-17T23:46:12Z` | issue `#403` |
+| real trading enabled | False | `2026-09-17T23:10:50Z` | manual `VM runtime env 2026-09-17T23:10Z` |
 
-**Blocker:** Second Codex found an owned-close reconciliation defect in the original #320 SHA; reviewer-driven repair head efbff8897c4ef27c6ef8b35270af1554b83328c4 passed the full executor check and now requires exact-SHA re-review plus integration into #332 before the final #328 challenge.  
-**Next:** Issue #331.
+**Blocker:** PR #404 still requires independent exact-SHA Codex and Claude/Opus review plus post-deploy prospective source/event-recall proof; #403 candidate-universe expansion and #397 quota arbitration remain open before Lane 3 source-completeness can be claimed.  
+**Next:** Issue #400.
 
 ## Infrastructure
 **Status:** `DEGRADED`
