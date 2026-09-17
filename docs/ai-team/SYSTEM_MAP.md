@@ -69,6 +69,9 @@ Update this file only when a component moves, is added, or is retired.
 | Stage | Path | Runtime |
 |---|---|---|
 | Executor service (TypeScript) | `services/invo-notification-executor/src/service.ts` | `hyperliquid-invo-notification-executor.service` |
+| Portfolio selector / candidate ledger | `services/invo-notification-executor/src/portfolio-candidates.ts`, `portfolio-candidate-cli.ts` | `hyperliquid-invo-portfolio-research.service`; selector `invo-portfolio-hybrid-v3-20260916` |
+| Prospective elite admission | `services/invo-notification-executor/src/elite-admission.ts` | NEW/ADD fail closed on exact-portfolio pre-trade elite evidence; CLOSE bypasses admission for managed unwind |
+| Close rejection / residual integrity | `services/invo-notification-executor/src/close-rejection.ts` | True dust may terminate incomplete; executable thin-depth residual remains unresolved/retryable |
 | Signal parsing | `services/invo-notification-executor/src/notification-signal.ts` | `verifiedTrade` gate, open/increase/close |
 | Ownership state | `services/invo-notification-executor/src/notification-state.ts` | Persists across restarts |
 | Trader discovery / lifecycle | `services/invo-notification-executor/src/trader-tracker.ts` | PnL-blind multi-surface funnel and shadow-assessment queue |

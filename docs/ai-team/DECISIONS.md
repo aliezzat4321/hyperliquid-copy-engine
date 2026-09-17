@@ -2,6 +2,30 @@
 
 Append-only record of accepted architecture / policy decisions. New decisions may supersede old ones but should not erase them.
 
+
+## 2026-09-17 — Lane 3 selector v3 governs prospective shadow admission
+
+- Broad Invo discovery and leaderboard collection remain research inputs only. Leaderboard
+  membership never authorizes a copied position by itself.
+- Selector `invo-portfolio-hybrid-v3-20260916` evaluates each portfolio independently and
+  requires the versioned hybrid win-rate/return/sample policy: at least 20 closed positions,
+  at least 7 age days when known, win rate at least 60%, positive displayed return, no
+  liquidation, and quality score at least 60. Lower win rates require both larger returns
+  and deeper samples; sibling portfolios cannot inherit eligibility from one another.
+- Shadow NEW/ADD is authorized only when the exact source `portfolioId` has fresh,
+  non-future `ELITE_CANDIDATE` evidence that existed before the source trade. Both the
+  aggregate candidate state and that portfolio's own observation are age-bounded and fail
+  closed when stale, missing, malformed or future-dated.
+- Existing managed exposure may CLOSE after demotion. Eligibility therefore constrains new
+  risk without orphaning exposure. Selector-version changes reset first-elite timestamps so
+  historical outcomes cannot be relabelled as prospectively selected.
+- Close reconciliation distinguishes true non-executable dust from executable residuals:
+  insufficient causal displayed depth remains `UNRESOLVED_EXPOSURE` and retryable rather
+  than being erased as dust; missing or mismatched Hyperliquid L2 coin identity fails closed.
+- This decision governs prospective shadow evidence only. It does not authorize real
+  trading, capital, credentials, signing or live order routing; `REAL_TRADING_ENABLED`
+  remains disabled.
+
 ## 2026-09-03 — Risk eligibility is separate from credible edge
 
 - Promotion policy v2 retains the v1 profitability floors and adds a versioned,
