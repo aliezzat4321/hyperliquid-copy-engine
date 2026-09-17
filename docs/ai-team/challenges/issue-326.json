@@ -1,0 +1,24 @@
+{
+  "schema_version": "lane1_challenge_v1",
+  "issue": 326,
+  "target_pr": 317,
+  "target_sha": "c47bc6854534dd41c620bca69054d4ed9b764940",
+  "challenger": "CODEX_CHATGPT",
+  "overall": "FAIL",
+  "profitability_claim": false,
+  "real_trading_enabled": false,
+  "opus_rereview_ready": false,
+  "items": [
+    {"id": 1, "status": "PASS", "evidence": ["src/hlcopy/profitability/position_live_cli.py:25", "scripts/prospective_champion_lane.py:178-201", "tests/test_lane1_opus_repair_v1.py:test_canonical_notional_grid_contains_high_primary_notionals"], "finding": "Canonical 1000/5000/10000/25000/50000 grid; absent primary rows are NOT_EVALUATED with nullable verdict fields."},
+    {"id": 2, "status": "PASS", "evidence": ["src/hlcopy/profitability/lane1_handoff.py:record_prospective_outcomes", "src/hlcopy/profitability/lane1_handoff.py:_latest_evaluated_outcome", "tests/test_lane1_opus_repair_v1.py:test_prospective_outcome_is_written_to_identity_ledger", "tests/test_lane1_opus_repair_v1.py:test_evaluated_underperformer_is_demoted_without_resetting_cutoff"], "finding": "Outcome evidence is append-only/idempotent; evaluated negative outcomes demote while preserving prospective_start_ns."},
+    {"id": 3, "status": "PASS", "evidence": ["src/hlcopy/profitability/incremental_funnel_cli.py:_read_last_prospective_measurement", "src/hlcopy/profitability/incremental_funnel_cli.py:prospective_shadow_measurement", "scripts/prospective_champion_lane.py:prospective_shadow_count"], "finding": "The funnel imports only a prospective-report measurement and emits null when unavailable; challenger count is not substituted."},
+    {"id": 4, "status": "PASS", "evidence": ["scripts/prospective_champion_lane.py:178-215", "tests/test_lane1_opus_repair_v1.py:test_insufficient_actions_do_not_become_performance_failure"], "finding": "No scenarios means NOT_EVALUATED; fewer than 20 realized actions means INSUFFICIENT_ACTIONS and approved=null."},
+    {"id": 5, "status": "PASS", "evidence": ["src/hlcopy/profitability/incremental_funnel_cli.py:_split_oos", "src/hlcopy/profitability/incremental_funnel_cli.py:active_windows/finalist_windows filtering", "tests/test_lane1_opus_repair_v1.py:test_screen_and_confirmation_windows_are_strictly_disjoint"], "finding": "Screen and confirmation have a strict receipt-time boundary; persisted rows outside active window IDs expire."},
+    {"id": 6, "status": "PASS", "evidence": ["src/hlcopy/profitability/incremental_funnel_cli.py:_selection_return_bps", "scripts/prospective_champion_lane.py:_selection_return_bps", "tests/test_lane1_opus_repair_v1.py:test_selection_return_is_normalized_by_action_count"], "finding": "Selection return divides closed net PnL by notional and realized action count; cumulative legacy return remains separate."},
+    {"id": 7, "status": "PASS", "evidence": ["src/hlcopy/profitability/causal_book.py:CausalParquetL2BookProvider", "src/hlcopy/profitability/lane1_handoff.py:record_prospective_outcomes", "tests/test_lane1_opus_repair_v1.py:test_prospective_outcome_is_written_to_identity_ledger"], "finding": "Causal received-time book selection, immutable prospective cutoffs, and fingerprint deduplication remain intact."},
+    {"id": 8, "status": "FAIL", "evidence": ["target scripts/prospective_champion_lane.py scenario rows omit executable_events and missed_events", "docs/ai-team/CURRENT_STATE.md:Lane 1 SHADOW_EVIDENCE_MEASUREMENT_INCOMPLETE", "working-tree scripts/prospective_champion_lane.py:queue_coin_l2_replay"], "finding": "Target silently omits queue-coin replay coverage and fresh runtime replay evidence is unavailable. Working tree exposes coin/scenario/executable/missed counts; runtime evidence remains required."},
+    {"id": 9, "status": "FAIL", "evidence": ["target src/hlcopy/profitability/incremental_funnel_cli.py:_window_id", "working-tree src/hlcopy/profitability/incremental_funnel_cli.py:_window_id", "tests/test_lane1_opus_repair_v1.py:test_window_ids_include_wallet_and_coin_candidate_identity"], "finding": "Target hash omits wallet and coin, allowing cross-candidate collisions. Working tree includes normalized wallet and coin."},
+    {"id": 10, "status": "FAIL", "evidence": ["cd /tmp/issue326-target && python3 -m pytest -q tests/test_lane1_opus_repair_v1.py => No module named pytest", "python3 -m compileall -q scoped files => PASS"], "finding": "Exact-target focused pytest execution is blocked because pytest is absent; compilation does not satisfy this criterion."}
+  ],
+  "blockers": ["Produce fresh queue-coin L2/replay runtime evidence with the repaired contract.", "Run focused pytest in an environment containing project test dependencies."]
+}
