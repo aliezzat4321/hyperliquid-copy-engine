@@ -11,6 +11,12 @@ import { TraderTracker } from './trader-tracker.js';
 import { liveScopeSkipReason } from './live-scope.js';
 import { fetchFeedBackfill } from './feed-backfill.js';
 import { canProspectivelyRebaseGap, planUnrecoverableGap } from './gap-reconciliation.js';
+import {
+  directSourceTimeMs,
+  EliteDirectWatchState,
+  loadEliteDirectTargets,
+  signalsFromDirectInvestments,
+} from './elite-direct-watch.js';
 import { eliteAdmissionFromState, ELITE_ADMISSION_VERSION } from './elite-admission.js';
 import { shouldTerminallyDustReconcile } from './close-rejection.js';
 import {
@@ -90,6 +96,10 @@ function loadConfig() {
     trackerPath: resolve(process.env.NOTIFICATION_TRADER_TRACKER_PATH ?? 'data/notification-trader-population.json'),
     candidateStatePath: resolve(process.env.NOTIFICATION_TRADER_CANDIDATE_STATE_PATH ?? '/var/lib/hyperliquid-copy-engine/invo-notification-executor/portfolio-candidates.json'),
     candidateStateMaxAgeMs: Math.max(60_000, n('NOTIFICATION_TRADER_CANDIDATE_MAX_AGE_MS', 20 * 60 * 1000)),
+    directWatchStatePath: resolve(process.env.NOTIFICATION_TRADER_DIRECT_WATCH_STATE_PATH ?? '/var/lib/hyperliquid-copy-engine/invo-notification-executor/elite-direct-watch.json'),
+    directWatchScanMs: Math.max(2_000, n('NOTIFICATION_TRADER_DIRECT_WATCH_SCAN_MS', 5_000)),
+    directWatchMaxHydratesPerScan: Math.max(1, Math.min(5, Math.trunc(n('NOTIFICATION_TRADER_DIRECT_WATCH_MAX_HYDRATES_PER_SCAN', 2)))),
+    directWatchFallbackPollMs: Math.max(10_000, n('NOTIFICATION_TRADER_DIRECT_WATCH_FALLBACK_POLL_MS', 20_000)),
     minEvidenceEvents: Math.max(1, Math.trunc(n('NOTIFICATION_TRADER_MIN_EVIDENCE_EVENTS', 20))),
     minObservationDays: Math.max(1, Math.trunc(n('NOTIFICATION_TRADER_MIN_OBSERVATION_DAYS', 7))),
     staleAfterMs: Math.max(60_000, n('NOTIFICATION_TRADER_STALE_AFTER_MS', 3 * 24 * 60 * 60 * 1000)),
@@ -121,7 +131,9 @@ const tracker = new TraderTracker(cfg.trackerPath, {
   staleAfterMs: cfg.staleAfterMs,
   inactiveAfterMs: cfg.inactiveAfterMs,
 });
+const directWatch = new EliteDirectWatchState(cfg.directWatchStatePath);
 const inFlight = new Set<string>();
+const inFlightSourceEvents = new Set<string>();
 let initialized = false;
 let hydrating = false;
 let pendingWake: { source: string; hints?: NotificationHints; receivedAtMs: number; feedFilter?: string } | null = null;
@@ -129,6 +141,14 @@ let lastSuccessPollMs = 0;
 let backoffMs = 0;
 let discoverySurfaceIndex = 0;
 let lastFundingOracleBoundaryMs = -1;
+let lastDirectWatchScanMs = 0;
+let directWatchBackoffMs = 0;
+let directWatchBackoffUntilMs = 0;
+const directWatchMetrics = {
+  selectorRequests: 0, hydrationRequests: 0, hydrationCount: 0,
+  signalsObserved: 0, signalsHandled: 0, http429s: 0,
+  lastScanAtMs: 0, lastSuccessAtMs: 0,
+};
 const FUNDING_INTERVAL_MS = 60 * 60 * 1000;
 const SOURCE_CLOSE_RETRY_BASE_MS = 250;
 const SOURCE_CLOSE_RETRY_MAX_MS = 30_000;
@@ -301,6 +321,8 @@ async function shadowOpen(
     sourceBaseShortId: signal.sourceBaseShortId,
     sourcePostId: signal.postId,
     username: signal.username,
+    ownerId: signal.ownerId,
+    portfolioId: signal.portfolioId,
     side: signal.side,
     openedAtMs: fill.receivedAtMs,
     paper: true,
@@ -481,8 +503,15 @@ async function shadowReup(
 }
 
 async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: number, feedFilter: string) {
-  if (state.hasSeen(signal.key) || inFlight.has(signal.key)) return;
+  const sourceEventKey = signal.sourceTimeMs == null ? null : `source-event:${signal.sourceBaseId}:${signal.sourceTimeMs}`;
+  if (
+    state.hasSeen(signal.key)
+    || (sourceEventKey != null && state.hasSeen(sourceEventKey))
+    || inFlight.has(signal.key)
+    || inFlightSourceEvents.has(signal.sourceBaseId)
+  ) return;
   inFlight.add(signal.key);
+  inFlightSourceEvents.add(signal.sourceBaseId);
   const decisionAtMs = Date.now();
 
   try {
@@ -980,6 +1009,8 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
       sourceBaseShortId: signal.sourceBaseShortId,
       sourcePostId: signal.postId,
       username: signal.username,
+      ownerId: signal.ownerId,
+      portfolioId: signal.portfolioId,
       side: signal.side,
       openedAtMs: Date.now(),
       localBaseShortId: invoResult?.baseShortId ?? invoResult?.investment?.baseShortId,
@@ -1008,7 +1039,9 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
       ...(signal.action === 'close' ? closeFreshness(signal, receivedAtMs) : {}),
     });
   } finally {
+    if (sourceEventKey != null && state.hasSeen(signal.key)) state.markSeen(sourceEventKey);
     inFlight.delete(signal.key);
+    inFlightSourceEvents.delete(signal.sourceBaseId);
   }
 }
 
@@ -1249,6 +1282,137 @@ async function wake(source: string, hints?: NotificationHints, receivedAtMs = Da
   }
 }
 
+function directInvestmentRows(payload: any): any[] {
+  return Array.isArray(payload?.investmentsTicker) ? payload.investmentsTicker : [];
+}
+
+function ownedDirectPortfolioIds(): Set<string> {
+  return new Set(
+    Object.values(state.snapshot().managed)
+      .map(position => String(position.portfolioId ?? '').trim())
+      .filter(Boolean),
+  );
+}
+
+async function hydrateDirectTarget(
+  target: ReturnType<EliteDirectWatchState['targets']>[number],
+  selectorUpdatedAtMs: number | null,
+  reason: string,
+  observedAtMs: number,
+) {
+  directWatchMetrics.hydrationRequests += 2;
+  const [openPayload, closedPayload] = await Promise.all([
+    invo.getPortfolioInvestments(target.portfolioId, true, 1, 100),
+    invo.getPortfolioInvestments(target.portfolioId, false, 1, 100),
+  ]);
+  const openRows = directInvestmentRows(openPayload);
+  const closedRows = directInvestmentRows(closedPayload);
+  const signals = signalsFromDirectInvestments(
+    openRows, closedRows, target, target.processedThroughMs, observedAtMs,
+  );
+  directWatchMetrics.hydrationCount += 1;
+  directWatchMetrics.signalsObserved += signals.length;
+  for (const signal of signals) {
+    await execute(signal, `elite_direct:${reason}`, observedAtMs, target.sourceFilter);
+  }
+  const allHandled = signals.every(signal => {
+    if (state.hasSeen(signal.key)) return true;
+    if (signal.sourceTimeMs == null) return false;
+    return state.hasSeen(`source-event:${signal.sourceBaseId}:${signal.sourceTimeMs}`);
+  });
+  const highWaterMs = signals.reduce(
+    (highWater, signal) => Math.max(highWater, signal.sourceTimeMs ?? highWater),
+    target.processedThroughMs,
+  );
+  if (allHandled) {
+    directWatch.commitHydration(
+      target.portfolioId,
+      highWaterMs,
+      selectorUpdatedAtMs == null ? undefined : selectorUpdatedAtMs,
+    );
+    directWatch.noteFallbackPoll(target.portfolioId, observedAtMs);
+    directWatchMetrics.signalsHandled += signals.length;
+    directWatchMetrics.lastSuccessAtMs = Date.now();
+  }
+  log({
+    type: 'elite_direct_hydration',
+    source: 'portfolio_specific_read_only',
+    reason,
+    portfolioId: target.portfolioId,
+    username: target.username,
+    selectorUpdatedAtMs,
+    previousProcessedThroughMs: target.processedThroughMs,
+    highWaterMs,
+    signalCount: signals.length,
+    allHandled,
+    live: false,
+  });
+}
+
+async function scanEliteDirectWatch(nowMs = Date.now()) {
+  if (cfg.live || nowMs < directWatchBackoffUntilMs) return;
+  const candidate = loadEliteDirectTargets(cfg.candidateStatePath, nowMs, cfg.candidateStateMaxAgeMs);
+  directWatch.syncTargets(candidate.targets, ownedDirectPortfolioIds(), nowMs);
+  const targets = directWatch.targets();
+  const targetsByFilter = new Map<string, typeof targets>();
+  for (const target of targets) {
+    const rows = targetsByFilter.get(target.sourceFilter) ?? [];
+    rows.push(target);
+    targetsByFilter.set(target.sourceFilter, rows);
+  }
+  const hydrationQueue: Array<{
+    target: typeof targets[number];
+    selectorUpdatedAtMs: number | null;
+    reason: string;
+  }> = [];
+  try {
+    for (const [sourceFilter, filterTargets] of targetsByFilter) {
+      directWatchMetrics.selectorRequests += 1;
+      const payload = await invo.discoverPortfolios(sourceFilter, 1, 100);
+      const rows = Array.isArray(payload?.items) ? payload.items : [];
+      const byId = new Map(rows.map((row: any) => [String(row?.id ?? ''), row]));
+      for (const target of filterTargets) {
+        const row: any = byId.get(target.portfolioId);
+        const selectorUpdatedAtMs = directSourceTimeMs(row?.updatedAt);
+        if (selectorUpdatedAtMs != null) {
+          const decision = directWatch.observeSelector(target.portfolioId, selectorUpdatedAtMs);
+          if (decision.hydrate) hydrationQueue.push({ target, selectorUpdatedAtMs, reason: 'selector_change' });
+        } else if (directWatch.shouldFallbackPoll(target.portfolioId, nowMs, cfg.directWatchFallbackPollMs)) {
+          hydrationQueue.push({ target, selectorUpdatedAtMs: null, reason: 'selector_missing_fallback' });
+        }
+      }
+    }
+    hydrationQueue.sort((a, b) => {
+      if (a.reason !== b.reason) return a.reason === 'selector_change' ? -1 : 1;
+      return (a.selectorUpdatedAtMs ?? 0) - (b.selectorUpdatedAtMs ?? 0);
+    });
+    for (const item of hydrationQueue.slice(0, cfg.directWatchMaxHydratesPerScan)) {
+      await hydrateDirectTarget(item.target, item.selectorUpdatedAtMs, item.reason, nowMs);
+    }
+    directWatchBackoffMs = 0;
+    directWatchBackoffUntilMs = 0;
+    directWatchMetrics.lastSuccessAtMs = Date.now();
+  } catch (err: any) {
+    const status = err?.status;
+    if (status === 429) {
+      directWatchMetrics.http429s += 1;
+      directWatchBackoffMs = Math.min(Math.max(directWatchBackoffMs * 2, 2_000), 30_000);
+      directWatchBackoffUntilMs = Date.now() + directWatchBackoffMs;
+    }
+    log({
+      type: 'elite_direct_watch_error',
+      source: 'portfolio_specific_read_only',
+      status,
+      backoffMs: directWatchBackoffMs,
+      error: err instanceof Error ? err.message : String(err),
+      live: false,
+    });
+  } finally {
+    lastDirectWatchScanMs = nowMs;
+    directWatchMetrics.lastScanAtMs = nowMs;
+  }
+}
+
 function readJson(req: IncomingMessage): Promise<any> {
   return new Promise((resolveBody, reject) => {
     let body = '';
@@ -1306,6 +1470,16 @@ function startServer() {
         feedFilter: cfg.feedFilter,
         feedMaxPages: cfg.feedMaxPages,
         feedCursors: state.snapshot().feedCursors,
+        directWatch: {
+          enabled: !cfg.live,
+          ...directWatch.status(),
+          ...directWatchMetrics,
+          scanMs: cfg.directWatchScanMs,
+          maxHydratesPerScan: cfg.directWatchMaxHydratesPerScan,
+          fallbackPollMs: cfg.directWatchFallbackPollMs,
+          backoffMs: directWatchBackoffMs,
+          backoffUntilMs: directWatchBackoffUntilMs,
+        },
         maxSignalAgeMs: cfg.maxSignalAgeMs,
         lastSuccessPollMs,
         managedCount: state.managedCount(),
@@ -1380,6 +1554,10 @@ async function pollLoop() {
       }
     }
     await wake(`api_poll:${surface}`, undefined, Date.now(), surface);
+    const directNowMs = Date.now();
+    if (!cfg.live && directNowMs - lastDirectWatchScanMs >= cfg.directWatchScanMs) {
+      await scanEliteDirectWatch(directNowMs);
+    }
   }
 }
 
@@ -1397,6 +1575,7 @@ async function main() {
     }
   }
   await wake('startup_baseline', undefined, Date.now());
+  if (!cfg.live) await scanEliteDirectWatch(Date.now());
   startServer();
   log({
     type: 'service_started',
@@ -1412,6 +1591,15 @@ async function main() {
     discoverySurfaces: cfg.discoverySurfaces,
     feedLimit: cfg.feedLimit,
     feedMaxPages: cfg.feedMaxPages,
+    directWatch: {
+      enabled: !cfg.live,
+      version: directWatch.status().version,
+      scanMs: cfg.directWatchScanMs,
+      maxHydratesPerScan: cfg.directWatchMaxHydratesPerScan,
+      fallbackPollMs: cfg.directWatchFallbackPollMs,
+      statePath: cfg.directWatchStatePath,
+      source: 'portfolio_specific_read_only',
+    },
     shadowExecutionPolicy: shadowPolicy,
     fundingOracleMaxDelayMs: cfg.shadowFundingOracleMaxDelayMs,
     executionEvidenceVersion: EXECUTION_EVIDENCE_VERSION,
