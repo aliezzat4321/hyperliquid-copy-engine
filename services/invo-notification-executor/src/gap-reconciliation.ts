@@ -5,6 +5,14 @@ export interface UnrecoverableGapPlan {
   cursorAdvanceAllowed: false;
 }
 
+export function canProspectivelyRebaseGap(
+  live: boolean,
+  managedCount: number,
+  newestPostId: string | null,
+): boolean {
+  return !live && managedCount === 0 && Boolean(newestPostId);
+}
+
 /**
  * Fail-closed plan for a fetched window that did not reach the durable feed cursor.
  * We may reconcile closes for exposure we already own because ignoring those closes

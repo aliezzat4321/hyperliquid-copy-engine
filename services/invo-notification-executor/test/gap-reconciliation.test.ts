@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { planUnrecoverableGap } from '../src/gap-reconciliation.js';
+import { canProspectivelyRebaseGap, planUnrecoverableGap } from '../src/gap-reconciliation.js';
 import type { InvoSignal } from '../src/notification-signal.js';
 
 function signal(
@@ -66,4 +66,12 @@ test('unrecoverable gap never promotes opens or unowned closes into reconciliati
   );
   assert.equal(plan.cursorAdvanceAllowed, false);
   assert.deepEqual(plan.ownedCloses, []);
+});
+
+
+test('prospective gap rebase is allowed only for shadow with zero managed exposure and a newest post', () => {
+  assert.equal(canProspectivelyRebaseGap(false, 0, 'newest-post'), true);
+  assert.equal(canProspectivelyRebaseGap(true, 0, 'newest-post'), false, 'live mode must never rebase across a missing range');
+  assert.equal(canProspectivelyRebaseGap(false, 1, 'newest-post'), false, 'managed exposure must keep gap recovery fail-closed');
+  assert.equal(canProspectivelyRebaseGap(false, 0, null), false, 'no durable high-water target means no rebase');
 });
