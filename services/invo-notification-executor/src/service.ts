@@ -11,6 +11,8 @@ import { TraderTracker } from './trader-tracker.js';
 import { liveScopeSkipReason } from './live-scope.js';
 import { fetchFeedBackfill } from './feed-backfill.js';
 import { planUnrecoverableGap } from './gap-reconciliation.js';
+import { eliteAdmissionFromState, ELITE_ADMISSION_VERSION } from './elite-admission.js';
+import { shouldTerminallyDustReconcile } from './close-rejection.js';
 import {
   COST_MODEL_VERSION,
   EXECUTION_EVIDENCE_VERSION,
@@ -86,6 +88,8 @@ function loadConfig() {
     statePath: resolve(process.env.NOTIFICATION_TRADER_STATE_PATH ?? 'data/notification-trader-state.json'),
     auditPath: resolve(process.env.NOTIFICATION_TRADER_AUDIT_PATH ?? 'data/notification-trader-audit.jsonl'),
     trackerPath: resolve(process.env.NOTIFICATION_TRADER_TRACKER_PATH ?? 'data/notification-trader-population.json'),
+    candidateStatePath: resolve(process.env.NOTIFICATION_TRADER_CANDIDATE_STATE_PATH ?? '/var/lib/hyperliquid-copy-engine/invo-notification-executor/portfolio-candidates.json'),
+    candidateStateMaxAgeMs: Math.max(60_000, n('NOTIFICATION_TRADER_CANDIDATE_MAX_AGE_MS', 20 * 60 * 1000)),
     minEvidenceEvents: Math.max(1, Math.trunc(n('NOTIFICATION_TRADER_MIN_EVIDENCE_EVENTS', 20))),
     minObservationDays: Math.max(1, Math.trunc(n('NOTIFICATION_TRADER_MIN_OBSERVATION_DAYS', 7))),
     staleAfterMs: Math.max(60_000, n('NOTIFICATION_TRADER_STALE_AFTER_MS', 3 * 24 * 60 * 60 * 1000)),
@@ -482,8 +486,40 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
   const decisionAtMs = Date.now();
 
   try {
-    // Wide shadow research deliberately includes every trader in the selected Invo feed.
-    // Trader scope restrictions remain live-only.
+    // Discovery remains broad in the separate portfolio-research collector, but NEW
+    // Lane 3 shadow exposure is portfolio-level elite-only. Closes bypass this gate so
+    // previously owned broad-research exposure can always unwind after a demotion.
+    if (!cfg.live && signal.action !== 'close') {
+      const eligibilityCutoffMs = signal.sourceTimeMs ?? receivedAtMs;
+      const candidateAdmission = eliteAdmissionFromState(
+        cfg.candidateStatePath,
+        signal.portfolioId,
+        eligibilityCutoffMs,
+        cfg.candidateStateMaxAgeMs,
+      );
+      if (!candidateAdmission.allowed) {
+        state.markSeen(signal.key);
+        log({
+          type: 'skip',
+          reason: `shadow_${candidateAdmission.reason}`,
+          shadowAdmissionMode: 'ELITE_ONLY',
+          eligibilityCutoffMs,
+          candidateAdmission,
+          signal,
+          wakeSource,
+        });
+        return;
+      }
+      log({
+        type: 'shadow_portfolio_admitted',
+        shadowAdmissionMode: 'ELITE_ONLY',
+        eligibilityCutoffMs,
+        candidateAdmission,
+        signal,
+        wakeSource,
+      });
+    }
+
     const liveScopeReason = cfg.live
       ? liveScopeSkipReason(signal, feedFilter, cfg.allow, cfg.copyAllFollowed)
       : null;
@@ -540,14 +576,25 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
           shadowPolicy,
         );
         if (!result.ok) {
-          const dustRejected = result.reason === 'below_min_notional' || result.reason === 'lot_rounded_to_zero';
+          const bestBid = assetBook.book?.bids[0]?.px ?? null;
+          const bestAsk = assetBook.book?.asks[0]?.px ?? null;
+          const midFromBook = bestBid != null && bestAsk != null ? (bestBid + bestAsk) / 2 : null;
+          const dustRejected = shouldTerminallyDustReconcile(
+            result.reason,
+            size,
+            assetBook.asset.szDecimals,
+            midFromBook,
+            shadowPolicy.minNotionalUsd,
+          );
           if (dustRejected) {
             state.clearManagedBySource(signal.sourceBaseId);
             state.markSeen(signal.key);
             log({
               type: 'shadow_close_dust_reconciled', reason: result.reason, detail: result.detail ?? null,
               economicsCompleteness: 'INCOMPLETE_DUST_RECONCILIATION', managed, signal, wakeSource,
-              dustReconciledSize: size, unresolvedSize: 0, decisionAtMs,
+              dustReconciledSize: size,
+              dustEstimatedNotionalUsd: midFromBook == null ? null : size * midFromBook,
+              unresolvedSize: 0, decisionAtMs,
               bookRequestedAtMs: assetBook.requestedAtMs, bookReceivedAtMs: assetBook.receivedAtMs,
               ...closeFreshness(signal, receivedAtMs),
             });
@@ -1222,6 +1269,10 @@ function startServer() {
         initialized,
         live: cfg.live,
         researchWide: !cfg.live,
+        shadowAdmissionMode: cfg.live ? 'LIVE_SCOPE' : 'ELITE_ONLY',
+        eliteAdmissionVersion: ELITE_ADMISSION_VERSION,
+        candidateStatePath: cfg.candidateStatePath,
+        candidateStateMaxAgeMs: cfg.candidateStateMaxAgeMs,
         feedFilter: cfg.feedFilter,
         feedMaxPages: cfg.feedMaxPages,
         feedCursors: state.snapshot().feedCursors,
@@ -1321,6 +1372,10 @@ async function main() {
     type: 'service_started',
     live: cfg.live,
     researchWide: !cfg.live,
+    shadowAdmissionMode: cfg.live ? 'LIVE_SCOPE' : 'ELITE_ONLY',
+    eliteAdmissionVersion: ELITE_ADMISSION_VERSION,
+    candidateStatePath: cfg.candidateStatePath,
+    candidateStateMaxAgeMs: cfg.candidateStateMaxAgeMs,
     pollMs: cfg.pollMs,
     maxSignalAgeMs: cfg.maxSignalAgeMs,
     feedFilter: cfg.feedFilter,

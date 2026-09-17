@@ -45,8 +45,11 @@ export async function fetchAssetBook(coin: string): Promise<AssetBook | null> {
   // Book receipt is the completion of the l2Book request. Metadata latency must never
   // make an otherwise fresh book appear stale.
   const receivedAtMs = Date.now();
-  const returnedCoin = String(rawBook?.coin ?? '');
-  if (returnedCoin && returnedCoin !== coin) {
+  const returnedCoin = String(rawBook?.coin ?? '').trim();
+  if (!returnedCoin) {
+    throw new Error(`L2 book coin missing: requested ${coin}`);
+  }
+  if (returnedCoin.toUpperCase() !== coin.trim().toUpperCase()) {
     throw new Error(`L2 book coin mismatch: requested ${coin}, received ${returnedCoin}`);
   }
   const meta = await metaPromise;

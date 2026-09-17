@@ -3,7 +3,12 @@ import test from 'node:test';
 import { mkdtempSync, readFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { classifyPortfolio, PortfolioCandidateLedger } from '../src/portfolio-candidates.js';
+import {
+  classifyPortfolio,
+  PortfolioCandidateLedger,
+  requiredClosedPositionsForWinRate,
+  requiredReturnPctForWinRate,
+} from '../src/portfolio-candidates.js';
 
 const now = Date.parse('2026-09-16T00:00:00Z');
 const old = '2025-01-01T00:00:00Z';
@@ -26,7 +31,7 @@ function portfolio(overrides: Record<string, unknown> = {}) {
   };
 }
 
-test('elite classification requires a proven portfolio-level sample', () => {
+test('elite classification rewards both win rate and return without requiring an old or huge sample', () => {
   const result = classifyPortfolio(portfolio(), now, 'trending');
   assert.ok(result);
   assert.equal(result.bucket, 'ELITE_CANDIDATE');
@@ -36,21 +41,197 @@ test('elite classification requires a proven portfolio-level sample', () => {
   assert.equal(result.closedPositions, 500);
 });
 
-test('two portfolios from the same owner never share eligibility', () => {
+test('hybrid curve requires more return and more evidence as win rate falls', () => {
+  assert.equal(requiredReturnPctForWinRate(60), 1000);
+  assert.equal(requiredClosedPositionsForWinRate(60), 50);
+  assert.ok(Math.abs((requiredReturnPctForWinRate(70) ?? 0) - 316.96) < 0.01);
+  assert.equal(requiredClosedPositionsForWinRate(70), 35);
+  assert.equal(requiredReturnPctForWinRate(80), 100);
+  assert.equal(requiredClosedPositionsForWinRate(80), 20);
+  assert.ok((requiredReturnPctForWinRate(90) ?? Infinity) < 32);
+  assert.equal(requiredClosedPositionsForWinRate(90), 20);
+});
+
+test('a strong newer trader with 20-30 closes and sub-500 percent return can enter shadow research', () => {
+  const result = classifyPortfolio(portfolio({
+    id: 'p-new-strong',
+    createdAt: '2026-09-08T00:00:00Z',
+    lastTradeAt: '2026-09-15T06:00:00Z',
+    closedPositions: 24,
+    wonPositions: 20,
+    lostPositions: 4,
+    winRate: 83.3,
+    percentChange: 120,
+  }), now, '1W');
+  assert.ok(result);
+  assert.equal(result.bucket, 'ELITE_CANDIDATE');
+  assert.equal(result.closedPositions, 24);
+  assert.equal(result.daysActive, 8);
+  assert.equal(result.percentChange, 120);
+  assert.ok((result.closedPositionsPerDay ?? 0) >= 3);
+  assert.ok((result.scoreBreakdown.recentActivity ?? 0) > 0);
+});
+
+test('exceptional return can compensate for a win rate below 80 when sample evidence is strong', () => {
+  const result = classifyPortfolio(portfolio({
+    id: 'p-79-9-monster-return',
+    createdAt: '2026-08-01T00:00:00Z',
+    lastTradeAt: '2026-09-15T12:00:00Z',
+    closedPositions: 100,
+    wonPositions: 79,
+    lostPositions: 21,
+    winRate: 79.9,
+    percentChange: 5000,
+  }), now, '1M');
+  assert.ok(result);
+  assert.equal(result.bucket, 'ELITE_CANDIDATE');
+  assert.ok((result.hybridRequiredReturnPct ?? Infinity) < 5000);
+  assert.ok((result.hybridRequiredClosedPositions ?? Infinity) <= 100);
+});
+
+test('a lower win rate with huge return still needs deeper sample confidence', () => {
+  const thin = classifyPortfolio(portfolio({
+    id: 'p-68-thin',
+    createdAt: '2026-08-01T00:00:00Z',
+    lastTradeAt: '2026-09-15T12:00:00Z',
+    closedPositions: 20,
+    wonPositions: 14,
+    lostPositions: 6,
+    winRate: 68,
+    percentChange: 5000,
+  }), now, '1M');
+  const proven = classifyPortfolio(portfolio({
+    id: 'p-68-proven',
+    createdAt: '2026-08-01T00:00:00Z',
+    lastTradeAt: '2026-09-15T12:00:00Z',
+    closedPositions: 40,
+    wonPositions: 27,
+    lostPositions: 13,
+    winRate: 68,
+    percentChange: 5000,
+  }), now, '1M');
+  assert.ok(thin);
+  assert.ok(proven);
+  assert.notEqual(thin.bucket, 'ELITE_CANDIDATE');
+  assert.ok(thin.reasons.includes('sample_below_win_rate_tradeoff'));
+  assert.equal(proven.hybridRequiredClosedPositions, 38);
+  assert.equal(proven.bucket, 'ELITE_CANDIDATE');
+});
+
+test('the absolute win-rate floor cannot be bypassed by extreme headline return', () => {
+  const result = classifyPortfolio(portfolio({
+    id: 'p-59-9',
+    closedPositions: 500,
+    wonPositions: 300,
+    lostPositions: 200,
+    winRate: 59.9,
+    percentChange: 50_000,
+  }), now, 'AT');
+  assert.ok(result);
+  assert.notEqual(result.bucket, 'ELITE_CANDIDATE');
+  assert.ok(result.reasons.includes('win_rate_below_absolute_floor'));
+});
+
+test('high win rate alone is insufficient when return is too weak for the hybrid curve', () => {
+  const result = classifyPortfolio(portfolio({
+    id: 'p-high-win-low-return',
+    closedPositions: 100,
+    wonPositions: 92,
+    lostPositions: 8,
+    winRate: 92,
+    percentChange: 5,
+  }), now, '1M');
+  assert.ok(result);
+  assert.notEqual(result.bucket, 'ELITE_CANDIDATE');
+  assert.ok(result.reasons.includes('return_below_win_rate_tradeoff'));
+});
+
+test('80 percent qualifies when return and the rest of the portfolio evidence are strong', () => {
+  const result = classifyPortfolio(portfolio({
+    id: 'p-80-floor',
+    createdAt: '2026-09-01T00:00:00Z',
+    lastTradeAt: '2026-09-15T12:00:00Z',
+    closedPositions: 35,
+    wonPositions: 28,
+    lostPositions: 7,
+    winRate: 80,
+    percentChange: 500,
+  }), now, '1M');
+  assert.ok(result);
+  assert.equal(result.bucket, 'ELITE_CANDIDATE');
+});
+
+test('500 percent return is rewarded strongly but is not a universal minimum gate', () => {
+  const moderateReturn = classifyPortfolio(portfolio({
+    id: 'p-120',
+    createdAt: '2026-09-01T00:00:00Z',
+    closedPositions: 35,
+    wonPositions: 30,
+    lostPositions: 5,
+    winRate: 85.7,
+    percentChange: 120,
+  }), now, '1M');
+  const idealReturn = classifyPortfolio(portfolio({
+    id: 'p-500',
+    createdAt: '2026-09-01T00:00:00Z',
+    closedPositions: 35,
+    wonPositions: 30,
+    lostPositions: 5,
+    winRate: 85.7,
+    percentChange: 500,
+  }), now, '1M');
+  assert.ok(moderateReturn);
+  assert.ok(idealReturn);
+  assert.equal(moderateReturn.bucket, 'ELITE_CANDIDATE');
+  assert.equal(idealReturn.bucket, 'ELITE_CANDIDATE');
+  assert.ok(idealReturn.score > moderateReturn.score);
+});
+
+test('explicit recent activity and daily frequency add weight rather than acting as oversized hard gates', () => {
+  const recent = classifyPortfolio(portfolio({
+    id: 'p-recent',
+    createdAt: '2026-09-02T00:00:00Z',
+    lastTradeAt: '2026-09-15T18:00:00Z',
+    closedPositions: 42,
+    wonPositions: 36,
+    lostPositions: 6,
+    winRate: 85.7,
+    percentChange: 180,
+  }), now, '1W');
+  const stale = classifyPortfolio(portfolio({
+    id: 'p-stale',
+    createdAt: '2026-09-02T00:00:00Z',
+    lastTradeAt: '2026-08-20T00:00:00Z',
+    closedPositions: 42,
+    wonPositions: 36,
+    lostPositions: 6,
+    winRate: 85.7,
+    percentChange: 180,
+  }), now, '1W');
+  assert.ok(recent);
+  assert.ok(stale);
+  assert.ok((recent.scoreBreakdown.dailyFrequency ?? 0) > 0);
+  assert.ok((recent.scoreBreakdown.recentActivity ?? 0) > (stale.scoreBreakdown.recentActivity ?? 0));
+  assert.ok(recent.score > stale.score);
+});
+
+test('multiple portfolios from the same owner can qualify when each independently makes the cut', () => {
   const dir = mkdtempSync(join(tmpdir(), 'portfolio-ledger-'));
   const state = join(dir, 'state.json');
   const snapshots = join(dir, 'snapshots.jsonl');
   const ledger = new PortfolioCandidateLedger(state, snapshots);
   ledger.observe([
-    portfolio({ id: 'p-good' }),
+    portfolio({ id: 'p-good-a' }),
+    portfolio({ id: 'p-good-b', name: 'Second Good Portfolio', closedPositions: 80, wonPositions: 65, lostPositions: 15, winRate: 81.25, percentChange: 650 }),
     portfolio({ id: 'p-bad', name: 'Bad Portfolio', closedPositions: 200, wonPositions: 70, lostPositions: 130, winRate: 35, percentChange: -60 }),
   ], 'trending', now);
 
-  assert.equal(ledger.get('p-good')?.bucket, 'ELITE_CANDIDATE');
+  assert.equal(ledger.get('p-good-a')?.bucket, 'ELITE_CANDIDATE');
+  assert.equal(ledger.get('p-good-b')?.bucket, 'ELITE_CANDIDATE');
   assert.equal(ledger.get('p-bad')?.bucket, 'REJECTED_DEMOTED');
   assert.equal(ledger.report().uniqueOwnerCount, 1);
-  assert.equal(ledger.report().uniquePortfolioCount, 2);
-  assert.deepEqual(ledger.report().elitePortfolioIds, ['p-good']);
+  assert.equal(ledger.report().uniquePortfolioCount, 3);
+  assert.deepEqual(new Set(ledger.report().elitePortfolioIds), new Set(['p-good-a', 'p-good-b']));
 });
 
 test('high return with too little history stays out of elite', () => {

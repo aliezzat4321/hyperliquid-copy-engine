@@ -68,6 +68,53 @@ test('asset book fails closed when Hyperliquid returns a different coin', async 
   }
 });
 
+test('asset book fails closed when Hyperliquid omits coin identity', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url, init) => {
+    const body = JSON.parse(String(init?.body ?? '{}'));
+    if (body.type === 'l2Book') {
+      return jsonResponse({
+        time: Date.now() - 100,
+        levels: [[{ px: '100', sz: '2' }], [{ px: '101', sz: '2' }]],
+      });
+    }
+    if (body.type === 'meta') {
+      return jsonResponse({ universe: [{ name: 'BTC', szDecimals: 3, maxLeverage: 50 }] });
+    }
+    throw new Error(`unexpected info request: ${body.type}`);
+  }) as typeof fetch;
+
+  try {
+    await assert.rejects(() => fetchAssetBook('BTC'), /L2 book coin missing: requested BTC/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('asset book fails closed when Hyperliquid returns an empty coin identity', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url, init) => {
+    const body = JSON.parse(String(init?.body ?? '{}'));
+    if (body.type === 'l2Book') {
+      return jsonResponse({
+        coin: '   ',
+        time: Date.now() - 100,
+        levels: [[{ px: '100', sz: '2' }], [{ px: '101', sz: '2' }]],
+      });
+    }
+    if (body.type === 'meta') {
+      return jsonResponse({ universe: [{ name: 'BTC', szDecimals: 3, maxLeverage: 50 }] });
+    }
+    throw new Error(`unexpected info request: ${body.type}`);
+  }) as typeof fetch;
+
+  try {
+    await assert.rejects(() => fetchAssetBook('BTC'), /L2 book coin missing: requested BTC/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('funding failures expose exact query boundaries and raw-enough returned rows while failing closed', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (_url, init) => {
