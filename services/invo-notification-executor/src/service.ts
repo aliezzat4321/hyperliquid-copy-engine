@@ -95,11 +95,12 @@ function loadConfig() {
     auditPath: resolve(process.env.NOTIFICATION_TRADER_AUDIT_PATH ?? 'data/notification-trader-audit.jsonl'),
     trackerPath: resolve(process.env.NOTIFICATION_TRADER_TRACKER_PATH ?? 'data/notification-trader-population.json'),
     candidateStatePath: resolve(process.env.NOTIFICATION_TRADER_CANDIDATE_STATE_PATH ?? '/var/lib/hyperliquid-copy-engine/invo-notification-executor/portfolio-candidates.json'),
+    candidateSnapshotsPath: resolve(process.env.INVO_PORTFOLIO_CANDIDATE_SNAPSHOTS_PATH ?? '/var/lib/hyperliquid-copy-engine/invo-notification-executor/portfolio-candidate-snapshots.jsonl'),
     candidateStateMaxAgeMs: Math.max(60_000, n('NOTIFICATION_TRADER_CANDIDATE_MAX_AGE_MS', 20 * 60 * 1000)),
     directWatchStatePath: resolve(process.env.NOTIFICATION_TRADER_DIRECT_WATCH_STATE_PATH ?? '/var/lib/hyperliquid-copy-engine/invo-notification-executor/elite-direct-watch.json'),
-    directWatchScanMs: Math.max(2_000, n('NOTIFICATION_TRADER_DIRECT_WATCH_SCAN_MS', 5_000)),
-    directWatchMaxHydratesPerScan: Math.max(1, Math.min(5, Math.trunc(n('NOTIFICATION_TRADER_DIRECT_WATCH_MAX_HYDRATES_PER_SCAN', 2)))),
-    directWatchFallbackPollMs: Math.max(10_000, n('NOTIFICATION_TRADER_DIRECT_WATCH_FALLBACK_POLL_MS', 20_000)),
+    directWatchScanMs: Math.max(2_000, n('NOTIFICATION_TRADER_DIRECT_WATCH_SCAN_MS', 3_000)),
+    directWatchMaxHydratesPerScan: Math.max(1, Math.min(20, Math.trunc(n('NOTIFICATION_TRADER_DIRECT_WATCH_MAX_HYDRATES_PER_SCAN', 8)))),
+    directWatchFallbackPollMs: Math.max(10_000, n('NOTIFICATION_TRADER_DIRECT_WATCH_FALLBACK_POLL_MS', 18_000)),
     minEvidenceEvents: Math.max(1, Math.trunc(n('NOTIFICATION_TRADER_MIN_EVIDENCE_EVENTS', 20))),
     minObservationDays: Math.max(1, Math.trunc(n('NOTIFICATION_TRADER_MIN_OBSERVATION_DAYS', 7))),
     staleAfterMs: Math.max(60_000, n('NOTIFICATION_TRADER_STALE_AFTER_MS', 3 * 24 * 60 * 60 * 1000)),
@@ -525,6 +526,7 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
         signal.portfolioId,
         eligibilityCutoffMs,
         cfg.candidateStateMaxAgeMs,
+        cfg.candidateSnapshotsPath,
       );
       if (!candidateAdmission.allowed) {
         state.markSeen(signal.key);
@@ -1299,12 +1301,14 @@ async function hydrateDirectTarget(
   selectorUpdatedAtMs: number | null,
   reason: string,
   observedAtMs: number,
+  includeClosed: boolean,
 ) {
-  directWatchMetrics.hydrationRequests += 2;
-  const [openPayload, closedPayload] = await Promise.all([
-    invo.getPortfolioInvestments(target.portfolioId, true, 1, 100),
-    invo.getPortfolioInvestments(target.portfolioId, false, 1, 100),
-  ]);
+  directWatchMetrics.hydrationRequests += includeClosed ? 2 : 1;
+  const openPromise = invo.getPortfolioInvestments(target.portfolioId, true, 1, 100);
+  const closedPromise = includeClosed
+    ? invo.getPortfolioInvestments(target.portfolioId, false, 1, 100)
+    : Promise.resolve(null);
+  const [openPayload, closedPayload] = await Promise.all([openPromise, closedPromise]);
   const openRows = directInvestmentRows(openPayload);
   const closedRows = directInvestmentRows(closedPayload);
   const signals = signalsFromDirectInvestments(
@@ -1352,7 +1356,8 @@ async function hydrateDirectTarget(
 async function scanEliteDirectWatch(nowMs = Date.now()) {
   if (cfg.live || nowMs < directWatchBackoffUntilMs) return;
   const candidate = loadEliteDirectTargets(cfg.candidateStatePath, nowMs, cfg.candidateStateMaxAgeMs);
-  directWatch.syncTargets(candidate.targets, ownedDirectPortfolioIds(), nowMs);
+  const ownedPortfolioIds = ownedDirectPortfolioIds();
+  directWatch.syncTargets(candidate.targets, ownedPortfolioIds, nowMs);
   const targets = directWatch.targets();
   const targetsByFilter = new Map<string, typeof targets>();
   for (const target of targets) {
@@ -1364,7 +1369,23 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
     target: typeof targets[number];
     selectorUpdatedAtMs: number | null;
     reason: string;
+    includeClosed: boolean;
   }> = [];
+  const queued = new Set<string>();
+  const queueTarget = (
+    target: typeof targets[number],
+    selectorUpdatedAtMs: number | null,
+    reason: string,
+  ) => {
+    if (queued.has(target.portfolioId)) return;
+    queued.add(target.portfolioId);
+    hydrationQueue.push({
+      target,
+      selectorUpdatedAtMs,
+      reason,
+      includeClosed: ownedPortfolioIds.has(target.portfolioId),
+    });
+  };
   try {
     for (const [sourceFilter, filterTargets] of targetsByFilter) {
       directWatchMetrics.selectorRequests += 1;
@@ -1376,18 +1397,32 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
         const selectorUpdatedAtMs = directSourceTimeMs(row?.updatedAt);
         if (selectorUpdatedAtMs != null) {
           const decision = directWatch.observeSelector(target.portfolioId, selectorUpdatedAtMs);
-          if (decision.hydrate) hydrationQueue.push({ target, selectorUpdatedAtMs, reason: 'selector_change' });
-        } else if (directWatch.shouldFallbackPoll(target.portfolioId, nowMs, cfg.directWatchFallbackPollMs)) {
-          hydrationQueue.push({ target, selectorUpdatedAtMs: null, reason: 'selector_missing_fallback' });
+          if (decision.hydrate) queueTarget(target, selectorUpdatedAtMs, 'selector_change');
         }
       }
     }
+
+    // Invo portfolio updatedAt is not a reliable trade-change signal. Keep it as
+    // a fast prioritization hint, but directly poll every selected elite on a
+    // bounded stagger so no leaderboard trade depends on that metadata changing.
+    for (const target of targets) {
+      if (directWatch.shouldFallbackPoll(target.portfolioId, nowMs, cfg.directWatchFallbackPollMs)) {
+        queueTarget(target, null, 'periodic_direct_poll');
+      }
+    }
+
     hydrationQueue.sort((a, b) => {
       if (a.reason !== b.reason) return a.reason === 'selector_change' ? -1 : 1;
-      return (a.selectorUpdatedAtMs ?? 0) - (b.selectorUpdatedAtMs ?? 0);
+      return a.target.lastFallbackPollAtMs - b.target.lastFallbackPollAtMs;
     });
     for (const item of hydrationQueue.slice(0, cfg.directWatchMaxHydratesPerScan)) {
-      await hydrateDirectTarget(item.target, item.selectorUpdatedAtMs, item.reason, nowMs);
+      await hydrateDirectTarget(
+        item.target,
+        item.selectorUpdatedAtMs,
+        item.reason,
+        nowMs,
+        item.includeClosed,
+      );
     }
     directWatchBackoffMs = 0;
     directWatchBackoffUntilMs = 0;
