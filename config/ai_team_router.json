@@ -9,6 +9,7 @@
   },
   "initial_routes": {
     "ROUTINE": {"task_type": "BUILD", "agent": "CODEX_CHATGPT", "model_class": "CODEX_DEFAULT"},
+    "EXACT_SHA_REVIEW": {"task_type": "REVIEW", "agent": "CLAUDE", "model_class": "OPUS"},
     "QUANT_PROFITABILITY": {"task_type": "RESEARCH", "agent": "CLAUDE", "model_class": "OPUS"},
     "STATISTICAL_METHODOLOGY": {"task_type": "RESEARCH", "agent": "CLAUDE", "model_class": "OPUS"},
     "MAJOR_ARCHITECTURE": {"task_type": "RESEARCH", "agent": "CLAUDE", "model_class": "OPUS"},

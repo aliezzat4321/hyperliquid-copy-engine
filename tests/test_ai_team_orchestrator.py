@@ -270,6 +270,74 @@ def test_high_value_initial_route_is_opus_research(task_class):
                      "agent": "CLAUDE", "model_class": "OPUS"}
 
 
+def test_exact_sha_review_initial_route_requires_and_normalizes_target():
+    route = orch.parse_initial_route(
+        "AI_TASK_CLASS=EXACT_SHA_REVIEW\nAI_INITIAL_ROUTE=REVIEW\n"
+        "AI_INITIAL_AGENT=CLAUDE\nAI_INITIAL_MODEL=OPUS\n"
+        "AI_INITIAL_PR=374\nAI_INITIAL_SHA=ABCDEF0123456789ABCDEF0123456789ABCDEF01"
+    )
+
+    assert route == {
+        "task_class": "EXACT_SHA_REVIEW",
+        "task_type": "REVIEW",
+        "agent": "CLAUDE",
+        "model_class": "OPUS",
+        "pr_number": 374,
+        "target_sha": "abcdef0123456789abcdef0123456789abcdef01",
+    }
+
+
+@pytest.mark.parametrize("target_metadata", [
+    "AI_INITIAL_SHA=" + "a" * 40,
+    "AI_INITIAL_PR=374",
+    "AI_INITIAL_PR=not-an-int\nAI_INITIAL_SHA=" + "a" * 40,
+    "AI_INITIAL_PR=374\nAI_INITIAL_SHA=bad-sha",
+])
+def test_exact_sha_review_bad_or_missing_target_fails_closed(target_metadata):
+    with pytest.raises(ValueError, match="INVALID_INITIAL_ROUTE"):
+        orch.parse_initial_route(
+            "AI_TASK_CLASS=EXACT_SHA_REVIEW\nAI_INITIAL_ROUTE=REVIEW\n"
+            "AI_INITIAL_AGENT=CLAUDE\nAI_INITIAL_MODEL=OPUS\n"
+            + target_metadata
+        )
+
+
+def test_exact_sha_review_requires_explicit_route_even_when_auto_queued():
+    with pytest.raises(ValueError, match="incomplete or contradictory route"):
+        orch.parse_initial_route(
+            "AI_TEAM_AUTO_QUEUE=YES\nAI_TASK_CLASS=EXACT_SHA_REVIEW\n"
+            "AI_INITIAL_PR=374\nAI_INITIAL_SHA=" + "a" * 40
+        )
+
+
+@pytest.mark.parametrize("task_class,task_type,agent,model", [
+    ("ROUTINE", "BUILD", "CODEX_CHATGPT", "CODEX_DEFAULT"),
+    ("QUANT_PROFITABILITY", "RESEARCH", "CLAUDE", "OPUS"),
+    ("STATISTICAL_METHODOLOGY", "RESEARCH", "CLAUDE", "OPUS"),
+    ("MAJOR_ARCHITECTURE", "RESEARCH", "CLAUDE", "OPUS"),
+    ("UNRESOLVED_DISAGREEMENT", "RESEARCH", "CLAUDE", "OPUS"),
+    ("CAPITAL_SENSITIVE_METHODOLOGY", "RESEARCH", "CLAUDE", "OPUS"),
+])
+def test_existing_initial_routes_remain_unchanged(task_class, task_type, agent, model):
+    route = orch.parse_initial_route(
+        f"AI_TASK_CLASS={task_class}\nAI_INITIAL_ROUTE={task_type}\n"
+        f"AI_INITIAL_AGENT={agent}\nAI_INITIAL_MODEL={model}"
+    )
+    assert route == {"task_class": task_class, "task_type": task_type,
+                     "agent": agent, "model_class": model}
+
+
+def test_non_direct_class_cannot_smuggle_exact_target_into_review_authority():
+    route = orch.parse_initial_route(
+        "AI_TASK_CLASS=ROUTINE\nAI_INITIAL_ROUTE=BUILD\n"
+        "AI_INITIAL_AGENT=CODEX_CHATGPT\nAI_INITIAL_MODEL=CODEX_DEFAULT\n"
+        "AI_INITIAL_PR=374\nAI_INITIAL_SHA=" + "a" * 40
+    )
+    assert route == {"task_class": "ROUTINE", "task_type": "BUILD",
+                     "agent": "CODEX_CHATGPT", "model_class": "CODEX_DEFAULT"}
+    assert "pr_number" not in route and "target_sha" not in route
+
+
 def test_routine_route_and_bad_route_fail_closed():
     assert orch.parse_initial_route("AI_TASK_CLASS=ROUTINE")["agent"] == "CODEX_CHATGPT"
     with pytest.raises(ValueError, match="INVALID_INITIAL_ROUTE"):
@@ -339,6 +407,88 @@ def test_machine_assignment_contains_exact_sha_and_model():
     assert f"TARGET_SHA={sha}" in text
     assert "MODEL_CLASS=SONNET" in text
     assert "STATUS=PENDING" in text
+
+
+def test_claim_exact_sha_review_persists_immutable_target_and_marker(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    sha = "9f6bd253d79ed9ee0689eb5e235244ebac3103a1"
+    issue = {
+        "number": 383,
+        "author_association": "OWNER",
+        "body": (
+            "AI_TASK_CLASS=EXACT_SHA_REVIEW\nAI_INITIAL_ROUTE=REVIEW\n"
+            "AI_INITIAL_AGENT=CLAUDE\nAI_INITIAL_MODEL=OPUS\n"
+            f"AI_INITIAL_PR=374\nAI_INITIAL_SHA={sha}\n"
+            "AI_TEAM_CLOSE_ON_MERGE=YES"
+        ),
+    }
+
+    class GH:
+        def __init__(self):
+            self.comments = []
+
+        def ready_issues(self, label):
+            return [issue]
+
+        def comment(self, number, body):
+            self.comments.append((number, body))
+
+        def add_labels(self, *args):
+            pass
+
+        def remove_label(self, *args):
+            pass
+
+    class Runtime:
+        def event(self, *args, **kwargs):
+            pass
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg, team.ledger, team.gh = orch.DEFAULT_CONFIG, ledger, GH()
+    team.runtime, team.trusted = Runtime(), {"OWNER"}
+    team.sync_runtime_checkpoint = lambda: None
+
+    assert team.claim_ready_issue() is True
+    task = ledger.db.execute("SELECT * FROM tasks WHERE issue_number=383").fetchone()
+    assert (task["task_type"], task["agent"], task["model_class"]) == (
+        "REVIEW", "CLAUDE", "OPUS"
+    )
+    assert task["pr_number"] == 374
+    assert task["target_sha"] == sha
+    marker = team.gh.comments[0][1]
+    assert "TARGET_PR=374" in marker
+    assert f"TARGET_SHA={sha}" in marker
+
+
+def test_exact_sha_review_does_not_follow_moved_pr_head(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    requested_sha = "a" * 40
+    moved_sha = "b" * 40
+    task_id = ledger.create_task(
+        issue_number=383, pr_number=374, task_type="REVIEW", agent="CLAUDE",
+        model_class="OPUS", task_class="EXACT_SHA_REVIEW", target_sha=requested_sha,
+    )
+
+    class GH:
+        def pr(self, number):
+            return {"state": "open", "merged_at": None, "head": {"sha": moved_sha}}
+
+    class Runtime:
+        def event(self, *args, **kwargs):
+            pass
+
+    team = object.__new__(orch.Orchestrator)
+    team.ledger, team.gh, team.runtime = ledger, GH(), Runtime()
+    team.enqueue_replacement_review = lambda *args: pytest.fail(
+        "immutable exact-SHA review must not follow a moved head"
+    )
+
+    team.handle_review(ledger.get(task_id))
+
+    task = ledger.get(task_id)
+    assert task["status"] == "STALE"
+    assert task["target_sha"] == requested_sha
+    assert task["last_error"] == f"PR moved to {moved_sha}"
 
 
 def test_review_prompt_is_explicitly_delta_scoped_and_forbids_repo_wide_rereads(tmp_path):

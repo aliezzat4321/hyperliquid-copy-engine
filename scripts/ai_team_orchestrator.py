@@ -149,6 +149,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "initial_routes": {
         "ROUTINE": {"task_type": "BUILD", "agent": "CODEX_CHATGPT", "model_class": "CODEX_DEFAULT"},
+        "EXACT_SHA_REVIEW": {"task_type": "REVIEW", "agent": "CLAUDE", "model_class": "OPUS"},
         **{name: {"task_type": "RESEARCH", "agent": "CLAUDE", "model_class": "OPUS"}
            for name in ("QUANT_PROFITABILITY", "STATISTICAL_METHODOLOGY", "MAJOR_ARCHITECTURE",
                         "UNRESOLVED_DISAGREEMENT", "CAPITAL_SENSITIVE_METHODOLOGY")},
@@ -1138,10 +1139,13 @@ def _machine_values(body: str, name: str) -> list[str]:
     return re.findall(rf"(?mi)^\s*{re.escape(name)}\s*=\s*([^\s]+)\s*$", body or "")
 
 
-def parse_initial_route(body: str, cfg: dict[str, Any] | None = None) -> dict[str, str]:
+def parse_initial_route(body: str, cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     """Strictly parse the initial route. Invalid high-stakes metadata never defaults."""
     cfg = cfg or DEFAULT_CONFIG
-    names = ("AI_TASK_CLASS", "AI_INITIAL_ROUTE", "AI_INITIAL_AGENT", "AI_INITIAL_MODEL")
+    names = (
+        "AI_TASK_CLASS", "AI_INITIAL_ROUTE", "AI_INITIAL_AGENT", "AI_INITIAL_MODEL",
+        "AI_INITIAL_PR", "AI_INITIAL_SHA",
+    )
     values = {name: _machine_values(body, name) for name in names}
     if any(len(items) > 1 for items in values.values()):
         raise ValueError("INVALID_INITIAL_ROUTE: duplicate routing field")
@@ -1167,11 +1171,38 @@ def parse_initial_route(body: str, cfg: dict[str, Any] | None = None) -> dict[st
     }
     # Existing trusted queue entries predate the explicit route triple. Migrate them
     # through the reviewed class allowlist; new non-queue entries remain strict.
-    if not any(supplied.values()) and (task_class == "ROUTINE" or legacy_queue):
+    if (
+        not any(supplied.values())
+        and task_class != "EXACT_SHA_REVIEW"
+        and (task_class == "ROUTINE" or legacy_queue)
+    ):
         supplied = dict(expected)
     if supplied != expected:
         raise ValueError("INVALID_INITIAL_ROUTE: incomplete or contradictory route")
-    return {"task_class": task_class, **supplied}  # type: ignore[arg-type]
+    target_values = {
+        "pr_number": values["AI_INITIAL_PR"],
+        "target_sha": values["AI_INITIAL_SHA"],
+    }
+    if task_class != "EXACT_SHA_REVIEW":
+        # Target metadata grants no authority outside the dedicated direct-review class.
+        return {"task_class": task_class, **supplied}
+    if any(len(items) != 1 for items in target_values.values()):
+        raise ValueError("INVALID_INITIAL_ROUTE: exact-SHA review requires PR and SHA")
+    try:
+        pr_number = int(target_values["pr_number"][0])
+    except ValueError as exc:
+        raise ValueError("INVALID_INITIAL_ROUTE: PR must be a positive integer") from exc
+    if pr_number <= 0 or str(pr_number) != target_values["pr_number"][0]:
+        raise ValueError("INVALID_INITIAL_ROUTE: PR must be a positive integer")
+    target_sha = target_values["target_sha"][0]
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", target_sha):
+        raise ValueError("INVALID_INITIAL_ROUTE: SHA must be 40 hexadecimal characters")
+    return {
+        "task_class": task_class,
+        **supplied,
+        "pr_number": pr_number,
+        "target_sha": target_sha.lower(),
+    }
 
 
 def parse_protected_action_authorization(body: str) -> dict[str, Any] | None:
@@ -1206,6 +1237,7 @@ def parse_task_class(body: str) -> tuple[str, str | None]:
     """
     allowed = {
         "ROUTINE",
+        "EXACT_SHA_REVIEW",
         "QUANT_PROFITABILITY",
         "STATISTICAL_METHODOLOGY",
         "MAJOR_ARCHITECTURE",
@@ -1243,6 +1275,10 @@ def normalize_blocker(blocker: Any, *, subject_sha: str, source_kind: str,
 
 
 def route_review(cfg: dict[str, Any], task_class: str, escalation_reason: str | None) -> str:
+    if task_class == "EXACT_SHA_REVIEW":
+        if escalation_reason:
+            raise RuntimeError("Opus escalation reason supplied for exact-SHA review")
+        return "OPUS"
     if task_class in cfg["opus_allowed_task_classes"]:
         if escalation_reason and escalation_reason not in cfg["opus_allowed_reasons"]:
             raise RuntimeError(f"invalid Opus escalation reason: {escalation_reason}")
@@ -2229,10 +2265,12 @@ class Orchestrator:
             task_class = route["task_class"]
             task_id = self.ledger.create_task(
                 issue_number=number,
+                pr_number=route.get("pr_number"),
                 task_type=route["task_type"],
                 agent=route["agent"],
                 model_class=route["model_class"],
                 task_class=task_class,
+                target_sha=route.get("target_sha"),
                 queue_priority=queue_priority,
                 lifecycle_phase="IMPLEMENTING",
                 completion_contract=completion_contract,
@@ -2245,6 +2283,8 @@ class Orchestrator:
                     model_class=route["model_class"],
                     task_class=task_class,
                     issue_number=number,
+                    pr_number=route.get("pr_number"),
+                    target_sha=route.get("target_sha"),
                 ),
             )
             self.gh.add_labels(number, [self.cfg["labels"]["pending"]])
@@ -3557,7 +3597,8 @@ Otherwise emit SECOND_PASS_GATE=FAIL and never emit approval.
         target_sha = str(task["target_sha"])
         if current_sha != target_sha:
             self.ledger.update(task["id"], status="STALE", last_error=f"PR moved to {current_sha}")
-            self.enqueue_replacement_review(task, current_sha)
+            if task["task_class"] != "EXACT_SHA_REVIEW":
+                self.enqueue_replacement_review(task, current_sha)
             return
         model = str(task["model_class"])
         issue = self.gh.issue(int(task["issue_number"]))
@@ -3742,7 +3783,8 @@ not run on re-review because previous_sha is then populated.
                 task["id"], status="STALE", last_error="PR changed during review",
                 systemd_unit=None,
             )
-            self.enqueue_replacement_review(task, str(after["head"]["sha"]))
+            if task["task_class"] != "EXACT_SHA_REVIEW":
+                self.enqueue_replacement_review(task, str(after["head"]["sha"]))
             self.finish_runtime_run(
                 run_id,
                 str(task["id"]),
