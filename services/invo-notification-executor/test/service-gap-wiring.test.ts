@@ -43,8 +43,7 @@ test('production service reconciles owned gap closes before any shadow zero-mana
   const reconciliationLogIndex = gapBranch.indexOf("type: 'unrecoverable_feed_gap_reconciliation'");
   const guardedRebaseIndex = gapBranch.indexOf('if (prospectiveRebaseAllowed && backfill.newestPostId)');
   const setCursorIndex = gapBranch.indexOf('state.setFeedCursor(', guardedRebaseIndex);
-  const initializedIndex = gapBranch.indexOf('initialized = true', setCursorIndex);
-  const rebaseLogIndex = gapBranch.indexOf("type: 'unrecoverable_feed_gap_rebased'", initializedIndex);
+  const rebaseLogIndex = gapBranch.indexOf("type: 'unrecoverable_feed_gap_rebased'", setCursorIndex);
   const returnIndex = gapBranch.indexOf('return gapPlan.ownedCloses.length', rebaseLogIndex);
 
   assert.ok(planIndex >= 0, 'service must build an owned-close-only gap plan');
@@ -54,8 +53,7 @@ test('production service reconciles owned gap closes before any shadow zero-mana
   assert.ok(reconciliationLogIndex > rebasePolicyIndex, 'service must record reconciliation and rebase eligibility');
   assert.ok(guardedRebaseIndex > reconciliationLogIndex, 'cursor advance must remain behind the explicit prospective rebase guard');
   assert.ok(setCursorIndex > guardedRebaseIndex, 'service may advance only inside the guarded rebase branch');
-  assert.ok(initializedIndex > setCursorIndex, 'service must make the rebase the startup boundary before returning');
-  assert.ok(rebaseLogIndex > initializedIndex, 'service must audit the prospective rebase');
+  assert.ok(rebaseLogIndex > setCursorIndex, 'service must durably establish and audit the per-surface boundary');
   assert.ok(returnIndex > rebaseLogIndex, 'service must not return before the rebase is durably recorded');
 });
 

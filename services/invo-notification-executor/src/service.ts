@@ -12,9 +12,18 @@ import { liveScopeSkipReason } from './live-scope.js';
 import { fetchFeedBackfill } from './feed-backfill.js';
 import { canProspectivelyRebaseGap, planUnrecoverableGap } from './gap-reconciliation.js';
 import {
+  INVO_FEED_SURFACES,
+  type InvoFeedSurface,
+  parseDiscoverySurfaces,
+  parseFeedSurface,
+  planSurfaceBaseline,
+  surfaceNeedsBaseline,
+} from './feed-surfaces.js';
+import {
   directSourceTimeMs,
   EliteDirectWatchState,
   loadEliteDirectTargets,
+  planDirectHydrations,
   signalsFromDirectInvestments,
 } from './elite-direct-watch.js';
 import { eliteAdmissionFromState, ELITE_ADMISSION_VERSION } from './elite-admission.js';
@@ -54,15 +63,13 @@ function b(name: string, fallback: boolean): boolean {
 function loadConfig() {
   const allow = (process.env.NOTIFICATION_TRADER_ALLOW ?? '')
     .split(',').map(v => v.trim().replace(/^@/, '').toLowerCase()).filter(Boolean);
-  const feedFilter = (process.env.NOTIFICATION_TRADER_FEED_FILTER ?? 'following').trim().toLowerCase();
-  if (!['following', 'all', 'trending'].includes(feedFilter)) {
-    throw new Error(`Invalid NOTIFICATION_TRADER_FEED_FILTER: ${feedFilter}`);
-  }
-  const discoverySurfaces = (process.env.NOTIFICATION_TRADER_DISCOVERY_SURFACES ?? 'following,all,trending')
-    .split(',').map(v => v.trim().toLowerCase()).filter(Boolean);
-  if (!discoverySurfaces.length || discoverySurfaces.some(v => !['following', 'all', 'trending'].includes(v))) {
-    throw new Error(`Invalid NOTIFICATION_TRADER_DISCOVERY_SURFACES: ${discoverySurfaces.join(',')}`);
-  }
+  const feedFilter = parseFeedSurface(
+    process.env.NOTIFICATION_TRADER_FEED_FILTER ?? 'following',
+    'NOTIFICATION_TRADER_FEED_FILTER',
+  );
+  const discoverySurfaces = parseDiscoverySurfaces(
+    process.env.NOTIFICATION_TRADER_DISCOVERY_SURFACES ?? INVO_FEED_SURFACES.join(','),
+  );
   return {
     live: b('NOTIFICATION_TRADER_LIVE', false),
     host: process.env.NOTIFICATION_TRADER_HOST ?? '127.0.0.1',
@@ -135,9 +142,8 @@ const tracker = new TraderTracker(cfg.trackerPath, {
 const directWatch = new EliteDirectWatchState(cfg.directWatchStatePath);
 const inFlight = new Set<string>();
 const inFlightSourceEvents = new Set<string>();
-let initialized = false;
 let hydrating = false;
-let pendingWake: { source: string; hints?: NotificationHints; receivedAtMs: number; feedFilter?: string } | null = null;
+let pendingWake: { source: string; hints?: NotificationHints; receivedAtMs: number; feedFilter?: InvoFeedSurface } | null = null;
 let lastSuccessPollMs = 0;
 let backoffMs = 0;
 let discoverySurfaceIndex = 0;
@@ -1191,9 +1197,6 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
         source: 'shadow_zero_managed_gap_rebase',
       };
       state.setFeedCursor(feedFilter, rebasedCursor);
-      // Treat the explicit rebase as the startup boundary so the next newer signal is
-      // processed prospectively instead of being swallowed by startup-baseline indexing.
-      initialized = true;
       log({
         type: 'unrecoverable_feed_gap_rebased',
         feedFilter,
@@ -1217,21 +1220,27 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
   });
   if (tracked.length) tracker.flush();
 
-  if (!initialized) {
-    const recoverableCloses: InvoSignal[] = [];
-    for (const { signal } of tracked) {
-      if (!signal) continue;
-      const managed = signal.action === 'close' ? state.getManagedBySource(signal.sourceBaseId) : null;
-      if (managed) recoverableCloses.push(signal);
-      else state.markSeen(signal.key);
-    }
-    initialized = true;
+  if (surfaceNeedsBaseline(state.hasFeedBaseline(feedFilter))) {
+    const baseline = planSurfaceBaseline(
+      tracked.map(row => row.signal),
+      sourceBaseId => Boolean(state.getManagedBySource(sourceBaseId)),
+    );
+    for (const signal of baseline.skipped) state.markSeen(signal.key);
     lastSuccessPollMs = Date.now();
-    log({ type: 'baseline_indexed', posts: posts.length, recoverableCloses: recoverableCloses.length, live: cfg.live, feedFilter, feedLimit: cfg.feedLimit, traderFunnel: tracker.report().funnel });
-    for (const signal of recoverableCloses) await execute(signal, 'startup_recovery', receivedAtMs, feedFilter);
-    const startupHandled = recoverableCloses.every(signal => state.hasSeen(signal.key));
-    if (startupHandled && backfill.newestPostId) state.setFeedCursor(feedFilter, { postId: backfill.newestPostId, observedAtMs: Date.now(), source: 'startup_baseline' });
-    return recoverableCloses.length;
+    log({ type: 'surface_baseline_indexed', posts: posts.length, skippedOpenAddsAndUnownedCloses: baseline.skipped.length, recoverableCloses: baseline.recoverableCloses.length, live: cfg.live, feedFilter, feedLimit: cfg.feedLimit, traderFunnel: tracker.report().funnel });
+    for (const signal of baseline.recoverableCloses) {
+      await execute(signal, 'surface_baseline_owned_close_recovery', receivedAtMs, feedFilter);
+    }
+    const startupHandled = baseline.recoverableCloses.every(signal => state.hasSeen(signal.key));
+    if (startupHandled) {
+      const baselineAtMs = Date.now();
+      if (backfill.newestPostId) {
+        state.setFeedCursor(feedFilter, { postId: backfill.newestPostId, observedAtMs: baselineAtMs, source: 'startup_baseline' });
+      } else {
+        state.markFeedBaselined(feedFilter, baselineAtMs);
+      }
+    }
+    return baseline.recoverableCloses.length;
   }
 
   const signals: InvoSignal[] = tracked
@@ -1314,6 +1323,10 @@ async function hydrateDirectTarget(
   const signals = signalsFromDirectInvestments(
     openRows, closedRows, target, target.processedThroughMs, observedAtMs,
   );
+  // This target received its bounded direct-poll opportunity even if a later
+  // signal cannot be handled. Advance the scheduling deadline without moving
+  // the event watermark so one failing target cannot monopolize every scan.
+  directWatch.noteFallbackPoll(target.portfolioId, observedAtMs);
   directWatchMetrics.hydrationCount += 1;
   directWatchMetrics.signalsObserved += signals.length;
   for (const signal of signals) {
@@ -1334,7 +1347,6 @@ async function hydrateDirectTarget(
       highWaterMs,
       selectorUpdatedAtMs == null ? undefined : selectorUpdatedAtMs,
     );
-    directWatch.noteFallbackPoll(target.portfolioId, observedAtMs);
     directWatchMetrics.signalsHandled += signals.length;
     directWatchMetrics.lastSuccessAtMs = Date.now();
   }
@@ -1365,27 +1377,7 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
     rows.push(target);
     targetsByFilter.set(target.sourceFilter, rows);
   }
-  const hydrationQueue: Array<{
-    target: typeof targets[number];
-    selectorUpdatedAtMs: number | null;
-    reason: string;
-    includeClosed: boolean;
-  }> = [];
-  const queued = new Set<string>();
-  const queueTarget = (
-    target: typeof targets[number],
-    selectorUpdatedAtMs: number | null,
-    reason: string,
-  ) => {
-    if (queued.has(target.portfolioId)) return;
-    queued.add(target.portfolioId);
-    hydrationQueue.push({
-      target,
-      selectorUpdatedAtMs,
-      reason,
-      includeClosed: ownedPortfolioIds.has(target.portfolioId),
-    });
-  };
+  const selectorChanges = new Map<string, number>();
   try {
     for (const [sourceFilter, filterTargets] of targetsByFilter) {
       directWatchMetrics.selectorRequests += 1;
@@ -1397,7 +1389,7 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
         const selectorUpdatedAtMs = directSourceTimeMs(row?.updatedAt);
         if (selectorUpdatedAtMs != null) {
           const decision = directWatch.observeSelector(target.portfolioId, selectorUpdatedAtMs);
-          if (decision.hydrate) queueTarget(target, selectorUpdatedAtMs, 'selector_change');
+          if (decision.hydrate) selectorChanges.set(target.portfolioId, selectorUpdatedAtMs);
         }
       }
     }
@@ -1405,23 +1397,20 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
     // Invo portfolio updatedAt is not a reliable trade-change signal. Keep it as
     // a fast prioritization hint, but directly poll every selected elite on a
     // bounded stagger so no leaderboard trade depends on that metadata changing.
-    for (const target of targets) {
-      if (directWatch.shouldFallbackPoll(target.portfolioId, nowMs, cfg.directWatchFallbackPollMs)) {
-        queueTarget(target, null, 'periodic_direct_poll');
-      }
-    }
-
-    hydrationQueue.sort((a, b) => {
-      if (a.reason !== b.reason) return a.reason === 'selector_change' ? -1 : 1;
-      return a.target.lastFallbackPollAtMs - b.target.lastFallbackPollAtMs;
-    });
-    for (const item of hydrationQueue.slice(0, cfg.directWatchMaxHydratesPerScan)) {
+    const hydrationPlan = planDirectHydrations(
+      targets,
+      selectorChanges,
+      nowMs,
+      cfg.directWatchFallbackPollMs,
+      cfg.directWatchMaxHydratesPerScan,
+    );
+    for (const item of hydrationPlan) {
       await hydrateDirectTarget(
         item.target,
         item.selectorUpdatedAtMs,
         item.reason,
         nowMs,
-        item.includeClosed,
+        ownedPortfolioIds.has(item.target.portfolioId),
       );
     }
     directWatchBackoffMs = 0;
@@ -1495,7 +1484,8 @@ function startServer() {
       });
       return json(res, 200, {
         ok: true,
-        initialized,
+        initialized: cfg.discoverySurfaces.every(surface => state.hasFeedBaseline(surface)),
+        initializedSurfaces: cfg.discoverySurfaces.filter(surface => state.hasFeedBaseline(surface)),
         live: cfg.live,
         researchWide: !cfg.live,
         shadowAdmissionMode: cfg.live ? 'LIVE_SCOPE' : 'ELITE_ONLY',
@@ -1609,7 +1599,12 @@ async function main() {
       log({ type: 'funding_oracle_capture_error', phase: 'startup', error: err instanceof Error ? err.message : String(err) });
     }
   }
-  await wake('startup_baseline', undefined, Date.now());
+  // Establish every configured surface boundary before ingress and the rotating poller
+  // start. Sequential requests keep startup bounded/429-safe and minimize the window in
+  // which an event could arrive before a newly enabled surface has its own cursor.
+  for (const surface of cfg.discoverySurfaces) {
+    await wake(`startup_surface:${surface}`, undefined, Date.now(), surface);
+  }
   if (!cfg.live) await scanEliteDirectWatch(Date.now());
   startServer();
   log({

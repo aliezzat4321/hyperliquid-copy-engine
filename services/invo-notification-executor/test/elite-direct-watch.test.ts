@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
   EliteDirectWatchState,
   loadEliteDirectTargets,
+  planDirectHydrations,
   signalsFromDirectInvestments,
   type EliteDirectTarget,
 } from '../src/elite-direct-watch.js';
@@ -112,6 +113,53 @@ test('owned portfolio remains directly watched after demotion and restart', () =
   assert.equal(restarted.targets().length, 0);
 });
 
+test('overdue periodic targets outrank repeated selector-change hints', () => {
+  const makeTarget = (portfolioId: string, lastFallbackPollAtMs: number) => ({
+    ...target,
+    portfolioId,
+    baselineAtMs: BASE,
+    processedThroughMs: BASE,
+    selectorInitialized: true,
+    lastSelectorUpdatedAtMs: BASE,
+    lastFallbackPollAtMs,
+  });
+  const overdueOldest = makeTarget('periodic-oldest', BASE - 60_000);
+  const overdueNewer = makeTarget('periodic-newer', BASE - 50_000);
+  const selectorOnly = makeTarget('selector-only', BASE - 1_000);
+  const selectorChanges = new Map([
+    [selectorOnly.portfolioId, BASE + 10],
+    [overdueNewer.portfolioId, BASE + 20],
+  ]);
+
+  const first = planDirectHydrations(
+    [selectorOnly, overdueNewer, overdueOldest], selectorChanges, BASE, 25_000, 1,
+  );
+  assert.equal(first[0].target.portfolioId, 'periodic-oldest');
+  assert.equal(first[0].reason, 'periodic_direct_poll');
+
+  overdueOldest.lastFallbackPollAtMs = BASE;
+  const second = planDirectHydrations(
+    [selectorOnly, overdueNewer, overdueOldest], selectorChanges, BASE, 25_000, 1,
+  );
+  assert.equal(second[0].target.portfolioId, 'periodic-newer');
+  assert.equal(second[0].reason, 'periodic_direct_poll');
+  assert.equal(second[0].selectorUpdatedAtMs, BASE + 20);
+});
+
+test('recorded direct-poll attempts rotate bounded periodic service across targets', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'elite-watch-fairness-')), 'state.json');
+  const state = new EliteDirectWatchState(path);
+  const secondTarget = { ...target, portfolioId: 'p2' };
+  state.syncTargets([target, secondTarget], new Set(), BASE - 60_000);
+
+  const first = planDirectHydrations(state.targets(), new Map(), BASE, 25_000, 1);
+  assert.equal(first[0].target.portfolioId, 'p1');
+  state.noteFallbackPoll('p1', BASE);
+
+  const second = planDirectHydrations(state.targets(), new Map(), BASE, 25_000, 1);
+  assert.equal(second[0].target.portfolioId, 'p2');
+});
+
 test('same resulting source size cannot be copied twice if only updatedAt changes later', () => {
   const first = openRow({
     createdAt: BASE - 100,
@@ -126,4 +174,24 @@ test('same resulting source size cannot be copied twice if only updatedAt change
   assert.equal(a.key, b.key);
   assert.equal(a.entrySize, 1.5);
   assert.equal(b.entrySize, 1.5);
+});
+
+test('sanitized captured investment shapes preserve open/increase and owned-close semantics', () => {
+  const fixture = JSON.parse(readFileSync(
+    new URL('../../test/fixtures/invo-read-only-captured-shapes.json', import.meta.url),
+    'utf8',
+  ));
+  const capturedTarget = {
+    portfolioId: 'portfolio-direct', ownerId: 'owner-direct', username: 'captured-shape', sourceFilter: 'fire_moves',
+  };
+  const signals = signalsFromDirectInvestments(
+    fixture.investments.open.investmentsTicker,
+    fixture.investments.closed.investmentsTicker,
+    capturedTarget,
+    1789685682200,
+    1789685684000,
+  );
+  assert.deepEqual(signals.map(row => row.action), ['increase', 'close']);
+  assert.equal(signals[0].entrySize, 1);
+  assert.equal(signals[1].closingPrice, 1.1);
 });

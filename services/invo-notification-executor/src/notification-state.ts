@@ -63,6 +63,7 @@ interface DiskState {
   /** Keyed by the Invo source position/base id, not by coin. */
   managed: Record<string, ManagedPosition>;
   feedCursors: Record<string, FeedCursor>;
+  feedBaselines: Record<string, number>;
 }
 
 export interface FeedCursor {
@@ -113,7 +114,7 @@ function normalizeManaged(raw: Record<string, ManagedPosition> | undefined): Rec
 }
 
 export class NotificationState {
-  private state: DiskState = { seen: [], managed: {}, feedCursors: {} };
+  private state: DiskState = { seen: [], managed: {}, feedCursors: {}, feedBaselines: {} };
   private seen = new Set<string>();
 
   constructor(private readonly path: string, private readonly maxSeen = 20_000) {
@@ -128,6 +129,10 @@ export class NotificationState {
         seen: parsed.seen ?? [],
         managed: normalizeManaged(parsed.managed),
         feedCursors: parsed.feedCursors ?? {},
+        feedBaselines: {
+          ...Object.fromEntries(Object.entries(parsed.feedCursors ?? {}).map(([feed, cursor]) => [feed, cursor.observedAtMs])),
+          ...(parsed.feedBaselines ?? {}),
+        },
       };
       this.seen = new Set(this.state.seen);
     } catch (err) {
@@ -184,6 +189,16 @@ export class NotificationState {
 
   setFeedCursor(feed: string, cursor: FeedCursor) {
     this.state.feedCursors[feed] = cursor;
+    this.state.feedBaselines[feed] = cursor.observedAtMs;
+    this.save();
+  }
+
+  hasFeedBaseline(feed: string) {
+    return Number.isFinite(this.state.feedBaselines[feed]);
+  }
+
+  markFeedBaselined(feed: string, observedAtMs: number) {
+    this.state.feedBaselines[feed] = observedAtMs;
     this.save();
   }
 

@@ -11,12 +11,46 @@ export interface EliteDirectTarget {
   sourceFilter: string;
 }
 
-interface StoredTarget extends EliteDirectTarget {
+export interface StoredTarget extends EliteDirectTarget {
   baselineAtMs: number;
   processedThroughMs: number;
   selectorInitialized: boolean;
   lastSelectorUpdatedAtMs: number | null;
   lastFallbackPollAtMs: number;
+}
+
+export interface DirectHydrationPlanItem {
+  target: StoredTarget;
+  selectorUpdatedAtMs: number | null;
+  reason: 'periodic_direct_poll' | 'selector_change';
+}
+
+export function planDirectHydrations(
+  targets: StoredTarget[],
+  selectorChanges: ReadonlyMap<string, number>,
+  nowMs: number,
+  fallbackPollMs: number,
+  maxHydrations: number,
+): DirectHydrationPlanItem[] {
+  return targets
+    .flatMap(target => {
+      const selectorUpdatedAtMs = selectorChanges.get(target.portfolioId) ?? null;
+      const periodicDue = nowMs - target.lastFallbackPollAtMs >= fallbackPollMs;
+      if (!periodicDue && selectorUpdatedAtMs == null) return [];
+      return [{
+        target,
+        selectorUpdatedAtMs,
+        reason: periodicDue ? 'periodic_direct_poll' as const : 'selector_change' as const,
+      }];
+    })
+    .sort((a, b) => {
+      if (a.reason !== b.reason) return a.reason === 'periodic_direct_poll' ? -1 : 1;
+      if (a.target.lastFallbackPollAtMs !== b.target.lastFallbackPollAtMs) {
+        return a.target.lastFallbackPollAtMs - b.target.lastFallbackPollAtMs;
+      }
+      return a.target.portfolioId.localeCompare(b.target.portfolioId);
+    })
+    .slice(0, Math.max(0, maxHydrations));
 }
 
 interface DirectWatchDiskState {

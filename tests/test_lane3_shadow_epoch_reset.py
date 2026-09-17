@@ -43,6 +43,7 @@ def test_reset_clears_derived_shadow_data_but_preserves_source_evidence(
                 "source": "following",
             }
         },
+        "feedBaselines": {"following": 123, "trending": 456},
     }
     write(tmp_path / "state.json", json.dumps(state))
 
@@ -72,6 +73,7 @@ def test_reset_clears_derived_shadow_data_but_preserves_source_evidence(
     after = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
     assert after["seen"] == state["seen"]
     assert after["feedCursors"] == state["feedCursors"]
+    assert after["feedBaselines"] == state["feedBaselines"]
     assert after["managed"] == {}
     for name, content in preserved.items():
         assert (tmp_path / name).read_text(encoding="utf-8") == content
@@ -86,6 +88,7 @@ def test_reset_clears_derived_shadow_data_but_preserves_source_evidence(
     assert result["managedPositionsRemoved"] == 1
     assert result["seenKeysPreserved"] == 2
     assert result["feedCursorsPreserved"] == 1
+    assert result["feedBaselinesPreserved"] == 2
     assert result["selectorVersion"] == SELECTOR_VERSION
     assert result["realTradingEnabled"] is False
     assert result["polymarketTouched"] is False
@@ -105,6 +108,53 @@ def test_invalid_state_fails_before_any_derived_file_is_deleted(
 
     with pytest.raises(RuntimeError, match="seen must be an array"):
         reset_state_root(tmp_path, epoch="test-epoch")
+
+    assert (tmp_path / "audit.jsonl").read_text(encoding="utf-8") == (
+        "must remain on failed validation\n"
+    )
+    assert not (tmp_path / "dataset-resets.jsonl").exists()
+
+
+def test_reset_accepts_legacy_state_without_feed_baselines(tmp_path: Path) -> None:
+    legacy = {
+        "seen": ["legacy-key"],
+        "managed": {},
+        "feedCursors": {
+            "following": {
+                "postId": "legacy-post",
+                "observedAtMs": 123,
+                "source": "startup_baseline",
+            }
+        },
+    }
+    write(tmp_path / "state.json", json.dumps(legacy))
+
+    result = reset_state_root(tmp_path, epoch="legacy-state-reset")
+
+    after = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert after["feedCursors"] == legacy["feedCursors"]
+    assert "feedBaselines" not in after
+    assert result["feedCursorsPreserved"] == 1
+    assert result["feedBaselinesPreserved"] == 0
+
+
+@pytest.mark.parametrize(
+    "invalid", [[], "123", None, {"following": False}, {"following": float("inf")}]
+)
+def test_invalid_feed_baselines_fail_before_deletion(
+    tmp_path: Path, invalid: object
+) -> None:
+    state = {
+        "seen": [],
+        "managed": {},
+        "feedCursors": {},
+        "feedBaselines": invalid,
+    }
+    write(tmp_path / "state.json", json.dumps(state))
+    write(tmp_path / "audit.jsonl", "must remain on failed validation\n")
+
+    with pytest.raises(RuntimeError, match="feedBaselines"):
+        reset_state_root(tmp_path, epoch="invalid-baselines")
 
     assert (tmp_path / "audit.jsonl").read_text(encoding="utf-8") == (
         "must remain on failed validation\n"

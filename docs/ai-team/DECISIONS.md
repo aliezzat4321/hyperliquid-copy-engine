@@ -26,6 +26,24 @@ Append-only record of accepted architecture / policy decisions. New decisions ma
   trading, capital, credentials, signing or live order routing; `REAL_TRADING_ENABLED`
   remains disabled.
 
+## 2026-09-17 — Lane 3 feed surfaces have independent prospective boundaries
+
+- The supported `/v1_0/posts/get_feed` discovery filters are the exact current web-app
+  enum values `following`, `trending`, `fire_moves`, and `most_recent`. Generic feeds are
+  discovery and latency supplements; portfolio-specific investment polling remains the
+  authoritative monitor for already selected elite portfolios.
+- Every feed surface owns a separate durable high-water cursor. A surface with no cursor
+  establishes its own prospective baseline: historical OPEN/ADD and unowned CLOSE events
+  are indexed but not executed, while CLOSE for locally managed exposure may reconcile.
+  Later posts newer than that surface's boundary enter the normal freshness, causal elite
+  admission, source-event dedupe, and execution-realism gates.
+- Adding or re-enabling one surface must not depend on process-global initialization and
+  must not advance another surface's cursor. Unrecoverable gaps retain the existing
+  owned-close-only reconciliation and fail-closed cursor semantics.
+- Feed rotation and direct hydration stay bounded and retain exponential HTTP 429 backoff.
+  This decision changes no real-trading permission, credential, capital, signing or order
+  route; `REAL_TRADING_ENABLED` remains disabled.
+
 ## 2026-09-03 — Risk eligibility is separate from credible edge
 
 - Promotion policy v2 retains the v1 profitability floors and adds a versioned,

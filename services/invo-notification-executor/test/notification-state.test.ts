@@ -20,6 +20,17 @@ test('persists dedupe and source-position ownership across restart', () => {
   assert.equal(second.getManagedBySource('base-1'), null);
 });
 
+test('an empty feed baseline survives restart without inventing a post cursor', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'invo-empty-baseline-'));
+  const path = join(dir, 'state.json');
+  const first = new NotificationState(path);
+  first.markFeedBaselined('fire_moves', 10);
+  assert.equal(first.getFeedCursor('fire_moves'), null);
+  const restarted = new NotificationState(path);
+  assert.equal(restarted.hasFeedBaseline('fire_moves'), true);
+  assert.equal(restarted.getFeedCursor('fire_moves'), null);
+});
+
 test('keeps simultaneous same-coin positions independent by source base id', () => {
   const dir = mkdtempSync(join(tmpdir(), 'invo-notify-state-'));
   const path = join(dir, 'state.json');
