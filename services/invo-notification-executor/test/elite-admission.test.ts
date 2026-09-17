@@ -121,3 +121,65 @@ test('missing candidate state fails closed', () => {
   assert.equal(decision.allowed, false);
   assert.equal(decision.reason, 'candidate_state_missing');
 });
+
+test('historical snapshot authorizes a trade when latest aggregate state is newer than the trade', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lane3-elite-history-'));
+  const statePath = join(dir, 'portfolio-candidates.json');
+  const snapshotsPath = join(dir, 'portfolio-candidate-snapshots.jsonl');
+  const historicalAt = decisionAtMs - 5 * 60_000;
+  const futureAt = decisionAtMs + 60_000;
+  writeFileSync(statePath, JSON.stringify(validState({
+    lastObservedAtMs: futureAt,
+    firstEliteAtMs: { [portfolioId]: decisionAtMs - 10 * 60_000 },
+    portfolios: {
+      [portfolioId]: {
+        ...(validState().portfolios as any)[portfolioId],
+        observedAtMs: futureAt,
+        bucket: 'ELITE_CANDIDATE',
+      },
+    },
+  })));
+  writeFileSync(snapshotsPath, JSON.stringify({
+    ...(validState().portfolios as any)[portfolioId],
+    selectorVersion: ELITE_SELECTOR_VERSION,
+    observedAtMs: historicalAt,
+    bucket: 'ELITE_CANDIDATE',
+  }) + '\n');
+  const decision = eliteAdmissionFromState(
+    statePath, portfolioId, decisionAtMs, 20 * 60_000, snapshotsPath,
+  );
+  assert.equal(decision.allowed, true);
+  assert.equal(decision.reason, 'elite_candidate_pretrade_snapshot_qualified');
+  assert.equal(decision.candidateObservedAtMs, historicalAt);
+});
+
+test('latest pre-trade snapshot preserves demotion and prevents look-ahead re-promotion', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lane3-elite-history-demotion-'));
+  const statePath = join(dir, 'portfolio-candidates.json');
+  const snapshotsPath = join(dir, 'portfolio-candidate-snapshots.jsonl');
+  const eliteAt = decisionAtMs - 10 * 60_000;
+  const demotedAt = decisionAtMs - 60_000;
+  const futureAt = decisionAtMs + 60_000;
+  writeFileSync(statePath, JSON.stringify(validState({
+    lastObservedAtMs: futureAt,
+    firstEliteAtMs: { [portfolioId]: eliteAt },
+    portfolios: {
+      [portfolioId]: {
+        ...(validState().portfolios as any)[portfolioId],
+        observedAtMs: futureAt,
+        bucket: 'ELITE_CANDIDATE',
+      },
+    },
+  })));
+  const baseCandidate = (validState().portfolios as any)[portfolioId];
+  writeFileSync(snapshotsPath, [
+    JSON.stringify({ ...baseCandidate, selectorVersion: ELITE_SELECTOR_VERSION, observedAtMs: eliteAt, bucket: 'ELITE_CANDIDATE' }),
+    JSON.stringify({ ...baseCandidate, selectorVersion: ELITE_SELECTOR_VERSION, observedAtMs: demotedAt, bucket: 'RESEARCH_WIDE' }),
+  ].join('\n') + '\n');
+  const decision = eliteAdmissionFromState(
+    statePath, portfolioId, decisionAtMs, 20 * 60_000, snapshotsPath,
+  );
+  assert.equal(decision.allowed, false);
+  assert.equal(decision.reason, 'portfolio_not_elite');
+  assert.equal(decision.candidateObservedAtMs, demotedAt);
+});
