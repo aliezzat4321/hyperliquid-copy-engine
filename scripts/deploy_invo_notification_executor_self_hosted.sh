@@ -98,9 +98,9 @@ set_env NOTIFICATION_TRADER_AUDIT_PATH /var/lib/hyperliquid-copy-engine/invo-not
 set_env NOTIFICATION_TRADER_TRACKER_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/trader-population.json
 set_env NOTIFICATION_TRADER_CANDIDATE_STATE_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/portfolio-candidates.json
 set_env NOTIFICATION_TRADER_DIRECT_WATCH_STATE_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/elite-direct-watch.json
-set_env NOTIFICATION_TRADER_DIRECT_WATCH_SCAN_MS 5000
-set_env NOTIFICATION_TRADER_DIRECT_WATCH_MAX_HYDRATES_PER_SCAN 2
-set_env NOTIFICATION_TRADER_DIRECT_WATCH_FALLBACK_POLL_MS 20000
+set_env NOTIFICATION_TRADER_DIRECT_WATCH_SCAN_MS 3000
+set_env NOTIFICATION_TRADER_DIRECT_WATCH_MAX_HYDRATES_PER_SCAN 8
+set_env NOTIFICATION_TRADER_DIRECT_WATCH_FALLBACK_POLL_MS 18000
 # The clean-epoch seed runs the portfolio CLI directly rather than through its
 # systemd unit, so persist the CLI's own path variables in the sourced env file.
 set_env INVO_PORTFOLIO_CANDIDATE_STATE_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/portfolio-candidates.json
