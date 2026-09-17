@@ -97,6 +97,12 @@ set_env NOTIFICATION_TRADER_STATE_PATH /var/lib/hyperliquid-copy-engine/invo-not
 set_env NOTIFICATION_TRADER_AUDIT_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/audit.jsonl
 set_env NOTIFICATION_TRADER_TRACKER_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/trader-population.json
 set_env NOTIFICATION_TRADER_CANDIDATE_STATE_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/portfolio-candidates.json
+# The clean-epoch seed runs the portfolio CLI directly rather than through its
+# systemd unit, so persist the CLI's own path variables in the sourced env file.
+set_env INVO_PORTFOLIO_CANDIDATE_STATE_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/portfolio-candidates.json
+set_env INVO_PORTFOLIO_CANDIDATE_SNAPSHOTS_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/portfolio-candidate-snapshots.jsonl
+set_env INVO_PORTFOLIO_LEADERBOARD_STATE_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/invo-leaderboards.json
+set_env INVO_PORTFOLIO_LEADERBOARD_SNAPSHOTS_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/invo-leaderboard-snapshots.jsonl
 # Current Invo feed API accepts following/trending; `all` returns HTTP 500 Invalid feed type.
 # Keep discovery broad across valid surfaces without flooding the executor with known-bad requests.
 set_env NOTIFICATION_TRADER_DISCOVERY_SURFACES following,trending
@@ -154,6 +160,17 @@ if [[ "$current_epoch" != "$EVIDENCE_EPOCH" ]]; then
     reset_evidence=1
 
     # Seed selector-v3 eligibility before the executor can accept a NEW/ADD event.
+    # Match the research systemd unit's runtime environment so the direct CLI writes
+    # the production candidate/leaderboard paths rather than repository-local defaults.
+    # Both files are root-owned deployment inputs; a malformed file fails closed under
+    # `set -e` before the executor is restarted or the clean epoch is marked complete.
+    set -a
+    # shellcheck disable=SC1090
+    source "$INVO_ENV"
+    # shellcheck disable=SC1090
+    source "$EXEC_ENV"
+    set +a
+
     # This creates fresh candidate state/snapshots while retaining raw leaderboard history.
     node dist/src/portfolio-candidate-cli.js
     node - "$STATE/portfolio-candidates.json" "$EXPECTED_SELECTOR" <<'NODE'
