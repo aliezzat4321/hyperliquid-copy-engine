@@ -9,6 +9,11 @@ Type=oneshot
 User=root
 Group=root
 UMask=0077
+# Emergency containment: service age alone must not terminate legitimate long model work.
+# Keep the existing supervisor logic available for timer/runtime-staleness recovery while
+# the semantic no-progress hang classifier is hardened under #384.
+Environment=AI_TEAM_SUPERVISOR_SERVICE_HANG_SECONDS=31536000
+# Classification only: live service environment touched; real trading remains disabled.
 ExecStart=/usr/bin/python3 /opt/hyperliquid-ai-team/scripts/ai_team_external_supervisor.py
 TimeoutStartSec=240
 NoNewPrivileges=yes

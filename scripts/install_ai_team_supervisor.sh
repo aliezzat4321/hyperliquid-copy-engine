@@ -22,6 +22,19 @@ echo 'POLYMARKET_INSPECTION=NO'
 echo 'POLYMARKET_MUTATION=NO'
 echo 'REAL_TRADING_CHANGE=NO'
 
+# Retire the obsolete host supervisor installed by the old emergency workflow.
+# That legacy unit invoked the orchestrator with `timeout 90` every two minutes
+# and then TERM/KILLed the process, which can terminate legitimate long model work.
+systemctl disable --now hyperliquid-ai-external-supervisor.timer >/dev/null 2>&1 || true
+systemctl stop hyperliquid-ai-external-supervisor.service >/dev/null 2>&1 || true
+rm -f /etc/systemd/system/hyperliquid-ai-external-supervisor.timer
+rm -f /etc/systemd/system/hyperliquid-ai-external-supervisor.service
+rm -f /usr/local/sbin/hyperliquid-ai-external-supervisor
+systemctl daemon-reload
+systemctl reset-failed hyperliquid-ai-external-supervisor.service >/dev/null 2>&1 || true
+
+echo 'LEGACY_DESTRUCTIVE_SUPERVISOR_RETIRED=YES'
+
 install -d -o root -g root -m 0700 "$STATE"
 install -d -o root -g root -m 0755 "$OPT/scripts"
 install -o root -g root -m 0755 \
