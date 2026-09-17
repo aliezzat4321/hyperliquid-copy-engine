@@ -19,6 +19,8 @@ export interface ManagedPosition {
   sourceBaseShortId: string;
   sourcePostId: string;
   username?: string;
+  ownerId?: string;
+  portfolioId?: string;
   side: 'long' | 'short';
   openedAtMs: number;
   localBaseShortId?: string;

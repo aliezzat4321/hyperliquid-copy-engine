@@ -93,6 +93,14 @@ export async function getFeed(filter = 'following', lastPostId: string | null = 
   });
 }
 
+export async function getPortfolioInvestments(portfolioId: string, isOpen: boolean, page = 1, size = 100) {
+  return post('/v1_0/investments/get_investments', {
+    portfolioId,
+    isOpen,
+    params: { page, size },
+  });
+}
+
 export async function checkAccountReady() {
   return post('/dex/account/ready', {});
 }
