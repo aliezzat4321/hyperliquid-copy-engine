@@ -10,7 +10,7 @@ import { ManagedPosition, NotificationState } from './notification-state.js';
 import { TraderTracker } from './trader-tracker.js';
 import { liveScopeSkipReason } from './live-scope.js';
 import { fetchFeedBackfill } from './feed-backfill.js';
-import { planUnrecoverableGap } from './gap-reconciliation.js';
+import { canProspectivelyRebaseGap, planUnrecoverableGap } from './gap-reconciliation.js';
 import { eliteAdmissionFromState, ELITE_ADMISSION_VERSION } from './elite-admission.js';
 import { shouldTerminallyDustReconcile } from './close-rejection.js';
 import {
@@ -1134,14 +1134,44 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
     for (const signal of gapPlan.ownedCloses) {
       await execute(signal, `${source}:gap_recovery`, receivedAtMs, feedFilter);
     }
+    const remainingManagedCount = state.managedCount();
+    const prospectiveRebaseAllowed = canProspectivelyRebaseGap(
+      cfg.live,
+      remainingManagedCount,
+      backfill.newestPostId,
+    );
     log({
       type: 'unrecoverable_feed_gap_reconciliation',
       feedFilter,
       savedCursor: saved,
       ownedCloseKeys: gapPlan.ownedCloses.map(signal => signal.key),
       reconciledOwnedCloses: gapPlan.ownedCloses.filter(signal => state.hasSeen(signal.key)).length,
-      cursorAdvanceAllowed: false,
+      remainingManagedCount,
+      cursorAdvanceAllowed: prospectiveRebaseAllowed,
     });
+    if (prospectiveRebaseAllowed && backfill.newestPostId) {
+      const rebasedCursor = {
+        postId: backfill.newestPostId,
+        observedAtMs: Date.now(),
+        source: 'shadow_zero_managed_gap_rebase',
+      };
+      state.setFeedCursor(feedFilter, rebasedCursor);
+      // Treat the explicit rebase as the startup boundary so the next newer signal is
+      // processed prospectively instead of being swallowed by startup-baseline indexing.
+      initialized = true;
+      log({
+        type: 'unrecoverable_feed_gap_rebased',
+        feedFilter,
+        previousCursor: saved,
+        newCursor: rebasedCursor,
+        fetchedPostsSkipped: posts.length,
+        missingRangeUnknown: true,
+        reason: 'shadow_zero_managed_prospective_rebase',
+        productionTrading: false,
+      });
+      lastSuccessPollMs = Date.now();
+      return gapPlan.ownedCloses.length;
+    }
     lastSuccessPollMs = Date.now();
     return gapPlan.ownedCloses.length;
   }

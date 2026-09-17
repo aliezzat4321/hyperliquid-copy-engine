@@ -29,7 +29,7 @@ function closeSignal(key: string, sourceBaseId: string, sourceTimeMs: number | n
   };
 }
 
-test('production service reconciles owned gap closes before returning and never advances the cursor', () => {
+test('production service reconciles owned gap closes before any shadow zero-managed prospective rebase', () => {
   const serviceSource = readFileSync(new URL('../../src/service.ts', import.meta.url), 'utf8');
   const gapStart = serviceSource.indexOf('if (saved && !backfill.cursorReached)');
   const normalPath = serviceSource.indexOf('const tracked =', gapStart);
@@ -39,15 +39,24 @@ test('production service reconciles owned gap closes before returning and never 
   const planIndex = gapBranch.indexOf('planUnrecoverableGap(');
   const executeLoopIndex = gapBranch.indexOf('for (const signal of gapPlan.ownedCloses)');
   const executeIndex = gapBranch.indexOf('await execute(signal', executeLoopIndex);
+  const rebasePolicyIndex = gapBranch.indexOf('canProspectivelyRebaseGap(');
   const reconciliationLogIndex = gapBranch.indexOf("type: 'unrecoverable_feed_gap_reconciliation'");
-  const returnIndex = gapBranch.indexOf('return gapPlan.ownedCloses.length');
+  const guardedRebaseIndex = gapBranch.indexOf('if (prospectiveRebaseAllowed && backfill.newestPostId)');
+  const setCursorIndex = gapBranch.indexOf('state.setFeedCursor(', guardedRebaseIndex);
+  const initializedIndex = gapBranch.indexOf('initialized = true', setCursorIndex);
+  const rebaseLogIndex = gapBranch.indexOf("type: 'unrecoverable_feed_gap_rebased'", initializedIndex);
+  const returnIndex = gapBranch.indexOf('return gapPlan.ownedCloses.length', rebaseLogIndex);
 
   assert.ok(planIndex >= 0, 'service must build an owned-close-only gap plan');
   assert.ok(executeLoopIndex > planIndex, 'service must iterate planned owned closes');
   assert.ok(executeIndex > executeLoopIndex, 'service must await the real execute path for each owned close');
-  assert.ok(reconciliationLogIndex > executeIndex, 'service must record reconciliation after execution');
-  assert.ok(returnIndex > reconciliationLogIndex, 'service must not return before owned-close reconciliation');
-  assert.equal(gapBranch.includes('setFeedCursor('), false, 'unrecoverable-gap branch must never advance the cursor');
+  assert.ok(rebasePolicyIndex > executeIndex, 'prospective rebase eligibility must be evaluated after owned-close reconciliation');
+  assert.ok(reconciliationLogIndex > rebasePolicyIndex, 'service must record reconciliation and rebase eligibility');
+  assert.ok(guardedRebaseIndex > reconciliationLogIndex, 'cursor advance must remain behind the explicit prospective rebase guard');
+  assert.ok(setCursorIndex > guardedRebaseIndex, 'service may advance only inside the guarded rebase branch');
+  assert.ok(initializedIndex > setCursorIndex, 'service must make the rebase the startup boundary before returning');
+  assert.ok(rebaseLogIndex > initializedIndex, 'service must audit the prospective rebase');
+  assert.ok(returnIndex > rebaseLogIndex, 'service must not return before the rebase is durably recorded');
 });
 
 test('stateful gap replay closes owned exposure once while preserving the durable high-water cursor', async () => {
