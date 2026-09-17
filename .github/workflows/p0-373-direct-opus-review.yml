@@ -1,0 +1,164 @@
+name: p0-373-direct-opus-review
+
+on:
+  push:
+    branches:
+      - codex/lane3-elite-admission-thin-depth-361-369
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    runs-on: [self-hosted, hyperliquid]
+    timeout-minutes: 20
+    env:
+      PR_NUMBER: '373'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+
+      - name: Exact-head independent Opus review
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET_SHA="$(git rev-parse HEAD)"
+          test "$TARGET_SHA" = "$GITHUB_SHA"
+          REVIEW_WORKDIR="/var/lib/hyperliquid-ai-team/agents/claude/worktrees/p0-373-direct-opus-${GITHUB_RUN_ID}"
+
+          sudo rm -rf "$REVIEW_WORKDIR"
+          sudo mkdir -p "$REVIEW_WORKDIR"
+          sudo cp -a "$GITHUB_WORKSPACE/." "$REVIEW_WORKDIR/"
+          sudo chown -R hl-claude-agent:hl-claude-agent "$REVIEW_WORKDIR"
+
+          cat > /tmp/p0-373-opus-prompt.txt <<EOF
+          You are Claude Opus, the independent exact-SHA reviewer for Hyperliquid Lane 3 PR #373.
+          TARGET_SHA=$TARGET_SHA
+          PR_NUMBER=$PR_NUMBER
+          Production trading must remain disabled.
+
+          Review this exact checked-out tree read-only. Falsify the implementation; do not accept it merely because tests pass.
+
+          Selector/admission requirements:
+          - Broad Invo CROWN/1D/1W/1M/1Y/AT plus research discovery remains broad and independent.
+          - Leaderboard membership alone never authorizes a copy.
+          - Selector invo-portfolio-hybrid-v3-20260916 jointly values win rate and historical return instead of using 80% as a universal hard boundary.
+          - Absolute win-rate floor is 60%; anything below 60% can remain in broad research but must never become ELITE_CANDIDATE regardless of return.
+          - Base floors remain at least 20 closed positions, at least 7 portfolio-age days when known, positive displayed historical return, not liquidated, and score at least 60/100.
+          - Hybrid return curve is continuous/logarithmic: approximately 60% WR -> 1000% required return, 70% -> 317%, 80% -> 100%, 90% -> 31%, with still lower required return above 90%.
+          - Hybrid sample curve requires more evidence below 80%: 60% WR -> 50 closes, 70% -> 35, 80%+ -> the normal 20-close floor.
+          - Therefore a very high-return trader below 80% may qualify, but only if both the return trade-off and the deeper sample requirement are met.
+          - A high-win-rate trader with weak return must fail the hybrid return requirement; neither metric alone is sufficient.
+          - Win rate and historical return each carry 30 score points; 500% remains excellent return credit while 1000% saturates return score.
+          - Daily closed-trade frequency contributes weight.
+          - Explicit recent trade/activity recency contributes weight when trustworthy data exists; missing recency is neutral, never guessed.
+          - Wins/losses count ratio is observability only and is not double-counted as payout-ratio evidence.
+          - Multiple portfolios from one owner can all qualify if each independently passes; eligibility cannot be inherited between sibling portfolios.
+          - Selector version changes cannot backdate first-elite timestamps or rewrite historical outcomes.
+          - NEW/ADD requires the exact portfolioId to have pre-trade ELITE_CANDIDATE evidence.
+          - Missing, malformed, stale, future, absent, or non-elite candidate evidence fails closed explicitly.
+          - Existing managed exposure can CLOSE after demotion so exposure is never orphaned.
+
+          Execution-integrity requirements:
+          - True non-executable residual dust may terminate only as incomplete dust reconciliation.
+          - If requested residual is executable but causal displayed depth is insufficient, exposure remains UNRESOLVED_EXPOSURE and uses bounded retry; it is never deleted as dust.
+          - Missing, empty, or mismatched Hyperliquid L2 returned coin identity fails closed.
+          - No production trading, signing, credential, capital-control, or live-routing enablement.
+
+          Inspect relevant source and tests, including portfolio-candidates.ts, elite-admission.ts, service.ts, close-rejection.ts, shadow-market.ts and their tests. Run focused tests if useful.
+
+          If any material issue exists, explain it and end with exactly:
+          LANE3_REVIEW=FAIL
+          MODEL_CLASS=OPUS
+          TARGET_SHA=$TARGET_SHA
+          PR_NUMBER=$PR_NUMBER
+          PRODUCTION_TRADING=DISABLED
+
+          If and only if all requirements pass, end with exactly:
+          LANE3_REVIEW=PASS
+          MODEL_CLASS=OPUS
+          TARGET_SHA=$TARGET_SHA
+          PR_NUMBER=$PR_NUMBER
+          SELECTOR_V3=PASS
+          ELITE_ADMISSION=PASS
+          PORTFOLIO_IDENTITY=PASS
+          MULTI_PORTFOLIO_OWNER=PASS
+          NO_HINDSIGHT=PASS
+          CLOSE_UNWIND=PASS
+          THIN_DEPTH_INTEGRITY=PASS
+          TRUE_DUST_INCOMPLETE=PASS
+          L2_COIN_FAIL_CLOSED=PASS
+          BROAD_DISCOVERY_INDEPENDENT=PASS
+          PRODUCTION_TRADING=DISABLED
+          EOF
+
+          uid="$(id -u hl-claude-agent)"
+          gid="$(id -g hl-claude-agent)"
+          home=/var/lib/hyperliquid-ai-team/agents/claude/home
+          set +e
+          (
+            cd "$REVIEW_WORKDIR"
+            timeout --foreground 900s setpriv \
+              --reuid="$uid" --regid="$gid" --init-groups \
+              env -i HOME="$home" CLAUDE_CONFIG_DIR="$home/.claude" \
+              XDG_CONFIG_HOME="$home/.config" XDG_CACHE_HOME="$home/.cache" \
+              PATH=/usr/local/bin:/usr/bin:/bin \
+              /usr/bin/claude -p --model opus --max-turns 40 \
+              --output-format json --permission-mode dontAsk \
+              --allowedTools Read,Glob,Grep,Bash \
+              "$(cat /tmp/p0-373-opus-prompt.txt)" \
+              > /tmp/p0-373-opus.json 2> /tmp/p0-373-opus.err
+          )
+          rc=$?
+          set -e
+          if [[ $rc -ne 0 ]]; then
+            tail -c 5000 /tmp/p0-373-opus.err || true
+            exit "$rc"
+          fi
+
+          python3 - <<'PY' > /tmp/p0-373-opus-result.txt
+          import json
+          from pathlib import Path
+          raw = Path('/tmp/p0-373-opus.json').read_text(errors='replace')
+          try:
+              data = json.loads(raw)
+              print(data.get('result') or data.get('text') or raw)
+          except Exception:
+              print(raw)
+          PY
+
+          required=(
+            'LANE3_REVIEW=PASS'
+            'MODEL_CLASS=OPUS'
+            "TARGET_SHA=$TARGET_SHA"
+            "PR_NUMBER=$PR_NUMBER"
+            'SELECTOR_V3=PASS'
+            'ELITE_ADMISSION=PASS'
+            'PORTFOLIO_IDENTITY=PASS'
+            'MULTI_PORTFOLIO_OWNER=PASS'
+            'NO_HINDSIGHT=PASS'
+            'CLOSE_UNWIND=PASS'
+            'THIN_DEPTH_INTEGRITY=PASS'
+            'TRUE_DUST_INCOMPLETE=PASS'
+            'L2_COIN_FAIL_CLOSED=PASS'
+            'BROAD_DISCOVERY_INDEPENDENT=PASS'
+            'PRODUCTION_TRADING=DISABLED'
+          )
+          for marker in "${required[@]}"; do
+            test "$(grep -Fxc "$marker" /tmp/p0-373-opus-result.txt || true)" = 1 || {
+              echo "Missing or duplicate review marker: $marker"
+              tail -c 10000 /tmp/p0-373-opus-result.txt
+              exit 1
+            }
+          done
+
+          test -z "$(git -C "$REVIEW_WORKDIR" status --porcelain --untracked-files=no)"
+          echo DIRECT_OPUS_REVIEW=PASS
+          echo TARGET_SHA="$TARGET_SHA"
+          tail -c 10000 /tmp/p0-373-opus-result.txt
