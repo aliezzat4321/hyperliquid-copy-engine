@@ -14,6 +14,8 @@ test('service wires elite direct watch only in shadow and through normal execute
   assert.ok(execute > hydrate && execute < scan, 'direct signals must flow through execute()');
   assert.ok(liveGuard > scan, 'direct watcher must fail closed in live mode');
   assert.ok(bounded > liveGuard, 'per-scan hydration work must be bounded');
+  assert.match(source, /shouldFallbackPoll\(target\.portfolioId, nowMs, cfg\.directWatchFallbackPollMs\)/, 'every elite must have periodic direct polling independent of selector updatedAt');
+  assert.match(source, /includeClosed: ownedPortfolioIds\.has\(target\.portfolioId\)/, 'closed-history polling must be limited to owned portfolios');
   assert.ok(pollGuard > scan, 'runtime scheduler must guard direct watch with !cfg.live');
 });
 
@@ -23,4 +25,5 @@ test('service dedupes feed/direct races by source event and preserves admission/
   assert.match(source, /inFlightSourceEvents\.has\(signal\.sourceBaseId\)/);
   assert.match(source, /ageMs > cfg\.maxSignalAgeMs/);
   assert.match(source, /shadow_\$\{candidateAdmission\.reason\}/);
+  assert.match(source, /cfg\.candidateSnapshotsPath/, 'admission must use immutable pre-trade candidate snapshots');
 });
