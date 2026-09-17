@@ -64,7 +64,9 @@ def test_reset_clears_derived_shadow_data_but_preserves_source_evidence(
     result = reset_state_root(
         tmp_path,
         epoch="lane3-hybrid-v3-clean-20260916",
-        now=dt.datetime(2026, 9, 16, 20, 0, tzinfo=dt.timezone.utc),
+        now=dt.datetime(
+            2026, 9, 16, 20, 0, tzinfo=dt.timezone.utc  # noqa: UP017
+        ),
     )
 
     after = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))

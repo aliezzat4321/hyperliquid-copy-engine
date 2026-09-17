@@ -17,7 +17,8 @@ import os
 from pathlib import Path
 from typing import Any
 
-UTC = dt.timezone.utc
+# The production self-hosted deploy host is Python 3.10; datetime.UTC is 3.11+.
+UTC = dt.timezone.utc  # noqa: UP017
 CANONICAL_STATE_ROOT = Path(
     "/var/lib/hyperliquid-copy-engine/invo-notification-executor"
 )
