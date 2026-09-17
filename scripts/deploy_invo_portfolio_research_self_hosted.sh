@@ -59,15 +59,25 @@ for required in "$candidate" "$leaderboards" "$leaderboard_snapshots" "$elite"; 
   fi
 done
 
-node - "$candidate" "$leaderboards" "$elite" <<'NODE'
+node - "$candidate" "$leaderboards" "$elite" "$SERVICE_DIR/src/portfolio-candidates.ts" <<'NODE'
 const fs = require('fs');
-const [candidatePath, leaderboardPath, elitePath] = process.argv.slice(2);
+const [candidatePath, leaderboardPath, elitePath, selectorSourcePath] = process.argv.slice(2);
 const candidate = JSON.parse(fs.readFileSync(candidatePath, 'utf8'));
 const leaderboards = JSON.parse(fs.readFileSync(leaderboardPath, 'utf8'));
 const elite = JSON.parse(fs.readFileSync(elitePath, 'utf8'));
+const selectorSource = fs.readFileSync(selectorSourcePath, 'utf8');
+const selectorMatch = selectorSource.match(
+  /ELITE_SELECTOR_VERSION\s*=\s*['"]([^'"]+)['"]/,
+);
+if (!selectorMatch) throw new Error('unable to resolve selector version from source');
+const expectedSelector = selectorMatch[1];
 const portfolios = Object.values(candidate.portfolios || {});
 if (!portfolios.length) throw new Error('Invo portfolio discovery returned zero portfolios');
-if (candidate.selectorVersion !== 'invo-portfolio-elite-v1-20260916') throw new Error(`unexpected selector version ${candidate.selectorVersion}`);
+if (candidate.selectorVersion !== expectedSelector) {
+  throw new Error(
+    `unexpected selector version ${candidate.selectorVersion}; expected ${expectedSelector}`,
+  );
+}
 if (leaderboards.leaderboardVersion !== 'invo-top-portfolios-surfaces-v2-20260916') throw new Error(`unexpected leaderboard version ${leaderboards.leaderboardVersion}`);
 const requiredSurfaces = ['CROWN', '1D', '1W', '1M', '1Y', 'AT'];
 const countsBySurface = {};
