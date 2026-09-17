@@ -99,6 +99,23 @@ test('stale candidate state fails closed', () => {
   assert.equal(decision.reason, 'candidate_state_stale');
 });
 
+test('stale portfolio observation fails closed even when aggregate candidate state is fresh', () => {
+  const state = validState({
+    lastObservedAtMs: decisionAtMs - 60_000,
+    portfolios: {
+      [portfolioId]: {
+        ...(validState().portfolios as any)[portfolioId],
+        observedAtMs: decisionAtMs - 21 * 60_000,
+      },
+    },
+  });
+  const decision = eliteAdmissionFromState(stateFile(state), portfolioId, decisionAtMs, 20 * 60_000);
+  assert.equal(decision.allowed, false);
+  assert.equal(decision.reason, 'candidate_observation_stale');
+  assert.equal(decision.candidateStateLastObservedAtMs, decisionAtMs - 60_000);
+  assert.equal(decision.candidateObservedAtMs, decisionAtMs - 21 * 60_000);
+});
+
 test('missing candidate state fails closed', () => {
   const decision = eliteAdmissionFromState('/does/not/exist/portfolio-candidates.json', portfolioId, decisionAtMs, 20 * 60_000);
   assert.equal(decision.allowed, false);

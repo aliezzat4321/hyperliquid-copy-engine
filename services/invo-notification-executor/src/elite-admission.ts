@@ -117,6 +117,7 @@ export function eliteAdmissionFromState(
 
   if (candidateObservedAtMs == null || candidateObservedAtMs <= 0) return { ...enriched, reason: 'candidate_observation_missing' };
   if (candidateObservedAtMs > decisionAtMs) return { ...enriched, reason: 'candidate_observation_from_future' };
+  if (decisionAtMs - candidateObservedAtMs > maxStateAgeMs) return { ...enriched, reason: 'candidate_observation_stale' };
   if (candidate.bucket !== 'ELITE_CANDIDATE') return { ...enriched, reason: 'portfolio_not_elite' };
   if (firstEliteAtMs == null || firstEliteAtMs > decisionAtMs) return { ...enriched, reason: 'portfolio_not_elite_at_decision_time' };
 
