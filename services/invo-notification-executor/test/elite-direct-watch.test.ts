@@ -5,9 +5,12 @@ import { join } from 'node:path';
 import test from 'node:test';
 import {
   EliteDirectWatchState,
+  closedSignalsAfterBoundary,
   loadEliteDirectTargets,
+  planClosedHydrations,
   planDirectHydrations,
   signalsFromDirectInvestments,
+  unownedCloseEvidence,
   type EliteDirectTarget,
 } from '../src/elite-direct-watch.js';
 
@@ -122,6 +125,10 @@ test('overdue periodic targets outrank repeated selector-change hints', () => {
     selectorInitialized: true,
     lastSelectorUpdatedAtMs: BASE,
     lastFallbackPollAtMs,
+    closedHistoryInitialized: true,
+    closedProcessedThroughMs: BASE,
+    closedBoundaryIds: [],
+    lastClosedPollAtMs: BASE,
   });
   const overdueOldest = makeTarget('periodic-oldest', BASE - 60_000);
   const overdueNewer = makeTarget('periodic-newer', BASE - 50_000);
@@ -194,4 +201,66 @@ test('sanitized captured investment shapes preserve open/increase and owned-clos
   assert.deepEqual(signals.map(row => row.action), ['increase', 'close']);
   assert.equal(signals[0].entrySize, 1);
   assert.equal(signals[1].closingPrice, 1.1);
+});
+
+test('closed-only round trip after a baseline is evidence, never a replayed shadow open', () => {
+  const closed = openRow({
+    isOpen: false, closingPrice: 0.8, createdAt: BASE + 100, updatedAt: BASE + 200, closedAt: BASE + 200,
+  });
+  const signals = closedSignalsAfterBoundary([closed], target, BASE, [], BASE + 300);
+  assert.equal(signals.length, 1);
+  assert.equal(signals[0].action, 'close');
+  assert.equal(signals.some(signal => signal.action === 'open'), false);
+  assert.deepEqual(unownedCloseEvidence(signals[0], false), {
+    type: 'missed_short_roundtrip',
+    reason: 'open_and_close_not_observed_while_open',
+    lifecycleCopyability: 'NON_COPYABLE_CLOSED_ONLY',
+    reconstructedOpenExecuted: false,
+    sourceCreatedAtMs: BASE + 100,
+    sourceClosedAtMs: BASE + 200,
+    portfolioId: 'p1',
+  });
+});
+
+test('first closed-history baseline indexes old rows without replay and survives restart', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'elite-closed-watermark-')), 'state.json');
+  const first = new EliteDirectWatchState(path);
+  first.syncTargets([target], new Set(), BASE);
+  const old = openRow({ isOpen: false, closingPrice: 0.8, createdAt: BASE - 200, closedAt: BASE - 100 });
+  assert.equal(first.targets()[0].closedHistoryInitialized, false);
+  first.commitClosedHydration('p1', [old], BASE + 1);
+
+  const restarted = new EliteDirectWatchState(path);
+  const stored = restarted.targets()[0];
+  assert.equal(stored.closedHistoryInitialized, true);
+  assert.equal(stored.closedProcessedThroughMs, BASE - 100);
+  assert.deepEqual(stored.closedBoundaryIds, ['base1']);
+  assert.deepEqual(closedSignalsAfterBoundary([old], target, stored.closedProcessedThroughMs, stored.closedBoundaryIds, BASE + 2), []);
+});
+
+test('equal-timestamp feed/direct boundary identity is not counted twice', () => {
+  const first = openRow({ isOpen: false, closingPrice: 0.8, closedAt: BASE + 100 });
+  const duplicate = { ...first, id: 'different-surface-row-id' };
+  assert.deepEqual(closedSignalsAfterBoundary([duplicate], target, BASE + 100, ['base1'], BASE + 200), []);
+});
+
+test('closed polling is fair for 45 targets and request math stays bounded', () => {
+  const rows = Array.from({ length: 45 }, (_, index) => ({
+    ...target, portfolioId: `p${String(index).padStart(2, '0')}`,
+    baselineAtMs: BASE, processedThroughMs: BASE, selectorInitialized: true,
+    lastSelectorUpdatedAtMs: BASE, lastFallbackPollAtMs: BASE,
+    closedHistoryInitialized: true, closedProcessedThroughMs: BASE,
+    closedBoundaryIds: [], lastClosedPollAtMs: BASE - 60_000 - index,
+  }));
+  const served = new Set<string>();
+  for (let scan = 0; scan < 15; scan += 1) {
+    const plan = planClosedHydrations(rows, BASE + scan * 3_000, 60_000, 3);
+    for (const item of plan) {
+      served.add(item.target.portfolioId);
+      item.target.lastClosedPollAtMs = BASE + scan * 3_000;
+    }
+  }
+  assert.equal(served.size, 45);
+  assert.equal(15 * 3_000, 45_000);
+  assert.equal(8 + 3 * 2, 14, 'worst case is 14 direct investment requests per scan');
 });

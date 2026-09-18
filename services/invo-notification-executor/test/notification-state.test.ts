@@ -58,6 +58,15 @@ test('bounds the persistent dedupe window', () => {
   assert.equal(state.hasSeen('c'), true);
 });
 
+test('persists whether an opening lifecycle was observed', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'invo-open-observed-')), 'state.json');
+  const first = new NotificationState(path);
+  first.markObservedOpen('base-open');
+  const restarted = new NotificationState(path);
+  assert.equal(restarted.hasObservedOpen('base-open'), true);
+  assert.equal(restarted.hasObservedOpen('base-never-open'), false);
+});
+
 test('restart synthesizes a retryable close signal for legacy unresolved source-close exposure', () => {
   const dir = mkdtempSync(join(tmpdir(), 'invo-notify-state-'));
   const path = join(dir, 'state.json');

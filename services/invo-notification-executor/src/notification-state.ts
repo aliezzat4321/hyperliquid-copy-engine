@@ -64,6 +64,7 @@ interface DiskState {
   managed: Record<string, ManagedPosition>;
   feedCursors: Record<string, FeedCursor>;
   feedBaselines: Record<string, number>;
+  observedOpenSourceIds: string[];
 }
 
 export interface FeedCursor {
@@ -114,8 +115,9 @@ function normalizeManaged(raw: Record<string, ManagedPosition> | undefined): Rec
 }
 
 export class NotificationState {
-  private state: DiskState = { seen: [], managed: {}, feedCursors: {}, feedBaselines: {} };
+  private state: DiskState = { seen: [], managed: {}, feedCursors: {}, feedBaselines: {}, observedOpenSourceIds: [] };
   private seen = new Set<string>();
+  private observedOpenSourceIds = new Set<string>();
 
   constructor(private readonly path: string, private readonly maxSeen = 20_000) {
     this.load();
@@ -133,8 +135,10 @@ export class NotificationState {
           ...Object.fromEntries(Object.entries(parsed.feedCursors ?? {}).map(([feed, cursor]) => [feed, cursor.observedAtMs])),
           ...(parsed.feedBaselines ?? {}),
         },
+        observedOpenSourceIds: parsed.observedOpenSourceIds ?? [],
       };
       this.seen = new Set(this.state.seen);
+      this.observedOpenSourceIds = new Set(this.state.observedOpenSourceIds);
     } catch (err) {
       console.error(JSON.stringify({ type: 'state_load_error', path: this.path, error: String(err) }));
     }
@@ -156,6 +160,19 @@ export class NotificationState {
     while (this.state.seen.length > this.maxSeen) {
       const old = this.state.seen.shift();
       if (old) this.seen.delete(old);
+    }
+    this.save();
+  }
+
+  hasObservedOpen(sourceBaseId: string) { return this.observedOpenSourceIds.has(sourceBaseId); }
+
+  markObservedOpen(sourceBaseId: string) {
+    if (!sourceBaseId || this.observedOpenSourceIds.has(sourceBaseId)) return;
+    this.state.observedOpenSourceIds.push(sourceBaseId);
+    this.observedOpenSourceIds.add(sourceBaseId);
+    while (this.state.observedOpenSourceIds.length > this.maxSeen) {
+      const old = this.state.observedOpenSourceIds.shift();
+      if (old) this.observedOpenSourceIds.delete(old);
     }
     this.save();
   }

@@ -7,6 +7,8 @@ export interface InvoSignal {
   observedAtMs: number;
   sourceTimeMs: number | null;
   sourceTimeField: string | null;
+  /** Source creation time when the API exposes it separately from this event time. */
+  openedSourceTimeMs?: number | null;
   ownerId: string;
   username: string;
   portfolioId: string;
@@ -93,6 +95,7 @@ export function signalFromFeedPost(post: any, observedAtMs = Date.now()): InvoSi
     observedAtMs,
     sourceTimeMs,
     sourceTimeField,
+    openedSourceTimeMs: toMs(update.createdAt),
     ownerId,
     username,
     portfolioId,

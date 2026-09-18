@@ -2,7 +2,8 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname } from 'path';
 import type { InvoSignal } from './notification-signal.js';
 
-export const ELITE_DIRECT_WATCH_VERSION = 'lane3-elite-direct-watch-v1-20260917';
+export const ELITE_DIRECT_WATCH_VERSION = 'lane3-elite-direct-watch-v2-20260918';
+const LEGACY_VERSION = 'lane3-elite-direct-watch-v1-20260917';
 
 export interface EliteDirectTarget {
   portfolioId: string;
@@ -17,6 +18,10 @@ export interface StoredTarget extends EliteDirectTarget {
   selectorInitialized: boolean;
   lastSelectorUpdatedAtMs: number | null;
   lastFallbackPollAtMs: number;
+  closedHistoryInitialized: boolean;
+  closedProcessedThroughMs: number;
+  closedBoundaryIds: string[];
+  lastClosedPollAtMs: number;
 }
 
 export interface DirectHydrationPlanItem {
@@ -24,6 +29,8 @@ export interface DirectHydrationPlanItem {
   selectorUpdatedAtMs: number | null;
   reason: 'periodic_direct_poll' | 'selector_change';
 }
+
+export interface ClosedHydrationPlanItem { target: StoredTarget; reason: 'closed_history_baseline' | 'periodic_closed_poll' }
 
 export function planDirectHydrations(
   targets: StoredTarget[],
@@ -53,6 +60,20 @@ export function planDirectHydrations(
     .slice(0, Math.max(0, maxHydrations));
 }
 
+export function planClosedHydrations(
+  targets: StoredTarget[], nowMs: number, closedPollMs: number, maxHydrations: number,
+): ClosedHydrationPlanItem[] {
+  return targets
+    .filter(target => !target.closedHistoryInitialized || nowMs - target.lastClosedPollAtMs >= closedPollMs)
+    .sort((a, b) => {
+      if (a.closedHistoryInitialized !== b.closedHistoryInitialized) return a.closedHistoryInitialized ? 1 : -1;
+      if (a.lastClosedPollAtMs !== b.lastClosedPollAtMs) return a.lastClosedPollAtMs - b.lastClosedPollAtMs;
+      return a.portfolioId.localeCompare(b.portfolioId);
+    })
+    .slice(0, Math.max(0, maxHydrations))
+    .map(target => ({ target, reason: target.closedHistoryInitialized ? 'periodic_closed_poll' : 'closed_history_baseline' }));
+}
+
 interface DirectWatchDiskState {
   version: string;
   targets: Record<string, StoredTarget>;
@@ -64,6 +85,10 @@ export interface DirectWatchStatus {
   selectorInitializedCount: number;
   fallbackTargetCount: number;
   oldestProcessedThroughMs: number | null;
+  closedInitializedCount: number;
+  oldestClosedProcessedThroughMs: number | null;
+  oldestOpenPollAtMs: number | null;
+  oldestClosedPollAtMs: number | null;
 }
 
 export function directSourceTimeMs(value: unknown): number | null {
@@ -119,8 +144,18 @@ export class EliteDirectWatchState {
     if (!existsSync(this.path)) return;
     try {
       const parsed = JSON.parse(readFileSync(this.path, 'utf8')) as DirectWatchDiskState;
-      if (parsed?.version === ELITE_DIRECT_WATCH_VERSION && parsed?.targets && typeof parsed.targets === 'object') {
-        this.state = parsed;
+      if ([ELITE_DIRECT_WATCH_VERSION, LEGACY_VERSION].includes(parsed?.version) && parsed?.targets && typeof parsed.targets === 'object') {
+        this.state = { version: ELITE_DIRECT_WATCH_VERSION, targets: {} };
+        for (const [portfolioId, raw] of Object.entries(parsed.targets)) {
+          const target = raw as Partial<StoredTarget>;
+          this.state.targets[portfolioId] = {
+            ...(target as StoredTarget),
+            closedHistoryInitialized: target.closedHistoryInitialized ?? false,
+            closedProcessedThroughMs: target.closedProcessedThroughMs ?? 0,
+            closedBoundaryIds: target.closedBoundaryIds ?? [],
+            lastClosedPollAtMs: target.lastClosedPollAtMs ?? 0,
+          };
+        }
       }
     } catch {
       // Fail closed by starting a new prospective baseline. Historical events are never replayed.
@@ -147,6 +182,10 @@ export class EliteDirectWatchState {
           selectorInitialized: false,
           lastSelectorUpdatedAtMs: null,
           lastFallbackPollAtMs: 0,
+          closedHistoryInitialized: false,
+          closedProcessedThroughMs: 0,
+          closedBoundaryIds: [],
+          lastClosedPollAtMs: 0,
         };
         changed = true;
       } else if (
@@ -198,6 +237,33 @@ export class EliteDirectWatchState {
     this.save();
   }
 
+  noteClosedPoll(portfolioId: string, atMs: number) {
+    const target = this.state.targets[portfolioId];
+    if (!target) return;
+    target.lastClosedPollAtMs = atMs;
+    this.save();
+  }
+
+  commitClosedHydration(portfolioId: string, rows: any[], polledAtMs: number) {
+    const target = this.state.targets[portfolioId];
+    if (!target) return;
+    const points = rows.flatMap(row => {
+      const atMs = directSourceTimeMs(row?.closedAt) ?? directSourceTimeMs(row?.updatedAt);
+      const id = String(row?.baseId ?? row?.id ?? '').trim();
+      return atMs != null && id ? [{ atMs, id }] : [];
+    });
+    const newestMs = points.reduce((value, point) => Math.max(value, point.atMs), target.closedProcessedThroughMs);
+    const boundaryIds = new Set(
+      newestMs === target.closedProcessedThroughMs ? target.closedBoundaryIds : [],
+    );
+    for (const point of points) if (point.atMs === newestMs) boundaryIds.add(point.id);
+    target.closedHistoryInitialized = true;
+    target.closedProcessedThroughMs = newestMs;
+    target.closedBoundaryIds = [...boundaryIds].sort();
+    target.lastClosedPollAtMs = polledAtMs;
+    this.save();
+  }
+
   commitHydration(portfolioId: string, processedThroughMs: number, selectorUpdatedAtMs?: number) {
     const target = this.state.targets[portfolioId];
     if (!target) return;
@@ -212,12 +278,18 @@ export class EliteDirectWatchState {
   status(): DirectWatchStatus {
     const targets = Object.values(this.state.targets);
     const processed = targets.map(target => target.processedThroughMs).filter(Number.isFinite);
+    const closedProcessed = targets.filter(target => target.closedHistoryInitialized)
+      .map(target => target.closedProcessedThroughMs).filter(Number.isFinite);
     return {
       version: ELITE_DIRECT_WATCH_VERSION,
       targetCount: targets.length,
       selectorInitializedCount: targets.filter(target => target.selectorInitialized).length,
       fallbackTargetCount: targets.filter(target => !target.selectorInitialized).length,
       oldestProcessedThroughMs: processed.length ? Math.min(...processed) : null,
+      closedInitializedCount: targets.filter(target => target.closedHistoryInitialized).length,
+      oldestClosedProcessedThroughMs: closedProcessed.length ? Math.min(...closedProcessed) : null,
+      oldestOpenPollAtMs: targets.length ? Math.min(...targets.map(target => target.lastFallbackPollAtMs)) : null,
+      oldestClosedPollAtMs: targets.length ? Math.min(...targets.map(target => target.lastClosedPollAtMs)) : null,
     };
   }
 }
@@ -249,6 +321,7 @@ function signalFromInvestment(
     observedAtMs,
     sourceTimeMs,
     sourceTimeField,
+    openedSourceTimeMs: directSourceTimeMs(row?.createdAt),
     ownerId: target.ownerId || String(row?.owner?.id ?? ''),
     username: target.username || normalizedUsername(row?.owner?.username),
     portfolioId: target.portfolioId,
@@ -312,4 +385,28 @@ export function signalsFromDirectInvestments(
   }
   const byKey = new Map(out.map(signal => [signal.key, signal]));
   return [...byKey.values()].sort((a, b) => (a.sourceTimeMs ?? a.observedAtMs) - (b.sourceTimeMs ?? b.observedAtMs));
+}
+
+export function closedSignalsAfterBoundary(
+  closedRows: any[], target: EliteDirectTarget, processedThroughMs: number,
+  boundaryIds: readonly string[], observedAtMs: number,
+): InvoSignal[] {
+  const atBoundary = new Set(boundaryIds);
+  return signalsFromDirectInvestments([], closedRows, target, processedThroughMs - 1, observedAtMs)
+    .filter(signal => {
+      const sourceMs = signal.sourceTimeMs ?? 0;
+      return sourceMs > processedThroughMs || (sourceMs === processedThroughMs && !atBoundary.has(signal.sourceBaseId));
+    });
+}
+
+export function unownedCloseEvidence(signal: InvoSignal, observedOpen: boolean) {
+  return {
+    type: observedOpen ? 'close_ownership_gap' : 'missed_short_roundtrip',
+    reason: observedOpen ? 'close_not_owned_by_service' : 'open_and_close_not_observed_while_open',
+    lifecycleCopyability: observedOpen ? 'NOT_OWNED' : 'NON_COPYABLE_CLOSED_ONLY',
+    reconstructedOpenExecuted: false,
+    sourceCreatedAtMs: signal.openedSourceTimeMs ?? null,
+    sourceClosedAtMs: signal.sourceTimeMs,
+    portfolioId: signal.portfolioId,
+  } as const;
 }

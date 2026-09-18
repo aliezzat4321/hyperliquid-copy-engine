@@ -21,10 +21,13 @@ import {
 } from './feed-surfaces.js';
 import {
   directSourceTimeMs,
+  closedSignalsAfterBoundary,
   EliteDirectWatchState,
   loadEliteDirectTargets,
+  planClosedHydrations,
   planDirectHydrations,
   signalsFromDirectInvestments,
+  unownedCloseEvidence,
 } from './elite-direct-watch.js';
 import { eliteAdmissionFromState, ELITE_ADMISSION_VERSION } from './elite-admission.js';
 import { shouldTerminallyDustReconcile } from './close-rejection.js';
@@ -108,6 +111,9 @@ function loadConfig() {
     directWatchScanMs: Math.max(2_000, n('NOTIFICATION_TRADER_DIRECT_WATCH_SCAN_MS', 3_000)),
     directWatchMaxHydratesPerScan: Math.max(1, Math.min(20, Math.trunc(n('NOTIFICATION_TRADER_DIRECT_WATCH_MAX_HYDRATES_PER_SCAN', 8)))),
     directWatchFallbackPollMs: Math.max(10_000, n('NOTIFICATION_TRADER_DIRECT_WATCH_FALLBACK_POLL_MS', 18_000)),
+    directWatchClosedPollMs: Math.max(30_000, n('NOTIFICATION_TRADER_DIRECT_WATCH_CLOSED_POLL_MS', 60_000)),
+    directWatchMaxClosedHydratesPerScan: Math.max(1, Math.min(10, Math.trunc(n('NOTIFICATION_TRADER_DIRECT_WATCH_MAX_CLOSED_HYDRATES_PER_SCAN', 3)))),
+    directWatchClosedMaxPages: Math.max(1, Math.min(3, Math.trunc(n('NOTIFICATION_TRADER_DIRECT_WATCH_CLOSED_MAX_PAGES', 2)))),
     minEvidenceEvents: Math.max(1, Math.trunc(n('NOTIFICATION_TRADER_MIN_EVIDENCE_EVENTS', 20))),
     minObservationDays: Math.max(1, Math.trunc(n('NOTIFICATION_TRADER_MIN_OBSERVATION_DAYS', 7))),
     staleAfterMs: Math.max(60_000, n('NOTIFICATION_TRADER_STALE_AFTER_MS', 3 * 24 * 60 * 60 * 1000)),
@@ -153,6 +159,7 @@ let directWatchBackoffMs = 0;
 let directWatchBackoffUntilMs = 0;
 const directWatchMetrics = {
   selectorRequests: 0, hydrationRequests: 0, hydrationCount: 0,
+  closedHydrationCount: 0, closedBaselineCount: 0, closedOverflowRiskCount: 0,
   signalsObserved: 0, signalsHandled: 0, http429s: 0,
   lastScanAtMs: 0, lastSuccessAtMs: 0,
 };
@@ -511,9 +518,11 @@ async function shadowReup(
 
 async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: number, feedFilter: string) {
   const sourceEventKey = signal.sourceTimeMs == null ? null : `source-event:${signal.sourceBaseId}:${signal.sourceTimeMs}`;
+  const closeLifecycleKey = signal.action === 'close' ? `source-close:${signal.sourceBaseId}` : null;
   if (
     state.hasSeen(signal.key)
     || (sourceEventKey != null && state.hasSeen(sourceEventKey))
+    || (closeLifecycleKey != null && state.hasSeen(closeLifecycleKey))
     || inFlight.has(signal.key)
     || inFlightSourceEvents.has(signal.sourceBaseId)
   ) return;
@@ -522,6 +531,7 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
   const decisionAtMs = Date.now();
 
   try {
+    if (signal.action !== 'close') state.markObservedOpen(signal.sourceBaseId);
     // Discovery remains broad in the separate portfolio-research collector, but NEW
     // Lane 3 shadow exposure is portfolio-level elite-only. Closes bypass this gate so
     // previously owned broad-research exposure can always unwind after a demotion.
@@ -577,7 +587,11 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
       const managed = state.getManagedBySource(signal.sourceBaseId);
       if (!managed) {
         state.markSeen(signal.key);
-        log({ type: 'close_ownership_gap', reason: 'close_not_owned_by_service', managed: null, signal, wakeSource, ...closeFreshness(signal, receivedAtMs) });
+        const observedOpen = state.hasObservedOpen(signal.sourceBaseId);
+        log({
+          ...unownedCloseEvidence(signal, observedOpen),
+          managed: null, signal, wakeSource, ...closeFreshness(signal, receivedAtMs),
+        });
         return;
       }
 
@@ -1047,7 +1061,10 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
       ...(signal.action === 'close' ? closeFreshness(signal, receivedAtMs) : {}),
     });
   } finally {
-    if (sourceEventKey != null && state.hasSeen(signal.key)) state.markSeen(sourceEventKey);
+    if (state.hasSeen(signal.key)) {
+      if (sourceEventKey != null) state.markSeen(sourceEventKey);
+      if (closeLifecycleKey != null) state.markSeen(closeLifecycleKey);
+    }
     inFlight.delete(signal.key);
     inFlightSourceEvents.delete(signal.sourceBaseId);
   }
@@ -1310,18 +1327,12 @@ async function hydrateDirectTarget(
   selectorUpdatedAtMs: number | null,
   reason: string,
   observedAtMs: number,
-  includeClosed: boolean,
 ) {
-  directWatchMetrics.hydrationRequests += includeClosed ? 2 : 1;
-  const openPromise = invo.getPortfolioInvestments(target.portfolioId, true, 1, 100);
-  const closedPromise = includeClosed
-    ? invo.getPortfolioInvestments(target.portfolioId, false, 1, 100)
-    : Promise.resolve(null);
-  const [openPayload, closedPayload] = await Promise.all([openPromise, closedPromise]);
+  directWatchMetrics.hydrationRequests += 1;
+  const openPayload = await invo.getPortfolioInvestments(target.portfolioId, true, 1, 100);
   const openRows = directInvestmentRows(openPayload);
-  const closedRows = directInvestmentRows(closedPayload);
   const signals = signalsFromDirectInvestments(
-    openRows, closedRows, target, target.processedThroughMs, observedAtMs,
+    openRows, [], target, target.processedThroughMs, observedAtMs,
   );
   // This target received its bounded direct-poll opportunity even if a later
   // signal cannot be handled. Advance the scheduling deadline without moving
@@ -1362,6 +1373,59 @@ async function hydrateDirectTarget(
     signalCount: signals.length,
     allHandled,
     live: false,
+  });
+}
+
+async function hydrateClosedHistory(
+  target: ReturnType<EliteDirectWatchState['targets']>[number],
+  reason: 'closed_history_baseline' | 'periodic_closed_poll',
+  observedAtMs: number,
+) {
+  const rows: any[] = [];
+  let boundaryReached = !target.closedHistoryInitialized;
+  let pagesFetched = 0;
+  for (let page = 1; page <= cfg.directWatchClosedMaxPages; page += 1) {
+    directWatchMetrics.hydrationRequests += 1;
+    const payload = await invo.getPortfolioInvestments(target.portfolioId, false, page, 100);
+    pagesFetched += 1;
+    const pageRows = directInvestmentRows(payload);
+    rows.push(...pageRows);
+    if (pageRows.length < 100) { boundaryReached = true; break; }
+    if (target.closedHistoryInitialized && pageRows.some(row => {
+      const atMs = directSourceTimeMs(row?.closedAt) ?? directSourceTimeMs(row?.updatedAt);
+      return atMs != null && atMs <= target.closedProcessedThroughMs;
+    })) { boundaryReached = true; break; }
+  }
+  directWatch.noteClosedPoll(target.portfolioId, observedAtMs);
+  directWatchMetrics.closedHydrationCount += 1;
+  if (!boundaryReached) directWatchMetrics.closedOverflowRiskCount += 1;
+
+  if (!target.closedHistoryInitialized) {
+    directWatch.commitClosedHydration(target.portfolioId, rows, observedAtMs);
+    directWatchMetrics.closedBaselineCount += 1;
+    log({
+      type: 'elite_direct_closed_history_baseline', portfolioId: target.portfolioId,
+      indexedRows: rows.length, pagesFetched, boundaryReached, replayedSignals: 0, live: false,
+    });
+    return;
+  }
+
+  const signals = closedSignalsAfterBoundary(
+    rows, target, target.closedProcessedThroughMs, target.closedBoundaryIds, observedAtMs,
+  );
+  directWatchMetrics.signalsObserved += signals.length;
+  for (const signal of signals) await execute(signal, `elite_direct:${reason}`, observedAtMs, target.sourceFilter);
+  const allHandled = signals.every(signal => state.hasSeen(signal.key)
+    || (signal.sourceTimeMs != null && state.hasSeen(`source-event:${signal.sourceBaseId}:${signal.sourceTimeMs}`)));
+  const watermarkCommitted = allHandled && boundaryReached;
+  if (watermarkCommitted) {
+    directWatch.commitClosedHydration(target.portfolioId, rows, observedAtMs);
+    directWatchMetrics.signalsHandled += signals.length;
+  }
+  log({
+    type: 'elite_direct_closed_hydration', portfolioId: target.portfolioId, reason,
+    previousClosedProcessedThroughMs: target.closedProcessedThroughMs,
+    signalCount: signals.length, pagesFetched, boundaryReached, allHandled, watermarkCommitted, live: false,
   });
 }
 
@@ -1410,9 +1474,13 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
         item.selectorUpdatedAtMs,
         item.reason,
         nowMs,
-        ownedPortfolioIds.has(item.target.portfolioId),
       );
     }
+    const closedPlan = planClosedHydrations(
+      directWatch.targets(), nowMs, cfg.directWatchClosedPollMs,
+      cfg.directWatchMaxClosedHydratesPerScan,
+    );
+    for (const item of closedPlan) await hydrateClosedHistory(item.target, item.reason, nowMs);
     directWatchBackoffMs = 0;
     directWatchBackoffUntilMs = 0;
     directWatchMetrics.lastSuccessAtMs = Date.now();
@@ -1502,6 +1570,15 @@ function startServer() {
           scanMs: cfg.directWatchScanMs,
           maxHydratesPerScan: cfg.directWatchMaxHydratesPerScan,
           fallbackPollMs: cfg.directWatchFallbackPollMs,
+          closedPollMs: cfg.directWatchClosedPollMs,
+          maxClosedHydratesPerScan: cfg.directWatchMaxClosedHydratesPerScan,
+          closedMaxPages: cfg.directWatchClosedMaxPages,
+          nominalOpenSweepMs: Math.ceil(directWatch.status().targetCount / cfg.directWatchMaxHydratesPerScan) * cfg.directWatchScanMs,
+          nominalClosedSweepMs: Math.ceil(directWatch.status().targetCount / cfg.directWatchMaxClosedHydratesPerScan) * cfg.directWatchScanMs,
+          nominalMaxRequestsPerScan: cfg.directWatchMaxHydratesPerScan
+            + cfg.directWatchMaxClosedHydratesPerScan * cfg.directWatchClosedMaxPages,
+          openFreshnessGuarantee: false,
+          openFreshnessLimitReason: '18s nominal sweep leaves 7s for feed, selector, transport, execution, and 429 backoff; use observed poll ages',
           backoffMs: directWatchBackoffMs,
           backoffUntilMs: directWatchBackoffUntilMs,
         },
@@ -1627,6 +1704,9 @@ async function main() {
       scanMs: cfg.directWatchScanMs,
       maxHydratesPerScan: cfg.directWatchMaxHydratesPerScan,
       fallbackPollMs: cfg.directWatchFallbackPollMs,
+      closedPollMs: cfg.directWatchClosedPollMs,
+      maxClosedHydratesPerScan: cfg.directWatchMaxClosedHydratesPerScan,
+      closedMaxPages: cfg.directWatchClosedMaxPages,
       statePath: cfg.directWatchStatePath,
       source: 'portfolio_specific_read_only',
     },
