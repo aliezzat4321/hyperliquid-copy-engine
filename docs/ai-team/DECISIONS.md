@@ -53,9 +53,9 @@ Append-only record of accepted architecture / policy decisions. New decisions ma
   therefore checked for within-page and cross-page non-increasing effective close time.
   An ordering violation emits explicit risk telemetry and advances neither baseline nor
   watermark.
-  A closed-history timestamp boundary is proven only by a strictly older row, endpoint
-  exhaustion, or encountering the complete stored identity set at the boundary timestamp;
-  unrelated equal-timestamp rows cannot advance the watermark. Bounded pagination that
+  A closed-history timestamp boundary is proven only by a strictly older row or endpoint
+  exhaustion; stored identities cannot prove an unstable equal-timestamp ordering.
+  Unrelated equal-timestamp rows cannot advance the watermark. Bounded pagination that
   proves none of these retains the prior watermark and emits overflow-risk telemetry.
 - Selector timestamps are prioritization hints only. Non-rate-limit selector, open, and
   closed request failures are isolated per target. Scheduling attempts are durably noted
@@ -72,10 +72,14 @@ Append-only record of accepted architecture / policy decisions. New decisions ma
   immediately after indexing. Retryable owned CLOSE recovery may still gate its cursor,
   but cannot leave the surface in startup mode and swallow later fresh OPEN/ADD events;
   the managed exposure retains its pending close for reconciliation.
-- The 45-target defaults imply nominal 18s open and 45s closed sweeps and at most 18
-  requests per 3s scan with four selector surfaces (6 requests/s). These are capacity
-  calculations, not a 25s freshness guarantee; health exposes actual oldest poll age and
-  overdue lag.
+- The 45-target defaults imply nominal 18s open and 45s closed sweeps. Complete OPEN
+  pagination now permits at most three pages per each of eight bounded open/drain slots;
+  with four selector requests and two pages for each of three CLOSED slots, the explicit
+  worst case is 34 requests per 3s scan (11.33 requests/s). This is a ceiling, not an
+  expected rate: short endpoints stop early and a 429 stops the scan under bounded global
+  cooldown. Health exposes configured page bounds, the calculated ceiling, oldest poll
+  age, retirement drain counts, overflow, and ordering failures. Shared-quota arbitration
+  remains unresolved under open Issue #397; this PR does not claim that capacity proof.
 - This changes shadow source capture only. It does not authorize real trading, capital,
   credentials, signing, order routing, deployment, or bulk mining.
 
@@ -227,3 +231,17 @@ This supersedes the earlier task-class policy that withheld automatic merge from
   provenance, policy, safety and uncontaminated 24-observation stability conjuncts.
 - This decision changes no live-trading permission. `REAL_TRADING_ENABLED` remains
   disabled.
+
+## 2026-09-18 — Lane 3 admission history is a bounded causal index
+
+- Portfolio research remains the owner of the append-only candidate snapshot JSONL, but
+  atomically publishes a separate `*.recent.json` admission index containing at most the
+  last three observations per portfolio from the last 30 minutes.
+- Three observations cover a fresh signal (maximum age 25 seconds) across the collector's
+  10-minute refresh boundary. Admission selects only the latest observation at or before
+  source time, preserving demotion and preventing look-ahead.
+- The executor never parses the historical JSONL. The compact index has an 8 MiB read
+  ceiling; missing, malformed, oversized, or unreadable indexes fail closed. Thus hot-path
+  memory and latency do not grow with historical runtime.
+- This changes no live-trading permission. `REAL_TRADING_ENABLED` and
+  `NOTIFICATION_TRADER_LIVE` remain disabled.

@@ -2,8 +2,10 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname } from 'path';
 import type { InvoSignal } from './notification-signal.js';
 
-export const ELITE_DIRECT_WATCH_VERSION = 'lane3-elite-direct-watch-v2-20260918';
+export const ELITE_DIRECT_WATCH_VERSION = 'lane3-elite-direct-watch-v4-20260918';
 const LEGACY_VERSION = 'lane3-elite-direct-watch-v1-20260917';
+const LEGACY_VERSION_2 = 'lane3-elite-direct-watch-v2-20260918';
+const LEGACY_VERSION_3 = 'lane3-elite-direct-watch-v3-20260918';
 
 export interface EliteDirectTarget {
   portfolioId: string;
@@ -13,6 +15,13 @@ export interface EliteDirectTarget {
 }
 
 export interface StoredTarget extends EliteDirectTarget {
+  lifecycle?: 'ACTIVE' | 'RETIRING';
+  retiredAtMs?: number | null;
+  retireAfterMs?: number | null;
+  lastRetirementOpenPollAtMs?: number;
+  retirementRelevantOpenCount?: number | null;
+  retirementOpenEmptyProofs?: number;
+  retirementClosedProofs?: number;
   baselineAtMs: number;
   processedThroughMs: number;
   selectorInitialized: boolean;
@@ -27,7 +36,7 @@ export interface StoredTarget extends EliteDirectTarget {
 export interface DirectHydrationPlanItem {
   target: StoredTarget;
   selectorUpdatedAtMs: number | null;
-  reason: 'periodic_direct_poll' | 'selector_change';
+  reason: 'periodic_direct_poll' | 'selector_change' | 'retirement_open_drain';
 }
 
 export interface ClosedHydrationPlanItem { target: StoredTarget; reason: 'closed_history_baseline' | 'periodic_closed_poll' }
@@ -74,9 +83,8 @@ export async function runIsolatedHydrations<T>(
 /**
  * The captured endpoint is newest-first across pages. Equal timestamps may span
  * pages, so an unrelated row at T proves nothing. We may stop only after passing
- * below T, exhausting the endpoint, or encountering every identity in the stored
- * T boundary set. The latter relies on the captured stable newest-first ordering:
- * the prior boundary set marks the already-scanned suffix at T.
+ * below T or exhausting the endpoint. Seeing stored identities is insufficient:
+ * equal-timestamp rows have no stable secondary ordering and may continue later.
  */
 export function closedBoundaryProof(
   pageRows: any[],
@@ -84,15 +92,12 @@ export function closedBoundaryProof(
   boundaryIds: ReadonlySet<string>,
   encounteredBoundaryIds: Set<string>,
   pageSize: number,
-): { reached: boolean; reason: 'older_timestamp' | 'stored_boundary_ids' | 'endpoint_exhausted' | null } {
+): { reached: boolean; reason: 'older_timestamp' | 'endpoint_exhausted' | null } {
   for (const row of pageRows) {
     const atMs = directSourceTimeMs(row?.closedAt) ?? directSourceTimeMs(row?.updatedAt);
     const id = String(row?.baseId ?? row?.id ?? '').trim();
     if (atMs != null && atMs < processedThroughMs) return { reached: true, reason: 'older_timestamp' };
     if (atMs === processedThroughMs && id && boundaryIds.has(id)) encounteredBoundaryIds.add(id);
-  }
-  if (boundaryIds.size > 0 && encounteredBoundaryIds.size === boundaryIds.size) {
-    return { reached: true, reason: 'stored_boundary_ids' };
   }
   if (pageRows.length < pageSize) return { reached: true, reason: 'endpoint_exhausted' };
   return { reached: false, reason: null };
@@ -123,38 +128,69 @@ export interface ClosedPageOrderingResult {
   violation: ClosedOrderingViolation | null;
 }
 
-/** Validates the observed newest-first ordering without treating it as an API guarantee. */
-export function validateClosedPageOrdering(
+export type OpenOrderingViolation = ClosedOrderingViolation;
+export interface OpenPaginationResult {
+  rows: any[];
+  pagesFetched: number;
+  complete: boolean;
+  overflow: boolean;
+  orderingViolation: OpenOrderingViolation | null;
+}
+
+/** Fetches the whole newest-first OPEN endpoint; no high-water is safe on overflow. */
+export async function fetchCompleteOpenInvestments(
+  fetchPage: (page: number) => Promise<any[]>, maxPages: number, pageSize = 100,
+): Promise<OpenPaginationResult> {
+  const rows: any[] = [];
+  let priorLast: number | null = null;
+  for (let page = 1; page <= Math.max(1, maxPages); page += 1) {
+    const pageRows = await fetchPage(page);
+    const normalized = pageRows.map(row => ({ ...row, closedAt: undefined }));
+    const ordering = validateOpenPageOrdering(normalized, page, priorLast);
+    if (ordering.violation) return { rows, pagesFetched: page, complete: false, overflow: true, orderingViolation: ordering.violation };
+    priorLast = ordering.lastTimestampMs ?? priorLast;
+    rows.push(...pageRows);
+    if (pageRows.length < pageSize) return { rows, pagesFetched: page, complete: true, overflow: false, orderingViolation: null };
+  }
+  return { rows, pagesFetched: Math.max(1, maxPages), complete: false, overflow: true, orderingViolation: null };
+}
+
+function validateOpenPageOrdering(rows: any[], page: number, prior: number | null): ClosedPageOrderingResult {
+  return validateTimestampOrdering(rows, page, prior, row => directSourceTimeMs(row?.updatedAt) ?? directSourceTimeMs(row?.createdAt));
+}
+
+function validateTimestampOrdering(
   rows: any[], page: number, priorPageLastTimestampMs: number | null,
+  timestamp: (row: any) => number | null,
 ): ClosedPageOrderingResult {
   let firstTimestampMs: number | null = null;
   let previousTimestampMs: number | null = null;
   for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
-    const row = rows[rowIndex];
-    const timestampMs = directSourceTimeMs(row?.closedAt) ?? directSourceTimeMs(row?.updatedAt);
-    if (timestampMs == null) {
-      return { firstTimestampMs, lastTimestampMs: previousTimestampMs, violation: {
-        kind: 'missing_effective_close_time', page, rowIndex,
-        previousTimestampMs, timestampMs: null,
-      } };
-    }
+    const timestampMs = timestamp(rows[rowIndex]);
+    if (timestampMs == null) return { firstTimestampMs, lastTimestampMs: previousTimestampMs, violation: {
+      kind: 'missing_effective_close_time', page, rowIndex, previousTimestampMs, timestampMs: null,
+    } };
     if (rowIndex === 0) {
       firstTimestampMs = timestampMs;
-      if (priorPageLastTimestampMs != null && timestampMs > priorPageLastTimestampMs) {
-        return { firstTimestampMs, lastTimestampMs: timestampMs, violation: {
-          kind: 'cross_page_reversal', page, rowIndex,
-          previousTimestampMs: priorPageLastTimestampMs, timestampMs,
-        } };
-      }
-    } else if (previousTimestampMs != null && timestampMs > previousTimestampMs) {
-      return { firstTimestampMs, lastTimestampMs: timestampMs, violation: {
-        kind: 'within_page_reversal', page, rowIndex,
-        previousTimestampMs, timestampMs,
-      } };
-    }
+      if (priorPageLastTimestampMs != null && timestampMs > priorPageLastTimestampMs) return {
+        firstTimestampMs, lastTimestampMs: timestampMs, violation: { kind: 'cross_page_reversal', page, rowIndex,
+          previousTimestampMs: priorPageLastTimestampMs, timestampMs },
+      };
+    } else if (previousTimestampMs != null && timestampMs > previousTimestampMs) return {
+      firstTimestampMs, lastTimestampMs: timestampMs, violation: { kind: 'within_page_reversal', page, rowIndex,
+        previousTimestampMs, timestampMs },
+    };
     previousTimestampMs = timestampMs;
   }
   return { firstTimestampMs, lastTimestampMs: previousTimestampMs, violation: null };
+}
+
+/** Validates the observed newest-first ordering without treating it as an API guarantee. */
+export function validateClosedPageOrdering(
+  rows: any[], page: number, priorPageLastTimestampMs: number | null,
+): ClosedPageOrderingResult {
+  return validateTimestampOrdering(rows, page, priorPageLastTimestampMs,
+    row => directSourceTimeMs(row?.closedAt) ?? directSourceTimeMs(row?.updatedAt));
 }
 
 /**
@@ -226,7 +262,11 @@ export function planDirectHydrations(
   maxHydrations: number,
 ): DirectHydrationPlanItem[] {
   return targets
-    .flatMap(target => {
+    .flatMap<DirectHydrationPlanItem>(target => {
+      if (target.lifecycle === 'RETIRING') {
+        if (nowMs - (target.lastRetirementOpenPollAtMs ?? 0) < fallbackPollMs) return [];
+        return [{ target, selectorUpdatedAtMs: null, reason: 'retirement_open_drain' as const }];
+      }
       const selectorUpdatedAtMs = selectorChanges.get(target.portfolioId) ?? null;
       const periodicDue = nowMs - target.lastFallbackPollAtMs >= fallbackPollMs;
       if (!periodicDue && selectorUpdatedAtMs == null) return [];
@@ -237,7 +277,6 @@ export function planDirectHydrations(
       }];
     })
     .sort((a, b) => {
-      if (a.reason !== b.reason) return a.reason === 'periodic_direct_poll' ? -1 : 1;
       if (a.target.lastFallbackPollAtMs !== b.target.lastFallbackPollAtMs) {
         return a.target.lastFallbackPollAtMs - b.target.lastFallbackPollAtMs;
       }
@@ -250,12 +289,8 @@ export function planClosedHydrations(
   targets: StoredTarget[], nowMs: number, closedPollMs: number, maxHydrations: number,
 ): ClosedHydrationPlanItem[] {
   return targets
-    .filter(target => !target.closedHistoryInitialized || nowMs - target.lastClosedPollAtMs >= closedPollMs)
-    .sort((a, b) => {
-      if (a.closedHistoryInitialized !== b.closedHistoryInitialized) return a.closedHistoryInitialized ? 1 : -1;
-      if (a.lastClosedPollAtMs !== b.lastClosedPollAtMs) return a.lastClosedPollAtMs - b.lastClosedPollAtMs;
-      return a.portfolioId.localeCompare(b.portfolioId);
-    })
+    .filter(target => nowMs - target.lastClosedPollAtMs >= closedPollMs)
+    .sort((a, b) => a.lastClosedPollAtMs - b.lastClosedPollAtMs || a.portfolioId.localeCompare(b.portfolioId))
     .slice(0, Math.max(0, maxHydrations))
     .map(target => ({ target, reason: target.closedHistoryInitialized ? 'periodic_closed_poll' : 'closed_history_baseline' }));
 }
@@ -275,6 +310,10 @@ export interface DirectWatchStatus {
   oldestClosedProcessedThroughMs: number | null;
   oldestOpenPollAtMs: number | null;
   oldestClosedPollAtMs: number | null;
+  retiringTargetCount: number;
+  retirementRelevantOpenCount: number;
+  retirementOpenEmptyProofCount: number;
+  retirementClosedProofCount: number;
 }
 
 export function directSourceTimeMs(value: unknown): number | null {
@@ -299,16 +338,21 @@ export function loadEliteDirectTargets(
   candidateStatePath: string,
   nowMs: number,
   maxAgeMs: number,
-): { targets: EliteDirectTarget[]; observedAtMs: number | null; stale: boolean } {
-  if (!existsSync(candidateStatePath)) return { targets: [], observedAtMs: null, stale: true };
-  const parsed = JSON.parse(readFileSync(candidateStatePath, 'utf8')) as any;
+): { targets: EliteDirectTarget[]; demotedPortfolioIds: string[]; observedAtMs: number | null; stale: boolean } {
+  if (!existsSync(candidateStatePath)) return { targets: [], demotedPortfolioIds: [], observedAtMs: null, stale: true };
+  let parsed: any;
+  try { parsed = JSON.parse(readFileSync(candidateStatePath, 'utf8')); }
+  catch { return { targets: [], demotedPortfolioIds: [], observedAtMs: null, stale: true }; }
   const observedAtMs = Number(parsed?.lastObservedAtMs);
   const stale = !Number.isFinite(observedAtMs) || nowMs - observedAtMs > maxAgeMs;
-  if (stale) return { targets: [], observedAtMs: Number.isFinite(observedAtMs) ? observedAtMs : null, stale: true };
+  if (stale) return { targets: [], demotedPortfolioIds: [], observedAtMs: Number.isFinite(observedAtMs) ? observedAtMs : null, stale: true };
   const targets: EliteDirectTarget[] = [];
+  const demotedPortfolioIds: string[] = [];
   for (const row of Object.values(parsed?.portfolios ?? {}) as any[]) {
-    if (row?.bucket !== 'ELITE_CANDIDATE') continue;
+    if (Number(row?.observedAtMs) !== observedAtMs) continue;
     const portfolioId = String(row?.portfolioId ?? '').trim();
+    if (!portfolioId) continue;
+    if (row?.bucket !== 'ELITE_CANDIDATE') { demotedPortfolioIds.push(portfolioId); continue; }
     const ownerId = String(row?.ownerId ?? '').trim();
     const username = normalizedUsername(row?.username);
     const sourceFilter = String(row?.sourceFilter ?? '').trim().toLowerCase();
@@ -316,7 +360,7 @@ export function loadEliteDirectTargets(
     targets.push({ portfolioId, ownerId, username, sourceFilter });
   }
   targets.sort((a, b) => a.portfolioId.localeCompare(b.portfolioId));
-  return { targets, observedAtMs, stale: false };
+  return { targets, demotedPortfolioIds: [...new Set(demotedPortfolioIds)].sort(), observedAtMs, stale: false };
 }
 
 export class EliteDirectWatchState {
@@ -330,12 +374,19 @@ export class EliteDirectWatchState {
     if (!existsSync(this.path)) return;
     try {
       const parsed = JSON.parse(readFileSync(this.path, 'utf8')) as DirectWatchDiskState;
-      if ([ELITE_DIRECT_WATCH_VERSION, LEGACY_VERSION].includes(parsed?.version) && parsed?.targets && typeof parsed.targets === 'object') {
+      if ([ELITE_DIRECT_WATCH_VERSION, LEGACY_VERSION_3, LEGACY_VERSION_2, LEGACY_VERSION].includes(parsed?.version) && parsed?.targets && typeof parsed.targets === 'object') {
         this.state = { version: ELITE_DIRECT_WATCH_VERSION, targets: {} };
         for (const [portfolioId, raw] of Object.entries(parsed.targets)) {
           const target = raw as Partial<StoredTarget>;
           this.state.targets[portfolioId] = {
             ...(target as StoredTarget),
+            lifecycle: target.lifecycle ?? 'ACTIVE',
+            retiredAtMs: target.retiredAtMs ?? null,
+            retireAfterMs: target.retireAfterMs ?? null,
+            lastRetirementOpenPollAtMs: target.lastRetirementOpenPollAtMs ?? 0,
+            retirementRelevantOpenCount: target.retirementRelevantOpenCount ?? null,
+            retirementOpenEmptyProofs: target.retirementOpenEmptyProofs ?? 0,
+            retirementClosedProofs: target.retirementClosedProofs ?? 0,
             closedHistoryInitialized: target.closedHistoryInitialized ?? false,
             closedProcessedThroughMs: target.closedProcessedThroughMs ?? 0,
             closedBoundaryIds: target.closedBoundaryIds ?? [],
@@ -355,7 +406,12 @@ export class EliteDirectWatchState {
     renameSync(temp, this.path);
   }
 
-  syncTargets(targets: EliteDirectTarget[], ownedPortfolioIds: Set<string>, baselineAtMs: number) {
+  syncTargets(
+    targets: EliteDirectTarget[], ownedPortfolioIds: Set<string>, baselineAtMs: number,
+    authoritative = true, retirementGraceMs = 120_000, demotedPortfolioIds: ReadonlySet<string> = new Set(),
+  ) {
+    // Missing, malformed, or stale candidate state is not a demotion signal.
+    if (!authoritative) return;
     const wanted = new Map(targets.map(target => [target.portfolioId, target]));
     let changed = false;
     for (const target of targets) {
@@ -363,6 +419,9 @@ export class EliteDirectWatchState {
       if (!existing) {
         this.state.targets[target.portfolioId] = {
           ...target,
+          lifecycle: 'ACTIVE', retiredAtMs: null, retireAfterMs: null,
+          lastRetirementOpenPollAtMs: 0,
+          retirementRelevantOpenCount: null, retirementOpenEmptyProofs: 0, retirementClosedProofs: 0,
           baselineAtMs,
           processedThroughMs: baselineAtMs,
           selectorInitialized: false,
@@ -382,11 +441,32 @@ export class EliteDirectWatchState {
         this.state.targets[target.portfolioId] = { ...existing, ...target };
         changed = true;
       }
+      if (existing && existing.lifecycle !== 'ACTIVE') {
+        Object.assign(existing, { lifecycle: 'ACTIVE', retiredAtMs: null, retireAfterMs: null,
+          lastRetirementOpenPollAtMs: 0,
+          retirementRelevantOpenCount: null, retirementOpenEmptyProofs: 0, retirementClosedProofs: 0 });
+        changed = true;
+      }
     }
     for (const portfolioId of Object.keys(this.state.targets)) {
-      if (!wanted.has(portfolioId) && !ownedPortfolioIds.has(portfolioId)) {
-        delete this.state.targets[portfolioId];
+      const existing = this.state.targets[portfolioId];
+      if (demotedPortfolioIds.has(portfolioId) && existing.lifecycle === 'ACTIVE') {
+        existing.lifecycle = 'RETIRING';
+        existing.retiredAtMs = baselineAtMs;
+        existing.retireAfterMs = baselineAtMs + retirementGraceMs;
+        existing.lastRetirementOpenPollAtMs = 0;
+        existing.retirementRelevantOpenCount = null;
+        existing.retirementOpenEmptyProofs = 0;
+        existing.retirementClosedProofs = 0;
         changed = true;
+      }
+      if (!ownedPortfolioIds.has(portfolioId)
+        && existing.lifecycle === 'RETIRING'
+        && (existing.retirementOpenEmptyProofs ?? 0) >= 2
+        && (existing.retirementClosedProofs ?? 0) >= 2
+        && baselineAtMs >= (existing.retireAfterMs ?? Number.POSITIVE_INFINITY)
+        && existing.closedHistoryInitialized) {
+        delete this.state.targets[portfolioId]; changed = true;
       }
     }
     if (changed) this.save();
@@ -423,10 +503,35 @@ export class EliteDirectWatchState {
     this.save();
   }
 
+  commitRetirementOpenPoll(portfolioId: string, rows: any[], polledAtMs: number) {
+    const target = this.state.targets[portfolioId];
+    if (!target || target.lifecycle !== 'RETIRING') return;
+    const retiredAtMs = target.retiredAtMs ?? Number.NEGATIVE_INFINITY;
+    const relevant = rows.filter(row => {
+      const createdAtMs = directSourceTimeMs(row?.createdAt);
+      return createdAtMs == null || createdAtMs <= retiredAtMs;
+    });
+    target.lastRetirementOpenPollAtMs = polledAtMs;
+    target.lastFallbackPollAtMs = polledAtMs;
+    target.retirementRelevantOpenCount = relevant.length;
+    target.retirementOpenEmptyProofs = polledAtMs >= (target.retireAfterMs ?? Number.POSITIVE_INFINITY) && relevant.length === 0
+      ? (target.retirementOpenEmptyProofs ?? 0) + 1 : 0;
+    this.save();
+  }
+
   noteClosedPoll(portfolioId: string, atMs: number) {
     const target = this.state.targets[portfolioId];
     if (!target) return;
     target.lastClosedPollAtMs = atMs;
+    this.save();
+  }
+
+  initializeRetirementDrain(portfolioId: string) {
+    const target = this.state.targets[portfolioId];
+    if (!target || target.lifecycle !== 'RETIRING' || target.closedHistoryInitialized) return;
+    target.closedHistoryInitialized = true;
+    target.closedProcessedThroughMs = target.baselineAtMs;
+    target.closedBoundaryIds = [];
     this.save();
   }
 
@@ -447,6 +552,9 @@ export class EliteDirectWatchState {
     target.closedProcessedThroughMs = newestMs;
     target.closedBoundaryIds = [...boundaryIds].sort();
     target.lastClosedPollAtMs = polledAtMs;
+    if (target.lifecycle === 'RETIRING' && polledAtMs >= (target.retireAfterMs ?? Number.POSITIVE_INFINITY)) {
+      target.retirementClosedProofs = (target.retirementClosedProofs ?? 0) + 1;
+    }
     this.save();
   }
 
@@ -476,6 +584,10 @@ export class EliteDirectWatchState {
       oldestClosedProcessedThroughMs: closedProcessed.length ? Math.min(...closedProcessed) : null,
       oldestOpenPollAtMs: targets.length ? Math.min(...targets.map(target => target.lastFallbackPollAtMs)) : null,
       oldestClosedPollAtMs: targets.length ? Math.min(...targets.map(target => target.lastClosedPollAtMs)) : null,
+      retiringTargetCount: targets.filter(target => target.lifecycle === 'RETIRING').length,
+      retirementRelevantOpenCount: targets.reduce((sum, target) => sum + (target.retirementRelevantOpenCount ?? 0), 0),
+      retirementOpenEmptyProofCount: targets.reduce((sum, target) => sum + (target.retirementOpenEmptyProofs ?? 0), 0),
+      retirementClosedProofCount: targets.reduce((sum, target) => sum + (target.retirementClosedProofs ?? 0), 0),
     };
   }
 }

@@ -12,18 +12,29 @@ function signal(action: SignalAction, base: string): InvoSignal {
   };
 }
 
-test('generic batch OPEN then CLOSE for one source cannot leave orphaned managed exposure', async () => {
+test('same timestamp batch orders OPEN then INCREASE then CLOSE and cannot orphan exposure', async () => {
   const queue = new SourceLifecycleQueue();
   const managed = new Set<string>();
   const events: string[] = [];
-  await runSignalBatchBySource([signal('open', 'same'), signal('close', 'same')], async item => {
+  await runSignalBatchBySource([signal('close', 'same'), signal('increase', 'same'), signal('open', 'same')], async item => {
     await queue.run(item.sourceBaseId, async () => {
       if (item.action === 'open') managed.add(item.sourceBaseId);
       else managed.delete(item.sourceBaseId);
       events.push(item.action);
     });
   });
-  assert.deepEqual(events, ['open', 'close']);
+  assert.deepEqual(events, ['open', 'increase', 'close']);
+  assert.equal(managed.has('same'), false);
+});
+
+test('durable known close dominates a later-arriving older open across ingress paths', async () => {
+  const queue = new SourceLifecycleQueue();
+  const closed = new Set<string>();
+  const managed = new Set<string>();
+  await queue.run('same', async () => { closed.add('same'); managed.delete('same'); });
+  await queue.run('same', async () => {
+    if (!closed.has('same')) managed.add('same');
+  });
   assert.equal(managed.has('same'), false);
 });
 

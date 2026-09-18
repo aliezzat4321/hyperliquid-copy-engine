@@ -6,47 +6,41 @@ export const ELITE_ADMISSION_VERSION = 'lane3-elite-admission-v1-20260916';
 interface SnapshotCacheEntry {
   mtimeMs: number;
   size: number;
-  byPortfolio: Map<string, any[]>;
+  rows: any[];
 }
 
 const snapshotCache = new Map<string, SnapshotCacheEntry>();
+
+const MAX_RECENT_INDEX_BYTES = 8 * 1024 * 1024;
 
 function latestHistoricalSnapshot(
   snapshotsPath: string | undefined,
   portfolioId: string,
   decisionAtMs: number,
-): any | null {
-  if (!snapshotsPath || !existsSync(snapshotsPath)) return null;
+): { row: any | null; error: string | null } {
+  if (!snapshotsPath) return { row: null, error: null };
+  const indexPath = `${snapshotsPath}.recent.json`;
+  if (!existsSync(indexPath)) return { row: null, error: null };
   let stat;
-  try { stat = statSync(snapshotsPath); } catch { return null; }
-  let cached = snapshotCache.get(snapshotsPath);
+  try { stat = statSync(indexPath); } catch { return { row: null, error: 'candidate_snapshot_index_io_error' }; }
+  if (stat.size > MAX_RECENT_INDEX_BYTES) return { row: null, error: 'candidate_snapshot_index_oversize' };
+  let cached = snapshotCache.get(indexPath);
   if (!cached || cached.mtimeMs !== stat.mtimeMs || cached.size !== stat.size) {
-    const byPortfolio = new Map<string, any[]>();
-    for (const line of readFileSync(snapshotsPath, 'utf8').split('\n')) {
-      if (!line.trim()) continue;
-      let row: any;
-      try { row = JSON.parse(line); } catch { continue; }
-      const id = typeof row?.portfolioId === 'string' ? row.portfolioId : '';
-      const observedAtMs = Number(row?.observedAtMs);
-      if (!id || !Number.isFinite(observedAtMs)) continue;
-      const rows = byPortfolio.get(id) ?? [];
-      rows.push(row);
-      byPortfolio.set(id, rows);
-    }
-    for (const rows of byPortfolio.values()) {
-      rows.sort((a, b) => Number(a.observedAtMs) - Number(b.observedAtMs));
-    }
-    cached = { mtimeMs: stat.mtimeMs, size: stat.size, byPortfolio };
-    snapshotCache.set(snapshotsPath, cached);
+    try {
+      const parsed = JSON.parse(readFileSync(indexPath, 'utf8'));
+      if (parsed?.version !== 1 || !Array.isArray(parsed?.rows)) throw new Error('invalid index');
+      cached = { mtimeMs: stat.mtimeMs, size: stat.size, rows: parsed.rows };
+      snapshotCache.set(indexPath, cached);
+    } catch { return { row: null, error: 'candidate_snapshot_index_unparseable' }; }
   }
-  const rows = cached.byPortfolio.get(portfolioId) ?? [];
   let chosen: any | null = null;
-  for (const row of rows) {
+  for (const row of cached.rows) {
+    if (row?.portfolioId !== portfolioId) continue;
     const observedAtMs = Number(row?.observedAtMs);
-    if (observedAtMs > decisionAtMs) break;
-    chosen = row;
+    if (Number.isFinite(observedAtMs) && observedAtMs <= decisionAtMs
+      && (chosen == null || observedAtMs > Number(chosen.observedAtMs))) chosen = row;
   }
-  return chosen;
+  return { row: chosen, error: null };
 }
 
 export interface EliteAdmissionDecision {
@@ -143,7 +137,9 @@ export function eliteAdmissionFromState(
     return { ...common, reason: 'candidate_state_stale' };
   }
 
-  const historical = latestHistoricalSnapshot(snapshotsPath, portfolioId, decisionAtMs);
+  const historicalResult = latestHistoricalSnapshot(snapshotsPath, portfolioId, decisionAtMs);
+  if (historicalResult.error) return { ...common, reason: historicalResult.error };
+  const historical = historicalResult.row;
   const current = state?.portfolios?.[portfolioId];
   const candidate = historical ?? (
     current && finite(current?.observedAtMs) != null && Number(current.observedAtMs) <= decisionAtMs
@@ -210,4 +206,3 @@ export function eliteAdmissionFromState(
     reason: historical ? 'elite_candidate_pretrade_snapshot_qualified' : 'elite_candidate_pretrade_qualified',
   };
 }
-

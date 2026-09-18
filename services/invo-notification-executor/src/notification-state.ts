@@ -65,6 +65,7 @@ interface DiskState {
   feedCursors: Record<string, FeedCursor>;
   feedBaselines: Record<string, number>;
   observedOpenSourceIds: string[];
+  handledCloseSourceIds: string[];
 }
 
 export interface FeedCursor {
@@ -115,9 +116,10 @@ function normalizeManaged(raw: Record<string, ManagedPosition> | undefined): Rec
 }
 
 export class NotificationState {
-  private state: DiskState = { seen: [], managed: {}, feedCursors: {}, feedBaselines: {}, observedOpenSourceIds: [] };
+  private state: DiskState = { seen: [], managed: {}, feedCursors: {}, feedBaselines: {}, observedOpenSourceIds: [], handledCloseSourceIds: [] };
   private seen = new Set<string>();
   private observedOpenSourceIds = new Set<string>();
+  private handledCloseSourceIds = new Set<string>();
 
   constructor(private readonly path: string, private readonly maxSeen = 20_000) {
     this.load();
@@ -136,9 +138,16 @@ export class NotificationState {
           ...(parsed.feedBaselines ?? {}),
         },
         observedOpenSourceIds: parsed.observedOpenSourceIds ?? [],
+        handledCloseSourceIds: [...new Set([
+          ...(Array.isArray(parsed.handledCloseSourceIds) ? parsed.handledCloseSourceIds : [])
+            .filter(value => typeof value === 'string' && value.length > 0),
+          ...(Array.isArray(parsed.seen) ? parsed.seen : []).flatMap(key => typeof key === 'string' && key.startsWith('source-close:')
+            && key.length > 'source-close:'.length ? [key.slice('source-close:'.length)] : []),
+        ])].slice(-this.maxSeen),
       };
       this.seen = new Set(this.state.seen);
       this.observedOpenSourceIds = new Set(this.state.observedOpenSourceIds);
+      this.handledCloseSourceIds = new Set(this.state.handledCloseSourceIds);
     } catch (err) {
       console.error(JSON.stringify({ type: 'state_load_error', path: this.path, error: String(err) }));
     }
@@ -173,6 +182,19 @@ export class NotificationState {
     while (this.state.observedOpenSourceIds.length > this.maxSeen) {
       const old = this.state.observedOpenSourceIds.shift();
       if (old) this.observedOpenSourceIds.delete(old);
+    }
+    this.save();
+  }
+
+  hasHandledClose(sourceBaseId: string) { return this.handledCloseSourceIds.has(sourceBaseId); }
+
+  markHandledClose(sourceBaseId: string) {
+    if (!sourceBaseId || this.handledCloseSourceIds.has(sourceBaseId)) return;
+    this.state.handledCloseSourceIds.push(sourceBaseId);
+    this.handledCloseSourceIds.add(sourceBaseId);
+    while (this.state.handledCloseSourceIds.length > this.maxSeen) {
+      const old = this.state.handledCloseSourceIds.shift();
+      if (old) this.handledCloseSourceIds.delete(old);
     }
     this.save();
   }

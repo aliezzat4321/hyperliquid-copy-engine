@@ -260,3 +260,20 @@ test('candidate snapshots are immutable and persist portfolio ids separately', (
   assert.equal(lines[0].winRatePct, 93);
   assert.equal(lines[1].winRatePct, 92);
 });
+
+test('compact causal index keeps distinct cycles and same-time demotion dominates elite', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'portfolio-recent-'));
+  const state = join(dir, 'state.json');
+  const snapshots = join(dir, 'snapshots.jsonl');
+  const ledger = new PortfolioCandidateLedger(state, snapshots);
+  ledger.observe([portfolio({ id: 'p-1' })], 'trending', now - 1000);
+  ledger.observe([
+    portfolio({ id: 'p-1' }),
+    portfolio({ id: 'p-1' }),
+    portfolio({ id: 'p-1', liquidated: true }),
+    portfolio({ id: 'p-1' }),
+  ], 'trending', now);
+  const recent = JSON.parse(readFileSync(`${snapshots}.recent.json`, 'utf8')).rows;
+  assert.deepEqual(recent.map((row: any) => row.observedAtMs), [now - 1000, now]);
+  assert.equal(recent[1].bucket, 'REJECTED_DEMOTED');
+});

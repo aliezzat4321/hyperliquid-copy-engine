@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { NotificationState } from '../src/notification-state.js';
@@ -92,6 +92,22 @@ test('restart synthesizes a retryable close signal for legacy unresolved source-
   assert.equal(pending.coin, 'XRP');
   assert.equal(pending.sourceBaseId, 'legacy-xrp');
   assert.equal(pending.sourceTimeField, 'legacy_unresolved_source_close');
+});
+
+test('handled source close dominance persists across restart', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'notification-close-dominance-')), 'state.json');
+  new NotificationState(path).markHandledClose('base-closed');
+  assert.equal(new NotificationState(path).hasHandledClose('base-closed'), true);
+});
+
+test('legacy seen-only source-close migrates into durable close dominance', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'notification-legacy-close-')), 'state.json');
+  writeFileSync(path, JSON.stringify({ seen: ['noise', 'source-close:legacy-base'], managed: {},
+    feedCursors: {}, feedBaselines: {}, observedOpenSourceIds: [] }));
+  const migrated = new NotificationState(path);
+  assert.equal(migrated.hasHandledClose('legacy-base'), true);
+  migrated.markSeen('persist-migration');
+  assert.equal(new NotificationState(path).hasHandledClose('legacy-base'), true);
 });
 
 test('explicit pending close evidence is preserved instead of being overwritten by migration', () => {

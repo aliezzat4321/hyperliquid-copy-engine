@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -139,12 +139,12 @@ test('historical snapshot authorizes a trade when latest aggregate state is newe
       },
     },
   })));
-  writeFileSync(snapshotsPath, JSON.stringify({
+  writeFileSync(`${snapshotsPath}.recent.json`, JSON.stringify({ version: 1, rows: [{
     ...(validState().portfolios as any)[portfolioId],
     selectorVersion: ELITE_SELECTOR_VERSION,
     observedAtMs: historicalAt,
     bucket: 'ELITE_CANDIDATE',
-  }) + '\n');
+  }] }));
   const decision = eliteAdmissionFromState(
     statePath, portfolioId, decisionAtMs, 20 * 60_000, snapshotsPath,
   );
@@ -172,14 +172,41 @@ test('latest pre-trade snapshot preserves demotion and prevents look-ahead re-pr
     },
   })));
   const baseCandidate = (validState().portfolios as any)[portfolioId];
-  writeFileSync(snapshotsPath, [
-    JSON.stringify({ ...baseCandidate, selectorVersion: ELITE_SELECTOR_VERSION, observedAtMs: eliteAt, bucket: 'ELITE_CANDIDATE' }),
-    JSON.stringify({ ...baseCandidate, selectorVersion: ELITE_SELECTOR_VERSION, observedAtMs: demotedAt, bucket: 'RESEARCH_WIDE' }),
-  ].join('\n') + '\n');
+  writeFileSync(`${snapshotsPath}.recent.json`, JSON.stringify({ version: 1, rows: [
+    { ...baseCandidate, selectorVersion: ELITE_SELECTOR_VERSION, observedAtMs: eliteAt, bucket: 'ELITE_CANDIDATE' },
+    { ...baseCandidate, selectorVersion: ELITE_SELECTOR_VERSION, observedAtMs: demotedAt, bucket: 'RESEARCH_WIDE' },
+  ] }));
   const decision = eliteAdmissionFromState(
     statePath, portfolioId, decisionAtMs, 20 * 60_000, snapshotsPath,
   );
   assert.equal(decision.allowed, false);
   assert.equal(decision.reason, 'portfolio_not_elite');
   assert.equal(decision.candidateObservedAtMs, demotedAt);
+});
+
+test('admission latency and memory are independent of a sparse 1GB append-only history', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lane3-elite-billion-'));
+  const statePath = join(dir, 'portfolio-candidates.json');
+  const snapshotsPath = join(dir, 'portfolio-candidate-snapshots.jsonl');
+  writeFileSync(statePath, JSON.stringify(validState()));
+  writeFileSync(snapshotsPath, '');
+  truncateSync(snapshotsPath, 1024 * 1024 * 1024);
+  const candidate = (validState().portfolios as any)[portfolioId];
+  writeFileSync(`${snapshotsPath}.recent.json`, JSON.stringify({ version: 1, rows: [candidate] }));
+  const before = process.memoryUsage().heapUsed;
+  const decision = eliteAdmissionFromState(statePath, portfolioId, decisionAtMs, 20 * 60_000, snapshotsPath);
+  assert.equal(decision.allowed, true);
+  assert.ok(process.memoryUsage().heapUsed - before < 8 * 1024 * 1024);
+});
+
+test('malformed compact snapshot index fails closed instead of throwing through execute', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lane3-elite-malformed-index-'));
+  const statePath = join(dir, 'portfolio-candidates.json');
+  const snapshotsPath = join(dir, 'portfolio-candidate-snapshots.jsonl');
+  const futureState = validState({ lastObservedAtMs: decisionAtMs + 1 });
+  writeFileSync(statePath, JSON.stringify(futureState));
+  writeFileSync(`${snapshotsPath}.recent.json`, '{"version":1,"rows":[');
+  const decision = eliteAdmissionFromState(statePath, portfolioId, decisionAtMs, 20 * 60_000, snapshotsPath);
+  assert.equal(decision.allowed, false);
+  assert.equal(decision.reason, 'candidate_snapshot_index_unparseable');
 });

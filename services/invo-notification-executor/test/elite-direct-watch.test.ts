@@ -6,6 +6,7 @@ import test from 'node:test';
 import {
   EliteDirectWatchState,
   establishClosedBaseline,
+  fetchCompleteOpenInvestments,
   closedBoundaryProof,
   closedSignalsAfterBoundary,
   loadEliteDirectTargets,
@@ -93,8 +94,8 @@ test('candidate loader tracks only fresh elite portfolios', () => {
   writeFileSync(path, JSON.stringify({
     lastObservedAtMs: BASE,
     portfolios: {
-      p1: { ...target, bucket: 'ELITE_CANDIDATE' },
-      p2: { portfolioId: 'p2', ownerId: 'o2', username: 'wide', sourceFilter: 'all', bucket: 'RESEARCH_WIDE' },
+      p1: { ...target, observedAtMs: BASE, bucket: 'ELITE_CANDIDATE' },
+      p2: { portfolioId: 'p2', ownerId: 'o2', username: 'wide', sourceFilter: 'all', observedAtMs: BASE, bucket: 'RESEARCH_WIDE' },
     },
   }));
   const fresh = loadEliteDirectTargets(path, BASE + 10, 20_000);
@@ -103,6 +104,22 @@ test('candidate loader tracks only fresh elite portfolios', () => {
   const stale = loadEliteDirectTargets(path, BASE + 20_001, 20_000);
   assert.equal(stale.stale, true);
   assert.deepEqual(stale.targets, []);
+});
+
+test('bounded discovery absence is not demotion; only same-cycle non-elite is explicit', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elite-authoritative-universe-'));
+  const path = join(dir, 'candidates.json');
+  writeFileSync(path, JSON.stringify({
+    lastObservedAtMs: BASE + 10,
+    portfolios: {
+      p1: { ...target, observedAtMs: BASE, bucket: 'ELITE_CANDIDATE' },
+      p2: { ...target, portfolioId: 'p2', observedAtMs: BASE + 10, bucket: 'RESEARCH_WIDE' },
+    },
+  }));
+  const fresh = loadEliteDirectTargets(path, BASE + 11, 20_000);
+  assert.equal(fresh.stale, false);
+  assert.deepEqual(fresh.targets, []);
+  assert.deepEqual(fresh.demotedPortfolioIds, ['p2']);
 });
 
 test('owned portfolio remains directly watched after demotion and restart', () => {
@@ -117,7 +134,7 @@ test('owned portfolio remains directly watched after demotion and restart', () =
   assert.equal(restarted.targets()[0].portfolioId, 'p1');
 
   restarted.syncTargets([], new Set(), BASE + 200);
-  assert.equal(restarted.targets().length, 0);
+  assert.equal(restarted.targets().length, 1, 'retirement requires close-drain proof and grace');
 });
 
 test('overdue periodic targets outrank repeated selector-change hints', () => {
@@ -385,7 +402,8 @@ test('closed polling is fair for 45 targets and request math stays bounded', () 
   }
   assert.equal(served.size, 45);
   assert.equal(15 * 3_000, 45_000);
-  assert.equal(4 + 8 + 3 * 2, 18, 'four selectors plus open/closed hydration is at most 18 requests per scan');
+  assert.equal(4 + 8 * 3 + 3 * 2, 34,
+    'four selectors plus paginated open/drain and closed hydration is at most 34 requests per scan');
 });
 
 test('equal-timestamp closed boundary spanning 100 rows is not proven by unrelated rows', () => {
@@ -402,8 +420,114 @@ test('equal-timestamp closed boundary spanning 100 rows is not proven by unrelat
   const unseen = closedSignalsAfterBoundary([...firstPage, ...secondPage], target, BASE, [...boundaryIds], BASE + 1);
   assert.equal(unseen.length, 120);
   assert.deepEqual(closedBoundaryProof(secondPage, BASE, boundaryIds, encountered, 100), {
-    reached: true, reason: 'stored_boundary_ids',
+    reached: true, reason: 'endpoint_exhausted',
   });
+});
+
+test('old boundary id on page one cannot hide new equal-time rows on page two', () => {
+  const sameTime = (id: string) => openRow({ id, baseId: id, isOpen: false, closingPrice: 0.8,
+    createdAt: BASE - 100, updatedAt: BASE, closedAt: BASE });
+  const encountered = new Set<string>();
+  const first = [sameTime('old'), ...Array.from({ length: 99 }, (_, i) => sameTime(`new-a-${i}`))];
+  const second = Array.from({ length: 100 }, (_, i) => sameTime(`new-b-${i}`));
+  const third = [openRow({ id: 'older', baseId: 'older', isOpen: false, closedAt: BASE - 1 })];
+  assert.equal(closedBoundaryProof(first, BASE, new Set(['old']), encountered, 100).reached, false);
+  assert.equal(closedBoundaryProof(second, BASE, new Set(['old']), encountered, 100).reached, false);
+  assert.deepEqual(closedBoundaryProof(third, BASE, new Set(['old']), encountered, 100), { reached: true, reason: 'older_timestamp' });
+  assert.equal(closedSignalsAfterBoundary([...first, ...second, ...third], target, BASE, ['old'], BASE + 1).length, 199);
+});
+
+test('open pagination observes page two and fails closed on overflow or ordering reversal', async () => {
+  const rows = Array.from({ length: 101 }, (_, i) => openRow({ id: `i${i}`, baseId: `b${i}`, updatedAt: BASE + 200 - i }));
+  const complete = await fetchCompleteOpenInvestments(async page => rows.slice((page - 1) * 100, page * 100), 3);
+  assert.equal(complete.complete, true);
+  assert.equal(complete.rows.length, 101);
+  assert.equal(signalsFromDirectInvestments(complete.rows, [], target, BASE, BASE + 300).some(s => s.sourceBaseId === 'b100'), true);
+  const overflow = await fetchCompleteOpenInvestments(async () => rows.slice(0, 100), 2);
+  assert.equal(overflow.complete, false);
+  assert.equal(overflow.overflow, true);
+  const reversed = await fetchCompleteOpenInvestments(async () => [rows[1], rows[0]], 2);
+  assert.equal(reversed.complete, false);
+  assert.equal(reversed.orderingViolation?.kind, 'within_page_reversal');
+});
+
+test('stale candidate state retains targets; authoritative demotion retires and drains before deletion', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'elite-retire-')), 'state.json');
+  let state = new EliteDirectWatchState(path);
+  state.syncTargets([target], new Set(), BASE);
+  state.syncTargets([], new Set(), BASE + 1, false);
+  assert.equal(state.targets()[0].lifecycle, 'ACTIVE');
+  state.syncTargets([], new Set(), BASE + 10, true, 100, new Set(['p1']));
+  assert.equal(state.targets()[0].lifecycle, 'RETIRING');
+  assert.equal(planDirectHydrations(state.targets(), new Map(), BASE + 20, 1, 10)[0]?.reason,
+    'retirement_open_drain');
+  state.initializeRetirementDrain('p1');
+  const close = openRow({ isOpen: false, closingPrice: 0.8, createdAt: BASE + 1,
+    closedAt: BASE + 11, updatedAt: BASE + 11 });
+  const retiring = state.targets()[0];
+  assert.equal(closedSignalsAfterBoundary(
+    [close], target, retiring.closedProcessedThroughMs, retiring.closedBoundaryIds, BASE + 20,
+  ).length, 1, 'closed-only roundtrip after selection remains observable after demotion');
+  state.commitRetirementOpenPoll('p1', [], BASE + 120);
+  state.commitClosedHydration('p1', [close], BASE + 120);
+  state.commitRetirementOpenPoll('p1', [], BASE + 130);
+  state.commitClosedHydration('p1', [close], BASE + 130);
+  state = new EliteDirectWatchState(path);
+  state.syncTargets([], new Set(), BASE + 200, true, 100, new Set(['p1']));
+  assert.equal(state.targets().length, 0);
+});
+
+test('active target absent from a fresh bounded cycle remains active', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'elite-bounded-absence-')), 'state.json');
+  const state = new EliteDirectWatchState(path);
+  state.syncTargets([target], new Set(), BASE);
+  state.syncTargets([], new Set(), BASE + 10, true, 1, new Set());
+  assert.equal(state.targets()[0].lifecycle, 'ACTIVE');
+});
+
+test('pre-demotion open blocks deletion and drain proofs survive restart', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'elite-retirement-open-')), 'state.json');
+  let state = new EliteDirectWatchState(path);
+  state.syncTargets([target], new Set(), BASE);
+  state.syncTargets([], new Set(), BASE + 10, true, 10, new Set(['p1']));
+  state.commitRetirementOpenPoll('p1', [openRow({ createdAt: BASE + 1 })], BASE + 30);
+  state.commitClosedHydration('p1', [], BASE + 30);
+  state.commitClosedHydration('p1', [], BASE + 40);
+  state.syncTargets([], new Set(), BASE + 50, true, 10, new Set(['p1']));
+  assert.equal(state.targets().length, 1, 'a relevant pre-demotion source position remains open');
+  assert.equal(state.targets()[0].retirementRelevantOpenCount, 1);
+
+  state.commitRetirementOpenPoll('p1', [openRow({ createdAt: BASE + 11 })], BASE + 60);
+  state = new EliteDirectWatchState(path);
+  assert.equal(state.targets()[0].retirementOpenEmptyProofs, 1, 'post-demotion opens do not block drain');
+  state.commitRetirementOpenPoll('p1', [], BASE + 70);
+  state.syncTargets([], new Set(), BASE + 80, true, 10, new Set(['p1']));
+  assert.equal(state.targets().length, 0);
+});
+
+test('open overflow cannot create a retirement empty proof', async () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'elite-retirement-overflow-')), 'state.json');
+  const state = new EliteDirectWatchState(path);
+  state.syncTargets([target], new Set(), BASE);
+  state.syncTargets([], new Set(), BASE + 1, true, 1, new Set(['p1']));
+  const overflow = await fetchCompleteOpenInvestments(async () => Array.from({ length: 100 }, (_, i) =>
+    openRow({ id: `i${i}`, baseId: `b${i}`, updatedAt: BASE + 200 - i })), 1);
+  assert.equal(overflow.complete, false);
+  assert.equal(state.targets()[0].retirementOpenEmptyProofs, 0, 'caller must not commit incomplete polls');
+});
+
+test('owned retiring target is never deleted after grace and drain proof', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'elite-owned-retire-')), 'state.json');
+  const state = new EliteDirectWatchState(path);
+  state.syncTargets([target], new Set(), BASE);
+  state.syncTargets([], new Set(['p1']), BASE + 1, true, 1, new Set(['p1']));
+  const close = openRow({ isOpen: false, closedAt: BASE + 2 });
+  state.commitClosedHydration('p1', [close], BASE + 2);
+  state.commitClosedHydration('p1', [close], BASE + 3);
+  state.commitRetirementOpenPoll('p1', [], BASE + 3);
+  state.commitRetirementOpenPoll('p1', [], BASE + 4);
+  state.syncTargets([], new Set(['p1']), BASE + 10, true, 1, new Set(['p1']));
+  assert.equal(state.targets().length, 1);
 });
 
 test('closed watermark advances only after pagination boundary proof', () => {
@@ -443,6 +567,28 @@ test('persistent first-target 500 still gives all later 44 targets bounded attem
   assert.equal(new Set(attempted).size, 45);
   assert.equal(closed.attempted.length, 3);
   assert.equal(closedAttempted, 3);
+});
+
+test('three permanent closed-baseline failures cannot starve the later 42 targets', async () => {
+  const rows = Array.from({ length: 45 }, (_, index) => ({
+    ...target, portfolioId: `p${String(index).padStart(2, '0')}`,
+    baselineAtMs: BASE, processedThroughMs: BASE, selectorInitialized: true,
+    lastSelectorUpdatedAtMs: BASE, lastFallbackPollAtMs: BASE,
+    closedHistoryInitialized: false, closedProcessedThroughMs: 0,
+    closedBoundaryIds: [], lastClosedPollAtMs: 0,
+  }));
+  const attempted = new Set<string>();
+  for (let scan = 0; scan < 15; scan += 1) {
+    const at = BASE + scan * 60_000;
+    const plan = planClosedHydrations(rows, at, 60_000, 3);
+    await runIsolatedHydrations(plan, item => {
+      attempted.add(item.target.portfolioId);
+      item.target.lastClosedPollAtMs = at;
+    }, async item => {
+      if (['p00', 'p01', 'p02'].includes(item.target.portfolioId)) throw new Error('permanent baseline failure');
+    });
+  }
+  assert.equal(attempted.size, 45);
 });
 
 test('429 stops bounded work, reports skipped targets, and recorded attempt rotates next scan', async () => {

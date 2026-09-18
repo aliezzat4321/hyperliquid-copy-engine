@@ -27,7 +27,10 @@ export async function runSignalBatchBySource(
 ): Promise<void> {
   const groups = new Map<string, InvoSignal[]>();
   for (const signal of signals) groups.set(signal.sourceBaseId, [...(groups.get(signal.sourceBaseId) ?? []), signal]);
+  const priority: Record<InvoSignal['action'], number> = { open: 0, increase: 1, close: 2 };
   await Promise.all([...groups.values()].map(async group => {
+    group.sort((a, b) => (a.sourceTimeMs ?? a.observedAtMs) - (b.sourceTimeMs ?? b.observedAtMs)
+      || priority[a.action] - priority[b.action] || a.key.localeCompare(b.key));
     for (const signal of group) await run(signal);
   }));
 }

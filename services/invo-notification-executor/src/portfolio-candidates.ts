@@ -397,6 +397,7 @@ export function classifyPortfolio(
 
 export class PortfolioCandidateLedger {
   private state: LedgerDiskState;
+  private recentRows: PortfolioSnapshot[] = [];
 
   constructor(
     private readonly statePath: string,
@@ -426,6 +427,15 @@ export class PortfolioCandidateLedger {
         // A malformed prior candidate file must not stop broad research; start a clean candidate view.
       }
     }
+    const recentPath = `${snapshotsPath}.recent.json`;
+    if (existsSync(recentPath)) {
+      try {
+        const parsed = JSON.parse(readFileSync(recentPath, 'utf8'));
+        if (parsed?.version === 1 && Array.isArray(parsed.rows)) this.recentRows = parsed.rows;
+      } catch {
+        // Rebuilt prospectively on the next observation; admission fails closed meanwhile.
+      }
+    }
   }
 
   observe(items: any[], sourceFilter: string, observedAtMs = Date.now()) {
@@ -437,16 +447,43 @@ export class PortfolioCandidateLedger {
       if (!snapshot) continue;
       snapshots.push(snapshot);
       const previous = this.state.portfolios[snapshot.portfolioId];
-      if (!previous || snapshot.observedAtMs >= previous.observedAtMs) this.state.portfolios[snapshot.portfolioId] = snapshot;
+      if (!previous || snapshot.observedAtMs > previous.observedAtMs
+        || (snapshot.observedAtMs === previous.observedAtMs
+          && previous.bucket === 'ELITE_CANDIDATE' && snapshot.bucket !== 'ELITE_CANDIDATE')) {
+        this.state.portfolios[snapshot.portfolioId] = snapshot;
+      }
       if (snapshot.bucket === 'ELITE_CANDIDATE' && this.state.firstEliteAtMs[snapshot.portfolioId] == null) {
         this.state.firstEliteAtMs[snapshot.portfolioId] = observedAtMs;
       }
       appendFileSync(this.snapshotsPath, `${JSON.stringify(snapshot)}\n`);
+      this.recentRows.push(snapshot);
     }
     this.state.lastObservedAtMs = Math.max(this.state.lastObservedAtMs, observedAtMs);
     const tmp = `${this.statePath}.tmp`;
     writeFileSync(tmp, JSON.stringify(this.state, null, 2));
     renameSync(tmp, this.statePath);
+    // The executor reads only this bounded causal index. Three observations cover
+    // the 25s signal window across a 10-minute collector boundary; the 30-minute
+    // time retention also bounds memory independently of append-only history age.
+    const cutoff = observedAtMs - 30 * 60_000;
+    const grouped = new Map<string, Map<number, PortfolioSnapshot>>();
+    for (const row of this.recentRows) {
+      if (!(row.observedAtMs >= cutoff)) continue;
+      const observations = grouped.get(row.portfolioId) ?? new Map<number, PortfolioSnapshot>();
+      const prior = observations.get(row.observedAtMs);
+      // A cycle can return the same portfolio from several bounded surfaces. One
+      // timestamp is one observation, and disagreement fails closed: non-elite wins.
+      if (!prior || (prior.bucket === 'ELITE_CANDIDATE' && row.bucket !== 'ELITE_CANDIDATE')) {
+        observations.set(row.observedAtMs, row);
+      }
+      grouped.set(row.portfolioId, observations);
+    }
+    this.recentRows = [...grouped.values()].flatMap(observations => [...observations.values()]
+      .sort((a, b) => b.observedAtMs - a.observedAtMs).slice(0, 3)).sort((a, b) => a.observedAtMs - b.observedAtMs);
+    const recentPath = `${this.snapshotsPath}.recent.json`;
+    const recentTmp = `${recentPath}.tmp`;
+    writeFileSync(recentTmp, JSON.stringify({ version: 1, generatedAtMs: observedAtMs, rows: this.recentRows }));
+    renameSync(recentTmp, recentPath);
     return snapshots;
   }
 

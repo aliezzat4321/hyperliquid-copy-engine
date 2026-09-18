@@ -44,6 +44,8 @@ def test_reset_clears_derived_shadow_data_but_preserves_source_evidence(
             }
         },
         "feedBaselines": {"following": 123, "trending": 456},
+        "observedOpenSourceIds": ["source-a"],
+        "handledCloseSourceIds": ["source-closed"],
     }
     write(tmp_path / "state.json", json.dumps(state))
 
@@ -74,6 +76,8 @@ def test_reset_clears_derived_shadow_data_but_preserves_source_evidence(
     assert after["seen"] == state["seen"]
     assert after["feedCursors"] == state["feedCursors"]
     assert after["feedBaselines"] == state["feedBaselines"]
+    assert after["observedOpenSourceIds"] == state["observedOpenSourceIds"]
+    assert after["handledCloseSourceIds"] == state["handledCloseSourceIds"]
     assert after["managed"] == {}
     for name, content in preserved.items():
         assert (tmp_path / name).read_text(encoding="utf-8") == content
