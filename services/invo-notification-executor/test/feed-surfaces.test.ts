@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import {
   INVO_FEED_SURFACES,
@@ -10,6 +12,7 @@ import {
 } from '../src/feed-surfaces.js';
 import type { InvoSignal } from '../src/notification-signal.js';
 import { signalFromFeedPost } from '../src/notification-signal.js';
+import { NotificationState } from '../src/notification-state.js';
 
 function signal(action: InvoSignal['action'], key: string, sourceBaseId: string): InvoSignal {
   return {
@@ -53,6 +56,32 @@ test('after a surface cursor exists, a later fresh signal is not assigned to bas
   const fresh = signal('open', 'fresh-open', 'fresh-source');
   assert.equal(planSurfaceBaseline([fresh], () => false).skipped[0].key, 'fresh-open');
   // The service calls planSurfaceBaseline only when surfaceNeedsBaseline(cursor) is true.
+});
+
+test('retryable owned close cannot hold a surface in baseline mode or swallow a later OPEN', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'surface-owned-close-')), 'state.json');
+  const state = new NotificationState(path);
+  const ownedClose = signal('close', 'owned-close', 'owned');
+  const first = planSurfaceBaseline([ownedClose], id => id === 'owned');
+  state.markFeedBaselined('trending', 10);
+  assert.equal(state.hasFeedBaseline('trending'), true);
+  assert.deepEqual(first.recoverableCloses.map(row => row.key), ['owned-close']);
+  assert.equal(state.hasSeen('owned-close'), false, 'owned close remains separately retryable');
+
+  const freshOpen = signal('open', 'fresh-open-after-close', 'fresh');
+  assert.equal(surfaceNeedsBaseline(state.hasFeedBaseline('trending')), false);
+  assert.equal(state.hasSeen(freshOpen.key), false, 'fresh OPEN enters normal processing');
+
+  const restarted = new NotificationState(path);
+  assert.equal(restarted.hasFeedBaseline('trending'), true);
+});
+
+test('empty first surface snapshot establishes a durable baseline', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'surface-empty-')), 'state.json');
+  const state = new NotificationState(path);
+  assert.deepEqual(planSurfaceBaseline([], () => false), { recoverableCloses: [], skipped: [] });
+  state.markFeedBaselined('most_recent', 20);
+  assert.equal(new NotificationState(path).hasFeedBaseline('most_recent'), true);
 });
 
 test('sanitized captured feed shapes parse on every proven surface', () => {
