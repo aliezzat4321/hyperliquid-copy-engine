@@ -21,11 +21,12 @@ test('service wires elite direct watch only in shadow and through normal execute
   assert.ok(pollGuard > scan, 'runtime scheduler must guard direct watch with !cfg.live');
 });
 
-test('service dedupes feed/direct races by source event and preserves admission/freshness gates', () => {
+test('service routes feed/direct races through action-aware dedupe and preserves admission/freshness gates', () => {
   const source = readFileSync(new URL('../../src/service.ts', import.meta.url), 'utf8');
-  assert.match(source, /source-event:\$\{signal\.sourceBaseId\}:\$\{signal\.sourceTimeMs\}/);
-  assert.match(source, /source-close:\$\{signal\.sourceBaseId\}/, 'feed/direct close timestamps may differ but one lifecycle closes once');
-  assert.match(source, /inFlightSourceEvents\.has\(signal\.sourceBaseId\)/);
+  assert.match(source, /signalWasSeen\(signal/);
+  assert.match(source, /sourceEventKey\(signal\)/);
+  assert.match(source, /closeLifecycleKey\(signal\)/, 'feed/direct close timestamps may differ but one lifecycle closes once');
+  assert.match(source, /inFlightSourceEvents\.has\(inFlightKey\)/);
   assert.match(source, /ageMs > cfg\.maxSignalAgeMs/);
   assert.match(source, /shadow_\$\{candidateAdmission\.reason\}/);
   assert.match(source, /cfg\.candidateSnapshotsPath/, 'admission must use immutable pre-trade candidate snapshots');

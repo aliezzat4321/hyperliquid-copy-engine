@@ -20,6 +20,8 @@ export interface InvoSignal {
   entryPrice: number | null;
   closingPrice: number | null;
   entrySize: number | null;
+  /** Resulting total source size, used to identify repeated INCREASE observations. */
+  resultingSourceSize?: number | null;
 }
 
 export interface NotificationHints {
@@ -107,6 +109,7 @@ export function signalFromFeedPost(post: any, observedAtMs = Date.now()): InvoSi
     entryPrice: numeric(update.entryPrice),
     closingPrice: numeric(update.closingPrice),
     entrySize: numeric(update.entrySize),
+    resultingSourceSize: action === 'increase' ? numeric(update.entrySize) : null,
   };
 }
 

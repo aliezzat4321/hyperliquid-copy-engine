@@ -32,6 +32,135 @@ export interface DirectHydrationPlanItem {
 
 export interface ClosedHydrationPlanItem { target: StoredTarget; reason: 'closed_history_baseline' | 'periodic_closed_poll' }
 
+export interface HydrationRunResult<T> {
+  attempted: T[];
+  failed: Array<{ item: T; error: unknown }>;
+  skippedAfterRateLimit: T[];
+  rateLimited: boolean;
+}
+
+/**
+ * Runs bounded target work without allowing one target failure to starve its peers.
+ * A 429 is different: callers must apply a global cooldown, so remaining work is
+ * reported as skipped and retried on a later scan. `noteAttempt` runs before I/O,
+ * which makes the deadline ordering rotate even when a target persistently fails.
+ */
+export async function runIsolatedHydrations<T>(
+  items: T[],
+  noteAttempt: (item: T) => void,
+  hydrate: (item: T) => Promise<void>,
+): Promise<HydrationRunResult<T>> {
+  const result: HydrationRunResult<T> = {
+    attempted: [], failed: [], skippedAfterRateLimit: [], rateLimited: false,
+  };
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
+    noteAttempt(item);
+    result.attempted.push(item);
+    try {
+      await hydrate(item);
+    } catch (error: any) {
+      result.failed.push({ item, error });
+      if (error?.status === 429) {
+        result.rateLimited = true;
+        result.skippedAfterRateLimit = items.slice(index + 1);
+        break;
+      }
+    }
+  }
+  return result;
+}
+
+/**
+ * The captured endpoint is newest-first across pages. Equal timestamps may span
+ * pages, so an unrelated row at T proves nothing. We may stop only after passing
+ * below T, exhausting the endpoint, or encountering every identity in the stored
+ * T boundary set. The latter relies on the captured stable newest-first ordering:
+ * the prior boundary set marks the already-scanned suffix at T.
+ */
+export function closedBoundaryProof(
+  pageRows: any[],
+  processedThroughMs: number,
+  boundaryIds: ReadonlySet<string>,
+  encounteredBoundaryIds: Set<string>,
+  pageSize: number,
+): { reached: boolean; reason: 'older_timestamp' | 'stored_boundary_ids' | 'endpoint_exhausted' | null } {
+  for (const row of pageRows) {
+    const atMs = directSourceTimeMs(row?.closedAt) ?? directSourceTimeMs(row?.updatedAt);
+    const id = String(row?.baseId ?? row?.id ?? '').trim();
+    if (atMs != null && atMs < processedThroughMs) return { reached: true, reason: 'older_timestamp' };
+    if (atMs === processedThroughMs && id && boundaryIds.has(id)) encounteredBoundaryIds.add(id);
+  }
+  if (boundaryIds.size > 0 && encounteredBoundaryIds.size === boundaryIds.size) {
+    return { reached: true, reason: 'stored_boundary_ids' };
+  }
+  if (pageRows.length < pageSize) return { reached: true, reason: 'endpoint_exhausted' };
+  return { reached: false, reason: null };
+}
+
+export interface ClosedBaselineResult {
+  boundaryReached: boolean;
+  boundaryReason: 'older_timestamp' | 'endpoint_exhausted' | null;
+  boundaryTimestampMs: number;
+  boundaryRows: any[];
+  boundaryIds: string[];
+  pagesFetched: number;
+  overflow: boolean;
+}
+
+/**
+ * Establishes a prospective CLOSED watermark around the newest visible timestamp.
+ * Only that equal-timestamp group matters: older history is neither crawled nor
+ * returned to the caller, and therefore can never become a replay candidate.
+ */
+export async function establishClosedBaseline(
+  fetchPage: (page: number) => Promise<any[]>,
+  maxPages: number,
+  pageSize = 100,
+): Promise<ClosedBaselineResult> {
+  let boundaryTimestampMs = 0;
+  const boundaryRows: any[] = [];
+  const boundaryIds = new Set<string>();
+  let pagesFetched = 0;
+
+  for (let page = 1; page <= Math.max(1, maxPages); page += 1) {
+    const rows = await fetchPage(page);
+    pagesFetched += 1;
+    const points = rows.flatMap(row => {
+      const atMs = directSourceTimeMs(row?.closedAt) ?? directSourceTimeMs(row?.updatedAt);
+      const id = String(row?.baseId ?? row?.id ?? '').trim();
+      return atMs != null ? [{ row, atMs, id }] : [];
+    });
+    if (page === 1) {
+      boundaryTimestampMs = points.reduce((newest, point) => Math.max(newest, point.atMs), 0);
+      if (boundaryTimestampMs === 0) {
+        if (rows.length < pageSize) {
+          return { boundaryReached: true, boundaryReason: 'endpoint_exhausted', boundaryTimestampMs: 0,
+            boundaryRows: [], boundaryIds: [], pagesFetched, overflow: false };
+        }
+        return { boundaryReached: false, boundaryReason: null, boundaryTimestampMs: 0,
+          boundaryRows: [], boundaryIds: [], pagesFetched, overflow: true };
+      }
+    }
+    for (const point of points) {
+      if (point.atMs === boundaryTimestampMs) {
+        boundaryRows.push(point.row);
+        if (point.id) boundaryIds.add(point.id);
+      }
+    }
+    if (points.some(point => point.atMs < boundaryTimestampMs)) {
+      return { boundaryReached: true, boundaryReason: 'older_timestamp', boundaryTimestampMs,
+        boundaryRows, boundaryIds: [...boundaryIds].sort(), pagesFetched, overflow: false };
+    }
+    if (rows.length < pageSize) {
+      return { boundaryReached: true, boundaryReason: 'endpoint_exhausted', boundaryTimestampMs,
+        boundaryRows, boundaryIds: [...boundaryIds].sort(), pagesFetched, overflow: false };
+    }
+  }
+  return { boundaryReached: false, boundaryReason: null, boundaryTimestampMs,
+    boundaryRows, boundaryIds: [...boundaryIds].sort(), pagesFetched, overflow: true };
+}
+
 export function planDirectHydrations(
   targets: StoredTarget[],
   selectorChanges: ReadonlyMap<string, number>,
@@ -333,6 +462,7 @@ function signalFromInvestment(
     entryPrice: positive(row?.entryPrice),
     closingPrice: positive(row?.closingPrice),
     entrySize: entrySizeOverride ?? positive(row?.entrySize),
+    resultingSourceSize: action === 'increase' ? positive(row?.entrySize) : null,
   };
 }
 

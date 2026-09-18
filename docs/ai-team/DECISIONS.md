@@ -44,6 +44,30 @@ Append-only record of accepted architecture / policy decisions. New decisions ma
   This decision changes no real-trading permission, credential, capital, signing or order
   route; `REAL_TRADING_ENABLED` remains disabled.
 
+## 2026-09-18 — Lane 3 direct watch is boundary-proven and failure-isolated
+
+- The captured portfolio-investments endpoint is treated as newest-first across pages.
+  A closed-history timestamp boundary is proven only by a strictly older row, endpoint
+  exhaustion, or encountering the complete stored identity set at the boundary timestamp;
+  unrelated equal-timestamp rows cannot advance the watermark. Bounded pagination that
+  proves none of these retains the prior watermark and emits overflow-risk telemetry.
+- Selector timestamps are prioritization hints only. Non-rate-limit selector, open, and
+  closed request failures are isolated per target. Scheduling attempts are durably noted
+  before I/O to rotate persistent failures without advancing event watermarks. HTTP 429
+  retains bounded global cooldown and records work skipped by that cooldown.
+- Cross-source event identity includes lifecycle action; INCREASE also includes resulting
+  source size. Legacy actionless keys suppress replay of old OPEN events but cannot
+  suppress an ambiguous same-time INCREASE or CLOSE; prospective feed cursors and direct
+  watermarks provide the history-replay boundary. The separate source-close lifecycle key
+  remains. A per-source queue serializes feed and direct lifecycle execution while distinct
+  sources retain parallelism.
+- The 45-target defaults imply nominal 18s open and 45s closed sweeps and at most 18
+  requests per 3s scan with four selector surfaces (6 requests/s). These are capacity
+  calculations, not a 25s freshness guarantee; health exposes actual oldest poll age and
+  overdue lag.
+- This changes shadow source capture only. It does not authorize real trading, capital,
+  credentials, signing, order routing, deployment, or bulk mining.
+
 ## 2026-09-03 — Risk eligibility is separate from credible edge
 
 - Promotion policy v2 retains the v1 profitability floors and adds a versioned,

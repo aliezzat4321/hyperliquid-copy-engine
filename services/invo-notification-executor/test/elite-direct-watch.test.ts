@@ -5,10 +5,13 @@ import { join } from 'node:path';
 import test from 'node:test';
 import {
   EliteDirectWatchState,
+  establishClosedBaseline,
+  closedBoundaryProof,
   closedSignalsAfterBoundary,
   loadEliteDirectTargets,
   planClosedHydrations,
   planDirectHydrations,
+  runIsolatedHydrations,
   signalsFromDirectInvestments,
   unownedCloseEvidence,
   type EliteDirectTarget,
@@ -238,6 +241,73 @@ test('first closed-history baseline indexes old rows without replay and survives
   assert.deepEqual(closedSignalsAfterBoundary([old], target, stored.closedProcessedThroughMs, stored.closedBoundaryIds, BASE + 2), []);
 });
 
+test('closed baseline ignores 456-row history when newest timestamp group ends on page one', async () => {
+  const newest = Array.from({ length: 3 }, (_, index) => openRow({
+    id: `new-${index}`, baseId: `new-${index}`, isOpen: false, closedAt: BASE,
+  }));
+  const history = Array.from({ length: 456 }, (_, index) => openRow({
+    id: `old-${index}`, baseId: `old-${index}`, isOpen: false, closedAt: BASE - index - 1,
+  }));
+  let calls = 0;
+  const result = await establishClosedBaseline(async page => {
+    calls += 1;
+    const all = [...newest, ...history];
+    return all.slice((page - 1) * 100, page * 100);
+  }, 2);
+  assert.equal(calls, 1);
+  assert.equal(result.boundaryReached, true);
+  assert.equal(result.boundaryReason, 'older_timestamp');
+  assert.deepEqual(result.boundaryIds, ['new-0', 'new-1', 'new-2']);
+  assert.equal(result.boundaryRows.length, 3);
+  assert.deepEqual(closedSignalsAfterBoundary(result.boundaryRows, target, BASE, result.boundaryIds, BASE + 1), []);
+});
+
+test('closed baseline collects a newest equal-timestamp group spanning pages', async () => {
+  const newest = Array.from({ length: 120 }, (_, index) => openRow({
+    id: `new-${index}`, baseId: `new-${index}`, isOpen: false, closedAt: BASE,
+  }));
+  const older = openRow({ id: 'older', baseId: 'older', isOpen: false, closedAt: BASE - 1 });
+  const all = [...newest, older];
+  const result = await establishClosedBaseline(
+    async page => all.slice((page - 1) * 100, page * 100), 2,
+  );
+  assert.equal(result.pagesFetched, 2);
+  assert.equal(result.boundaryReached, true);
+  assert.equal(result.boundaryReason, 'older_timestamp');
+  assert.equal(result.boundaryIds.length, 120);
+  assert.equal(result.boundaryRows.length, 120);
+});
+
+test('closed baseline reports overflow and cannot commit an incomplete newest group', async () => {
+  const newest = Array.from({ length: 250 }, (_, index) => openRow({
+    id: `new-${index}`, baseId: `new-${index}`, isOpen: false, closedAt: BASE,
+  }));
+  const result = await establishClosedBaseline(
+    async page => newest.slice((page - 1) * 100, page * 100), 2,
+  );
+  assert.equal(result.pagesFetched, 2);
+  assert.equal(result.boundaryReached, false);
+  assert.equal(result.overflow, true);
+  assert.equal(result.boundaryIds.length, 200);
+});
+
+test('empty closed baseline persists safely and later first close is prospective', async () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'elite-empty-closed-')), 'state.json');
+  const state = new EliteDirectWatchState(path);
+  state.syncTargets([target], new Set(), BASE);
+  const baseline = await establishClosedBaseline(async () => [], 2);
+  assert.equal(baseline.boundaryReached, true);
+  state.commitClosedHydration('p1', baseline.boundaryRows, BASE);
+
+  const restarted = new EliteDirectWatchState(path);
+  const stored = restarted.targets()[0];
+  assert.equal(stored.closedHistoryInitialized, true);
+  assert.equal(stored.closedProcessedThroughMs, 0);
+  assert.deepEqual(stored.closedBoundaryIds, []);
+  const firstClose = openRow({ isOpen: false, closingPrice: 0.8, closedAt: BASE + 1 });
+  assert.equal(closedSignalsAfterBoundary([firstClose], target, stored.closedProcessedThroughMs, [], BASE + 2).length, 1);
+});
+
 test('equal-timestamp feed/direct boundary identity is not counted twice', () => {
   const first = openRow({ isOpen: false, closingPrice: 0.8, closedAt: BASE + 100 });
   const duplicate = { ...first, id: 'different-surface-row-id' };
@@ -262,5 +332,73 @@ test('closed polling is fair for 45 targets and request math stays bounded', () 
   }
   assert.equal(served.size, 45);
   assert.equal(15 * 3_000, 45_000);
-  assert.equal(8 + 3 * 2, 14, 'worst case is 14 direct investment requests per scan');
+  assert.equal(4 + 8 + 3 * 2, 18, 'four selectors plus open/closed hydration is at most 18 requests per scan');
+});
+
+test('equal-timestamp closed boundary spanning 100 rows is not proven by unrelated rows', () => {
+  const boundaryIds = new Set(['stored-boundary']);
+  const encountered = new Set<string>();
+  const sameTime = (id: string) => openRow({ id, baseId: id, isOpen: false, closingPrice: 0.8, closedAt: BASE });
+  const firstPage = Array.from({ length: 100 }, (_, index) => sameTime(`new-${index}`));
+  const secondPage = [
+    ...Array.from({ length: 20 }, (_, index) => sameTime(`new-later-${index}`)),
+    sameTime('stored-boundary'),
+  ];
+
+  assert.deepEqual(closedBoundaryProof(firstPage, BASE, boundaryIds, encountered, 100), { reached: false, reason: null });
+  const unseen = closedSignalsAfterBoundary([...firstPage, ...secondPage], target, BASE, [...boundaryIds], BASE + 1);
+  assert.equal(unseen.length, 120);
+  assert.deepEqual(closedBoundaryProof(secondPage, BASE, boundaryIds, encountered, 100), {
+    reached: true, reason: 'stored_boundary_ids',
+  });
+});
+
+test('closed watermark advances only after pagination boundary proof', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'elite-closed-proof-')), 'state.json');
+  const state = new EliteDirectWatchState(path);
+  state.syncTargets([target], new Set(), BASE - 1);
+  state.commitClosedHydration('p1', [openRow({ baseId: 'old', isOpen: false, closedAt: BASE })], BASE);
+  const before = state.targets()[0];
+  const fullUnprovenPage = Array.from({ length: 100 }, (_, index) => openRow({
+    id: `new-${index}`, baseId: `new-${index}`, isOpen: false, closedAt: BASE + 1,
+  }));
+  const proof = closedBoundaryProof(fullUnprovenPage, BASE, new Set(['old']), new Set(), 100);
+  if (proof.reached) state.commitClosedHydration('p1', fullUnprovenPage, BASE + 2);
+  assert.equal(state.targets()[0].closedProcessedThroughMs, before.closedProcessedThroughMs);
+  assert.deepEqual(state.targets()[0].closedBoundaryIds, before.closedBoundaryIds);
+});
+
+test('persistent first-target 500 still gives all later 44 targets bounded attempts and does not starve closed phase', async () => {
+  const deadlines = Array.from({ length: 45 }, () => 0);
+  const attempted: number[] = [];
+  let failures = 0;
+  for (let scan = 0; scan < 6; scan += 1) {
+    const plan = Array.from({ length: 45 }, (_, index) => index)
+      .sort((a, b) => deadlines[a] - deadlines[b] || a - b)
+      .slice(0, 8);
+    const open = await runIsolatedHydrations(plan, item => {
+      attempted.push(item);
+      deadlines[item] = BASE + scan;
+    }, async item => {
+      if (item === 0) throw Object.assign(new Error('persistent'), { status: 500 });
+    });
+    failures += open.failed.length;
+  }
+  let closedAttempted = 0;
+  const closed = await runIsolatedHydrations([0, 1, 2], () => { closedAttempted += 1; }, async () => {});
+  assert.equal(failures, 2, 'target zero is retried only after all peers receive their first attempt');
+  assert.equal(new Set(attempted).size, 45);
+  assert.equal(closed.attempted.length, 3);
+  assert.equal(closedAttempted, 3);
+});
+
+test('429 stops bounded work, reports skipped targets, and recorded attempt rotates next scan', async () => {
+  const deadlines = [0, 0, 0];
+  const plan = () => [0, 1, 2].sort((a, b) => deadlines[a] - deadlines[b] || a - b);
+  const first = await runIsolatedHydrations(plan(), item => { deadlines[item] = BASE; }, async item => {
+    if (item === 0) throw Object.assign(new Error('quota'), { status: 429 });
+  });
+  assert.equal(first.rateLimited, true);
+  assert.deepEqual(first.skippedAfterRateLimit, [1, 2]);
+  assert.deepEqual(plan(), [1, 2, 0], 'failed target rotates behind unattempted peers after cooldown');
 });

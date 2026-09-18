@@ -21,14 +21,23 @@ import {
 } from './feed-surfaces.js';
 import {
   directSourceTimeMs,
+  establishClosedBaseline,
+  closedBoundaryProof,
   closedSignalsAfterBoundary,
   EliteDirectWatchState,
   loadEliteDirectTargets,
   planClosedHydrations,
   planDirectHydrations,
+  runIsolatedHydrations,
   signalsFromDirectInvestments,
   unownedCloseEvidence,
 } from './elite-direct-watch.js';
+import {
+  closeLifecycleKey,
+  signalWasSeen,
+  sourceEventKey,
+} from './source-event-dedupe.js';
+import { runSignalBatchBySource, SourceLifecycleQueue } from './source-lifecycle.js';
 import { eliteAdmissionFromState, ELITE_ADMISSION_VERSION } from './elite-admission.js';
 import { shouldTerminallyDustReconcile } from './close-rejection.js';
 import {
@@ -148,6 +157,7 @@ const tracker = new TraderTracker(cfg.trackerPath, {
 const directWatch = new EliteDirectWatchState(cfg.directWatchStatePath);
 const inFlight = new Set<string>();
 const inFlightSourceEvents = new Set<string>();
+const sourceLifecycleQueue = new SourceLifecycleQueue();
 let hydrating = false;
 let pendingWake: { source: string; hints?: NotificationHints; receivedAtMs: number; feedFilter?: InvoFeedSurface } | null = null;
 let lastSuccessPollMs = 0;
@@ -157,10 +167,12 @@ let lastFundingOracleBoundaryMs = -1;
 let lastDirectWatchScanMs = 0;
 let directWatchBackoffMs = 0;
 let directWatchBackoffUntilMs = 0;
+let directWatchSelectorIndex = 0;
 const directWatchMetrics = {
   selectorRequests: 0, hydrationRequests: 0, hydrationCount: 0,
   closedHydrationCount: 0, closedBaselineCount: 0, closedOverflowRiskCount: 0,
   signalsObserved: 0, signalsHandled: 0, http429s: 0,
+  targetErrors: 0, selectorErrors: 0, skippedAfterRateLimit: 0,
   lastScanAtMs: 0, lastSuccessAtMs: 0,
 };
 const FUNDING_INTERVAL_MS = 60 * 60 * 1000;
@@ -516,18 +528,17 @@ async function shadowReup(
   });
 }
 
-async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: number, feedFilter: string) {
-  const sourceEventKey = signal.sourceTimeMs == null ? null : `source-event:${signal.sourceBaseId}:${signal.sourceTimeMs}`;
-  const closeLifecycleKey = signal.action === 'close' ? `source-close:${signal.sourceBaseId}` : null;
+async function executeUnlocked(signal: InvoSignal, wakeSource: string, receivedAtMs: number, feedFilter: string) {
+  const eventKey = sourceEventKey(signal);
+  const lifecycleKey = closeLifecycleKey(signal);
+  const inFlightKey = eventKey ?? signal.key;
   if (
-    state.hasSeen(signal.key)
-    || (sourceEventKey != null && state.hasSeen(sourceEventKey))
-    || (closeLifecycleKey != null && state.hasSeen(closeLifecycleKey))
+    signalWasSeen(signal, key => state.hasSeen(key))
     || inFlight.has(signal.key)
-    || inFlightSourceEvents.has(signal.sourceBaseId)
+    || inFlightSourceEvents.has(inFlightKey)
   ) return;
   inFlight.add(signal.key);
-  inFlightSourceEvents.add(signal.sourceBaseId);
+  inFlightSourceEvents.add(inFlightKey);
   const decisionAtMs = Date.now();
 
   try {
@@ -1062,12 +1073,16 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
     });
   } finally {
     if (state.hasSeen(signal.key)) {
-      if (sourceEventKey != null) state.markSeen(sourceEventKey);
-      if (closeLifecycleKey != null) state.markSeen(closeLifecycleKey);
+      if (eventKey != null) state.markSeen(eventKey);
+      if (lifecycleKey != null) state.markSeen(lifecycleKey);
     }
     inFlight.delete(signal.key);
-    inFlightSourceEvents.delete(signal.sourceBaseId);
+    inFlightSourceEvents.delete(inFlightKey);
   }
+}
+
+async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: number, feedFilter: string) {
+  return sourceLifecycleQueue.run(signal.sourceBaseId, () => executeUnlocked(signal, wakeSource, receivedAtMs, feedFilter));
 }
 
 
@@ -1273,7 +1288,7 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
   if (cfg.live) {
     for (const signal of ordered) await execute(signal, source, receivedAtMs, feedFilter);
   } else {
-    await Promise.all(ordered.map(signal => execute(signal, source, receivedAtMs, feedFilter)));
+    await runSignalBatchBySource(ordered, signal => execute(signal, source, receivedAtMs, feedFilter));
   }
   const allHandled = ordered.every(signal => state.hasSeen(signal.key));
   if (allHandled && backfill.newestPostId) state.setFeedCursor(feedFilter, { postId: backfill.newestPostId, observedAtMs: Date.now(), source });
@@ -1334,20 +1349,12 @@ async function hydrateDirectTarget(
   const signals = signalsFromDirectInvestments(
     openRows, [], target, target.processedThroughMs, observedAtMs,
   );
-  // This target received its bounded direct-poll opportunity even if a later
-  // signal cannot be handled. Advance the scheduling deadline without moving
-  // the event watermark so one failing target cannot monopolize every scan.
-  directWatch.noteFallbackPoll(target.portfolioId, observedAtMs);
   directWatchMetrics.hydrationCount += 1;
   directWatchMetrics.signalsObserved += signals.length;
   for (const signal of signals) {
     await execute(signal, `elite_direct:${reason}`, observedAtMs, target.sourceFilter);
   }
-  const allHandled = signals.every(signal => {
-    if (state.hasSeen(signal.key)) return true;
-    if (signal.sourceTimeMs == null) return false;
-    return state.hasSeen(`source-event:${signal.sourceBaseId}:${signal.sourceTimeMs}`);
-  });
+  const allHandled = signals.every(signal => signalWasSeen(signal, key => state.hasSeen(key)));
   const highWaterMs = signals.reduce(
     (highWater, signal) => Math.max(highWater, signal.sourceTimeMs ?? highWater),
     target.processedThroughMs,
@@ -1381,8 +1388,32 @@ async function hydrateClosedHistory(
   reason: 'closed_history_baseline' | 'periodic_closed_poll',
   observedAtMs: number,
 ) {
+  if (!target.closedHistoryInitialized) {
+    const baseline = await establishClosedBaseline(async page => {
+      directWatchMetrics.hydrationRequests += 1;
+      return directInvestmentRows(await invo.getPortfolioInvestments(target.portfolioId, false, page, 100));
+    }, cfg.directWatchClosedMaxPages, 100);
+    directWatchMetrics.closedHydrationCount += 1;
+    if (baseline.overflow) directWatchMetrics.closedOverflowRiskCount += 1;
+    if (baseline.boundaryReached) {
+      directWatch.commitClosedHydration(target.portfolioId, baseline.boundaryRows, observedAtMs);
+      directWatchMetrics.closedBaselineCount += 1;
+    }
+    log({
+      type: baseline.overflow ? 'elite_direct_closed_baseline_overflow' : 'elite_direct_closed_history_baseline',
+      portfolioId: target.portfolioId, indexedRows: baseline.boundaryRows.length,
+      boundaryTimestampMs: baseline.boundaryTimestampMs, boundaryIds: baseline.boundaryIds.length,
+      pagesFetched: baseline.pagesFetched, boundaryReached: baseline.boundaryReached,
+      boundaryReason: baseline.boundaryReason, overflow: baseline.overflow,
+      watermarkCommitted: baseline.boundaryReached, replayedSignals: 0, live: false,
+    });
+    return;
+  }
   const rows: any[] = [];
-  let boundaryReached = !target.closedHistoryInitialized;
+  let boundaryReached = false;
+  let boundaryReason: ReturnType<typeof closedBoundaryProof>['reason'] = null;
+  const storedBoundaryIds = new Set(target.closedBoundaryIds);
+  const encounteredBoundaryIds = new Set<string>();
   let pagesFetched = 0;
   for (let page = 1; page <= cfg.directWatchClosedMaxPages; page += 1) {
     directWatchMetrics.hydrationRequests += 1;
@@ -1390,33 +1421,27 @@ async function hydrateClosedHistory(
     pagesFetched += 1;
     const pageRows = directInvestmentRows(payload);
     rows.push(...pageRows);
-    if (pageRows.length < 100) { boundaryReached = true; break; }
-    if (target.closedHistoryInitialized && pageRows.some(row => {
-      const atMs = directSourceTimeMs(row?.closedAt) ?? directSourceTimeMs(row?.updatedAt);
-      return atMs != null && atMs <= target.closedProcessedThroughMs;
-    })) { boundaryReached = true; break; }
+    const proof = target.closedHistoryInitialized
+      ? closedBoundaryProof(
+          pageRows, target.closedProcessedThroughMs, storedBoundaryIds,
+          encounteredBoundaryIds, 100,
+        )
+      : { reached: pageRows.length < 100, reason: pageRows.length < 100 ? 'endpoint_exhausted' as const : null };
+    if (proof.reached) {
+      boundaryReached = true;
+      boundaryReason = proof.reason;
+      break;
+    }
   }
-  directWatch.noteClosedPoll(target.portfolioId, observedAtMs);
   directWatchMetrics.closedHydrationCount += 1;
   if (!boundaryReached) directWatchMetrics.closedOverflowRiskCount += 1;
-
-  if (!target.closedHistoryInitialized) {
-    directWatch.commitClosedHydration(target.portfolioId, rows, observedAtMs);
-    directWatchMetrics.closedBaselineCount += 1;
-    log({
-      type: 'elite_direct_closed_history_baseline', portfolioId: target.portfolioId,
-      indexedRows: rows.length, pagesFetched, boundaryReached, replayedSignals: 0, live: false,
-    });
-    return;
-  }
 
   const signals = closedSignalsAfterBoundary(
     rows, target, target.closedProcessedThroughMs, target.closedBoundaryIds, observedAtMs,
   );
   directWatchMetrics.signalsObserved += signals.length;
   for (const signal of signals) await execute(signal, `elite_direct:${reason}`, observedAtMs, target.sourceFilter);
-  const allHandled = signals.every(signal => state.hasSeen(signal.key)
-    || (signal.sourceTimeMs != null && state.hasSeen(`source-event:${signal.sourceBaseId}:${signal.sourceTimeMs}`)));
+  const allHandled = signals.every(signal => signalWasSeen(signal, key => state.hasSeen(key)));
   const watermarkCommitted = allHandled && boundaryReached;
   if (watermarkCommitted) {
     directWatch.commitClosedHydration(target.portfolioId, rows, observedAtMs);
@@ -1425,80 +1450,119 @@ async function hydrateClosedHistory(
   log({
     type: 'elite_direct_closed_hydration', portfolioId: target.portfolioId, reason,
     previousClosedProcessedThroughMs: target.closedProcessedThroughMs,
-    signalCount: signals.length, pagesFetched, boundaryReached, allHandled, watermarkCommitted, live: false,
+    signalCount: signals.length, pagesFetched, boundaryReached, boundaryReason,
+    allHandled, watermarkCommitted, live: false,
   });
+}
+
+function applyDirectWatchRateLimit(nowMs: number) {
+  directWatchMetrics.http429s += 1;
+  directWatchBackoffMs = Math.min(Math.max(directWatchBackoffMs * 2, 2_000), 30_000);
+  directWatchBackoffUntilMs = nowMs + directWatchBackoffMs;
+}
+
+function logTargetFailures(phase: string, failed: Array<{ item: any; error: unknown }>) {
+  for (const { item, error } of failed) {
+    directWatchMetrics.targetErrors += 1;
+    log({ type: 'elite_direct_target_error', phase, portfolioId: item.target.portfolioId,
+      status: (error as any)?.status, error: error instanceof Error ? error.message : String(error), live: false });
+  }
 }
 
 async function scanEliteDirectWatch(nowMs = Date.now()) {
   if (cfg.live || nowMs < directWatchBackoffUntilMs) return;
-  const candidate = loadEliteDirectTargets(cfg.candidateStatePath, nowMs, cfg.candidateStateMaxAgeMs);
-  const ownedPortfolioIds = ownedDirectPortfolioIds();
-  directWatch.syncTargets(candidate.targets, ownedPortfolioIds, nowMs);
-  const targets = directWatch.targets();
-  const targetsByFilter = new Map<string, typeof targets>();
-  for (const target of targets) {
-    const rows = targetsByFilter.get(target.sourceFilter) ?? [];
-    rows.push(target);
-    targetsByFilter.set(target.sourceFilter, rows);
-  }
-  const selectorChanges = new Map<string, number>();
   try {
-    for (const [sourceFilter, filterTargets] of targetsByFilter) {
+    const candidate = loadEliteDirectTargets(cfg.candidateStatePath, nowMs, cfg.candidateStateMaxAgeMs);
+    directWatch.syncTargets(candidate.targets, ownedDirectPortfolioIds(), nowMs);
+    const targets = directWatch.targets();
+    const targetsByFilter = new Map<string, typeof targets>();
+    for (const target of targets) {
+      const rows = targetsByFilter.get(target.sourceFilter) ?? [];
+      rows.push(target);
+      targetsByFilter.set(target.sourceFilter, rows);
+    }
+    const selectorChanges = new Map<string, number>();
+    const selectorGroups = [...targetsByFilter.entries()];
+    const rotated = selectorGroups.length === 0 ? [] : selectorGroups.map(
+      (_, offset) => selectorGroups[(directWatchSelectorIndex + offset) % selectorGroups.length],
+    );
+    let selectorRateLimited = false;
+    for (const [sourceFilter, filterTargets] of rotated) {
       directWatchMetrics.selectorRequests += 1;
-      const payload = await invo.discoverPortfolios(sourceFilter, 1, 100);
-      const rows = Array.isArray(payload?.items) ? payload.items : [];
-      const byId = new Map(rows.map((row: any) => [String(row?.id ?? ''), row]));
-      for (const target of filterTargets) {
-        const row: any = byId.get(target.portfolioId);
-        const selectorUpdatedAtMs = directSourceTimeMs(row?.updatedAt);
-        if (selectorUpdatedAtMs != null) {
-          const decision = directWatch.observeSelector(target.portfolioId, selectorUpdatedAtMs);
-          if (decision.hydrate) selectorChanges.set(target.portfolioId, selectorUpdatedAtMs);
+      directWatchSelectorIndex = (directWatchSelectorIndex + 1) % selectorGroups.length;
+      try {
+        const payload = await invo.discoverPortfolios(sourceFilter, 1, 100);
+        const rows = Array.isArray(payload?.items) ? payload.items : [];
+        const byId = new Map(rows.map((row: any) => [String(row?.id ?? ''), row]));
+        for (const target of filterTargets) {
+          const row: any = byId.get(target.portfolioId);
+          const selectorUpdatedAtMs = directSourceTimeMs(row?.updatedAt);
+          if (selectorUpdatedAtMs != null) {
+            const decision = directWatch.observeSelector(target.portfolioId, selectorUpdatedAtMs);
+            if (decision.hydrate) selectorChanges.set(target.portfolioId, selectorUpdatedAtMs);
+          }
         }
+      } catch (error: any) {
+        directWatchMetrics.selectorErrors += 1;
+        log({ type: 'elite_direct_selector_error', sourceFilter, status: error?.status,
+          error: error instanceof Error ? error.message : String(error), live: false });
+        if (error?.status === 429) { applyDirectWatchRateLimit(Date.now()); selectorRateLimited = true; break; }
       }
     }
 
-    // Invo portfolio updatedAt is not a reliable trade-change signal. Keep it as
-    // a fast prioritization hint, but directly poll every selected elite on a
-    // bounded stagger so no leaderboard trade depends on that metadata changing.
+    // Selector timestamps are hints only. Periodic direct plans are constructed
+    // even when one or more selector requests fail.
     const hydrationPlan = planDirectHydrations(
-      targets,
-      selectorChanges,
-      nowMs,
-      cfg.directWatchFallbackPollMs,
+      targets, selectorChanges, nowMs, cfg.directWatchFallbackPollMs,
       cfg.directWatchMaxHydratesPerScan,
     );
-    for (const item of hydrationPlan) {
-      await hydrateDirectTarget(
-        item.target,
-        item.selectorUpdatedAtMs,
-        item.reason,
-        nowMs,
-      );
-    }
     const closedPlan = planClosedHydrations(
       directWatch.targets(), nowMs, cfg.directWatchClosedPollMs,
       cfg.directWatchMaxClosedHydratesPerScan,
     );
-    for (const item of closedPlan) await hydrateClosedHistory(item.target, item.reason, nowMs);
+    if (selectorRateLimited) {
+      directWatchMetrics.skippedAfterRateLimit += hydrationPlan.length + closedPlan.length;
+      log({ type: 'elite_direct_rate_limit_skip', phase: 'selector', skippedOpen: hydrationPlan.length,
+        skippedClosed: closedPlan.length, backoffMs: directWatchBackoffMs, live: false });
+      return;
+    }
+
+    const openRun = await runIsolatedHydrations(
+      hydrationPlan,
+      item => directWatch.noteFallbackPoll(item.target.portfolioId, nowMs),
+      item => hydrateDirectTarget(item.target, item.selectorUpdatedAtMs, item.reason, nowMs),
+    );
+    logTargetFailures('open', openRun.failed);
+    directWatchMetrics.skippedAfterRateLimit += openRun.skippedAfterRateLimit.length;
+    if (openRun.rateLimited) {
+      applyDirectWatchRateLimit(Date.now());
+      directWatchMetrics.skippedAfterRateLimit += closedPlan.length;
+      log({ type: 'elite_direct_rate_limit_skip', phase: 'open', skippedOpen: openRun.skippedAfterRateLimit.length,
+        skippedClosed: closedPlan.length, backoffMs: directWatchBackoffMs, live: false });
+      return;
+    }
+
+    const closedRun = await runIsolatedHydrations(
+      closedPlan,
+      item => directWatch.noteClosedPoll(item.target.portfolioId, nowMs),
+      item => hydrateClosedHistory(item.target, item.reason, nowMs),
+    );
+    logTargetFailures('closed', closedRun.failed);
+    directWatchMetrics.skippedAfterRateLimit += closedRun.skippedAfterRateLimit.length;
+    if (closedRun.rateLimited) {
+      applyDirectWatchRateLimit(Date.now());
+      log({ type: 'elite_direct_rate_limit_skip', phase: 'closed', skippedOpen: 0,
+        skippedClosed: closedRun.skippedAfterRateLimit.length, backoffMs: directWatchBackoffMs, live: false });
+      return;
+    }
     directWatchBackoffMs = 0;
     directWatchBackoffUntilMs = 0;
     directWatchMetrics.lastSuccessAtMs = Date.now();
   } catch (err: any) {
-    const status = err?.status;
-    if (status === 429) {
-      directWatchMetrics.http429s += 1;
-      directWatchBackoffMs = Math.min(Math.max(directWatchBackoffMs * 2, 2_000), 30_000);
-      directWatchBackoffUntilMs = Date.now() + directWatchBackoffMs;
-    }
-    log({
-      type: 'elite_direct_watch_error',
-      source: 'portfolio_specific_read_only',
-      status,
-      backoffMs: directWatchBackoffMs,
-      error: err instanceof Error ? err.message : String(err),
-      live: false,
-    });
+    // State/filesystem faults remain scan-level failures; HTTP target faults are
+    // isolated above and never reach this guard.
+    log({ type: 'elite_direct_watch_error', source: 'portfolio_specific_read_only', status: err?.status,
+      backoffMs: directWatchBackoffMs, error: err instanceof Error ? err.message : String(err), live: false });
   } finally {
     lastDirectWatchScanMs = nowMs;
     directWatchMetrics.lastScanAtMs = nowMs;
@@ -1532,6 +1596,12 @@ function startServer() {
     if (req.method === 'GET' && req.url === '/health') {
       const population = tracker.report();
       const snapshot = state.snapshot();
+      const directStatus = directWatch.status();
+      const healthNowMs = Date.now();
+      const oldestOpenPollAgeMs = directStatus.oldestOpenPollAtMs == null
+        ? null : Math.max(0, healthNowMs - directStatus.oldestOpenPollAtMs);
+      const oldestClosedPollAgeMs = directStatus.oldestClosedPollAtMs == null
+        ? null : Math.max(0, healthNowMs - directStatus.oldestClosedPollAtMs);
       const paperPositions = Object.values(snapshot.managed).filter(position => position.paper);
       const unresolvedPaperPositions = paperPositions.filter(position => position.unresolvedAfterSourceClose);
       const markablePaperPositions = paperPositions.filter(position => !position.unresolvedAfterSourceClose);
@@ -1565,7 +1635,7 @@ function startServer() {
         feedCursors: state.snapshot().feedCursors,
         directWatch: {
           enabled: !cfg.live,
-          ...directWatch.status(),
+          ...directStatus,
           ...directWatchMetrics,
           scanMs: cfg.directWatchScanMs,
           maxHydratesPerScan: cfg.directWatchMaxHydratesPerScan,
@@ -1573,10 +1643,18 @@ function startServer() {
           closedPollMs: cfg.directWatchClosedPollMs,
           maxClosedHydratesPerScan: cfg.directWatchMaxClosedHydratesPerScan,
           closedMaxPages: cfg.directWatchClosedMaxPages,
-          nominalOpenSweepMs: Math.ceil(directWatch.status().targetCount / cfg.directWatchMaxHydratesPerScan) * cfg.directWatchScanMs,
-          nominalClosedSweepMs: Math.ceil(directWatch.status().targetCount / cfg.directWatchMaxClosedHydratesPerScan) * cfg.directWatchScanMs,
+          nominalOpenSweepMs: Math.ceil(directStatus.targetCount / cfg.directWatchMaxHydratesPerScan) * cfg.directWatchScanMs,
+          nominalClosedSweepMs: Math.ceil(directStatus.targetCount / cfg.directWatchMaxClosedHydratesPerScan) * cfg.directWatchScanMs,
           nominalMaxRequestsPerScan: cfg.directWatchMaxHydratesPerScan
-            + cfg.directWatchMaxClosedHydratesPerScan * cfg.directWatchClosedMaxPages,
+            + cfg.directWatchMaxClosedHydratesPerScan * cfg.directWatchClosedMaxPages
+            + new Set(directWatch.targets().map(target => target.sourceFilter)).size,
+          nominalMaxRequestsPerSecond: (cfg.directWatchMaxHydratesPerScan
+            + cfg.directWatchMaxClosedHydratesPerScan * cfg.directWatchClosedMaxPages
+            + new Set(directWatch.targets().map(target => target.sourceFilter)).size) / (cfg.directWatchScanMs / 1000),
+          oldestOpenPollAgeMs,
+          oldestOpenPollOverdueMs: oldestOpenPollAgeMs == null ? null : Math.max(0, oldestOpenPollAgeMs - cfg.directWatchFallbackPollMs),
+          oldestClosedPollAgeMs,
+          oldestClosedPollOverdueMs: oldestClosedPollAgeMs == null ? null : Math.max(0, oldestClosedPollAgeMs - cfg.directWatchClosedPollMs),
           openFreshnessGuarantee: false,
           openFreshnessLimitReason: '18s nominal sweep leaves 7s for feed, selector, transport, execution, and 429 backoff; use observed poll ages',
           backoffMs: directWatchBackoffMs,
