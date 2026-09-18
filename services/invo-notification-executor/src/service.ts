@@ -27,8 +27,10 @@ import {
   closedSignalsAfterBoundary,
   EliteDirectWatchState,
   loadEliteDirectTargets,
+  isMissedPreDemotionOpen,
   planClosedHydrations,
   planDirectHydrations,
+  retiringOpenDispositions,
   runIsolatedHydrations,
   signalsFromDirectInvestments,
   unownedCloseEvidence,
@@ -603,7 +605,17 @@ async function executeUnlocked(signal: InvoSignal, wakeSource: string, receivedA
     const ageMs = signal.sourceTimeMs == null ? null : decisionAtMs - signal.sourceTimeMs;
     if (signal.action !== 'close' && ageMs != null && ageMs > cfg.maxSignalAgeMs) {
       state.markSeen(signal.key);
-      log({ type: 'skip', reason: 'stale_signal_over_25s_window', ageMs, maxSignalAgeMs: cfg.maxSignalAgeMs, signal, wakeSource });
+      const missedPreDemotion = isMissedPreDemotionOpen(
+        signal, wakeSource, decisionAtMs, cfg.maxSignalAgeMs,
+      );
+      log({
+        type: missedPreDemotion ? 'missed_pre_demotion_open' : 'skip',
+        reason: missedPreDemotion ? 'missed_pre_demotion_open' : 'stale_signal_over_25s_window',
+        lifecycleCopyability: missedPreDemotion ? 'NON_COPYABLE_STALE_FIRST_OBSERVATION' : undefined,
+        reconstructedOpenExecuted: missedPreDemotion ? false : undefined,
+        handledNoRetry: missedPreDemotion ? true : undefined,
+        ageMs, maxSignalAgeMs: cfg.maxSignalAgeMs, signal, wakeSource,
+      });
       return;
     }
 
@@ -1364,10 +1376,43 @@ async function hydrateDirectTarget(
   }, cfg.directWatchOpenMaxPages, 100);
   const openRows = openResult.rows;
   if (target.lifecycle === 'RETIRING') {
+    const dispositions = retiringOpenDispositions(
+      openRows, target, observedAtMs,
+      sourceBaseId => state.getManagedBySource(sourceBaseId) != null,
+    );
+    directWatchMetrics.hydrationCount += 1;
+    directWatchMetrics.signalsObserved += dispositions.length;
+    for (const disposition of dispositions) {
+      if (disposition.kind === 'execute') {
+        await execute(disposition.signal, `elite_direct:${reason}`, observedAtMs, target.sourceFilter);
+        continue;
+      }
+      state.markSeen(disposition.signal.key);
+      log({
+        type: 'skip',
+        reason: disposition.kind === 'post_demotion_open_ignored'
+          ? 'retirement_post_demotion_open_ignored'
+          : 'retirement_unowned_increase_noncopyable',
+        handledNoRetry: true,
+        retiredAtMs: target.retiredAtMs,
+        signal: disposition.signal,
+        wakeSource: `elite_direct:${reason}`,
+      });
+    }
+    const allHandled = dispositions.every(({ signal }) => signalWasSeen(signal, key => state.hasSeen(key)));
+    const highWaterMs = dispositions.reduce(
+      (highWater, { signal }) => Math.max(highWater, signal.sourceTimeMs ?? highWater),
+      target.processedThroughMs,
+    );
+    if (allHandled && openResult.complete) {
+      directWatch.commitHydration(target.portfolioId, highWaterMs);
+      directWatchMetrics.signalsHandled += dispositions.length;
+    }
     if (openResult.complete) directWatch.commitRetirementOpenPoll(target.portfolioId, openRows, observedAtMs);
     if (!openResult.complete) directWatchMetrics.openOverflowRiskCount += 1;
     if (openResult.orderingViolation) directWatchMetrics.openOrderingViolationCount += 1;
     log({ type: 'elite_direct_retirement_open_drain', portfolioId: target.portfolioId,
+      signalCount: dispositions.length, allHandled, highWaterMs,
       pagesFetched: openResult.pagesFetched, endpointComplete: openResult.complete,
       overflow: openResult.overflow, orderingViolation: openResult.orderingViolation, live: false });
     return;

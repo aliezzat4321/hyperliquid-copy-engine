@@ -138,6 +138,11 @@ export interface OpenPaginationResult {
   orderingViolation: OpenOrderingViolation | null;
 }
 
+export type RetirementOpenDisposition =
+  | { kind: 'execute'; signal: InvoSignal }
+  | { kind: 'post_demotion_open_ignored'; signal: InvoSignal }
+  | { kind: 'unowned_increase_ignored'; signal: InvoSignal };
+
 /** Fetches the whole newest-first OPEN endpoint; no high-water is safe on overflow. */
 export async function fetchCompleteOpenInvestments(
   fetchPage: (page: number) => Promise<any[]>, maxPages: number, pageSize = 100,
@@ -459,12 +464,12 @@ export class EliteDirectWatchState {
   ) {
     // Missing, malformed, or stale candidate state is not a demotion signal.
     if (!authoritative) return;
-    const wanted = new Map(targets.map(target => [target.portfolioId, target]));
     let changed = false;
     for (const target of targets) {
       const existing = this.state.targets[target.portfolioId];
+      let canonical = existing;
       if (!existing) {
-        this.state.targets[target.portfolioId] = {
+        canonical = this.state.targets[target.portfolioId] = {
           ...target,
           lifecycle: 'ACTIVE', retiredAtMs: null, retireAfterMs: null,
           lastRetirementOpenPollAtMs: 0,
@@ -485,11 +490,11 @@ export class EliteDirectWatchState {
         || existing.username !== target.username
         || existing.sourceFilter !== target.sourceFilter
       ) {
-        this.state.targets[target.portfolioId] = { ...existing, ...target };
+        canonical = this.state.targets[target.portfolioId] = { ...existing, ...target };
         changed = true;
       }
-      if (existing && existing.lifecycle !== 'ACTIVE') {
-        Object.assign(existing, { lifecycle: 'ACTIVE', retiredAtMs: null, retireAfterMs: null,
+      if (canonical && canonical.lifecycle !== 'ACTIVE') {
+        Object.assign(canonical, { lifecycle: 'ACTIVE', retiredAtMs: null, retireAfterMs: null,
           lastRetirementOpenPollAtMs: 0,
           retirementRelevantOpenCount: null, retirementOpenEmptyProofs: 0, retirementClosedProofs: 0 });
         changed = true;
@@ -731,6 +736,35 @@ export function signalsFromDirectInvestments(
   }
   const byKey = new Map(out.map(signal => [signal.key, signal]));
   return [...byKey.values()].sort((a, b) => (a.sourceTimeMs ?? a.observedAtMs) - (b.sourceTimeMs ?? b.observedAtMs));
+}
+
+/** Classifies RETIRING open rows without weakening normal execution gates. */
+export function retiringOpenDispositions(
+  openRows: any[], target: StoredTarget, observedAtMs: number,
+  isManagedSource: (sourceBaseId: string) => boolean,
+): RetirementOpenDisposition[] {
+  const retiredAtMs = target.retiredAtMs ?? Number.NEGATIVE_INFINITY;
+  return signalsFromDirectInvestments(
+    openRows, [], target, target.processedThroughMs, observedAtMs,
+  ).map(signal => {
+    const lifecycleCreatedAtMs = signal.openedSourceTimeMs;
+    if (lifecycleCreatedAtMs == null || lifecycleCreatedAtMs > retiredAtMs) {
+      return { kind: 'post_demotion_open_ignored', signal };
+    }
+    if (signal.action === 'increase' && !isManagedSource(signal.sourceBaseId)) {
+      return { kind: 'unowned_increase_ignored', signal };
+    }
+    return { kind: 'execute', signal };
+  });
+}
+
+export function isMissedPreDemotionOpen(
+  signal: InvoSignal, wakeSource: string, decisionAtMs: number, maxSignalAgeMs: number,
+): boolean {
+  return wakeSource === 'elite_direct:retirement_open_drain'
+    && signal.action === 'open'
+    && signal.sourceTimeMs != null
+    && decisionAtMs - signal.sourceTimeMs > maxSignalAgeMs;
 }
 
 export function closedSignalsAfterBoundary(

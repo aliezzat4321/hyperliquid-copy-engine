@@ -92,6 +92,20 @@ interface LedgerDiskState {
   lastObservedAtMs: number;
 }
 
+const PORTFOLIO_BUCKETS = new Set<PortfolioBucket>([
+  'ELITE_CANDIDATE', 'SPARSE_HIGH_RETURN', 'RESEARCH_WIDE', 'REJECTED_DEMOTED',
+]);
+
+function validRecentSnapshot(row: unknown): row is PortfolioSnapshot {
+  if (row == null || typeof row !== 'object' || Array.isArray(row)) return false;
+  const candidate = row as Partial<PortfolioSnapshot>;
+  return typeof candidate.portfolioId === 'string' && candidate.portfolioId.trim().length > 0
+    && candidate.selectorVersion === ELITE_SELECTOR_VERSION
+    && typeof candidate.observedAtMs === 'number'
+    && Number.isFinite(candidate.observedAtMs) && candidate.observedAtMs > 0
+    && PORTFOLIO_BUCKETS.has(candidate.bucket as PortfolioBucket);
+}
+
 function finite(v: unknown): number | null {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
@@ -415,13 +429,14 @@ export class PortfolioCandidateLedger {
     if (existsSync(statePath)) {
       try {
         const parsed = JSON.parse(readFileSync(statePath, 'utf8')) as Partial<LedgerDiskState>;
+        const selectorMatches = parsed.selectorVersion === ELITE_SELECTOR_VERSION;
         this.state = {
           version: 1,
           selectorVersion: ELITE_SELECTOR_VERSION,
           policy,
-          portfolios: parsed.portfolios ?? {},
-          firstEliteAtMs: parsed.selectorVersion === ELITE_SELECTOR_VERSION ? (parsed.firstEliteAtMs ?? {}) : {},
-          lastObservedAtMs: parsed.lastObservedAtMs ?? 0,
+          portfolios: selectorMatches ? (parsed.portfolios ?? {}) : {},
+          firstEliteAtMs: selectorMatches ? (parsed.firstEliteAtMs ?? {}) : {},
+          lastObservedAtMs: selectorMatches ? (parsed.lastObservedAtMs ?? 0) : 0,
         };
       } catch {
         // A malformed prior candidate file must not stop broad research; start a clean candidate view.
@@ -431,7 +446,10 @@ export class PortfolioCandidateLedger {
     if (existsSync(recentPath)) {
       try {
         const parsed = JSON.parse(readFileSync(recentPath, 'utf8'));
-        if (parsed?.version === 1 && Array.isArray(parsed.rows)) this.recentRows = parsed.rows;
+        if (parsed?.version === 1 && Array.isArray(parsed.rows)
+          && (parsed.selectorVersion == null || parsed.selectorVersion === ELITE_SELECTOR_VERSION)) {
+          this.recentRows = parsed.rows.filter(validRecentSnapshot);
+        }
       } catch {
         // Rebuilt prospectively on the next observation; admission fails closed meanwhile.
       }
@@ -468,7 +486,7 @@ export class PortfolioCandidateLedger {
     const cutoff = observedAtMs - 30 * 60_000;
     const grouped = new Map<string, Map<number, PortfolioSnapshot>>();
     for (const row of this.recentRows) {
-      if (!(row.observedAtMs >= cutoff)) continue;
+      if (!validRecentSnapshot(row) || !(row.observedAtMs >= cutoff)) continue;
       const observations = grouped.get(row.portfolioId) ?? new Map<number, PortfolioSnapshot>();
       const prior = observations.get(row.observedAtMs);
       // A cycle can return the same portfolio from several bounded surfaces. One
@@ -482,7 +500,12 @@ export class PortfolioCandidateLedger {
       .sort((a, b) => b.observedAtMs - a.observedAtMs).slice(0, 3)).sort((a, b) => a.observedAtMs - b.observedAtMs);
     const recentPath = `${this.snapshotsPath}.recent.json`;
     const recentTmp = `${recentPath}.tmp`;
-    writeFileSync(recentTmp, JSON.stringify({ version: 1, generatedAtMs: observedAtMs, rows: this.recentRows }));
+    writeFileSync(recentTmp, JSON.stringify({
+      version: 1,
+      selectorVersion: ELITE_SELECTOR_VERSION,
+      generatedAtMs: observedAtMs,
+      rows: this.recentRows,
+    }));
     renameSync(recentTmp, recentPath);
     return snapshots;
   }

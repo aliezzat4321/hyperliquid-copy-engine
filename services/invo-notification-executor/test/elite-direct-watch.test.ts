@@ -10,9 +10,11 @@ import {
   closedBoundaryProof,
   closedSignalsAfterBoundary,
   loadEliteDirectTargets,
+  isMissedPreDemotionOpen,
   planClosedHydrations,
   planDirectHydrations,
   runIsolatedHydrations,
+  retiringOpenDispositions,
   signalsFromDirectInvestments,
   unownedCloseEvidence,
   validateClosedPageOrdering,
@@ -540,6 +542,73 @@ test('pre-demotion open blocks deletion and drain proofs survive restart', () =>
   state.commitRetirementOpenPoll('p1', [], BASE + 70);
   state.syncTargets([], new Set(), BASE + 80, true, 10, new Set(['p1']));
   assert.equal(state.targets().length, 0);
+});
+
+test('retiring hydration executes pre-demotion opens and rejects post-demotion opens', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'elite-retirement-classify-')), 'state.json');
+  const state = new EliteDirectWatchState(path);
+  state.syncTargets([target], new Set(), BASE);
+  state.syncTargets([], new Set(), BASE + 200, true, 100, new Set(['p1']));
+  const retiring = state.targets()[0];
+  const dispositions = retiringOpenDispositions([
+    openRow({ id: 'pre', baseId: 'pre', createdAt: BASE + 100, updatedAt: BASE + 100 }),
+    openRow({ id: 'post', baseId: 'post', createdAt: BASE + 201, updatedAt: BASE + 201 }),
+  ], retiring, BASE + 210, () => false);
+  assert.deepEqual(dispositions.map(row => [row.signal.sourceBaseId, row.kind]), [
+    ['pre', 'execute'],
+    ['post', 'post_demotion_open_ignored'],
+  ]);
+  state.commitRetirementOpenPoll('p1', [
+    openRow({ id: 'pre', baseId: 'pre', createdAt: BASE + 100 }),
+    openRow({ id: 'post', baseId: 'post', createdAt: BASE + 201 }),
+  ], BASE + 210);
+  assert.equal(state.targets()[0].retirementRelevantOpenCount, 1,
+    'all currently-open pre-demotion rows count for deletion proof regardless of execution');
+  const pre = dispositions[0].signal;
+  assert.equal(isMissedPreDemotionOpen(pre, 'elite_direct:retirement_open_drain', BASE + 210, 200), false,
+    'a fresh first observation remains executable');
+  assert.equal(isMissedPreDemotionOpen(pre, 'elite_direct:retirement_open_drain', BASE + 401, 200), true,
+    'a stale first observation is explicit missed evidence, never a fabricated open');
+});
+
+test('retiring increases require an owned pre-demotion lifecycle', () => {
+  const stored = {
+    ...target, lifecycle: 'RETIRING' as const, retiredAtMs: BASE + 200, retireAfterMs: BASE + 300,
+    baselineAtMs: BASE, processedThroughMs: BASE + 100, selectorInitialized: true,
+    lastSelectorUpdatedAtMs: BASE, lastFallbackPollAtMs: BASE,
+    lastRetirementOpenPollAtMs: 0, retirementRelevantOpenCount: null,
+    retirementOpenEmptyProofs: 0, retirementClosedProofs: 0,
+    closedHistoryInitialized: true, closedProcessedThroughMs: BASE,
+    closedBoundaryIds: [], lastClosedPollAtMs: BASE,
+  };
+  const increase = openRow({ createdAt: BASE + 50, updatedAt: BASE + 210,
+    entrySize: 3, changes: { simIncrease: true, entrySize: 2 } });
+  assert.equal(retiringOpenDispositions([increase], stored, BASE + 220, () => true)[0].kind, 'execute');
+  assert.equal(retiringOpenDispositions([increase], stored, BASE + 220, () => false)[0].kind,
+    'unowned_increase_ignored');
+});
+
+test('reactivation mutates the canonical metadata object and clears stale drain proofs immediately', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'elite-reactivate-')), 'state.json');
+  const state = new EliteDirectWatchState(path);
+  state.syncTargets([target], new Set(), BASE);
+  state.syncTargets([], new Set(), BASE + 10, true, 10, new Set(['p1']));
+  state.initializeRetirementDrain('p1');
+  state.commitRetirementOpenPoll('p1', [], BASE + 30);
+  state.commitClosedHydration('p1', [], BASE + 30);
+  const changed = { ...target, ownerId: 'owner-new', username: 'renamed' };
+  state.syncTargets([changed], new Set(), BASE + 31, true, 10, new Set());
+  const reactivated = state.targets()[0];
+  assert.equal(reactivated.lifecycle, 'ACTIVE');
+  assert.equal(reactivated.ownerId, 'owner-new');
+  assert.equal(reactivated.username, 'renamed');
+  assert.equal(reactivated.retiredAtMs, null);
+  assert.equal(reactivated.retirementOpenEmptyProofs, 0);
+  assert.equal(reactivated.retirementClosedProofs, 0);
+  assert.equal(planDirectHydrations(state.targets(), new Map([['p1', BASE + 32]]), BASE + 32, 1_000, 1)[0]?.reason,
+    'selector_change', 'reactivated target is eligible for open hydration in the same scan');
+  state.syncTargets([changed], new Set(), BASE + 1_000, true, 10, new Set());
+  assert.equal(state.targets().length, 1, 'stale retirement proof cannot delete a reactivated target');
 });
 
 test('open overflow cannot create a retirement empty proof', async () => {
