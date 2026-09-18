@@ -12,6 +12,24 @@ interface SnapshotCacheEntry {
 const snapshotCache = new Map<string, SnapshotCacheEntry>();
 
 const MAX_RECENT_INDEX_BYTES = 8 * 1024 * 1024;
+const PORTFOLIO_BUCKETS = new Set([
+  'ELITE_CANDIDATE', 'SPARSE_HIGH_RETURN', 'RESEARCH_WIDE', 'REJECTED_DEMOTED',
+]);
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function validRecentRow(row: unknown): boolean {
+  if (!isPlainObject(row)) return false;
+  const observedAtMs = row.observedAtMs;
+  return typeof row.portfolioId === 'string' && row.portfolioId.trim().length > 0
+    && row.selectorVersion === ELITE_SELECTOR_VERSION
+    && typeof observedAtMs === 'number' && Number.isFinite(observedAtMs) && observedAtMs > 0
+    && PORTFOLIO_BUCKETS.has(row.bucket as string);
+}
 
 function latestHistoricalSnapshot(
   snapshotsPath: string | undefined,
@@ -28,7 +46,12 @@ function latestHistoricalSnapshot(
   if (!cached || cached.mtimeMs !== stat.mtimeMs || cached.size !== stat.size) {
     try {
       const parsed = JSON.parse(readFileSync(indexPath, 'utf8'));
-      if (parsed?.version !== 1 || !Array.isArray(parsed?.rows)) throw new Error('invalid index');
+      if (!isPlainObject(parsed) || parsed.version !== 1 || !Array.isArray(parsed.rows)) {
+        return { row: null, error: 'candidate_snapshot_index_invalid_wrapper' };
+      }
+      if (!parsed.rows.every(validRecentRow)) {
+        return { row: null, error: 'candidate_snapshot_index_invalid_row' };
+      }
       cached = { mtimeMs: stat.mtimeMs, size: stat.size, rows: parsed.rows };
       snapshotCache.set(indexPath, cached);
     } catch { return { row: null, error: 'candidate_snapshot_index_unparseable' }; }

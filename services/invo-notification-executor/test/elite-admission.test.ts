@@ -192,7 +192,9 @@ test('admission latency and memory are independent of a sparse 1GB append-only h
   writeFileSync(snapshotsPath, '');
   truncateSync(snapshotsPath, 1024 * 1024 * 1024);
   const candidate = (validState().portfolios as any)[portfolioId];
-  writeFileSync(`${snapshotsPath}.recent.json`, JSON.stringify({ version: 1, rows: [candidate] }));
+  writeFileSync(`${snapshotsPath}.recent.json`, JSON.stringify({ version: 1, rows: [
+    { ...candidate, selectorVersion: ELITE_SELECTOR_VERSION },
+  ] }));
   const before = process.memoryUsage().heapUsed;
   const decision = eliteAdmissionFromState(statePath, portfolioId, decisionAtMs, 20 * 60_000, snapshotsPath);
   assert.equal(decision.allowed, true);
@@ -209,4 +211,50 @@ test('malformed compact snapshot index fails closed instead of throwing through 
   const decision = eliteAdmissionFromState(statePath, portfolioId, decisionAtMs, 20 * 60_000, snapshotsPath);
   assert.equal(decision.allowed, false);
   assert.equal(decision.reason, 'candidate_snapshot_index_unparseable');
+});
+
+test('invalid compact index rows fail closed without falling back to current elite state', () => {
+  const badRows = [
+    [{}],
+    [{ ...(validState().portfolios as any)[portfolioId], selectorVersion: 'old-selector' }],
+    [
+      { ...(validState().portfolios as any)[portfolioId], selectorVersion: ELITE_SELECTOR_VERSION },
+      {},
+    ],
+    [{ ...(validState().portfolios as any)[portfolioId], selectorVersion: ELITE_SELECTOR_VERSION,
+      observedAtMs: 'not-a-timestamp' }],
+    [{ ...(validState().portfolios as any)[portfolioId], selectorVersion: ELITE_SELECTOR_VERSION,
+      observedAtMs: String(candidateObservedAtMs) }],
+    [{ ...(validState().portfolios as any)[portfolioId], selectorVersion: ELITE_SELECTOR_VERSION,
+      observedAtMs: 0 }],
+    [{ ...(validState().portfolios as any)[portfolioId], selectorVersion: ELITE_SELECTOR_VERSION,
+      bucket: 'NOT_A_BUCKET' }],
+  ];
+  for (const [index, rows] of badRows.entries()) {
+    const dir = mkdtempSync(join(tmpdir(), `lane3-elite-invalid-row-${index}-`));
+    const statePath = join(dir, 'portfolio-candidates.json');
+    const snapshotsPath = join(dir, 'portfolio-candidate-snapshots.jsonl');
+    writeFileSync(statePath, JSON.stringify(validState()));
+    writeFileSync(`${snapshotsPath}.recent.json`, JSON.stringify({ version: 1, rows }));
+    const decision = eliteAdmissionFromState(
+      statePath, portfolioId, decisionAtMs, 20 * 60_000, snapshotsPath,
+    );
+    assert.equal(decision.allowed, false, `case ${index} must fail closed`);
+    assert.equal(decision.reason, 'candidate_snapshot_index_invalid_row');
+  }
+});
+
+test('invalid compact index wrapper fails closed without current-state fallback', () => {
+  for (const wrapper of [[], { version: 2, rows: [] }, { version: 1, rows: {} }]) {
+    const dir = mkdtempSync(join(tmpdir(), 'lane3-elite-invalid-wrapper-'));
+    const statePath = join(dir, 'portfolio-candidates.json');
+    const snapshotsPath = join(dir, 'portfolio-candidate-snapshots.jsonl');
+    writeFileSync(statePath, JSON.stringify(validState()));
+    writeFileSync(`${snapshotsPath}.recent.json`, JSON.stringify(wrapper));
+    const decision = eliteAdmissionFromState(
+      statePath, portfolioId, decisionAtMs, 20 * 60_000, snapshotsPath,
+    );
+    assert.equal(decision.allowed, false);
+    assert.equal(decision.reason, 'candidate_snapshot_index_invalid_wrapper');
+  }
 });

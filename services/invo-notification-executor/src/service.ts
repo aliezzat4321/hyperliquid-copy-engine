@@ -178,6 +178,7 @@ const directWatchMetrics = {
   openOverflowRiskCount: 0, openOrderingViolationCount: 0,
   signalsObserved: 0, signalsHandled: 0, http429s: 0,
   targetErrors: 0, selectorErrors: 0, skippedAfterRateLimit: 0,
+  candidateStateRejections: 0, candidateStateLastError: null as string | null,
   lastScanAtMs: 0, lastSuccessAtMs: 0,
 };
 const FUNDING_INTERVAL_MS = 60 * 60 * 1000;
@@ -1529,6 +1530,14 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
   if (cfg.live || nowMs < directWatchBackoffUntilMs) return;
   try {
     const candidate = loadEliteDirectTargets(cfg.candidateStatePath, nowMs, cfg.candidateStateMaxAgeMs);
+    if (candidate.validationError) {
+      directWatchMetrics.candidateStateRejections += 1;
+      directWatchMetrics.candidateStateLastError = candidate.validationError;
+      log({ type: 'elite_direct_candidate_state_rejected', reason: candidate.validationError,
+        observedAtMs: candidate.observedAtMs, live: false });
+    } else {
+      directWatchMetrics.candidateStateLastError = null;
+    }
     directWatch.syncTargets(candidate.targets, ownedDirectPortfolioIds(), nowMs, !candidate.stale,
       120_000, new Set(candidate.demotedPortfolioIds));
     const targets = directWatch.targets();

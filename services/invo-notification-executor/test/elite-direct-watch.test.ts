@@ -18,6 +18,7 @@ import {
   validateClosedPageOrdering,
   type EliteDirectTarget,
 } from '../src/elite-direct-watch.js';
+import { ELITE_SELECTOR_VERSION } from '../src/portfolio-candidates.js';
 
 const BASE = 1_780_000_000_000;
 
@@ -92,10 +93,11 @@ test('candidate loader tracks only fresh elite portfolios', () => {
   const dir = mkdtempSync(join(tmpdir(), 'elite-candidates-'));
   const path = join(dir, 'candidates.json');
   writeFileSync(path, JSON.stringify({
+    selectorVersion: ELITE_SELECTOR_VERSION,
     lastObservedAtMs: BASE,
     portfolios: {
-      p1: { ...target, observedAtMs: BASE, bucket: 'ELITE_CANDIDATE' },
-      p2: { portfolioId: 'p2', ownerId: 'o2', username: 'wide', sourceFilter: 'all', observedAtMs: BASE, bucket: 'RESEARCH_WIDE' },
+      p1: { ...target, selectorVersion: ELITE_SELECTOR_VERSION, observedAtMs: BASE, bucket: 'ELITE_CANDIDATE' },
+      p2: { portfolioId: 'p2', selectorVersion: ELITE_SELECTOR_VERSION, ownerId: 'o2', username: 'wide', sourceFilter: 'all', observedAtMs: BASE, bucket: 'RESEARCH_WIDE' },
     },
   }));
   const fresh = loadEliteDirectTargets(path, BASE + 10, 20_000);
@@ -110,16 +112,51 @@ test('bounded discovery absence is not demotion; only same-cycle non-elite is ex
   const dir = mkdtempSync(join(tmpdir(), 'elite-authoritative-universe-'));
   const path = join(dir, 'candidates.json');
   writeFileSync(path, JSON.stringify({
+    selectorVersion: ELITE_SELECTOR_VERSION,
     lastObservedAtMs: BASE + 10,
     portfolios: {
-      p1: { ...target, observedAtMs: BASE, bucket: 'ELITE_CANDIDATE' },
-      p2: { ...target, portfolioId: 'p2', observedAtMs: BASE + 10, bucket: 'RESEARCH_WIDE' },
+      p1: { ...target, selectorVersion: ELITE_SELECTOR_VERSION, observedAtMs: BASE, bucket: 'ELITE_CANDIDATE' },
+      p2: { ...target, selectorVersion: ELITE_SELECTOR_VERSION, portfolioId: 'p2', observedAtMs: BASE + 10, bucket: 'RESEARCH_WIDE' },
     },
   }));
   const fresh = loadEliteDirectTargets(path, BASE + 11, 20_000);
   assert.equal(fresh.stale, false);
   assert.deepEqual(fresh.targets, []);
   assert.deepEqual(fresh.demotedPortfolioIds, ['p2']);
+});
+
+test('invalid fresh candidate state is non-authoritative and preserves existing targets', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elite-invalid-candidates-'));
+  const candidatePath = join(dir, 'candidates.json');
+  const watch = new EliteDirectWatchState(join(dir, 'watch.json'));
+  watch.syncTargets([target], new Set(), BASE);
+
+  const invalidStates = [
+    { selectorVersion: 'old-selector', lastObservedAtMs: BASE + 10, portfolios: {} },
+    { selectorVersion: ELITE_SELECTOR_VERSION, lastObservedAtMs: BASE + 20, portfolios: {} },
+    { selectorVersion: ELITE_SELECTOR_VERSION, lastObservedAtMs: BASE + 10, portfolios: [] },
+    { selectorVersion: ELITE_SELECTOR_VERSION, lastObservedAtMs: BASE + 10, portfolios: {
+      p1: { ...target, portfolioId: 'different', selectorVersion: ELITE_SELECTOR_VERSION,
+        observedAtMs: BASE + 10, bucket: 'RESEARCH_WIDE' },
+    } },
+    { selectorVersion: ELITE_SELECTOR_VERSION, lastObservedAtMs: BASE + 10, portfolios: {
+      p1: { ...target, selectorVersion: ELITE_SELECTOR_VERSION, observedAtMs: BASE + 10,
+        bucket: 'ELITE_CANDIDATE', ownerId: '' },
+    } },
+  ];
+
+  for (const [index, state] of invalidStates.entries()) {
+    writeFileSync(candidatePath, JSON.stringify(state));
+    const loaded = loadEliteDirectTargets(candidatePath, BASE + 11, 20_000);
+    assert.equal(loaded.stale, true, `case ${index} must be non-authoritative`);
+    assert.ok(loaded.validationError, `case ${index} exposes fail-closed telemetry`);
+    assert.deepEqual(loaded.targets, []);
+    assert.deepEqual(loaded.demotedPortfolioIds, []);
+    watch.syncTargets(loaded.targets, new Set(), BASE + 11, !loaded.stale,
+      120_000, new Set(loaded.demotedPortfolioIds));
+    assert.equal(watch.targets()[0]?.portfolioId, 'p1');
+    assert.equal(watch.targets()[0]?.lifecycle, 'ACTIVE');
+  }
 });
 
 test('owned portfolio remains directly watched after demotion and restart', () => {

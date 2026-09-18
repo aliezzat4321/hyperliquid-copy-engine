@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
 import { dirname } from 'path';
 import type { InvoSignal } from './notification-signal.js';
+import { ELITE_SELECTOR_VERSION, type PortfolioBucket } from './portfolio-candidates.js';
 
 export const ELITE_DIRECT_WATCH_VERSION = 'lane3-elite-direct-watch-v4-20260918';
 const LEGACY_VERSION = 'lane3-elite-direct-watch-v1-20260917';
@@ -334,33 +335,79 @@ function normalizedUsername(value: unknown): string {
   return String(value ?? '').replace(/^@/, '').trim().toLowerCase();
 }
 
+const PORTFOLIO_BUCKETS = new Set<PortfolioBucket>([
+  'ELITE_CANDIDATE', 'SPARSE_HIGH_RETURN', 'RESEARCH_WIDE', 'REJECTED_DEMOTED',
+]);
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+export interface EliteDirectTargetLoadResult {
+  targets: EliteDirectTarget[];
+  demotedPortfolioIds: string[];
+  observedAtMs: number | null;
+  stale: boolean;
+  validationError: string | null;
+}
+
+function rejectedTargets(observedAtMs: number | null, validationError: string): EliteDirectTargetLoadResult {
+  return { targets: [], demotedPortfolioIds: [], observedAtMs, stale: true, validationError };
+}
+
 export function loadEliteDirectTargets(
   candidateStatePath: string,
   nowMs: number,
   maxAgeMs: number,
-): { targets: EliteDirectTarget[]; demotedPortfolioIds: string[]; observedAtMs: number | null; stale: boolean } {
-  if (!existsSync(candidateStatePath)) return { targets: [], demotedPortfolioIds: [], observedAtMs: null, stale: true };
+): EliteDirectTargetLoadResult {
+  if (!existsSync(candidateStatePath)) return rejectedTargets(null, 'candidate_state_missing');
   let parsed: any;
   try { parsed = JSON.parse(readFileSync(candidateStatePath, 'utf8')); }
-  catch { return { targets: [], demotedPortfolioIds: [], observedAtMs: null, stale: true }; }
-  const observedAtMs = Number(parsed?.lastObservedAtMs);
-  const stale = !Number.isFinite(observedAtMs) || nowMs - observedAtMs > maxAgeMs;
-  if (stale) return { targets: [], demotedPortfolioIds: [], observedAtMs: Number.isFinite(observedAtMs) ? observedAtMs : null, stale: true };
+  catch { return rejectedTargets(null, 'candidate_state_unparseable'); }
+  if (!isPlainObject(parsed)) return rejectedTargets(null, 'candidate_state_invalid_wrapper');
+  const rawObservedAtMs = parsed.lastObservedAtMs;
+  const reportedObservedAtMs = typeof rawObservedAtMs === 'number' && Number.isFinite(rawObservedAtMs)
+    ? rawObservedAtMs : null;
+  if (parsed.selectorVersion !== ELITE_SELECTOR_VERSION) {
+    return rejectedTargets(reportedObservedAtMs, 'candidate_selector_version_mismatch');
+  }
+  if (typeof rawObservedAtMs !== 'number' || !Number.isFinite(rawObservedAtMs) || rawObservedAtMs <= 0) {
+    return rejectedTargets(reportedObservedAtMs, 'candidate_state_timestamp_invalid');
+  }
+  const observedAtMs = rawObservedAtMs;
+  if (observedAtMs > nowMs) return rejectedTargets(observedAtMs, 'candidate_state_from_future');
+  if (nowMs - observedAtMs > maxAgeMs) return rejectedTargets(observedAtMs, 'candidate_state_stale');
+  if (!isPlainObject(parsed.portfolios)) {
+    return rejectedTargets(observedAtMs, 'candidate_portfolios_invalid');
+  }
   const targets: EliteDirectTarget[] = [];
   const demotedPortfolioIds: string[] = [];
-  for (const row of Object.values(parsed?.portfolios ?? {}) as any[]) {
-    if (Number(row?.observedAtMs) !== observedAtMs) continue;
+  for (const [key, row] of Object.entries(parsed.portfolios) as Array<[string, any]>) {
     const portfolioId = String(row?.portfolioId ?? '').trim();
-    if (!portfolioId) continue;
+    const rowObservedAtMs = row?.observedAtMs;
+    if (!isPlainObject(row) || !portfolioId || key !== portfolioId
+      || typeof rowObservedAtMs !== 'number' || !Number.isFinite(rowObservedAtMs) || rowObservedAtMs <= 0) {
+      return rejectedTargets(observedAtMs, 'candidate_row_invalid');
+    }
+    if (rowObservedAtMs !== observedAtMs) continue;
+    if (row.selectorVersion !== ELITE_SELECTOR_VERSION
+      || !PORTFOLIO_BUCKETS.has(row.bucket as PortfolioBucket)) {
+      return rejectedTargets(observedAtMs, 'candidate_fresh_row_invalid');
+    }
     if (row?.bucket !== 'ELITE_CANDIDATE') { demotedPortfolioIds.push(portfolioId); continue; }
     const ownerId = String(row?.ownerId ?? '').trim();
     const username = normalizedUsername(row?.username);
     const sourceFilter = String(row?.sourceFilter ?? '').trim().toLowerCase();
-    if (!portfolioId || !ownerId || !username || !sourceFilter) continue;
+    if (!ownerId || !username || !sourceFilter) {
+      return rejectedTargets(observedAtMs, 'candidate_fresh_row_invalid');
+    }
     targets.push({ portfolioId, ownerId, username, sourceFilter });
   }
   targets.sort((a, b) => a.portfolioId.localeCompare(b.portfolioId));
-  return { targets, demotedPortfolioIds: [...new Set(demotedPortfolioIds)].sort(), observedAtMs, stale: false };
+  return { targets, demotedPortfolioIds: [...new Set(demotedPortfolioIds)].sort(), observedAtMs,
+    stale: false, validationError: null };
 }
 
 export class EliteDirectWatchState {
