@@ -38,5 +38,19 @@ test('service baselines independently from each surface durable cursor', () => {
   assert.match(source, /if \(surfaceNeedsBaseline\(state\.hasFeedBaseline\(feedFilter\)\)\)/);
   assert.doesNotMatch(source, /let initialized = false/);
   assert.match(source, /state\.setFeedCursor\(feedFilter, \{ postId: backfill\.newestPostId/);
+  const baselineBranch = source.slice(source.indexOf('if (surfaceNeedsBaseline'));
+  assert.ok(
+    baselineBranch.indexOf('state.markFeedBaselined(feedFilter, baselineAtMs)')
+      < baselineBranch.indexOf("await execute(signal, 'surface_baseline_owned_close_recovery'"),
+    'the durable surface boundary must precede retryable owned-close execution',
+  );
+  assert.match(baselineBranch, /startupHandled[\s\S]*state\.setFeedCursor/, 'cursor may remain gated by owned-close recovery');
   assert.match(source, /for \(const surface of cfg\.discoverySurfaces\)[\s\S]*startup_surface:\$\{surface\}/);
+});
+
+test('closed hydration fails closed on explicit ordering violations', () => {
+  const source = readFileSync(new URL('../../src/service.ts', import.meta.url), 'utf8');
+  assert.match(source, /validateClosedPageOrdering/);
+  assert.match(source, /type: 'ordering_violation'/);
+  assert.match(source, /overflowRiskCounted: true, watermarkCommitted: false/);
 });

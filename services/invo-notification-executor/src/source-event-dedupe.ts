@@ -19,6 +19,23 @@ export function closeLifecycleKey(signal: InvoSignal): string | null {
 }
 
 /**
+ * Canonical durable completion check for a CLOSED source lifecycle. A close may
+ * arrive from feed and direct polling with different timestamps, so either its
+ * action-aware event identity or the timestamp-independent lifecycle identity
+ * proves that the lifecycle was already accounted for.
+ */
+export function closedLifecycleWasHandled(
+  signal: InvoSignal,
+  hasSeen: (key: string) => boolean,
+): boolean {
+  if (signal.action !== 'close') return false;
+  const eventKey = sourceEventKey(signal);
+  const lifecycleKey = closeLifecycleKey(signal);
+  return (eventKey != null && hasSeen(eventKey))
+    || (lifecycleKey != null && hasSeen(lifecycleKey));
+}
+
+/**
  * Legacy event keys are honored for OPEN to prevent replay after upgrade.
  * They are intentionally not consulted for CLOSE because an old OPEN key is
  * ambiguous and must never suppress a later close at the same timestamp.
@@ -26,9 +43,8 @@ export function closeLifecycleKey(signal: InvoSignal): string | null {
 export function signalWasSeen(signal: InvoSignal, hasSeen: (key: string) => boolean): boolean {
   const eventKey = sourceEventKey(signal);
   const legacyKey = legacySourceEventKey(signal);
-  const lifecycleKey = closeLifecycleKey(signal);
   return hasSeen(signal.key)
     || (eventKey != null && hasSeen(eventKey))
     || (signal.action === 'open' && legacyKey != null && hasSeen(legacyKey))
-    || (lifecycleKey != null && hasSeen(lifecycleKey));
+    || closedLifecycleWasHandled(signal, hasSeen);
 }

@@ -106,6 +106,55 @@ export interface ClosedBaselineResult {
   boundaryIds: string[];
   pagesFetched: number;
   overflow: boolean;
+  orderingViolation: ClosedOrderingViolation | null;
+}
+
+export interface ClosedOrderingViolation {
+  kind: 'missing_effective_close_time' | 'within_page_reversal' | 'cross_page_reversal';
+  page: number;
+  rowIndex: number;
+  previousTimestampMs: number | null;
+  timestampMs: number | null;
+}
+
+export interface ClosedPageOrderingResult {
+  firstTimestampMs: number | null;
+  lastTimestampMs: number | null;
+  violation: ClosedOrderingViolation | null;
+}
+
+/** Validates the observed newest-first ordering without treating it as an API guarantee. */
+export function validateClosedPageOrdering(
+  rows: any[], page: number, priorPageLastTimestampMs: number | null,
+): ClosedPageOrderingResult {
+  let firstTimestampMs: number | null = null;
+  let previousTimestampMs: number | null = null;
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+    const row = rows[rowIndex];
+    const timestampMs = directSourceTimeMs(row?.closedAt) ?? directSourceTimeMs(row?.updatedAt);
+    if (timestampMs == null) {
+      return { firstTimestampMs, lastTimestampMs: previousTimestampMs, violation: {
+        kind: 'missing_effective_close_time', page, rowIndex,
+        previousTimestampMs, timestampMs: null,
+      } };
+    }
+    if (rowIndex === 0) {
+      firstTimestampMs = timestampMs;
+      if (priorPageLastTimestampMs != null && timestampMs > priorPageLastTimestampMs) {
+        return { firstTimestampMs, lastTimestampMs: timestampMs, violation: {
+          kind: 'cross_page_reversal', page, rowIndex,
+          previousTimestampMs: priorPageLastTimestampMs, timestampMs,
+        } };
+      }
+    } else if (previousTimestampMs != null && timestampMs > previousTimestampMs) {
+      return { firstTimestampMs, lastTimestampMs: timestampMs, violation: {
+        kind: 'within_page_reversal', page, rowIndex,
+        previousTimestampMs, timestampMs,
+      } };
+    }
+    previousTimestampMs = timestampMs;
+  }
+  return { firstTimestampMs, lastTimestampMs: previousTimestampMs, violation: null };
 }
 
 /**
@@ -122,10 +171,18 @@ export async function establishClosedBaseline(
   const boundaryRows: any[] = [];
   const boundaryIds = new Set<string>();
   let pagesFetched = 0;
+  let priorPageLastTimestampMs: number | null = null;
 
   for (let page = 1; page <= Math.max(1, maxPages); page += 1) {
     const rows = await fetchPage(page);
     pagesFetched += 1;
+    const ordering = validateClosedPageOrdering(rows, page, priorPageLastTimestampMs);
+    if (ordering.violation) {
+      return { boundaryReached: false, boundaryReason: null, boundaryTimestampMs,
+        boundaryRows, boundaryIds: [...boundaryIds].sort(), pagesFetched, overflow: true,
+        orderingViolation: ordering.violation };
+    }
+    priorPageLastTimestampMs = ordering.lastTimestampMs ?? priorPageLastTimestampMs;
     const points = rows.flatMap(row => {
       const atMs = directSourceTimeMs(row?.closedAt) ?? directSourceTimeMs(row?.updatedAt);
       const id = String(row?.baseId ?? row?.id ?? '').trim();
@@ -136,10 +193,10 @@ export async function establishClosedBaseline(
       if (boundaryTimestampMs === 0) {
         if (rows.length < pageSize) {
           return { boundaryReached: true, boundaryReason: 'endpoint_exhausted', boundaryTimestampMs: 0,
-            boundaryRows: [], boundaryIds: [], pagesFetched, overflow: false };
+            boundaryRows: [], boundaryIds: [], pagesFetched, overflow: false, orderingViolation: null };
         }
         return { boundaryReached: false, boundaryReason: null, boundaryTimestampMs: 0,
-          boundaryRows: [], boundaryIds: [], pagesFetched, overflow: true };
+          boundaryRows: [], boundaryIds: [], pagesFetched, overflow: true, orderingViolation: null };
       }
     }
     for (const point of points) {
@@ -150,15 +207,15 @@ export async function establishClosedBaseline(
     }
     if (points.some(point => point.atMs < boundaryTimestampMs)) {
       return { boundaryReached: true, boundaryReason: 'older_timestamp', boundaryTimestampMs,
-        boundaryRows, boundaryIds: [...boundaryIds].sort(), pagesFetched, overflow: false };
+        boundaryRows, boundaryIds: [...boundaryIds].sort(), pagesFetched, overflow: false, orderingViolation: null };
     }
     if (rows.length < pageSize) {
       return { boundaryReached: true, boundaryReason: 'endpoint_exhausted', boundaryTimestampMs,
-        boundaryRows, boundaryIds: [...boundaryIds].sort(), pagesFetched, overflow: false };
+        boundaryRows, boundaryIds: [...boundaryIds].sort(), pagesFetched, overflow: false, orderingViolation: null };
     }
   }
   return { boundaryReached: false, boundaryReason: null, boundaryTimestampMs,
-    boundaryRows, boundaryIds: [...boundaryIds].sort(), pagesFetched, overflow: true };
+    boundaryRows, boundaryIds: [...boundaryIds].sort(), pagesFetched, overflow: true, orderingViolation: null };
 }
 
 export function planDirectHydrations(

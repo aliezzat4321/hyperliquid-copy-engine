@@ -47,6 +47,12 @@ Append-only record of accepted architecture / policy decisions. New decisions ma
 ## 2026-09-18 — Lane 3 direct watch is boundary-proven and failure-isolated
 
 - The captured portfolio-investments endpoint is treated as newest-first across pages.
+  The sanitized two-portfolio, three-page read-only observation supporting that assumption
+  is retained in `services/invo-notification-executor/test/fixtures/invo-closed-ordering-observation.json`;
+  it is runtime evidence, not a permanent API contract. Every fetched CLOSED page is
+  therefore checked for within-page and cross-page non-increasing effective close time.
+  An ordering violation emits explicit risk telemetry and advances neither baseline nor
+  watermark.
   A closed-history timestamp boundary is proven only by a strictly older row, endpoint
   exhaustion, or encountering the complete stored identity set at the boundary timestamp;
   unrelated equal-timestamp rows cannot advance the watermark. Bounded pagination that
@@ -59,8 +65,13 @@ Append-only record of accepted architecture / policy decisions. New decisions ma
   source size. Legacy actionless keys suppress replay of old OPEN events but cannot
   suppress an ambiguous same-time INCREASE or CLOSE; prospective feed cursors and direct
   watermarks provide the history-replay boundary. The separate source-close lifecycle key
-  remains. A per-source queue serializes feed and direct lifecycle execution while distinct
-  sources retain parallelism.
+  remains and is canonical completion evidence for a CLOSED lifecycle even when feed and
+  direct timestamps differ. A per-source queue serializes feed and direct lifecycle
+  execution while distinct sources retain parallelism.
+- A surface's first fetched snapshot durably establishes its prospective feed baseline
+  immediately after indexing. Retryable owned CLOSE recovery may still gate its cursor,
+  but cannot leave the surface in startup mode and swallow later fresh OPEN/ADD events;
+  the managed exposure retains its pending close for reconciliation.
 - The 45-target defaults imply nominal 18s open and 45s closed sweeps and at most 18
   requests per 3s scan with four selector surfaces (6 requests/s). These are capacity
   calculations, not a 25s freshness guarantee; health exposes actual oldest poll age and

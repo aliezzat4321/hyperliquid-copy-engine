@@ -14,6 +14,7 @@ import {
   runIsolatedHydrations,
   signalsFromDirectInvestments,
   unownedCloseEvidence,
+  validateClosedPageOrdering,
   type EliteDirectTarget,
 } from '../src/elite-direct-watch.js';
 
@@ -289,6 +290,58 @@ test('closed baseline reports overflow and cannot commit an incomplete newest gr
   assert.equal(result.boundaryReached, false);
   assert.equal(result.overflow, true);
   assert.equal(result.boundaryIds.length, 200);
+});
+
+test('within-page newest-first reversal fails closed without baseline watermark commit', async () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'elite-ordering-within-')), 'state.json');
+  const state = new EliteDirectWatchState(path);
+  state.syncTargets([target], new Set(), BASE);
+  const before = state.targets()[0];
+  const rows = [
+    openRow({ baseId: 'newer', isOpen: false, closedAt: BASE + 2 }),
+    openRow({ baseId: 'older', isOpen: false, closedAt: BASE }),
+    openRow({ baseId: 'reversed', isOpen: false, closedAt: BASE + 1 }),
+  ];
+  const result = await establishClosedBaseline(async () => rows, 2, 100);
+  assert.equal(result.orderingViolation?.kind, 'within_page_reversal');
+  assert.equal(result.boundaryReached, false);
+  assert.equal(result.overflow, true);
+  if (result.boundaryReached) state.commitClosedHydration('p1', result.boundaryRows, BASE + 3);
+  assert.equal(state.targets()[0].closedHistoryInitialized, before.closedHistoryInitialized);
+  assert.equal(state.targets()[0].closedProcessedThroughMs, before.closedProcessedThroughMs);
+});
+
+test('cross-page newest-first reversal fails closed without baseline watermark commit', async () => {
+  const first = Array.from({ length: 100 }, (_, index) => openRow({
+    baseId: `page-1-${index}`, isOpen: false, closedAt: BASE + 100,
+  }));
+  const second = [openRow({ baseId: 'page-2-newer', isOpen: false, closedAt: BASE + 101 })];
+  assert.equal(validateClosedPageOrdering(first, 1, null).violation, null);
+  const result = await establishClosedBaseline(async page => page === 1 ? first : second, 2, 100);
+  assert.equal(result.orderingViolation?.kind, 'cross_page_reversal');
+  assert.equal(result.boundaryReached, false);
+  assert.equal(result.overflow, true);
+});
+
+test('sanitized three-page runtime probes document newest-first ordering only as an observation', () => {
+  const fixture = JSON.parse(readFileSync(
+    new URL('../../test/fixtures/invo-closed-ordering-observation.json', import.meta.url),
+    'utf8',
+  ));
+  assert.equal(fixture._evidence.kind, 'sanitized_runtime_observation');
+  assert.match(fixture._evidence.limitation, /not a permanent API contract/);
+  assert.equal(fixture.portfolios.length, 2);
+  for (const portfolio of fixture.portfolios) {
+    assert.equal(portfolio.pages.length, 3);
+    let priorLast: number | null = null;
+    for (const page of portfolio.pages) {
+      const first = Date.parse(page.first);
+      const last = Date.parse(page.last);
+      assert.ok(first >= last);
+      if (priorLast != null) assert.ok(first <= priorLast);
+      priorLast = last;
+    }
+  }
 });
 
 test('empty closed baseline persists safely and later first close is prospective', async () => {

@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { InvoSignal, SignalAction } from '../src/notification-signal.js';
-import { closeLifecycleKey, signalWasSeen, sourceEventKey } from '../src/source-event-dedupe.js';
+import {
+  closedLifecycleWasHandled,
+  closeLifecycleKey,
+  signalWasSeen,
+  sourceEventKey,
+} from '../src/source-event-dedupe.js';
 
 function signal(action: SignalAction, time: number, postId: string, resultingSourceSize?: number): InvoSignal {
   return {
@@ -40,6 +45,28 @@ test('same CLOSE from feed and direct at different timestamps closes once', () =
   const direct = signal('close', 101, 'direct');
   seen.add(closeLifecycleKey(feed)!);
   assert.equal(signalWasSeen(direct, key => seen.has(key)), true);
+  assert.equal(closedLifecycleWasHandled(direct, key => seen.has(key)), true);
+});
+
+test('durable lifecycle close advances a differently timestamped direct hydration exactly once across restart', () => {
+  const durableSeen = new Set<string>();
+  const feed = signal('close', 100, 'feed-close');
+  const direct = signal('close', 200, 'direct-close');
+  durableSeen.add(sourceEventKey(feed)!);
+  durableSeen.add(closeLifecycleKey(feed)!);
+
+  let watermarkCommits = 0;
+  let missedShortRoundtripEvidence = 1; // emitted by the first feed close only
+  if (closedLifecycleWasHandled(direct, key => durableSeen.has(key))) watermarkCommits += 1;
+  assert.equal(watermarkCommits, 1);
+  assert.equal(missedShortRoundtripEvidence, 1);
+
+  const restartedSeen = new Set(durableSeen);
+  if (!closedLifecycleWasHandled(direct, key => restartedSeen.has(key))) {
+    missedShortRoundtripEvidence += 1;
+  }
+  assert.equal(closedLifecycleWasHandled(direct, key => restartedSeen.has(key)), true);
+  assert.equal(missedShortRoundtripEvidence, 1, 'restart must not re-log lifecycle evidence');
 });
 
 test('INCREASE identity includes action, time, and resulting source size', () => {

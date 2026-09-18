@@ -31,8 +31,10 @@ import {
   runIsolatedHydrations,
   signalsFromDirectInvestments,
   unownedCloseEvidence,
+  validateClosedPageOrdering,
 } from './elite-direct-watch.js';
 import {
+  closedLifecycleWasHandled,
   closeLifecycleKey,
   signalWasSeen,
   sourceEventKey,
@@ -1259,17 +1261,18 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
     );
     for (const signal of baseline.skipped) state.markSeen(signal.key);
     lastSuccessPollMs = Date.now();
+    const baselineAtMs = Date.now();
+    // The first fetched snapshot establishes the prospective surface boundary even
+    // when an owned close needs asynchronous managed-exposure reconciliation.
+    state.markFeedBaselined(feedFilter, baselineAtMs);
     log({ type: 'surface_baseline_indexed', posts: posts.length, skippedOpenAddsAndUnownedCloses: baseline.skipped.length, recoverableCloses: baseline.recoverableCloses.length, live: cfg.live, feedFilter, feedLimit: cfg.feedLimit, traderFunnel: tracker.report().funnel });
     for (const signal of baseline.recoverableCloses) {
       await execute(signal, 'surface_baseline_owned_close_recovery', receivedAtMs, feedFilter);
     }
-    const startupHandled = baseline.recoverableCloses.every(signal => state.hasSeen(signal.key));
+    const startupHandled = baseline.recoverableCloses.every(signal => closedLifecycleWasHandled(signal, key => state.hasSeen(key)));
     if (startupHandled) {
-      const baselineAtMs = Date.now();
       if (backfill.newestPostId) {
         state.setFeedCursor(feedFilter, { postId: backfill.newestPostId, observedAtMs: baselineAtMs, source: 'startup_baseline' });
-      } else {
-        state.markFeedBaselined(feedFilter, baselineAtMs);
       }
     }
     return baseline.recoverableCloses.length;
@@ -1400,11 +1403,14 @@ async function hydrateClosedHistory(
       directWatchMetrics.closedBaselineCount += 1;
     }
     log({
-      type: baseline.overflow ? 'elite_direct_closed_baseline_overflow' : 'elite_direct_closed_history_baseline',
+      type: baseline.orderingViolation ? 'ordering_violation'
+        : baseline.overflow ? 'elite_direct_closed_baseline_overflow' : 'elite_direct_closed_history_baseline',
+      source: 'elite_direct_closed_history_baseline',
       portfolioId: target.portfolioId, indexedRows: baseline.boundaryRows.length,
       boundaryTimestampMs: baseline.boundaryTimestampMs, boundaryIds: baseline.boundaryIds.length,
       pagesFetched: baseline.pagesFetched, boundaryReached: baseline.boundaryReached,
       boundaryReason: baseline.boundaryReason, overflow: baseline.overflow,
+      orderingViolation: baseline.orderingViolation,
       watermarkCommitted: baseline.boundaryReached, replayedSignals: 0, live: false,
     });
     return;
@@ -1415,11 +1421,19 @@ async function hydrateClosedHistory(
   const storedBoundaryIds = new Set(target.closedBoundaryIds);
   const encounteredBoundaryIds = new Set<string>();
   let pagesFetched = 0;
+  let priorPageLastTimestampMs: number | null = null;
+  let orderingViolation: ReturnType<typeof validateClosedPageOrdering>['violation'] = null;
   for (let page = 1; page <= cfg.directWatchClosedMaxPages; page += 1) {
     directWatchMetrics.hydrationRequests += 1;
     const payload = await invo.getPortfolioInvestments(target.portfolioId, false, page, 100);
     pagesFetched += 1;
     const pageRows = directInvestmentRows(payload);
+    const ordering = validateClosedPageOrdering(pageRows, page, priorPageLastTimestampMs);
+    if (ordering.violation) {
+      orderingViolation = ordering.violation;
+      break;
+    }
+    priorPageLastTimestampMs = ordering.lastTimestampMs ?? priorPageLastTimestampMs;
     rows.push(...pageRows);
     const proof = target.closedHistoryInitialized
       ? closedBoundaryProof(
@@ -1434,14 +1448,23 @@ async function hydrateClosedHistory(
     }
   }
   directWatchMetrics.closedHydrationCount += 1;
-  if (!boundaryReached) directWatchMetrics.closedOverflowRiskCount += 1;
+  if (!boundaryReached || orderingViolation) directWatchMetrics.closedOverflowRiskCount += 1;
+
+  if (orderingViolation) {
+    log({
+      type: 'ordering_violation', source: 'elite_direct_closed_history',
+      portfolioId: target.portfolioId, reason, pagesFetched, orderingViolation,
+      overflowRiskCounted: true, watermarkCommitted: false, live: false,
+    });
+    return;
+  }
 
   const signals = closedSignalsAfterBoundary(
     rows, target, target.closedProcessedThroughMs, target.closedBoundaryIds, observedAtMs,
   );
   directWatchMetrics.signalsObserved += signals.length;
   for (const signal of signals) await execute(signal, `elite_direct:${reason}`, observedAtMs, target.sourceFilter);
-  const allHandled = signals.every(signal => signalWasSeen(signal, key => state.hasSeen(key)));
+  const allHandled = signals.every(signal => closedLifecycleWasHandled(signal, key => state.hasSeen(key)));
   const watermarkCommitted = allHandled && boundaryReached;
   if (watermarkCommitted) {
     directWatch.commitClosedHydration(target.portfolioId, rows, observedAtMs);
