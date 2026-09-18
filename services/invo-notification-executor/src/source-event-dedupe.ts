@@ -27,8 +27,10 @@ export function closeLifecycleKey(signal: InvoSignal): string | null {
 export function closedLifecycleWasHandled(
   signal: InvoSignal,
   hasSeen: (key: string) => boolean,
+  hasHandledClose?: (sourceBaseId: string) => boolean,
 ): boolean {
   if (signal.action !== 'close') return false;
+  if (hasHandledClose?.(signal.sourceBaseId)) return true;
   const eventKey = sourceEventKey(signal);
   const lifecycleKey = closeLifecycleKey(signal);
   return (eventKey != null && hasSeen(eventKey))

@@ -25,6 +25,7 @@ import {
   establishClosedBaseline,
   closedBoundaryProof,
   closedSignalsAfterBoundary,
+  classifyClosedHydrationRows,
   EliteDirectWatchState,
   loadEliteDirectTargets,
   isMissedPreDemotionOpen,
@@ -1293,7 +1294,9 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
     for (const signal of baseline.recoverableCloses) {
       await execute(signal, 'surface_baseline_owned_close_recovery', receivedAtMs, feedFilter);
     }
-    const startupHandled = baseline.recoverableCloses.every(signal => closedLifecycleWasHandled(signal, key => state.hasSeen(key)));
+    const startupHandled = baseline.recoverableCloses.every(signal => closedLifecycleWasHandled(
+      signal, key => state.hasSeen(key), sourceBaseId => state.hasHandledClose(sourceBaseId),
+    ));
     if (startupHandled) {
       if (backfill.newestPostId) {
         state.setFeedCursor(feedFilter, { postId: backfill.newestPostId, observedAtMs: baselineAtMs, source: 'startup_baseline' });
@@ -1378,11 +1381,28 @@ async function hydrateDirectTarget(
   if (target.lifecycle === 'RETIRING') {
     const dispositions = retiringOpenDispositions(
       openRows, target, observedAtMs,
-      sourceBaseId => state.getManagedBySource(sourceBaseId) != null,
+      {
+        hasObservedOpen: sourceBaseId => state.hasObservedOpen(sourceBaseId),
+        isManagedSource: sourceBaseId => state.getManagedBySource(sourceBaseId) != null,
+        hasHandledClose: sourceBaseId => state.hasHandledClose(sourceBaseId),
+        hasSeen: key => state.hasSeen(key),
+      },
     );
     directWatchMetrics.hydrationCount += 1;
     directWatchMetrics.signalsObserved += dispositions.length;
     for (const disposition of dispositions) {
+      if (disposition.kind === 'invalid_lifecycle_open') {
+        if (!state.hasSeen(disposition.evidenceKey)) {
+          state.markSeen(disposition.evidenceKey);
+          log({
+            type: 'skip', reason: 'retirement_open_missing_valid_lifecycle_identity',
+            handledNoRetry: true, portfolioId: target.portfolioId,
+            sourceBaseId: disposition.sourceBaseId, createdAt: disposition.createdAt,
+            wakeSource: `elite_direct:${reason}`,
+          });
+        }
+        continue;
+      }
       if (disposition.kind === 'execute') {
         await execute(disposition.signal, `elite_direct:${reason}`, observedAtMs, target.sourceFilter);
         continue;
@@ -1390,18 +1410,23 @@ async function hydrateDirectTarget(
       state.markSeen(disposition.signal.key);
       log({
         type: 'skip',
-        reason: disposition.kind === 'post_demotion_open_ignored'
-          ? 'retirement_post_demotion_open_ignored'
-          : 'retirement_unowned_increase_noncopyable',
+        reason: disposition.kind === 'pre_selection_open_ignored'
+          ? 'retirement_pre_selection_open_noncopyable'
+          : disposition.kind === 'post_demotion_open_ignored'
+            ? 'retirement_post_demotion_open_ignored'
+            : 'retirement_unowned_increase_noncopyable',
         handledNoRetry: true,
         retiredAtMs: target.retiredAtMs,
         signal: disposition.signal,
         wakeSource: `elite_direct:${reason}`,
       });
     }
-    const allHandled = dispositions.every(({ signal }) => signalWasSeen(signal, key => state.hasSeen(key)));
+    const allHandled = dispositions.every(disposition => disposition.kind === 'invalid_lifecycle_open'
+      ? state.hasSeen(disposition.evidenceKey)
+      : signalWasSeen(disposition.signal, key => state.hasSeen(key)));
     const highWaterMs = dispositions.reduce(
-      (highWater, { signal }) => Math.max(highWater, signal.sourceTimeMs ?? highWater),
+      (highWater, disposition) => disposition.kind === 'invalid_lifecycle_open'
+        ? highWater : Math.max(highWater, disposition.signal.sourceTimeMs ?? highWater),
       target.processedThroughMs,
     );
     if (allHandled && openResult.complete) {
@@ -1538,22 +1563,36 @@ async function hydrateClosedHistory(
     return;
   }
 
-  const signals = closedSignalsAfterBoundary(
+  const classified = classifyClosedHydrationRows(
     rows, target, target.closedProcessedThroughMs, target.closedBoundaryIds, observedAtMs,
   );
+  const { signals, unemittableFreshRows } = classified;
   directWatchMetrics.signalsObserved += signals.length;
   for (const signal of signals) await execute(signal, `elite_direct:${reason}`, observedAtMs, target.sourceFilter);
-  const allHandled = signals.every(signal => closedLifecycleWasHandled(signal, key => state.hasSeen(key)));
-  const watermarkCommitted = allHandled && boundaryReached;
+  const allHandled = signals.every(signal => closedLifecycleWasHandled(
+    signal, key => state.hasSeen(key), sourceBaseId => state.hasHandledClose(sourceBaseId),
+  ));
+  const allFreshRowsEmittable = unemittableFreshRows.length === 0;
+  const watermarkCommitted = allHandled && allFreshRowsEmittable && boundaryReached;
   if (watermarkCommitted) {
     directWatch.commitClosedHydration(target.portfolioId, rows, observedAtMs);
     directWatchMetrics.signalsHandled += signals.length;
   }
+  if (!allFreshRowsEmittable) {
+    log({
+      type: 'closed_row_unemittable', portfolioId: target.portfolioId, reason,
+      freshRowCount: classified.freshRowCount,
+      unemittableCount: unemittableFreshRows.length,
+      unemittableFreshRows, watermarkCommitted: false, live: false,
+    });
+  }
   log({
     type: 'elite_direct_closed_hydration', portfolioId: target.portfolioId, reason,
     previousClosedProcessedThroughMs: target.closedProcessedThroughMs,
-    signalCount: signals.length, pagesFetched, boundaryReached, boundaryReason,
-    allHandled, watermarkCommitted, live: false,
+    signalCount: signals.length, freshRowCount: classified.freshRowCount,
+    unemittableFreshRowCount: unemittableFreshRows.length,
+    pagesFetched, boundaryReached, boundaryReason,
+    allHandled, allFreshRowsEmittable, watermarkCommitted, live: false,
   });
 }
 

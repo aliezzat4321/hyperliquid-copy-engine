@@ -9,6 +9,7 @@ import {
   fetchCompleteOpenInvestments,
   closedBoundaryProof,
   closedSignalsAfterBoundary,
+  classifyClosedHydrationRows,
   loadEliteDirectTargets,
   isMissedPreDemotionOpen,
   planClosedHydrations,
@@ -34,6 +35,21 @@ function openRow(overrides: Record<string, unknown> = {}) {
     verifiedTrade: true, isOpen: true, directionLong: true, leverage: 7,
     entryPrice: 0.75, entrySize: 2, createdAt: BASE + 100, updatedAt: BASE + 100,
     portfolio: { id: 'p1' }, ...overrides,
+  };
+}
+
+function retirementLifecycle(overrides: Partial<{
+  hasObservedOpen: (sourceBaseId: string) => boolean;
+  isManagedSource: (sourceBaseId: string) => boolean;
+  hasHandledClose: (sourceBaseId: string) => boolean;
+  hasSeen: (key: string) => boolean;
+}> = {}) {
+  return {
+    hasObservedOpen: () => false,
+    isManagedSource: () => false,
+    hasHandledClose: () => false,
+    hasSeen: () => false,
+    ...overrides,
   };
 }
 test('startup baseline never replays pre-baseline investments', () => {
@@ -218,6 +234,8 @@ test('recorded direct-poll attempts rotate bounded periodic service across targe
   const state = new EliteDirectWatchState(path);
   const secondTarget = { ...target, portfolioId: 'p2' };
   state.syncTargets([target, secondTarget], new Set(), BASE - 60_000);
+  state.commitClosedHydration('p1', [], BASE - 60_000);
+  state.commitClosedHydration('p2', [], BASE - 60_000);
 
   const first = planDirectHydrations(state.targets(), new Map(), BASE, 25_000, 1);
   assert.equal(first[0].target.portfolioId, 'p1');
@@ -225,6 +243,37 @@ test('recorded direct-poll attempts rotate bounded periodic service across targe
 
   const second = planDirectHydrations(state.targets(), new Map(), BASE, 25_000, 1);
   assert.equal(second[0].target.portfolioId, 'p2');
+});
+
+test('OPEN hydration is blocked until the CLOSED cursor is initialized', () => {
+  const stored = {
+    ...target, lifecycle: 'ACTIVE' as const, retiredAtMs: null, retireAfterMs: null,
+    baselineAtMs: BASE, processedThroughMs: BASE, selectorInitialized: true,
+    lastSelectorUpdatedAtMs: BASE, lastFallbackPollAtMs: 0,
+    closedHistoryInitialized: false, closedProcessedThroughMs: 0,
+    closedBoundaryIds: [], lastClosedPollAtMs: 0,
+  };
+  assert.equal(planDirectHydrations([stored], new Map(), BASE + 30_000, 20_000, 1).length, 0);
+  stored.closedHistoryInitialized = true;
+  stored.closedProcessedThroughMs = BASE;
+  assert.equal(planDirectHydrations([stored], new Map(), BASE + 30_000, 20_000, 1).length, 1);
+});
+
+test('fresh CLOSED row missing closingPrice blocks watermark classification until it becomes emittable', () => {
+  const closed = openRow({
+    isOpen: false, baseId: 'close-x', id: 'close-x', createdAt: BASE + 10,
+    closedAt: BASE + 100, updatedAt: BASE + 100, closingPrice: null,
+  });
+  const blocked = classifyClosedHydrationRows([closed], target, BASE, [], BASE + 110);
+  assert.equal(blocked.signals.length, 0);
+  assert.equal(blocked.freshRowCount, 1);
+  assert.equal(blocked.unemittableFreshRows[0]?.reason, 'closing_price_unavailable');
+
+  const ready = classifyClosedHydrationRows(
+    [{ ...closed, closingPrice: 0.8 }], target, BASE, [], BASE + 120,
+  );
+  assert.equal(ready.signals.length, 1);
+  assert.equal(ready.unemittableFreshRows.length, 0);
 });
 
 test('same resulting source size cannot be copied twice if only updatedAt changes later', () => {
@@ -498,9 +547,11 @@ test('stale candidate state retains targets; authoritative demotion retires and 
   assert.equal(state.targets()[0].lifecycle, 'ACTIVE');
   state.syncTargets([], new Set(), BASE + 10, true, 100, new Set(['p1']));
   assert.equal(state.targets()[0].lifecycle, 'RETIRING');
+  assert.equal(planDirectHydrations(state.targets(), new Map(), BASE + 20, 1, 10).length, 0,
+    'OPEN drain waits until CLOSED cursor exists');
+  state.initializeRetirementDrain('p1');
   assert.equal(planDirectHydrations(state.targets(), new Map(), BASE + 20, 1, 10)[0]?.reason,
     'retirement_open_drain');
-  state.initializeRetirementDrain('p1');
   const close = openRow({ isOpen: false, closingPrice: 0.8, createdAt: BASE + 1,
     closedAt: BASE + 11, updatedAt: BASE + 11 });
   const retiring = state.targets()[0];
@@ -544,6 +595,18 @@ test('pre-demotion open blocks deletion and drain proofs survive restart', () =>
   assert.equal(state.targets().length, 0);
 });
 
+test('retirement drain proof excludes pre-selection rows and fails closed on unknown createdAt', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'elite-retirement-relevance-')), 'state.json');
+  const state = new EliteDirectWatchState(path);
+  state.syncTargets([target], new Set(), BASE);
+  state.syncTargets([], new Set(), BASE + 10, true, 10, new Set(['p1']));
+  state.commitRetirementOpenPoll('p1', [openRow({ createdAt: BASE - 1 })], BASE + 30);
+  assert.equal(state.targets()[0].retirementRelevantOpenCount, 0);
+  state.commitRetirementOpenPoll('p1', [openRow({ createdAt: 'invalid' })], BASE + 40);
+  assert.equal(state.targets()[0].retirementRelevantOpenCount, 1,
+    'unknown lifecycle provenance prevents a false empty drain proof');
+});
+
 test('retiring hydration executes pre-demotion opens and rejects post-demotion opens', () => {
   const path = join(mkdtempSync(join(tmpdir(), 'elite-retirement-classify-')), 'state.json');
   const state = new EliteDirectWatchState(path);
@@ -553,8 +616,8 @@ test('retiring hydration executes pre-demotion opens and rejects post-demotion o
   const dispositions = retiringOpenDispositions([
     openRow({ id: 'pre', baseId: 'pre', createdAt: BASE + 100, updatedAt: BASE + 100 }),
     openRow({ id: 'post', baseId: 'post', createdAt: BASE + 201, updatedAt: BASE + 201 }),
-  ], retiring, BASE + 210, () => false);
-  assert.deepEqual(dispositions.map(row => [row.signal.sourceBaseId, row.kind]), [
+  ], retiring, BASE + 210, retirementLifecycle());
+  assert.deepEqual(dispositions.map(row => [row.kind === 'invalid_lifecycle_open' ? row.sourceBaseId : row.signal.sourceBaseId, row.kind]), [
     ['pre', 'execute'],
     ['post', 'post_demotion_open_ignored'],
   ]);
@@ -564,7 +627,10 @@ test('retiring hydration executes pre-demotion opens and rejects post-demotion o
   ], BASE + 210);
   assert.equal(state.targets()[0].retirementRelevantOpenCount, 1,
     'all currently-open pre-demotion rows count for deletion proof regardless of execution');
-  const pre = dispositions[0].signal;
+  const first = dispositions[0];
+  assert.notEqual(first.kind, 'invalid_lifecycle_open');
+  if (first.kind === 'invalid_lifecycle_open') return;
+  const pre = first.signal;
   assert.equal(isMissedPreDemotionOpen(pre, 'elite_direct:retirement_open_drain', BASE + 210, 200), false,
     'a fresh first observation remains executable');
   assert.equal(isMissedPreDemotionOpen(pre, 'elite_direct:retirement_open_drain', BASE + 401, 200), true,
@@ -581,11 +647,73 @@ test('retiring increases require an owned pre-demotion lifecycle', () => {
     closedHistoryInitialized: true, closedProcessedThroughMs: BASE,
     closedBoundaryIds: [], lastClosedPollAtMs: BASE,
   };
-  const increase = openRow({ createdAt: BASE + 50, updatedAt: BASE + 210,
+  const increase = openRow({ createdAt: BASE + 50, updatedAt: BASE + 150,
     entrySize: 3, changes: { simIncrease: true, entrySize: 2 } });
-  assert.equal(retiringOpenDispositions([increase], stored, BASE + 220, () => true)[0].kind, 'execute');
-  assert.equal(retiringOpenDispositions([increase], stored, BASE + 220, () => false)[0].kind,
-    'unowned_increase_ignored');
+  assert.equal(retiringOpenDispositions([increase], stored, BASE + 220,
+    retirementLifecycle({ isManagedSource: () => true }))[0].kind, 'execute');
+  assert.equal(retiringOpenDispositions([increase], stored, BASE + 220,
+    retirementLifecycle({ hasObservedOpen: () => true }))[0].kind, 'unowned_increase_ignored',
+    'an unowned increase cannot create exposure or duplicate its already-observed OPEN');
+});
+
+test('retiring discovery bypasses portfolio watermark exactly once without lowering it', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'elite-retirement-delayed-')), 'state.json');
+  const state = new EliteDirectWatchState(path);
+  state.syncTargets([target], new Set(), BASE);
+  state.commitHydration('p1', BASE + 180);
+  state.syncTargets([], new Set(), BASE + 200, true, 100, new Set(['p1']));
+  const retiring = state.targets()[0];
+  const delayed = openRow({ id: 'delayed', baseId: 'delayed', createdAt: BASE + 100, updatedAt: BASE + 100 });
+  const [first] = retiringOpenDispositions([delayed], retiring, BASE + 210, retirementLifecycle());
+  assert.equal(first.kind, 'execute');
+  if (first.kind !== 'execute') return;
+  assert.equal(first.signal.action, 'open');
+  assert.equal(first.signal.sourceTimeMs, BASE + 100);
+
+  const seen = new Set([first.signal.key, `source-event:delayed:open:${BASE + 100}`]);
+  assert.deepEqual(retiringOpenDispositions([delayed], retiring, BASE + 211,
+    retirementLifecycle({ hasObservedOpen: () => true, hasSeen: key => seen.has(key) })), []);
+  state.commitHydration('p1', first.signal.sourceTimeMs ?? 0);
+  assert.equal(state.targets()[0].processedThroughMs, BASE + 180, 'old delayed OPEN cannot lower high-water');
+});
+
+test('retiring OPEN interval and durable close dominance fail closed', () => {
+  const stored = {
+    ...target, lifecycle: 'RETIRING' as const, retiredAtMs: BASE + 200, retireAfterMs: BASE + 300,
+    baselineAtMs: BASE, processedThroughMs: BASE + 180, selectorInitialized: true,
+    lastSelectorUpdatedAtMs: BASE, lastFallbackPollAtMs: BASE,
+    lastRetirementOpenPollAtMs: 0, retirementRelevantOpenCount: null,
+    retirementOpenEmptyProofs: 0, retirementClosedProofs: 0,
+    closedHistoryInitialized: true, closedProcessedThroughMs: BASE,
+    closedBoundaryIds: [], lastClosedPollAtMs: BASE,
+  };
+  const rows = [
+    openRow({ id: 'pre', baseId: 'pre', createdAt: BASE - 1, updatedAt: BASE - 1 }),
+    openRow({ id: 'post', baseId: 'post', createdAt: BASE + 201, updatedAt: BASE + 201 }),
+    openRow({ id: 'closed', baseId: 'closed', createdAt: BASE + 100, updatedAt: BASE + 100 }),
+    openRow({ id: 'missing-time', baseId: 'missing-time', createdAt: 'not-a-date' }),
+  ];
+  const dispositions = retiringOpenDispositions(rows, stored, BASE + 220,
+    retirementLifecycle({ hasHandledClose: id => id === 'closed' }));
+  assert.deepEqual(dispositions.map(row => row.kind), [
+    'pre_selection_open_ignored', 'post_demotion_open_ignored', 'invalid_lifecycle_open',
+  ]);
+});
+
+test('retiring increases are causal, pre-demotion, and owned only', () => {
+  const stored = {
+    ...target, lifecycle: 'RETIRING' as const, retiredAtMs: BASE + 200, retireAfterMs: BASE + 300,
+    baselineAtMs: BASE, processedThroughMs: BASE + 100, selectorInitialized: true,
+    lastSelectorUpdatedAtMs: BASE, lastFallbackPollAtMs: BASE,
+    lastRetirementOpenPollAtMs: 0, retirementRelevantOpenCount: null,
+    retirementOpenEmptyProofs: 0, retirementClosedProofs: 0,
+    closedHistoryInitialized: true, closedProcessedThroughMs: BASE,
+    closedBoundaryIds: [], lastClosedPollAtMs: BASE,
+  };
+  const lifecycle = retirementLifecycle({ isManagedSource: () => true });
+  const stale = openRow({ createdAt: BASE + 50, updatedAt: BASE + 100, changes: { simIncrease: true, entrySize: 1 } });
+  const post = openRow({ createdAt: BASE + 50, updatedAt: BASE + 201, changes: { simIncrease: true, entrySize: 1 } });
+  assert.deepEqual(retiringOpenDispositions([stale, post], stored, BASE + 220, lifecycle), []);
 });
 
 test('reactivation mutates the canonical metadata object and clears stale drain proofs immediately', () => {

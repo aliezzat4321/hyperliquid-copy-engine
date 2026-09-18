@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname } from 'path';
 import type { InvoSignal } from './notification-signal.js';
 import { ELITE_SELECTOR_VERSION, type PortfolioBucket } from './portfolio-candidates.js';
+import { signalWasSeen } from './source-event-dedupe.js';
 
 export const ELITE_DIRECT_WATCH_VERSION = 'lane3-elite-direct-watch-v4-20260918';
 const LEGACY_VERSION = 'lane3-elite-direct-watch-v1-20260917';
@@ -140,8 +141,17 @@ export interface OpenPaginationResult {
 
 export type RetirementOpenDisposition =
   | { kind: 'execute'; signal: InvoSignal }
+  | { kind: 'pre_selection_open_ignored'; signal: InvoSignal }
   | { kind: 'post_demotion_open_ignored'; signal: InvoSignal }
-  | { kind: 'unowned_increase_ignored'; signal: InvoSignal };
+  | { kind: 'unowned_increase_ignored'; signal: InvoSignal }
+  | { kind: 'invalid_lifecycle_open'; evidenceKey: string; sourceBaseId: string | null; createdAt: unknown };
+
+export interface RetirementLifecycleState {
+  hasObservedOpen: (sourceBaseId: string) => boolean;
+  isManagedSource: (sourceBaseId: string) => boolean;
+  hasHandledClose: (sourceBaseId: string) => boolean;
+  hasSeen: (key: string) => boolean;
+}
 
 /** Fetches the whole newest-first OPEN endpoint; no high-water is safe on overflow. */
 export async function fetchCompleteOpenInvestments(
@@ -269,6 +279,9 @@ export function planDirectHydrations(
 ): DirectHydrationPlanItem[] {
   return targets
     .flatMap<DirectHydrationPlanItem>(target => {
+      // Establish the CLOSED cursor before copying any OPEN. Otherwise a source
+      // position can be copied open and then swallowed by its first CLOSED baseline.
+      if (!target.closedHistoryInitialized) return [];
       if (target.lifecycle === 'RETIRING') {
         if (nowMs - (target.lastRetirementOpenPollAtMs ?? 0) < fallbackPollMs) return [];
         return [{ target, selectorUpdatedAtMs: null, reason: 'retirement_open_drain' as const }];
@@ -561,7 +574,8 @@ export class EliteDirectWatchState {
     const retiredAtMs = target.retiredAtMs ?? Number.NEGATIVE_INFINITY;
     const relevant = rows.filter(row => {
       const createdAtMs = directSourceTimeMs(row?.createdAt);
-      return createdAtMs == null || createdAtMs <= retiredAtMs;
+      // Unknown lifecycle time fails closed and prevents a false empty proof.
+      return createdAtMs == null || (createdAtMs >= target.baselineAtMs && createdAtMs <= retiredAtMs);
     });
     target.lastRetirementOpenPollAtMs = polledAtMs;
     target.lastFallbackPollAtMs = polledAtMs;
@@ -741,21 +755,90 @@ export function signalsFromDirectInvestments(
 /** Classifies RETIRING open rows without weakening normal execution gates. */
 export function retiringOpenDispositions(
   openRows: any[], target: StoredTarget, observedAtMs: number,
-  isManagedSource: (sourceBaseId: string) => boolean,
+  lifecycle: RetirementLifecycleState,
 ): RetirementOpenDisposition[] {
   const retiredAtMs = target.retiredAtMs ?? Number.NEGATIVE_INFINITY;
-  return signalsFromDirectInvestments(
-    openRows, [], target, target.processedThroughMs, observedAtMs,
-  ).map(signal => {
-    const lifecycleCreatedAtMs = signal.openedSourceTimeMs;
-    if (lifecycleCreatedAtMs == null || lifecycleCreatedAtMs > retiredAtMs) {
-      return { kind: 'post_demotion_open_ignored', signal };
+  const dispositions: RetirementOpenDisposition[] = [];
+  for (const row of openRows) {
+    if (row?.isOpen !== true || row?.verifiedTrade !== true) continue;
+    const sourceBaseId = String(row?.baseId ?? row?.id ?? '').trim();
+    const createdAtMs = directSourceTimeMs(row?.createdAt);
+    if (!sourceBaseId || createdAtMs == null) {
+      const rowId = String(row?.id ?? row?.baseId ?? 'unknown').trim() || 'unknown';
+      dispositions.push({
+        kind: 'invalid_lifecycle_open',
+        evidenceKey: `retirement-invalid-open:${target.portfolioId}:${rowId}:${String(row?.createdAt)}`,
+        sourceBaseId: sourceBaseId || null,
+        createdAt: row?.createdAt,
+      });
+      continue;
     }
-    if (signal.action === 'increase' && !isManagedSource(signal.sourceBaseId)) {
-      return { kind: 'unowned_increase_ignored', signal };
+
+    const openSignal = signalFromInvestment(
+      row, target, 'open', createdAtMs, 'investment.createdAt', observedAtMs,
+    );
+    // A malformed verified row is observable but can never become exposure.
+    if (!openSignal) {
+      dispositions.push({
+        kind: 'invalid_lifecycle_open',
+        evidenceKey: `retirement-invalid-open:${target.portfolioId}:${sourceBaseId}:${String(row?.createdAt)}`,
+        sourceBaseId,
+        createdAt: row?.createdAt,
+      });
+      continue;
     }
-    return { kind: 'execute', signal };
-  });
+    if (createdAtMs < target.baselineAtMs) {
+      if (!signalWasSeen(openSignal, lifecycle.hasSeen)) {
+        dispositions.push({ kind: 'pre_selection_open_ignored', signal: openSignal });
+      }
+      continue;
+    }
+    if (createdAtMs > retiredAtMs) {
+      if (!signalWasSeen(openSignal, lifecycle.hasSeen)) {
+        dispositions.push({ kind: 'post_demotion_open_ignored', signal: openSignal });
+      }
+      continue;
+    }
+    // A handled close dominates every delayed representation of its OPEN lifecycle.
+    if (lifecycle.hasHandledClose(sourceBaseId)) continue;
+
+    if (lifecycle.isManagedSource(sourceBaseId)) {
+      const updatedAtMs = directSourceTimeMs(row?.updatedAt);
+      if (updatedAtMs == null || updatedAtMs <= target.processedThroughMs
+        || updatedAtMs > retiredAtMs || row?.changes?.simIncrease !== true) continue;
+      const currentSize = positive(row?.entrySize);
+      const priorSize = positive(row?.changes?.entrySize);
+      if (currentSize == null || priorSize == null || currentSize <= priorSize) continue;
+      const increase = signalFromInvestment(
+        row, target, 'increase', updatedAtMs, 'investment.updatedAt', observedAtMs,
+        currentSize - priorSize, `size-${currentSize}`,
+      );
+      if (increase && !signalWasSeen(increase, lifecycle.hasSeen)) {
+        dispositions.push({ kind: 'execute', signal: increase });
+      }
+      continue;
+    }
+    if (lifecycle.hasObservedOpen(sourceBaseId)) {
+      const updatedAtMs = directSourceTimeMs(row?.updatedAt);
+      const currentSize = positive(row?.entrySize);
+      const priorSize = positive(row?.changes?.entrySize);
+      if (updatedAtMs != null && updatedAtMs > target.processedThroughMs
+        && updatedAtMs <= retiredAtMs && row?.changes?.simIncrease === true
+        && currentSize != null && priorSize != null && currentSize > priorSize) {
+        const increase = signalFromInvestment(
+          row, target, 'increase', updatedAtMs, 'investment.updatedAt', observedAtMs,
+          currentSize - priorSize, `size-${currentSize}`,
+        );
+        if (increase && !signalWasSeen(increase, lifecycle.hasSeen)) {
+          dispositions.push({ kind: 'unowned_increase_ignored', signal: increase });
+        }
+      }
+      continue;
+    }
+    if (signalWasSeen(openSignal, lifecycle.hasSeen)) continue;
+    dispositions.push({ kind: 'execute', signal: openSignal });
+  }
+  return dispositions;
 }
 
 export function isMissedPreDemotionOpen(
@@ -777,6 +860,52 @@ export function closedSignalsAfterBoundary(
       const sourceMs = signal.sourceTimeMs ?? 0;
       return sourceMs > processedThroughMs || (sourceMs === processedThroughMs && !atBoundary.has(signal.sourceBaseId));
     });
+}
+
+export interface ClosedHydrationClassification {
+  signals: InvoSignal[];
+  freshRowCount: number;
+  unemittableFreshRows: Array<{ sourceBaseId: string | null; sourceTimeMs: number; reason: string }>;
+}
+
+/**
+ * A CLOSED watermark may advance only across fresh rows that can be converted
+ * into a close signal. Otherwise partially populated source rows (for example
+ * missing closingPrice) would be consumed permanently and never retried.
+ */
+export function classifyClosedHydrationRows(
+  closedRows: any[],
+  target: EliteDirectTarget,
+  processedThroughMs: number,
+  boundaryIds: readonly string[],
+  observedAtMs: number,
+): ClosedHydrationClassification {
+  const signals = closedSignalsAfterBoundary(
+    closedRows, target, processedThroughMs, boundaryIds, observedAtMs,
+  );
+  const emitted = new Set(signals.map(signal => String(signal.sourceBaseId) + ':' + String(signal.sourceTimeMs ?? '')));
+  const boundary = new Set(boundaryIds);
+  const unemittableFreshRows: ClosedHydrationClassification['unemittableFreshRows'] = [];
+  let freshRowCount = 0;
+
+  for (const row of closedRows) {
+    const sourceTimeMs = directSourceTimeMs(row?.closedAt) ?? directSourceTimeMs(row?.updatedAt);
+    if (sourceTimeMs == null) continue; // ordering validation fails closed earlier.
+    const sourceBaseId = String(row?.baseId ?? row?.id ?? '').trim();
+    const isFresh = sourceTimeMs > processedThroughMs
+      || (sourceTimeMs === processedThroughMs && (!sourceBaseId || !boundary.has(sourceBaseId)));
+    if (!isFresh) continue;
+    freshRowCount += 1;
+    if (sourceBaseId && emitted.has(sourceBaseId + ':' + String(sourceTimeMs))) continue;
+
+    let reason = 'signal_conversion_failed';
+    if (!sourceBaseId) reason = 'missing_source_identity';
+    else if (row?.isOpen !== false) reason = 'closed_row_not_closed';
+    else if (row?.verifiedTrade !== true) reason = 'closed_row_unverified';
+    else if (positive(row?.closingPrice) == null) reason = 'closing_price_unavailable';
+    unemittableFreshRows.push({ sourceBaseId: sourceBaseId || null, sourceTimeMs, reason });
+  }
+  return { signals, freshRowCount, unemittableFreshRows };
 }
 
 export function unownedCloseEvidence(signal: InvoSignal, observedOpen: boolean) {
