@@ -12,11 +12,38 @@ import { liveScopeSkipReason } from './live-scope.js';
 import { fetchFeedBackfill } from './feed-backfill.js';
 import { canProspectivelyRebaseGap, planUnrecoverableGap } from './gap-reconciliation.js';
 import {
+  INVO_FEED_SURFACES,
+  type InvoFeedSurface,
+  parseDiscoverySurfaces,
+  parseFeedSurface,
+  planSurfaceBaseline,
+  surfaceNeedsBaseline,
+} from './feed-surfaces.js';
+import {
   directSourceTimeMs,
+  fetchCompleteOpenInvestments,
+  establishClosedBaseline,
+  closedBoundaryProof,
+  closedSignalsAfterBoundary,
+  classifyClosedHydrationRows,
   EliteDirectWatchState,
   loadEliteDirectTargets,
+  isMissedPreDemotionOpen,
+  planClosedHydrations,
+  planDirectHydrations,
+  retiringOpenDispositions,
+  runIsolatedHydrations,
   signalsFromDirectInvestments,
+  unownedCloseEvidence,
+  validateClosedPageOrdering,
 } from './elite-direct-watch.js';
+import {
+  closedLifecycleWasHandled,
+  closeLifecycleKey,
+  signalWasSeen,
+  sourceEventKey,
+} from './source-event-dedupe.js';
+import { runSignalBatchBySource, SourceLifecycleQueue } from './source-lifecycle.js';
 import { eliteAdmissionFromState, ELITE_ADMISSION_VERSION } from './elite-admission.js';
 import { shouldTerminallyDustReconcile } from './close-rejection.js';
 import {
@@ -54,15 +81,13 @@ function b(name: string, fallback: boolean): boolean {
 function loadConfig() {
   const allow = (process.env.NOTIFICATION_TRADER_ALLOW ?? '')
     .split(',').map(v => v.trim().replace(/^@/, '').toLowerCase()).filter(Boolean);
-  const feedFilter = (process.env.NOTIFICATION_TRADER_FEED_FILTER ?? 'following').trim().toLowerCase();
-  if (!['following', 'all', 'trending'].includes(feedFilter)) {
-    throw new Error(`Invalid NOTIFICATION_TRADER_FEED_FILTER: ${feedFilter}`);
-  }
-  const discoverySurfaces = (process.env.NOTIFICATION_TRADER_DISCOVERY_SURFACES ?? 'following,all,trending')
-    .split(',').map(v => v.trim().toLowerCase()).filter(Boolean);
-  if (!discoverySurfaces.length || discoverySurfaces.some(v => !['following', 'all', 'trending'].includes(v))) {
-    throw new Error(`Invalid NOTIFICATION_TRADER_DISCOVERY_SURFACES: ${discoverySurfaces.join(',')}`);
-  }
+  const feedFilter = parseFeedSurface(
+    process.env.NOTIFICATION_TRADER_FEED_FILTER ?? 'following',
+    'NOTIFICATION_TRADER_FEED_FILTER',
+  );
+  const discoverySurfaces = parseDiscoverySurfaces(
+    process.env.NOTIFICATION_TRADER_DISCOVERY_SURFACES ?? INVO_FEED_SURFACES.join(','),
+  );
   return {
     live: b('NOTIFICATION_TRADER_LIVE', false),
     host: process.env.NOTIFICATION_TRADER_HOST ?? '127.0.0.1',
@@ -95,11 +120,16 @@ function loadConfig() {
     auditPath: resolve(process.env.NOTIFICATION_TRADER_AUDIT_PATH ?? 'data/notification-trader-audit.jsonl'),
     trackerPath: resolve(process.env.NOTIFICATION_TRADER_TRACKER_PATH ?? 'data/notification-trader-population.json'),
     candidateStatePath: resolve(process.env.NOTIFICATION_TRADER_CANDIDATE_STATE_PATH ?? '/var/lib/hyperliquid-copy-engine/invo-notification-executor/portfolio-candidates.json'),
+    candidateSnapshotsPath: resolve(process.env.INVO_PORTFOLIO_CANDIDATE_SNAPSHOTS_PATH ?? '/var/lib/hyperliquid-copy-engine/invo-notification-executor/portfolio-candidate-snapshots.jsonl'),
     candidateStateMaxAgeMs: Math.max(60_000, n('NOTIFICATION_TRADER_CANDIDATE_MAX_AGE_MS', 20 * 60 * 1000)),
     directWatchStatePath: resolve(process.env.NOTIFICATION_TRADER_DIRECT_WATCH_STATE_PATH ?? '/var/lib/hyperliquid-copy-engine/invo-notification-executor/elite-direct-watch.json'),
-    directWatchScanMs: Math.max(2_000, n('NOTIFICATION_TRADER_DIRECT_WATCH_SCAN_MS', 5_000)),
-    directWatchMaxHydratesPerScan: Math.max(1, Math.min(5, Math.trunc(n('NOTIFICATION_TRADER_DIRECT_WATCH_MAX_HYDRATES_PER_SCAN', 2)))),
-    directWatchFallbackPollMs: Math.max(10_000, n('NOTIFICATION_TRADER_DIRECT_WATCH_FALLBACK_POLL_MS', 20_000)),
+    directWatchScanMs: Math.max(2_000, n('NOTIFICATION_TRADER_DIRECT_WATCH_SCAN_MS', 3_000)),
+    directWatchMaxHydratesPerScan: Math.max(1, Math.min(20, Math.trunc(n('NOTIFICATION_TRADER_DIRECT_WATCH_MAX_HYDRATES_PER_SCAN', 8)))),
+    directWatchOpenMaxPages: Math.max(1, Math.min(10, Math.trunc(n('NOTIFICATION_TRADER_DIRECT_WATCH_OPEN_MAX_PAGES', 3)))),
+    directWatchFallbackPollMs: Math.max(10_000, n('NOTIFICATION_TRADER_DIRECT_WATCH_FALLBACK_POLL_MS', 18_000)),
+    directWatchClosedPollMs: Math.max(30_000, n('NOTIFICATION_TRADER_DIRECT_WATCH_CLOSED_POLL_MS', 60_000)),
+    directWatchMaxClosedHydratesPerScan: Math.max(1, Math.min(10, Math.trunc(n('NOTIFICATION_TRADER_DIRECT_WATCH_MAX_CLOSED_HYDRATES_PER_SCAN', 3)))),
+    directWatchClosedMaxPages: Math.max(1, Math.min(3, Math.trunc(n('NOTIFICATION_TRADER_DIRECT_WATCH_CLOSED_MAX_PAGES', 2)))),
     minEvidenceEvents: Math.max(1, Math.trunc(n('NOTIFICATION_TRADER_MIN_EVIDENCE_EVENTS', 20))),
     minObservationDays: Math.max(1, Math.trunc(n('NOTIFICATION_TRADER_MIN_OBSERVATION_DAYS', 7))),
     staleAfterMs: Math.max(60_000, n('NOTIFICATION_TRADER_STALE_AFTER_MS', 3 * 24 * 60 * 60 * 1000)),
@@ -134,9 +164,9 @@ const tracker = new TraderTracker(cfg.trackerPath, {
 const directWatch = new EliteDirectWatchState(cfg.directWatchStatePath);
 const inFlight = new Set<string>();
 const inFlightSourceEvents = new Set<string>();
-let initialized = false;
+const sourceLifecycleQueue = new SourceLifecycleQueue();
 let hydrating = false;
-let pendingWake: { source: string; hints?: NotificationHints; receivedAtMs: number; feedFilter?: string } | null = null;
+let pendingWake: { source: string; hints?: NotificationHints; receivedAtMs: number; feedFilter?: InvoFeedSurface } | null = null;
 let lastSuccessPollMs = 0;
 let backoffMs = 0;
 let discoverySurfaceIndex = 0;
@@ -144,9 +174,14 @@ let lastFundingOracleBoundaryMs = -1;
 let lastDirectWatchScanMs = 0;
 let directWatchBackoffMs = 0;
 let directWatchBackoffUntilMs = 0;
+let directWatchSelectorIndex = 0;
 const directWatchMetrics = {
   selectorRequests: 0, hydrationRequests: 0, hydrationCount: 0,
+  closedHydrationCount: 0, closedBaselineCount: 0, closedOverflowRiskCount: 0,
+  openOverflowRiskCount: 0, openOrderingViolationCount: 0,
   signalsObserved: 0, signalsHandled: 0, http429s: 0,
+  targetErrors: 0, selectorErrors: 0, skippedAfterRateLimit: 0,
+  candidateStateRejections: 0, candidateStateLastError: null as string | null,
   lastScanAtMs: 0, lastSuccessAtMs: 0,
 };
 const FUNDING_INTERVAL_MS = 60 * 60 * 1000;
@@ -502,19 +537,28 @@ async function shadowReup(
   });
 }
 
-async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: number, feedFilter: string) {
-  const sourceEventKey = signal.sourceTimeMs == null ? null : `source-event:${signal.sourceBaseId}:${signal.sourceTimeMs}`;
+async function executeUnlocked(signal: InvoSignal, wakeSource: string, receivedAtMs: number, feedFilter: string) {
+  const eventKey = sourceEventKey(signal);
+  const lifecycleKey = closeLifecycleKey(signal);
+  const inFlightKey = eventKey ?? signal.key;
+  const alreadySeen = signalWasSeen(signal, key => state.hasSeen(key));
+  if (alreadySeen && signal.action === 'close') state.markHandledClose(signal.sourceBaseId);
   if (
-    state.hasSeen(signal.key)
-    || (sourceEventKey != null && state.hasSeen(sourceEventKey))
+    alreadySeen
     || inFlight.has(signal.key)
-    || inFlightSourceEvents.has(signal.sourceBaseId)
+    || inFlightSourceEvents.has(inFlightKey)
   ) return;
   inFlight.add(signal.key);
-  inFlightSourceEvents.add(signal.sourceBaseId);
+  inFlightSourceEvents.add(inFlightKey);
   const decisionAtMs = Date.now();
 
   try {
+    if (signal.action !== 'close' && state.hasHandledClose(signal.sourceBaseId)) {
+      state.markSeen(signal.key);
+      log({ type: 'skip', reason: 'lifecycle_already_closed', signal, wakeSource });
+      return;
+    }
+    if (signal.action !== 'close') state.markObservedOpen(signal.sourceBaseId);
     // Discovery remains broad in the separate portfolio-research collector, but NEW
     // Lane 3 shadow exposure is portfolio-level elite-only. Closes bypass this gate so
     // previously owned broad-research exposure can always unwind after a demotion.
@@ -525,6 +569,7 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
         signal.portfolioId,
         eligibilityCutoffMs,
         cfg.candidateStateMaxAgeMs,
+        cfg.candidateSnapshotsPath,
       );
       if (!candidateAdmission.allowed) {
         state.markSeen(signal.key);
@@ -561,7 +606,17 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
     const ageMs = signal.sourceTimeMs == null ? null : decisionAtMs - signal.sourceTimeMs;
     if (signal.action !== 'close' && ageMs != null && ageMs > cfg.maxSignalAgeMs) {
       state.markSeen(signal.key);
-      log({ type: 'skip', reason: 'stale_signal_over_25s_window', ageMs, maxSignalAgeMs: cfg.maxSignalAgeMs, signal, wakeSource });
+      const missedPreDemotion = isMissedPreDemotionOpen(
+        signal, wakeSource, decisionAtMs, cfg.maxSignalAgeMs,
+      );
+      log({
+        type: missedPreDemotion ? 'missed_pre_demotion_open' : 'skip',
+        reason: missedPreDemotion ? 'missed_pre_demotion_open' : 'stale_signal_over_25s_window',
+        lifecycleCopyability: missedPreDemotion ? 'NON_COPYABLE_STALE_FIRST_OBSERVATION' : undefined,
+        reconstructedOpenExecuted: missedPreDemotion ? false : undefined,
+        handledNoRetry: missedPreDemotion ? true : undefined,
+        ageMs, maxSignalAgeMs: cfg.maxSignalAgeMs, signal, wakeSource,
+      });
       return;
     }
 
@@ -569,7 +624,11 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
       const managed = state.getManagedBySource(signal.sourceBaseId);
       if (!managed) {
         state.markSeen(signal.key);
-        log({ type: 'close_ownership_gap', reason: 'close_not_owned_by_service', managed: null, signal, wakeSource, ...closeFreshness(signal, receivedAtMs) });
+        const observedOpen = state.hasObservedOpen(signal.sourceBaseId);
+        log({
+          ...unownedCloseEvidence(signal, observedOpen),
+          managed: null, signal, wakeSource, ...closeFreshness(signal, receivedAtMs),
+        });
         return;
       }
 
@@ -1039,10 +1098,18 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
       ...(signal.action === 'close' ? closeFreshness(signal, receivedAtMs) : {}),
     });
   } finally {
-    if (sourceEventKey != null && state.hasSeen(signal.key)) state.markSeen(sourceEventKey);
+    if (state.hasSeen(signal.key)) {
+      if (eventKey != null) state.markSeen(eventKey);
+      if (lifecycleKey != null) state.markSeen(lifecycleKey);
+      if (signal.action === 'close') state.markHandledClose(signal.sourceBaseId);
+    }
     inFlight.delete(signal.key);
-    inFlightSourceEvents.delete(signal.sourceBaseId);
+    inFlightSourceEvents.delete(inFlightKey);
   }
+}
+
+async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: number, feedFilter: string) {
+  return sourceLifecycleQueue.run(signal.sourceBaseId, () => executeUnlocked(signal, wakeSource, receivedAtMs, feedFilter));
 }
 
 
@@ -1189,9 +1256,6 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
         source: 'shadow_zero_managed_gap_rebase',
       };
       state.setFeedCursor(feedFilter, rebasedCursor);
-      // Treat the explicit rebase as the startup boundary so the next newer signal is
-      // processed prospectively instead of being swallowed by startup-baseline indexing.
-      initialized = true;
       log({
         type: 'unrecoverable_feed_gap_rebased',
         feedFilter,
@@ -1215,21 +1279,30 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
   });
   if (tracked.length) tracker.flush();
 
-  if (!initialized) {
-    const recoverableCloses: InvoSignal[] = [];
-    for (const { signal } of tracked) {
-      if (!signal) continue;
-      const managed = signal.action === 'close' ? state.getManagedBySource(signal.sourceBaseId) : null;
-      if (managed) recoverableCloses.push(signal);
-      else state.markSeen(signal.key);
-    }
-    initialized = true;
+  if (surfaceNeedsBaseline(state.hasFeedBaseline(feedFilter))) {
+    const baseline = planSurfaceBaseline(
+      tracked.map(row => row.signal),
+      sourceBaseId => Boolean(state.getManagedBySource(sourceBaseId)),
+    );
+    for (const signal of baseline.skipped) state.markSeen(signal.key);
     lastSuccessPollMs = Date.now();
-    log({ type: 'baseline_indexed', posts: posts.length, recoverableCloses: recoverableCloses.length, live: cfg.live, feedFilter, feedLimit: cfg.feedLimit, traderFunnel: tracker.report().funnel });
-    for (const signal of recoverableCloses) await execute(signal, 'startup_recovery', receivedAtMs, feedFilter);
-    const startupHandled = recoverableCloses.every(signal => state.hasSeen(signal.key));
-    if (startupHandled && backfill.newestPostId) state.setFeedCursor(feedFilter, { postId: backfill.newestPostId, observedAtMs: Date.now(), source: 'startup_baseline' });
-    return recoverableCloses.length;
+    const baselineAtMs = Date.now();
+    // The first fetched snapshot establishes the prospective surface boundary even
+    // when an owned close needs asynchronous managed-exposure reconciliation.
+    state.markFeedBaselined(feedFilter, baselineAtMs);
+    log({ type: 'surface_baseline_indexed', posts: posts.length, skippedOpenAddsAndUnownedCloses: baseline.skipped.length, recoverableCloses: baseline.recoverableCloses.length, live: cfg.live, feedFilter, feedLimit: cfg.feedLimit, traderFunnel: tracker.report().funnel });
+    for (const signal of baseline.recoverableCloses) {
+      await execute(signal, 'surface_baseline_owned_close_recovery', receivedAtMs, feedFilter);
+    }
+    const startupHandled = baseline.recoverableCloses.every(signal => closedLifecycleWasHandled(
+      signal, key => state.hasSeen(key), sourceBaseId => state.hasHandledClose(sourceBaseId),
+    ));
+    if (startupHandled) {
+      if (backfill.newestPostId) {
+        state.setFeedCursor(feedFilter, { postId: backfill.newestPostId, observedAtMs: baselineAtMs, source: 'startup_baseline' });
+      }
+    }
+    return baseline.recoverableCloses.length;
   }
 
   const signals: InvoSignal[] = tracked
@@ -1245,7 +1318,7 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
   if (cfg.live) {
     for (const signal of ordered) await execute(signal, source, receivedAtMs, feedFilter);
   } else {
-    await Promise.all(ordered.map(signal => execute(signal, source, receivedAtMs, feedFilter)));
+    await runSignalBatchBySource(ordered, signal => execute(signal, source, receivedAtMs, feedFilter));
   }
   const allHandled = ordered.every(signal => state.hasSeen(signal.key));
   if (allHandled && backfill.newestPostId) state.setFeedCursor(feedFilter, { postId: backfill.newestPostId, observedAtMs: Date.now(), source });
@@ -1300,40 +1373,99 @@ async function hydrateDirectTarget(
   reason: string,
   observedAtMs: number,
 ) {
-  directWatchMetrics.hydrationRequests += 2;
-  const [openPayload, closedPayload] = await Promise.all([
-    invo.getPortfolioInvestments(target.portfolioId, true, 1, 100),
-    invo.getPortfolioInvestments(target.portfolioId, false, 1, 100),
-  ]);
-  const openRows = directInvestmentRows(openPayload);
-  const closedRows = directInvestmentRows(closedPayload);
+  const openResult = await fetchCompleteOpenInvestments(async page => {
+    directWatchMetrics.hydrationRequests += 1;
+    return directInvestmentRows(await invo.getPortfolioInvestments(target.portfolioId, true, page, 100));
+  }, cfg.directWatchOpenMaxPages, 100);
+  const openRows = openResult.rows;
+  if (target.lifecycle === 'RETIRING') {
+    const dispositions = retiringOpenDispositions(
+      openRows, target, observedAtMs,
+      {
+        hasObservedOpen: sourceBaseId => state.hasObservedOpen(sourceBaseId),
+        isManagedSource: sourceBaseId => state.getManagedBySource(sourceBaseId) != null,
+        hasHandledClose: sourceBaseId => state.hasHandledClose(sourceBaseId),
+        hasSeen: key => state.hasSeen(key),
+      },
+    );
+    directWatchMetrics.hydrationCount += 1;
+    directWatchMetrics.signalsObserved += dispositions.length;
+    for (const disposition of dispositions) {
+      if (disposition.kind === 'invalid_lifecycle_open') {
+        if (!state.hasSeen(disposition.evidenceKey)) {
+          state.markSeen(disposition.evidenceKey);
+          log({
+            type: 'skip', reason: 'retirement_open_missing_valid_lifecycle_identity',
+            handledNoRetry: true, portfolioId: target.portfolioId,
+            sourceBaseId: disposition.sourceBaseId, createdAt: disposition.createdAt,
+            wakeSource: `elite_direct:${reason}`,
+          });
+        }
+        continue;
+      }
+      if (disposition.kind === 'execute') {
+        await execute(disposition.signal, `elite_direct:${reason}`, observedAtMs, target.sourceFilter);
+        continue;
+      }
+      state.markSeen(disposition.signal.key);
+      log({
+        type: 'skip',
+        reason: disposition.kind === 'pre_selection_open_ignored'
+          ? 'retirement_pre_selection_open_noncopyable'
+          : disposition.kind === 'post_demotion_open_ignored'
+            ? 'retirement_post_demotion_open_ignored'
+            : 'retirement_unowned_increase_noncopyable',
+        handledNoRetry: true,
+        retiredAtMs: target.retiredAtMs,
+        signal: disposition.signal,
+        wakeSource: `elite_direct:${reason}`,
+      });
+    }
+    const allHandled = dispositions.every(disposition => disposition.kind === 'invalid_lifecycle_open'
+      ? state.hasSeen(disposition.evidenceKey)
+      : signalWasSeen(disposition.signal, key => state.hasSeen(key)));
+    const highWaterMs = dispositions.reduce(
+      (highWater, disposition) => disposition.kind === 'invalid_lifecycle_open'
+        ? highWater : Math.max(highWater, disposition.signal.sourceTimeMs ?? highWater),
+      target.processedThroughMs,
+    );
+    if (allHandled && openResult.complete) {
+      directWatch.commitHydration(target.portfolioId, highWaterMs);
+      directWatchMetrics.signalsHandled += dispositions.length;
+    }
+    if (openResult.complete) directWatch.commitRetirementOpenPoll(target.portfolioId, openRows, observedAtMs);
+    if (!openResult.complete) directWatchMetrics.openOverflowRiskCount += 1;
+    if (openResult.orderingViolation) directWatchMetrics.openOrderingViolationCount += 1;
+    log({ type: 'elite_direct_retirement_open_drain', portfolioId: target.portfolioId,
+      signalCount: dispositions.length, allHandled, highWaterMs,
+      pagesFetched: openResult.pagesFetched, endpointComplete: openResult.complete,
+      overflow: openResult.overflow, orderingViolation: openResult.orderingViolation, live: false });
+    return;
+  }
   const signals = signalsFromDirectInvestments(
-    openRows, closedRows, target, target.processedThroughMs, observedAtMs,
+    openRows, [], target, target.processedThroughMs, observedAtMs,
   );
   directWatchMetrics.hydrationCount += 1;
   directWatchMetrics.signalsObserved += signals.length;
   for (const signal of signals) {
     await execute(signal, `elite_direct:${reason}`, observedAtMs, target.sourceFilter);
   }
-  const allHandled = signals.every(signal => {
-    if (state.hasSeen(signal.key)) return true;
-    if (signal.sourceTimeMs == null) return false;
-    return state.hasSeen(`source-event:${signal.sourceBaseId}:${signal.sourceTimeMs}`);
-  });
+  const allHandled = signals.every(signal => signalWasSeen(signal, key => state.hasSeen(key)));
   const highWaterMs = signals.reduce(
     (highWater, signal) => Math.max(highWater, signal.sourceTimeMs ?? highWater),
     target.processedThroughMs,
   );
-  if (allHandled) {
+  if (allHandled && openResult.complete) {
     directWatch.commitHydration(
       target.portfolioId,
       highWaterMs,
       selectorUpdatedAtMs == null ? undefined : selectorUpdatedAtMs,
     );
-    directWatch.noteFallbackPoll(target.portfolioId, observedAtMs);
     directWatchMetrics.signalsHandled += signals.length;
     directWatchMetrics.lastSuccessAtMs = Date.now();
   }
+  if (!openResult.complete) directWatchMetrics.openOverflowRiskCount += 1;
+  if (openResult.orderingViolation) directWatchMetrics.openOrderingViolationCount += 1;
   log({
     type: 'elite_direct_hydration',
     source: 'portfolio_specific_read_only',
@@ -1344,69 +1476,243 @@ async function hydrateDirectTarget(
     previousProcessedThroughMs: target.processedThroughMs,
     highWaterMs,
     signalCount: signals.length,
-    allHandled,
+    allHandled, pagesFetched: openResult.pagesFetched, endpointComplete: openResult.complete,
+    overflow: openResult.overflow, orderingViolation: openResult.orderingViolation,
+    watermarkCommitted: allHandled && openResult.complete,
     live: false,
   });
 }
 
+async function hydrateClosedHistory(
+  target: ReturnType<EliteDirectWatchState['targets']>[number],
+  reason: 'closed_history_baseline' | 'periodic_closed_poll',
+  observedAtMs: number,
+) {
+  if (!target.closedHistoryInitialized && target.lifecycle === 'RETIRING') {
+    // A target can demote before its first CLOSED baseline. Start at its original
+    // selection instant so a short round trip between selection and demotion is evidence.
+    directWatch.initializeRetirementDrain(target.portfolioId);
+    const initialized = directWatch.targets().find(row => row.portfolioId === target.portfolioId);
+    if (initialized) return hydrateClosedHistory(initialized, 'periodic_closed_poll', observedAtMs);
+  }
+  if (!target.closedHistoryInitialized) {
+    const baseline = await establishClosedBaseline(async page => {
+      directWatchMetrics.hydrationRequests += 1;
+      return directInvestmentRows(await invo.getPortfolioInvestments(target.portfolioId, false, page, 100));
+    }, cfg.directWatchClosedMaxPages, 100);
+    directWatchMetrics.closedHydrationCount += 1;
+    if (baseline.overflow) directWatchMetrics.closedOverflowRiskCount += 1;
+    if (baseline.boundaryReached) {
+      directWatch.commitClosedHydration(target.portfolioId, baseline.boundaryRows, observedAtMs);
+      directWatchMetrics.closedBaselineCount += 1;
+    }
+    log({
+      type: baseline.orderingViolation ? 'ordering_violation'
+        : baseline.overflow ? 'elite_direct_closed_baseline_overflow' : 'elite_direct_closed_history_baseline',
+      source: 'elite_direct_closed_history_baseline',
+      portfolioId: target.portfolioId, indexedRows: baseline.boundaryRows.length,
+      boundaryTimestampMs: baseline.boundaryTimestampMs, boundaryIds: baseline.boundaryIds.length,
+      pagesFetched: baseline.pagesFetched, boundaryReached: baseline.boundaryReached,
+      boundaryReason: baseline.boundaryReason, overflow: baseline.overflow,
+      orderingViolation: baseline.orderingViolation,
+      watermarkCommitted: baseline.boundaryReached, replayedSignals: 0, live: false,
+    });
+    return;
+  }
+  const rows: any[] = [];
+  let boundaryReached = false;
+  let boundaryReason: ReturnType<typeof closedBoundaryProof>['reason'] = null;
+  const storedBoundaryIds = new Set(target.closedBoundaryIds);
+  const encounteredBoundaryIds = new Set<string>();
+  let pagesFetched = 0;
+  let priorPageLastTimestampMs: number | null = null;
+  let orderingViolation: ReturnType<typeof validateClosedPageOrdering>['violation'] = null;
+  for (let page = 1; page <= cfg.directWatchClosedMaxPages; page += 1) {
+    directWatchMetrics.hydrationRequests += 1;
+    const payload = await invo.getPortfolioInvestments(target.portfolioId, false, page, 100);
+    pagesFetched += 1;
+    const pageRows = directInvestmentRows(payload);
+    const ordering = validateClosedPageOrdering(pageRows, page, priorPageLastTimestampMs);
+    if (ordering.violation) {
+      orderingViolation = ordering.violation;
+      break;
+    }
+    priorPageLastTimestampMs = ordering.lastTimestampMs ?? priorPageLastTimestampMs;
+    rows.push(...pageRows);
+    const proof = target.closedHistoryInitialized
+      ? closedBoundaryProof(
+          pageRows, target.closedProcessedThroughMs, storedBoundaryIds,
+          encounteredBoundaryIds, 100,
+        )
+      : { reached: pageRows.length < 100, reason: pageRows.length < 100 ? 'endpoint_exhausted' as const : null };
+    if (proof.reached) {
+      boundaryReached = true;
+      boundaryReason = proof.reason;
+      break;
+    }
+  }
+  directWatchMetrics.closedHydrationCount += 1;
+  if (!boundaryReached || orderingViolation) directWatchMetrics.closedOverflowRiskCount += 1;
+
+  if (orderingViolation) {
+    log({
+      type: 'ordering_violation', source: 'elite_direct_closed_history',
+      portfolioId: target.portfolioId, reason, pagesFetched, orderingViolation,
+      overflowRiskCounted: true, watermarkCommitted: false, live: false,
+    });
+    return;
+  }
+
+  const classified = classifyClosedHydrationRows(
+    rows, target, target.closedProcessedThroughMs, target.closedBoundaryIds, observedAtMs,
+  );
+  const { signals, unemittableFreshRows } = classified;
+  directWatchMetrics.signalsObserved += signals.length;
+  for (const signal of signals) await execute(signal, `elite_direct:${reason}`, observedAtMs, target.sourceFilter);
+  const allHandled = signals.every(signal => closedLifecycleWasHandled(
+    signal, key => state.hasSeen(key), sourceBaseId => state.hasHandledClose(sourceBaseId),
+  ));
+  const allFreshRowsEmittable = unemittableFreshRows.length === 0;
+  const watermarkCommitted = allHandled && allFreshRowsEmittable && boundaryReached;
+  if (watermarkCommitted) {
+    directWatch.commitClosedHydration(target.portfolioId, rows, observedAtMs);
+    directWatchMetrics.signalsHandled += signals.length;
+  }
+  if (!allFreshRowsEmittable) {
+    log({
+      type: 'closed_row_unemittable', portfolioId: target.portfolioId, reason,
+      freshRowCount: classified.freshRowCount,
+      unemittableCount: unemittableFreshRows.length,
+      unemittableFreshRows, watermarkCommitted: false, live: false,
+    });
+  }
+  log({
+    type: 'elite_direct_closed_hydration', portfolioId: target.portfolioId, reason,
+    previousClosedProcessedThroughMs: target.closedProcessedThroughMs,
+    signalCount: signals.length, freshRowCount: classified.freshRowCount,
+    unemittableFreshRowCount: unemittableFreshRows.length,
+    pagesFetched, boundaryReached, boundaryReason,
+    allHandled, allFreshRowsEmittable, watermarkCommitted, live: false,
+  });
+}
+
+function applyDirectWatchRateLimit(nowMs: number) {
+  directWatchMetrics.http429s += 1;
+  directWatchBackoffMs = Math.min(Math.max(directWatchBackoffMs * 2, 2_000), 30_000);
+  directWatchBackoffUntilMs = nowMs + directWatchBackoffMs;
+}
+
+function logTargetFailures(phase: string, failed: Array<{ item: any; error: unknown }>) {
+  for (const { item, error } of failed) {
+    directWatchMetrics.targetErrors += 1;
+    log({ type: 'elite_direct_target_error', phase, portfolioId: item.target.portfolioId,
+      status: (error as any)?.status, error: error instanceof Error ? error.message : String(error), live: false });
+  }
+}
+
 async function scanEliteDirectWatch(nowMs = Date.now()) {
   if (cfg.live || nowMs < directWatchBackoffUntilMs) return;
-  const candidate = loadEliteDirectTargets(cfg.candidateStatePath, nowMs, cfg.candidateStateMaxAgeMs);
-  directWatch.syncTargets(candidate.targets, ownedDirectPortfolioIds(), nowMs);
-  const targets = directWatch.targets();
-  const targetsByFilter = new Map<string, typeof targets>();
-  for (const target of targets) {
-    const rows = targetsByFilter.get(target.sourceFilter) ?? [];
-    rows.push(target);
-    targetsByFilter.set(target.sourceFilter, rows);
-  }
-  const hydrationQueue: Array<{
-    target: typeof targets[number];
-    selectorUpdatedAtMs: number | null;
-    reason: string;
-  }> = [];
   try {
-    for (const [sourceFilter, filterTargets] of targetsByFilter) {
+    const candidate = loadEliteDirectTargets(cfg.candidateStatePath, nowMs, cfg.candidateStateMaxAgeMs);
+    if (candidate.validationError) {
+      directWatchMetrics.candidateStateRejections += 1;
+      directWatchMetrics.candidateStateLastError = candidate.validationError;
+      log({ type: 'elite_direct_candidate_state_rejected', reason: candidate.validationError,
+        observedAtMs: candidate.observedAtMs, live: false });
+    } else {
+      directWatchMetrics.candidateStateLastError = null;
+    }
+    directWatch.syncTargets(candidate.targets, ownedDirectPortfolioIds(), nowMs, !candidate.stale,
+      120_000, new Set(candidate.demotedPortfolioIds));
+    const targets = directWatch.targets();
+    const targetsByFilter = new Map<string, typeof targets>();
+    for (const target of targets) {
+      const rows = targetsByFilter.get(target.sourceFilter) ?? [];
+      rows.push(target);
+      targetsByFilter.set(target.sourceFilter, rows);
+    }
+    const selectorChanges = new Map<string, number>();
+    const selectorGroups = [...targetsByFilter.entries()];
+    const rotated = selectorGroups.length === 0 ? [] : selectorGroups.map(
+      (_, offset) => selectorGroups[(directWatchSelectorIndex + offset) % selectorGroups.length],
+    );
+    let selectorRateLimited = false;
+    for (const [sourceFilter, filterTargets] of rotated) {
       directWatchMetrics.selectorRequests += 1;
-      const payload = await invo.discoverPortfolios(sourceFilter, 1, 100);
-      const rows = Array.isArray(payload?.items) ? payload.items : [];
-      const byId = new Map(rows.map((row: any) => [String(row?.id ?? ''), row]));
-      for (const target of filterTargets) {
-        const row: any = byId.get(target.portfolioId);
-        const selectorUpdatedAtMs = directSourceTimeMs(row?.updatedAt);
-        if (selectorUpdatedAtMs != null) {
-          const decision = directWatch.observeSelector(target.portfolioId, selectorUpdatedAtMs);
-          if (decision.hydrate) hydrationQueue.push({ target, selectorUpdatedAtMs, reason: 'selector_change' });
-        } else if (directWatch.shouldFallbackPoll(target.portfolioId, nowMs, cfg.directWatchFallbackPollMs)) {
-          hydrationQueue.push({ target, selectorUpdatedAtMs: null, reason: 'selector_missing_fallback' });
+      directWatchSelectorIndex = (directWatchSelectorIndex + 1) % selectorGroups.length;
+      try {
+        const payload = await invo.discoverPortfolios(sourceFilter, 1, 100);
+        const rows = Array.isArray(payload?.items) ? payload.items : [];
+        const byId = new Map(rows.map((row: any) => [String(row?.id ?? ''), row]));
+        for (const target of filterTargets) {
+          const row: any = byId.get(target.portfolioId);
+          const selectorUpdatedAtMs = directSourceTimeMs(row?.updatedAt);
+          if (selectorUpdatedAtMs != null) {
+            const decision = directWatch.observeSelector(target.portfolioId, selectorUpdatedAtMs);
+            if (decision.hydrate) selectorChanges.set(target.portfolioId, selectorUpdatedAtMs);
+          }
         }
+      } catch (error: any) {
+        directWatchMetrics.selectorErrors += 1;
+        log({ type: 'elite_direct_selector_error', sourceFilter, status: error?.status,
+          error: error instanceof Error ? error.message : String(error), live: false });
+        if (error?.status === 429) { applyDirectWatchRateLimit(Date.now()); selectorRateLimited = true; break; }
       }
     }
-    hydrationQueue.sort((a, b) => {
-      if (a.reason !== b.reason) return a.reason === 'selector_change' ? -1 : 1;
-      return (a.selectorUpdatedAtMs ?? 0) - (b.selectorUpdatedAtMs ?? 0);
-    });
-    for (const item of hydrationQueue.slice(0, cfg.directWatchMaxHydratesPerScan)) {
-      await hydrateDirectTarget(item.target, item.selectorUpdatedAtMs, item.reason, nowMs);
+
+    // Selector timestamps are hints only. Periodic direct plans are constructed
+    // even when one or more selector requests fail.
+    const hydrationPlan = planDirectHydrations(
+      targets, selectorChanges, nowMs, cfg.directWatchFallbackPollMs,
+      cfg.directWatchMaxHydratesPerScan,
+    );
+    const closedPlan = planClosedHydrations(
+      directWatch.targets(), nowMs, cfg.directWatchClosedPollMs,
+      cfg.directWatchMaxClosedHydratesPerScan,
+    );
+    if (selectorRateLimited) {
+      directWatchMetrics.skippedAfterRateLimit += hydrationPlan.length + closedPlan.length;
+      log({ type: 'elite_direct_rate_limit_skip', phase: 'selector', skippedOpen: hydrationPlan.length,
+        skippedClosed: closedPlan.length, backoffMs: directWatchBackoffMs, live: false });
+      return;
+    }
+
+    const openRun = await runIsolatedHydrations(
+      hydrationPlan,
+      item => directWatch.noteFallbackPoll(item.target.portfolioId, nowMs),
+      item => hydrateDirectTarget(item.target, item.selectorUpdatedAtMs, item.reason, nowMs),
+    );
+    logTargetFailures('open', openRun.failed);
+    directWatchMetrics.skippedAfterRateLimit += openRun.skippedAfterRateLimit.length;
+    if (openRun.rateLimited) {
+      applyDirectWatchRateLimit(Date.now());
+      directWatchMetrics.skippedAfterRateLimit += closedPlan.length;
+      log({ type: 'elite_direct_rate_limit_skip', phase: 'open', skippedOpen: openRun.skippedAfterRateLimit.length,
+        skippedClosed: closedPlan.length, backoffMs: directWatchBackoffMs, live: false });
+      return;
+    }
+
+    const closedRun = await runIsolatedHydrations(
+      closedPlan,
+      item => directWatch.noteClosedPoll(item.target.portfolioId, nowMs),
+      item => hydrateClosedHistory(item.target, item.reason, nowMs),
+    );
+    logTargetFailures('closed', closedRun.failed);
+    directWatchMetrics.skippedAfterRateLimit += closedRun.skippedAfterRateLimit.length;
+    if (closedRun.rateLimited) {
+      applyDirectWatchRateLimit(Date.now());
+      log({ type: 'elite_direct_rate_limit_skip', phase: 'closed', skippedOpen: 0,
+        skippedClosed: closedRun.skippedAfterRateLimit.length, backoffMs: directWatchBackoffMs, live: false });
+      return;
     }
     directWatchBackoffMs = 0;
     directWatchBackoffUntilMs = 0;
     directWatchMetrics.lastSuccessAtMs = Date.now();
   } catch (err: any) {
-    const status = err?.status;
-    if (status === 429) {
-      directWatchMetrics.http429s += 1;
-      directWatchBackoffMs = Math.min(Math.max(directWatchBackoffMs * 2, 2_000), 30_000);
-      directWatchBackoffUntilMs = Date.now() + directWatchBackoffMs;
-    }
-    log({
-      type: 'elite_direct_watch_error',
-      source: 'portfolio_specific_read_only',
-      status,
-      backoffMs: directWatchBackoffMs,
-      error: err instanceof Error ? err.message : String(err),
-      live: false,
-    });
+    // State/filesystem faults remain scan-level failures; HTTP target faults are
+    // isolated above and never reach this guard.
+    log({ type: 'elite_direct_watch_error', source: 'portfolio_specific_read_only', status: err?.status,
+      backoffMs: directWatchBackoffMs, error: err instanceof Error ? err.message : String(err), live: false });
   } finally {
     lastDirectWatchScanMs = nowMs;
     directWatchMetrics.lastScanAtMs = nowMs;
@@ -1440,6 +1746,12 @@ function startServer() {
     if (req.method === 'GET' && req.url === '/health') {
       const population = tracker.report();
       const snapshot = state.snapshot();
+      const directStatus = directWatch.status();
+      const healthNowMs = Date.now();
+      const oldestOpenPollAgeMs = directStatus.oldestOpenPollAtMs == null
+        ? null : Math.max(0, healthNowMs - directStatus.oldestOpenPollAtMs);
+      const oldestClosedPollAgeMs = directStatus.oldestClosedPollAtMs == null
+        ? null : Math.max(0, healthNowMs - directStatus.oldestClosedPollAtMs);
       const paperPositions = Object.values(snapshot.managed).filter(position => position.paper);
       const unresolvedPaperPositions = paperPositions.filter(position => position.unresolvedAfterSourceClose);
       const markablePaperPositions = paperPositions.filter(position => !position.unresolvedAfterSourceClose);
@@ -1460,7 +1772,8 @@ function startServer() {
       });
       return json(res, 200, {
         ok: true,
-        initialized,
+        initialized: cfg.discoverySurfaces.every(surface => state.hasFeedBaseline(surface)),
+        initializedSurfaces: cfg.discoverySurfaces.filter(surface => state.hasFeedBaseline(surface)),
         live: cfg.live,
         researchWide: !cfg.live,
         shadowAdmissionMode: cfg.live ? 'LIVE_SCOPE' : 'ELITE_ONLY',
@@ -1472,11 +1785,29 @@ function startServer() {
         feedCursors: state.snapshot().feedCursors,
         directWatch: {
           enabled: !cfg.live,
-          ...directWatch.status(),
+          ...directStatus,
           ...directWatchMetrics,
           scanMs: cfg.directWatchScanMs,
           maxHydratesPerScan: cfg.directWatchMaxHydratesPerScan,
+          openMaxPages: cfg.directWatchOpenMaxPages,
           fallbackPollMs: cfg.directWatchFallbackPollMs,
+          closedPollMs: cfg.directWatchClosedPollMs,
+          maxClosedHydratesPerScan: cfg.directWatchMaxClosedHydratesPerScan,
+          closedMaxPages: cfg.directWatchClosedMaxPages,
+          nominalOpenSweepMs: Math.ceil(directStatus.targetCount / cfg.directWatchMaxHydratesPerScan) * cfg.directWatchScanMs,
+          nominalClosedSweepMs: Math.ceil(directStatus.targetCount / cfg.directWatchMaxClosedHydratesPerScan) * cfg.directWatchScanMs,
+          nominalMaxRequestsPerScan: cfg.directWatchMaxHydratesPerScan * cfg.directWatchOpenMaxPages
+            + cfg.directWatchMaxClosedHydratesPerScan * cfg.directWatchClosedMaxPages
+            + new Set(directWatch.targets().map(target => target.sourceFilter)).size,
+          nominalMaxRequestsPerSecond: (cfg.directWatchMaxHydratesPerScan * cfg.directWatchOpenMaxPages
+            + cfg.directWatchMaxClosedHydratesPerScan * cfg.directWatchClosedMaxPages
+            + new Set(directWatch.targets().map(target => target.sourceFilter)).size) / (cfg.directWatchScanMs / 1000),
+          oldestOpenPollAgeMs,
+          oldestOpenPollOverdueMs: oldestOpenPollAgeMs == null ? null : Math.max(0, oldestOpenPollAgeMs - cfg.directWatchFallbackPollMs),
+          oldestClosedPollAgeMs,
+          oldestClosedPollOverdueMs: oldestClosedPollAgeMs == null ? null : Math.max(0, oldestClosedPollAgeMs - cfg.directWatchClosedPollMs),
+          openFreshnessGuarantee: false,
+          openFreshnessLimitReason: '18s nominal sweep leaves 7s for feed, selector, transport, execution, and 429 backoff; use observed poll ages',
           backoffMs: directWatchBackoffMs,
           backoffUntilMs: directWatchBackoffUntilMs,
         },
@@ -1574,7 +1905,12 @@ async function main() {
       log({ type: 'funding_oracle_capture_error', phase: 'startup', error: err instanceof Error ? err.message : String(err) });
     }
   }
-  await wake('startup_baseline', undefined, Date.now());
+  // Establish every configured surface boundary before ingress and the rotating poller
+  // start. Sequential requests keep startup bounded/429-safe and minimize the window in
+  // which an event could arrive before a newly enabled surface has its own cursor.
+  for (const surface of cfg.discoverySurfaces) {
+    await wake(`startup_surface:${surface}`, undefined, Date.now(), surface);
+  }
   if (!cfg.live) await scanEliteDirectWatch(Date.now());
   startServer();
   log({
@@ -1597,6 +1933,9 @@ async function main() {
       scanMs: cfg.directWatchScanMs,
       maxHydratesPerScan: cfg.directWatchMaxHydratesPerScan,
       fallbackPollMs: cfg.directWatchFallbackPollMs,
+      closedPollMs: cfg.directWatchClosedPollMs,
+      maxClosedHydratesPerScan: cfg.directWatchMaxClosedHydratesPerScan,
+      closedMaxPages: cfg.directWatchClosedMaxPages,
       statePath: cfg.directWatchStatePath,
       source: 'portfolio_specific_read_only',
     },

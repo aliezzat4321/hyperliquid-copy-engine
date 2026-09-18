@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { NotificationState } from '../src/notification-state.js';
@@ -18,6 +18,17 @@ test('persists dedupe and source-position ownership across restart', () => {
   assert.deepEqual(second.getFeedCursor('following'), { postId: 'post-high-water', observedAtMs: 2, source: 'poll' });
   second.clearManagedBySource('base-1');
   assert.equal(second.getManagedBySource('base-1'), null);
+});
+
+test('an empty feed baseline survives restart without inventing a post cursor', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'invo-empty-baseline-'));
+  const path = join(dir, 'state.json');
+  const first = new NotificationState(path);
+  first.markFeedBaselined('fire_moves', 10);
+  assert.equal(first.getFeedCursor('fire_moves'), null);
+  const restarted = new NotificationState(path);
+  assert.equal(restarted.hasFeedBaseline('fire_moves'), true);
+  assert.equal(restarted.getFeedCursor('fire_moves'), null);
 });
 
 test('keeps simultaneous same-coin positions independent by source base id', () => {
@@ -47,6 +58,15 @@ test('bounds the persistent dedupe window', () => {
   assert.equal(state.hasSeen('c'), true);
 });
 
+test('persists whether an opening lifecycle was observed', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'invo-open-observed-')), 'state.json');
+  const first = new NotificationState(path);
+  first.markObservedOpen('base-open');
+  const restarted = new NotificationState(path);
+  assert.equal(restarted.hasObservedOpen('base-open'), true);
+  assert.equal(restarted.hasObservedOpen('base-never-open'), false);
+});
+
 test('restart synthesizes a retryable close signal for legacy unresolved source-close exposure', () => {
   const dir = mkdtempSync(join(tmpdir(), 'invo-notify-state-'));
   const path = join(dir, 'state.json');
@@ -72,6 +92,22 @@ test('restart synthesizes a retryable close signal for legacy unresolved source-
   assert.equal(pending.coin, 'XRP');
   assert.equal(pending.sourceBaseId, 'legacy-xrp');
   assert.equal(pending.sourceTimeField, 'legacy_unresolved_source_close');
+});
+
+test('handled source close dominance persists across restart', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'notification-close-dominance-')), 'state.json');
+  new NotificationState(path).markHandledClose('base-closed');
+  assert.equal(new NotificationState(path).hasHandledClose('base-closed'), true);
+});
+
+test('legacy seen-only source-close migrates into durable close dominance', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'notification-legacy-close-')), 'state.json');
+  writeFileSync(path, JSON.stringify({ seen: ['noise', 'source-close:legacy-base'], managed: {},
+    feedCursors: {}, feedBaselines: {}, observedOpenSourceIds: [] }));
+  const migrated = new NotificationState(path);
+  assert.equal(migrated.hasHandledClose('legacy-base'), true);
+  migrated.markSeen('persist-migration');
+  assert.equal(new NotificationState(path).hasHandledClose('legacy-base'), true);
 });
 
 test('explicit pending close evidence is preserved instead of being overwritten by migration', () => {

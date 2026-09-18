@@ -1,0 +1,17 @@
+{
+  "_evidence": {
+    "kind": "sanitized_captured_shape",
+    "capturedAt": "2026-09-17",
+    "note": "Field structure only from authenticated read-only probes. Identifiers and economics are synthetic; this is not runtime or profitability proof."
+  },
+  "feed": {
+    "following": { "items": [{ "id": "post-following", "update": { "baseId": "base-following", "ticker": "BTC", "verifiedTrade": true, "isOpen": true, "directionLong": true, "leverage": 2, "entryPrice": 100, "entrySize": 1, "updatedAt": 1789685682001, "portfolio": { "id": "portfolio-following" }, "owner": { "id": "owner-following", "username": "captured_shape" } } }] },
+    "trending": { "items": [{ "id": "post-trending", "update": { "baseId": "base-trending", "ticker": "ETH", "verifiedTrade": true, "isOpen": true, "directionLong": false, "leverage": 3, "entryPrice": 100, "entrySize": 1, "updatedAt": 1789685682002, "portfolio": { "id": "portfolio-trending" }, "owner": { "id": "owner-trending", "username": "captured_shape" } } }] },
+    "fire_moves": { "items": [{ "id": "post-fire-moves", "update": { "baseId": "base-fire-moves", "ticker": "NEAR", "verifiedTrade": true, "isOpen": true, "directionLong": true, "leverage": 4, "entryPrice": 1, "entrySize": 2, "updatedAt": 1789685682576, "portfolio": { "id": "portfolio-fire-moves" }, "owner": { "id": "owner-fire-moves", "username": "captured_shape" }, "changes": { "isAdded": false } } }] },
+    "most_recent": { "items": [{ "id": "post-most-recent", "update": { "baseId": "base-most-recent", "ticker": "SOL", "verifiedTrade": true, "isOpen": false, "directionLong": true, "leverage": 2, "entryPrice": 100, "entrySize": 1, "closingPrice": 101, "closedAt": 1789685682004, "portfolio": { "id": "portfolio-most-recent" }, "owner": { "id": "owner-most-recent", "username": "captured_shape" } } }] }
+  },
+  "investments": {
+    "open": { "investmentsTicker": [{ "id": "investment-open", "baseId": "base-open", "baseShortId": "short-open", "ticker": "NEAR", "verifiedTrade": true, "isOpen": true, "directionLong": true, "leverage": 4, "entryPrice": 1, "entrySize": 3, "createdAt": 1789685682000, "updatedAt": 1789685682576, "portfolio": { "id": "portfolio-direct" }, "changes": { "simIncrease": true, "entrySize": 2 } }] },
+    "closed": { "investmentsTicker": [{ "id": "investment-closed", "baseId": "base-closed", "baseShortId": "short-closed", "ticker": "NEAR", "verifiedTrade": true, "isOpen": false, "directionLong": true, "leverage": 4, "entryPrice": 1, "entrySize": 2, "closingPrice": 1.1, "createdAt": 1789685681000, "updatedAt": 1789685683000, "closedAt": 1789685683000, "portfolio": { "id": "portfolio-direct" } }] }
+  }
+}
