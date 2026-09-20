@@ -2,7 +2,7 @@
 
 Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
-**Snapshot:** 2026-09-20T10:35:02Z
+**Snapshot:** 2026-09-20T15:34:12Z
 **Updated by:** CODEX_CHATGPT
 **Observed main head:** `fd63de5c60fc9d19ec643a2c491d5a815581765a`
 **Mission:** Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.
@@ -13,6 +13,7 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 ## Active priorities
 | Priority | Issue | Objective | Builder | Reviewer | Status | Profit-critical |
 |---|---:|---|---|---|---|---|
+| P0 | #350 | Make Lane 3 funding oracle capture mechanically reliable | CODEX_CHATGPT | CLAUDE | IN_PROGRESS | yes |
 | P0 | #400 | Complete Lane 3 selected-elite Invo trade-source capture | CODEX_CHATGPT | CLAUDE | IN_REVIEW | yes |
 | P0 | #403 | Assimilate Moves/Recent discovered portfolios into selector prospectively | CODEX_CHATGPT | CLAUDE | OPEN | yes |
 | P0 | #397 | Arbitrate shared Invo API quota without starving Lane 3 | CODEX_CHATGPT | CLAUDE | OPEN | yes |
@@ -49,6 +50,8 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
 | Fact | Value | Observed | Source |
 |---|---:|---|---|
+| Lane 3 independent funding capture implementation commit | 7b2c07b | `2026-09-20T15:34:12Z` | commit `7b2c07b89801bce5a46952b1b996e4d2305a360e` |
+| builder-validated executor test files passing after funding capture repair | 25 | `2026-09-20T15:34:12Z` | commit `7b2c07b89801bce5a46952b1b996e4d2305a360e` |
 | Lane 3 admission/capacity repair implementation commit | 29a6c5f | `2026-09-20T10:35:02Z` | commit `29a6c5f` |
 | builder-validated executor test files passing | 24 | `2026-09-20T10:35:02Z` | commit `29a6c5f` |
 | default direct-watch resident capacity proven by timeout/page/deadline budget | 1 | `2026-09-20T10:35:02Z` | commit `29a6c5f` |
@@ -57,8 +60,8 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 | exploratory missing portfolios meeting frozen selector on visible evidence | 53 | `2026-09-17T23:46:12Z` | issue `#403` |
 | real trading enabled | False | `2026-09-17T23:10:50Z` | manual `VM runtime env 2026-09-17T23:10Z` |
 
-**Blocker:** PR #404 repair commit 29a6c5f still requires independent review of the final exact SHA plus post-deploy prospective source/event-recall proof; production is unchanged, and #403 candidate-universe expansion plus #397 shared-quota arbitration remain separate open work before Lane 3 source-completeness can be claimed.
-**Next:** Issue #400.
+**Blocker:** Issue #350 funding capture repair commit 7b2c07b is builder-tested but not deployed, so it has no runtime reliability proof and still requires independent exact-SHA review. PR #404 repair commit 29a6c5f also requires independent review plus post-deploy prospective source/event-recall proof; production is unchanged.
+**Next:** Issues #350 and #400.
 
 ## Infrastructure
 **Status:** `DEGRADED`

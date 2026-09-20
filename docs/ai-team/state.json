@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "snapshot_at": "2026-09-20T10:35:02Z",
+  "snapshot_at": "2026-09-20T15:34:12Z",
   "updated_by": "CODEX_CHATGPT",
   "head_observed": "fd63de5c60fc9d19ec643a2c491d5a815581765a",
   "mission": "Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.",
@@ -10,6 +10,15 @@
     "authorization": null
   },
   "priorities": [
+    {
+      "priority": "P0",
+      "issue": 350,
+      "title": "Make Lane 3 funding oracle capture mechanically reliable",
+      "owner": "CODEX_CHATGPT",
+      "reviewer": "CLAUDE",
+      "status": "IN_PROGRESS",
+      "profitability_critical": true
+    },
     {
       "priority": "P0",
       "issue": 400,
@@ -141,6 +150,24 @@
       "status": "SHADOW_EVIDENCE_MEASUREMENT_INCOMPLETE",
       "facts": [
         {
+          "key": "funding_capture_reliability_implementation",
+          "label": "Lane 3 independent funding capture implementation commit",
+          "value": "7b2c07b",
+          "unit": "text",
+          "observed_at": "2026-09-20T15:34:12Z",
+          "source_type": "COMMIT",
+          "source_ref": "7b2c07b89801bce5a46952b1b996e4d2305a360e"
+        },
+        {
+          "key": "funding_capture_builder_validation",
+          "label": "builder-validated executor test files passing after funding capture repair",
+          "value": 25,
+          "unit": "count",
+          "observed_at": "2026-09-20T15:34:12Z",
+          "source_type": "COMMIT",
+          "source_ref": "7b2c07b89801bce5a46952b1b996e4d2305a360e"
+        },
+        {
           "key": "source_capture_pr_head",
           "label": "Lane 3 admission/capacity repair implementation commit",
           "value": "29a6c5f",
@@ -204,8 +231,8 @@
           "source_ref": "VM runtime env 2026-09-17T23:10Z"
         }
       ],
-      "blocker": "PR #404 repair commit 29a6c5f still requires independent review of the final exact SHA plus post-deploy prospective source/event-recall proof; production is unchanged, and #403 candidate-universe expansion plus #397 shared-quota arbitration remain separate open work before Lane 3 source-completeness can be claimed.",
-      "next": "Issue #400"
+      "blocker": "Issue #350 funding capture repair commit 7b2c07b is builder-tested but not deployed, so it has no runtime reliability proof and still requires independent exact-SHA review. PR #404 repair commit 29a6c5f also requires independent review plus post-deploy prospective source/event-recall proof; production is unchanged.",
+      "next": "Issues #350 and #400"
     }
   },
   "infrastructure": {
