@@ -84,6 +84,91 @@ export interface HydrationRunResult<T> {
   rateLimited: boolean;
 }
 
+export type ScheduledHydration =
+  | { phase: 'OPEN'; item: DirectHydrationPlanItem; dueAtMs: number }
+  | { phase: 'CLOSED'; item: ClosedHydrationPlanItem; dueAtMs: number };
+
+export function planDeadlineHydrations(
+  openItems: DirectHydrationPlanItem[], closedItems: ClosedHydrationPlanItem[],
+  openPollMs: number, closedPollMs: number,
+): ScheduledHydration[] {
+  return [
+    ...openItems.map(item => ({ phase: 'OPEN' as const, item,
+      dueAtMs: (item.reason === 'retirement_open_drain'
+        ? item.target.lastRetirementOpenPollAtMs ?? 0 : item.target.lastFallbackPollAtMs) + openPollMs })),
+    ...closedItems.map(item => ({ phase: 'CLOSED' as const, item,
+      dueAtMs: item.target.lastClosedPollAtMs + closedPollMs })),
+  ].sort((a, b) => a.dueAtMs - b.dueAtMs
+    || a.phase.localeCompare(b.phase)
+    || a.item.target.portfolioId.localeCompare(b.item.target.portfolioId));
+}
+
+/** Fixed-size worker pool. Failures are isolated; a 429 prevents new work from starting. */
+export async function runConcurrentHydrations<T>(
+  items: T[], concurrency: number, noteAttempt: (item: T) => void,
+  hydrate: (item: T) => Promise<void>,
+): Promise<HydrationRunResult<T>> {
+  const result: HydrationRunResult<T> = { attempted: [], failed: [], skippedAfterRateLimit: [], rateLimited: false };
+  let cursor = 0;
+  const workers = Array.from({ length: Math.max(1, Math.min(concurrency, items.length || 1)) }, async () => {
+    while (true) {
+      if (result.rateLimited) return;
+      const index = cursor++;
+      if (index >= items.length) return;
+      const item = items[index];
+      noteAttempt(item);
+      result.attempted.push(item);
+      try { await hydrate(item); }
+      catch (error: any) {
+        result.failed.push({ item, error });
+        if (error?.status === 429) result.rateLimited = true;
+      }
+    }
+  });
+  await Promise.all(workers);
+  const attempted = new Set(result.attempted);
+  result.skippedAfterRateLimit = result.rateLimited ? items.filter(item => !attempted.has(item)) : [];
+  return result;
+}
+
+export class DirectWatchRequestBudget {
+  private tokens: number;
+  private lastRefillMs: number;
+  private cooldownUntilMs = 0;
+  constructor(
+    readonly maxRequestsPerSecond: number, readonly burst: number,
+    private readonly now: () => number = Date.now,
+    private readonly sleep: (ms: number) => Promise<void> = ms => new Promise(resolve => setTimeout(resolve, ms)),
+  ) {
+    if (!(maxRequestsPerSecond > 0) || !(burst >= 1)) throw new Error('invalid direct-watch request budget');
+    this.tokens = burst;
+    this.lastRefillMs = now();
+  }
+  private refill(atMs: number) {
+    this.tokens = Math.min(this.burst, this.tokens + (atMs - this.lastRefillMs) * this.maxRequestsPerSecond / 1000);
+    this.lastRefillMs = atMs;
+  }
+  async acquire(): Promise<void> {
+    while (true) {
+      const atMs = this.now();
+      if (atMs < this.cooldownUntilMs) {
+        const error: any = new Error('direct-watch global rate-limit cooldown');
+        error.status = 429; error.cooldownUntilMs = this.cooldownUntilMs;
+        throw error;
+      }
+      this.refill(atMs);
+      if (this.tokens >= 1) { this.tokens -= 1; return; }
+      await this.sleep(Math.max(1, Math.ceil((1 - this.tokens) * 1000 / this.maxRequestsPerSecond)));
+    }
+  }
+  note429(cooldownUntilMs: number) {
+    this.cooldownUntilMs = Math.max(this.cooldownUntilMs, cooldownUntilMs);
+    this.tokens = 0;
+  }
+  status() { return { maxRequestsPerSecond: this.maxRequestsPerSecond, burst: this.burst,
+    availableTokens: this.tokens, cooldownUntilMs: this.cooldownUntilMs }; }
+}
+
 /**
  * Runs bounded target work without allowing one target failure to starve its peers.
  * A 429 is different: callers must apply a global cooldown, so remaining work is
@@ -397,8 +482,14 @@ export interface DirectWatchCapacity {
   worstCaseOpenSweepMsAtCap: number;
   worstCaseClosedSweepMsAtCap: number;
   provenResidentCap: number;
+  hardProvenResidentCap: number;
   worstCaseRequestBudget: number;
   fixedOverheadMs: number;
+  concurrency: number;
+  requestBudgetPerSecond: number;
+  requestBudgetBurst: number;
+  fixedReserveRequestsPerSecond: number;
+  limitingReasons: string[];
 }
 
 export function directWatchCapacity(input: {
@@ -409,33 +500,57 @@ export function directWatchCapacity(input: {
   maxClosedHydratesPerScan: number;
   closedPollMs: number;
   requestTimeoutMs: number;
+  maxAttemptsPerPage: number;
   openMaxPages: number;
   closedMaxPages: number;
   fixedOverheadMs: number;
+  concurrency: number;
+  requestBudgetPerSecond: number;
+  requestBudgetBurst: number;
+  fixedReserveRequestsPerSecond: number;
 }): DirectWatchCapacity {
   const openDeadlineBudgetMs = Math.max(0, input.openPollMs - input.fixedOverheadMs);
   const closedDeadlineBudgetMs = Math.max(0, input.closedPollMs - input.fixedOverheadMs);
-  const openTargetCostMs = input.openMaxPages * input.requestTimeoutMs;
-  const closedTargetCostMs = input.closedMaxPages * input.requestTimeoutMs;
-  const sustainableOpenTargetCeiling = Math.min(
-    input.maxOpenHydratesPerScan,
-    openTargetCostMs > 0 ? Math.floor(openDeadlineBudgetMs / openTargetCostMs) : 0,
-  );
-  const sustainableClosedTargetCeiling = Math.min(
-    input.maxClosedHydratesPerScan,
-    closedTargetCostMs > 0 ? Math.floor(closedDeadlineBudgetMs / closedTargetCostMs) : 0,
-  );
+  const openRequestsPerTarget = input.openMaxPages * input.maxAttemptsPerPage;
+  const closedRequestsPerTarget = input.closedMaxPages * input.maxAttemptsPerPage;
+  const openTargetCostMs = openRequestsPerTarget * input.requestTimeoutMs;
+  const closedTargetCostMs = closedRequestsPerTarget * input.requestTimeoutMs;
+  const usableRate = Math.max(0, input.requestBudgetPerSecond - input.fixedReserveRequestsPerSecond);
+  const wallOpen = openTargetCostMs > 0
+    ? input.concurrency * Math.floor(openDeadlineBudgetMs / openTargetCostMs) : 0;
+  const wallClosed = closedTargetCostMs > 0
+    ? input.concurrency * Math.floor(closedDeadlineBudgetMs / (openTargetCostMs + closedTargetCostMs)) : 0;
+  const rateCapacity = usableRate > 0
+    ? Math.floor(usableRate / (openRequestsPerTarget / input.openPollMs * 1000
+      + closedRequestsPerTarget / input.closedPollMs * 1000)) : 0;
+  const openBurstCapacity = Math.floor((input.requestBudgetBurst
+    + usableRate * Math.max(0, openDeadlineBudgetMs - input.requestTimeoutMs) / 1000) / openRequestsPerTarget);
+  const closedBurstCapacity = Math.floor((input.requestBudgetBurst
+    + usableRate * Math.max(0, closedDeadlineBudgetMs - input.requestTimeoutMs) / 1000) / closedRequestsPerTarget);
+  const sustainableOpenTargetCeiling = Math.min(input.maxOpenHydratesPerScan, wallOpen, openBurstCapacity);
+  const sustainableClosedTargetCeiling = Math.min(input.maxClosedHydratesPerScan, wallClosed, closedBurstCapacity);
   const provenResidentCap = Math.max(0, Math.min(
-    input.residentCap, sustainableOpenTargetCeiling, sustainableClosedTargetCeiling,
+    input.residentCap, sustainableOpenTargetCeiling, sustainableClosedTargetCeiling, rateCapacity,
   ));
+  const limitingReasons = [
+    ['configured_resident_cap', input.residentCap], ['open_deadline', sustainableOpenTargetCeiling],
+    ['closed_deadline', sustainableClosedTargetCeiling], ['steady_state_request_budget', rateCapacity],
+  ].filter(([, value]) => value === provenResidentCap).map(([reason]) => String(reason));
   return {
     sustainableOpenTargetCeiling,
     sustainableClosedTargetCeiling,
-    worstCaseOpenSweepMsAtCap: input.fixedOverheadMs + provenResidentCap * openTargetCostMs,
-    worstCaseClosedSweepMsAtCap: input.fixedOverheadMs + provenResidentCap * closedTargetCostMs,
+    worstCaseOpenSweepMsAtCap: input.fixedOverheadMs
+      + Math.ceil(provenResidentCap / input.concurrency) * openTargetCostMs,
+    worstCaseClosedSweepMsAtCap: input.fixedOverheadMs
+      + Math.ceil(provenResidentCap / input.concurrency) * (openTargetCostMs + closedTargetCostMs),
     provenResidentCap,
-    worstCaseRequestBudget: provenResidentCap * (input.openMaxPages + input.closedMaxPages),
+    hardProvenResidentCap: provenResidentCap,
+    worstCaseRequestBudget: provenResidentCap * (openRequestsPerTarget + closedRequestsPerTarget),
     fixedOverheadMs: input.fixedOverheadMs,
+    concurrency: input.concurrency, requestBudgetPerSecond: input.requestBudgetPerSecond,
+    requestBudgetBurst: input.requestBudgetBurst,
+    fixedReserveRequestsPerSecond: input.fixedReserveRequestsPerSecond,
+    limitingReasons,
   };
 }
 

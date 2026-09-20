@@ -30,9 +30,11 @@ import {
   loadEliteDirectTargets,
   isMissedPreDemotionOpen,
   planClosedHydrations,
+  planDeadlineHydrations,
   planDirectHydrations,
   retiringOpenDispositions,
-  runIsolatedHydrations,
+  runConcurrentHydrations,
+  DirectWatchRequestBudget,
   signalsFromDirectInvestments,
   unownedCloseEvidence,
   validateClosedPageOrdering,
@@ -127,15 +129,19 @@ function loadConfig() {
     directWatchAdmissionIndexPath: resolve(process.env.NOTIFICATION_TRADER_DIRECT_WATCH_ADMISSION_INDEX_PATH
       ?? '/var/lib/hyperliquid-copy-engine/invo-notification-executor/elite-direct-watch-admissions.json'),
     directWatchScanMs: Math.max(2_000, n('NOTIFICATION_TRADER_DIRECT_WATCH_SCAN_MS', 3_000)),
-    directWatchMaxHydratesPerScan: Math.max(1, Math.min(20, Math.trunc(n('NOTIFICATION_TRADER_DIRECT_WATCH_MAX_HYDRATES_PER_SCAN', 8)))),
+    directWatchMaxHydratesPerScan: Math.max(1, Math.min(64, Math.trunc(n('NOTIFICATION_TRADER_DIRECT_WATCH_MAX_HYDRATES_PER_SCAN', 24)))),
     directWatchOpenMaxPages: Math.max(1, Math.min(10, Math.trunc(n('NOTIFICATION_TRADER_DIRECT_WATCH_OPEN_MAX_PAGES', 3)))),
     directWatchFallbackPollMs: Math.max(10_000, n('NOTIFICATION_TRADER_DIRECT_WATCH_FALLBACK_POLL_MS', 18_000)),
     directWatchClosedPollMs: Math.max(30_000, n('NOTIFICATION_TRADER_DIRECT_WATCH_CLOSED_POLL_MS', 60_000)),
-    directWatchMaxClosedHydratesPerScan: Math.max(1, Math.min(10, Math.trunc(n('NOTIFICATION_TRADER_DIRECT_WATCH_MAX_CLOSED_HYDRATES_PER_SCAN', 3)))),
+    directWatchMaxClosedHydratesPerScan: Math.max(1, Math.min(64, Math.trunc(n('NOTIFICATION_TRADER_DIRECT_WATCH_MAX_CLOSED_HYDRATES_PER_SCAN', 24)))),
     directWatchClosedMaxPages: Math.max(1, Math.min(3, Math.trunc(n('NOTIFICATION_TRADER_DIRECT_WATCH_CLOSED_MAX_PAGES', 2)))),
     directWatchResidentCap: Math.max(1, Math.trunc(n('MAX_DIRECT_WATCH_RESIDENT_TARGETS', 48))),
     directWatchRequestTimeoutMs: invo.INVO_HTTP_REQUEST_TIMEOUT_MS,
-    directWatchFixedOverheadMs: Math.max(0, n('DIRECT_WATCH_FIXED_OVERHEAD_MS', 5_000)),
+    directWatchFixedOverheadMs: Math.max(0, n('DIRECT_WATCH_FIXED_OVERHEAD_MS', 2_000)),
+    directWatchConcurrency: Math.max(1, Math.min(32, Math.trunc(n('DIRECT_WATCH_CONCURRENCY', 16)))),
+    directWatchRequestBudgetPerSecond: Math.max(1, n('DIRECT_WATCH_MAX_REQUESTS_PER_SECOND', 12)),
+    directWatchRequestBudgetBurst: Math.max(1, Math.trunc(n('DIRECT_WATCH_REQUEST_BURST', 32))),
+    directWatchFixedReservePerSecond: Math.max(0, n('DIRECT_WATCH_FIXED_RESERVE_REQUESTS_PER_SECOND', 4)),
     directWatchNegativeMinObservations: Math.max(2, Math.trunc(n('DIRECT_WATCH_NEGATIVE_MIN_OBSERVATIONS', 2))),
     directWatchNegativeGraceMs: Math.max(600_000, n('DIRECT_WATCH_NEGATIVE_GRACE_MS', 600_000)),
     minEvidenceEvents: Math.max(1, Math.trunc(n('NOTIFICATION_TRADER_MIN_EVIDENCE_EVENTS', 20))),
@@ -153,10 +159,15 @@ const directWatchConfiguredCapacity = validateDirectWatchCapacity({
   openPollMs: cfg.directWatchFallbackPollMs,
   maxClosedHydratesPerScan: cfg.directWatchMaxClosedHydratesPerScan,
   closedPollMs: cfg.directWatchClosedPollMs,
-  requestTimeoutMs: cfg.directWatchRequestTimeoutMs * 2,
+  requestTimeoutMs: cfg.directWatchRequestTimeoutMs,
+  maxAttemptsPerPage: 2,
   openMaxPages: cfg.directWatchOpenMaxPages,
   closedMaxPages: cfg.directWatchClosedMaxPages,
   fixedOverheadMs: cfg.directWatchFixedOverheadMs,
+  concurrency: cfg.directWatchConcurrency,
+  requestBudgetPerSecond: cfg.directWatchRequestBudgetPerSecond,
+  requestBudgetBurst: cfg.directWatchRequestBudgetBurst,
+  fixedReserveRequestsPerSecond: cfg.directWatchFixedReservePerSecond,
 });
 const shadowPolicy: ShadowExecutionPolicy = {
   maxBookAgeMs: cfg.shadowMaxBookAgeMs,
@@ -194,14 +205,20 @@ let discoverySurfaceIndex = 0;
 let lastFundingOracleBoundaryMs = -1;
 let directWatchBackoffMs = 0;
 let directWatchBackoffUntilMs = 0;
+const directWatchRequestBudget = new DirectWatchRequestBudget(
+  cfg.directWatchRequestBudgetPerSecond - cfg.directWatchFixedReservePerSecond,
+  cfg.directWatchRequestBudgetBurst,
+);
 const directWatchMetrics = {
-  selectorRequests: 0, hydrationRequests: 0, hydrationCount: 0,
+  selectorRequests: 0, hydrationRequests: 0, openPhaseRequests: 0, closedPhaseRequests: 0, hydrationCount: 0,
   closedHydrationCount: 0, closedBaselineCount: 0, closedOverflowRiskCount: 0,
   openOverflowRiskCount: 0, openOrderingViolationCount: 0,
   signalsObserved: 0, signalsHandled: 0, http429s: 0,
   targetErrors: 0, selectorErrors: 0, skippedAfterRateLimit: 0,
   candidateStateRejections: 0, candidateStateLastError: null as string | null,
   deferredAdmissions: 0,
+  openDeadlineMisses: 0, closedDeadlineMisses: 0, maxObservedSweepAgeMs: 0,
+  queueDepth: 0,
   lastScanAtMs: 0, lastSuccessAtMs: 0,
 };
 const FUNDING_INTERVAL_MS = 60 * 60 * 1000;
@@ -1388,6 +1405,17 @@ function ownedDirectPortfolioIds(): Set<string> {
   );
 }
 
+async function getBudgetedDirectInvestments(
+  portfolioId: string, isOpen: boolean, page: number, phase: 'OPEN' | 'CLOSED',
+) {
+  return invo.getPortfolioInvestments(portfolioId, isOpen, page, 100, async () => {
+    await directWatchRequestBudget.acquire();
+    directWatchMetrics.hydrationRequests += 1;
+    if (phase === 'OPEN') directWatchMetrics.openPhaseRequests += 1;
+    else directWatchMetrics.closedPhaseRequests += 1;
+  });
+}
+
 async function hydrateDirectTarget(
   target: ReturnType<EliteDirectWatchState['targets']>[number],
   selectorUpdatedAtMs: number | null,
@@ -1395,8 +1423,7 @@ async function hydrateDirectTarget(
   observedAtMs: number,
 ) {
   const openResult = await fetchCompleteOpenInvestments(async page => {
-    directWatchMetrics.hydrationRequests += 1;
-    return directInvestmentRows(await invo.getPortfolioInvestments(target.portfolioId, true, page, 100));
+    return directInvestmentRows(await getBudgetedDirectInvestments(target.portfolioId, true, page, 'OPEN'));
   }, cfg.directWatchOpenMaxPages, 100);
   const openRows = openResult.rows;
   if (target.lifecycle === 'ENROLLING') {
@@ -1529,8 +1556,7 @@ async function hydrateClosedHistory(
   }
   if (!target.closedHistoryInitialized) {
     const baseline = await establishClosedBaseline(async page => {
-      directWatchMetrics.hydrationRequests += 1;
-      return directInvestmentRows(await invo.getPortfolioInvestments(target.portfolioId, false, page, 100));
+      return directInvestmentRows(await getBudgetedDirectInvestments(target.portfolioId, false, page, 'CLOSED'));
     }, cfg.directWatchClosedMaxPages, 100);
     directWatchMetrics.closedHydrationCount += 1;
     if (baseline.overflow) directWatchMetrics.closedOverflowRiskCount += 1;
@@ -1560,8 +1586,7 @@ async function hydrateClosedHistory(
   let priorPageLastTimestampMs: number | null = null;
   let orderingViolation: ReturnType<typeof validateClosedPageOrdering>['violation'] = null;
   for (let page = 1; page <= cfg.directWatchClosedMaxPages; page += 1) {
-    directWatchMetrics.hydrationRequests += 1;
-    const payload = await invo.getPortfolioInvestments(target.portfolioId, false, page, 100);
+    const payload = await getBudgetedDirectInvestments(target.portfolioId, false, page, 'CLOSED');
     pagesFetched += 1;
     const pageRows = directInvestmentRows(payload);
     const ordering = validateClosedPageOrdering(pageRows, page, priorPageLastTimestampMs);
@@ -1632,6 +1657,7 @@ function applyDirectWatchRateLimit(nowMs: number) {
   directWatchMetrics.http429s += 1;
   directWatchBackoffMs = Math.min(Math.max(directWatchBackoffMs * 2, 2_000), 30_000);
   directWatchBackoffUntilMs = nowMs + directWatchBackoffMs;
+  directWatchRequestBudget.note429(directWatchBackoffUntilMs);
 }
 
 function logTargetFailures(phase: string, failed: Array<{ item: any; error: unknown }>) {
@@ -1692,32 +1718,42 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
       directWatch.targets(), nowMs, cfg.directWatchClosedPollMs,
       cfg.directWatchMaxClosedHydratesPerScan,
     );
-    const openRun = await runIsolatedHydrations(
-      hydrationPlan,
-      item => directWatch.noteFallbackPoll(item.target.portfolioId, nowMs),
-      item => hydrateDirectTarget(item.target, item.selectorUpdatedAtMs, item.reason, nowMs),
+    const schedule = planDeadlineHydrations(
+      hydrationPlan, closedPlan, cfg.directWatchFallbackPollMs, cfg.directWatchClosedPollMs,
     );
-    logTargetFailures('open', openRun.failed);
-    directWatchMetrics.skippedAfterRateLimit += openRun.skippedAfterRateLimit.length;
-    if (openRun.rateLimited) {
-      applyDirectWatchRateLimit(Date.now());
-      directWatchMetrics.skippedAfterRateLimit += closedPlan.length;
-      log({ type: 'elite_direct_rate_limit_skip', phase: 'open', skippedOpen: openRun.skippedAfterRateLimit.length,
-        skippedClosed: closedPlan.length, backoffMs: directWatchBackoffMs, live: false });
-      return;
+    directWatchMetrics.queueDepth = schedule.length;
+    for (const work of schedule) {
+      const age = work.phase === 'OPEN'
+        ? nowMs - work.item.target.lastFallbackPollAtMs : nowMs - work.item.target.lastClosedPollAtMs;
+      directWatchMetrics.maxObservedSweepAgeMs = Math.max(directWatchMetrics.maxObservedSweepAgeMs, age);
+      if (work.dueAtMs < nowMs) {
+        if (work.phase === 'OPEN') directWatchMetrics.openDeadlineMisses += 1;
+        else directWatchMetrics.closedDeadlineMisses += 1;
+      }
     }
-
-    const closedRun = await runIsolatedHydrations(
-      closedPlan,
-      item => directWatch.noteClosedPoll(item.target.portfolioId, nowMs),
-      item => hydrateClosedHistory(item.target, item.reason, nowMs),
+    const run = await runConcurrentHydrations(
+      schedule, cfg.directWatchConcurrency,
+      work => {
+        if (work.phase === 'OPEN') directWatch.noteFallbackPoll(work.item.target.portfolioId, nowMs);
+        else directWatch.noteClosedPoll(work.item.target.portfolioId, nowMs);
+      },
+      async work => {
+        try {
+          if (work.phase === 'OPEN') await hydrateDirectTarget(
+            work.item.target, work.item.selectorUpdatedAtMs, work.item.reason, nowMs,
+          );
+          else await hydrateClosedHistory(work.item.target, work.item.reason, nowMs);
+        } catch (error: any) {
+          if (error?.status === 429 && error?.cooldownUntilMs == null) applyDirectWatchRateLimit(Date.now());
+          throw error;
+        }
+      },
     );
-    logTargetFailures('closed', closedRun.failed);
-    directWatchMetrics.skippedAfterRateLimit += closedRun.skippedAfterRateLimit.length;
-    if (closedRun.rateLimited) {
-      applyDirectWatchRateLimit(Date.now());
-      log({ type: 'elite_direct_rate_limit_skip', phase: 'closed', skippedOpen: 0,
-        skippedClosed: closedRun.skippedAfterRateLimit.length, backoffMs: directWatchBackoffMs, live: false });
+    logTargetFailures('deadline_queue', run.failed);
+    directWatchMetrics.skippedAfterRateLimit += run.skippedAfterRateLimit.length;
+    if (run.rateLimited) {
+      log({ type: 'elite_direct_rate_limit_skip', phase: 'deadline_queue',
+        skipped: run.skippedAfterRateLimit.length, backoffMs: directWatchBackoffMs, live: false });
       return;
     }
     directWatchBackoffMs = 0;
@@ -1814,6 +1850,8 @@ function startServer() {
           closedMaxPages: cfg.directWatchClosedMaxPages,
           residentCap: cfg.directWatchResidentCap,
           provenResidentCap: directWatchConfiguredCapacity.provenResidentCap,
+          hardProvenResidentCap: directWatchConfiguredCapacity.hardProvenResidentCap,
+          hardCapLimitingReasons: directWatchConfiguredCapacity.limitingReasons,
           residentBudgetHeadroom: directWatchConfiguredCapacity.provenResidentCap - directStatus.targetCount,
           negativeMinObservations: cfg.directWatchNegativeMinObservations,
           negativeGraceMs: cfg.directWatchNegativeGraceMs,
@@ -1824,6 +1862,10 @@ function startServer() {
           requestTimeoutMs: cfg.directWatchRequestTimeoutMs,
           worstCaseLogicalRequestMs: cfg.directWatchRequestTimeoutMs * 2,
           fixedOverheadMs: directWatchConfiguredCapacity.fixedOverheadMs,
+          concurrency: cfg.directWatchConcurrency,
+          requestBudget: directWatchRequestBudget.status(),
+          configuredRequestBudgetPerSecond: cfg.directWatchRequestBudgetPerSecond,
+          fixedFeedSelectorReserveRequestsPerSecond: cfg.directWatchFixedReservePerSecond,
           worstCaseRequestBudget: directWatchConfiguredCapacity.worstCaseRequestBudget,
           worstCaseOpenSweepMsAtCap: directWatchConfiguredCapacity.worstCaseOpenSweepMsAtCap,
           worstCaseClosedSweepMsAtCap: directWatchConfiguredCapacity.worstCaseClosedSweepMsAtCap,
@@ -1831,8 +1873,9 @@ function startServer() {
           oldestOpenPollOverdueMs: oldestOpenPollAgeMs == null ? null : Math.max(0, oldestOpenPollAgeMs - cfg.directWatchFallbackPollMs),
           oldestClosedPollAgeMs,
           oldestClosedPollOverdueMs: oldestClosedPollAgeMs == null ? null : Math.max(0, oldestClosedPollAgeMs - cfg.directWatchClosedPollMs),
-          openFreshnessGuarantee: false,
-          openFreshnessLimitReason: 'hard request-budget proof excludes rate-limit cooldown; observed overdue state is authoritative',
+          openFreshnessGuarantee: directWatchCapacityHealthy,
+          openFreshnessLimitReason: directWatchCapacityHealthy ? null
+            : 'observed deadline/cooldown state invalidates the configured hard-cap proof; new admissions fail closed',
           capacityHealthy: directWatchCapacityHealthy,
           unhealthyReason: directStatus.targetCount > directWatchConfiguredCapacity.provenResidentCap
             ? 'resident_count_exceeds_proven_capacity'
@@ -1974,6 +2017,11 @@ async function main() {
       closedPollMs: cfg.directWatchClosedPollMs,
       maxClosedHydratesPerScan: cfg.directWatchMaxClosedHydratesPerScan,
       closedMaxPages: cfg.directWatchClosedMaxPages,
+      concurrency: cfg.directWatchConcurrency,
+      hardProvenResidentCap: directWatchConfiguredCapacity.hardProvenResidentCap,
+      requestBudgetPerSecond: cfg.directWatchRequestBudgetPerSecond,
+      requestBudgetBurst: cfg.directWatchRequestBudgetBurst,
+      fixedFeedSelectorReserveRequestsPerSecond: cfg.directWatchFixedReservePerSecond,
       statePath: cfg.directWatchStatePath,
       source: 'portfolio_specific_read_only',
     },

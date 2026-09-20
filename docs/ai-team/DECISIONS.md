@@ -269,3 +269,23 @@ This supersedes the earlier task-class policy that withheld automatic merge from
   memory and latency do not grow with historical runtime.
 - This changes no live-trading permission. `REAL_TRADING_ENABLED` and
   `NOTIFICATION_TRADER_LIVE` remain disabled.
+
+## 2026-09-20 — Lane 3 direct watch is deadline-scheduled and locally request-budgeted
+
+- OPEN and CLOSED target work shares one earliest-deadline queue and a fixed worker
+  pool. Pagination remains sequential within a target, while targets execute
+  concurrently with per-target failure isolation.
+- Every direct `/get_investments` HTTP attempt consumes an executor-local token before
+  dispatch. The default 12 requests/second envelope reserves 4 requests/second for
+  feed/selector ingress, leaving an 8 requests/second direct allowance with burst 32.
+  A 429 starts global cooldown, removes burst credit, pauses new work, and makes new
+  admissions fail closed until observed deadline health recovers.
+- Resident admission uses the hard minimum across configured residents, OPEN and CLOSED
+  max pages, the two-attempt request-timeout bound, concurrency, request rate/burst,
+  unchanged deadlines, per-scan work bounds, and fixed feed/selector reserve. Defaults
+  prove 16 residents; `MAX_DIRECT_WATCH_RESIDENT_TARGETS=48` is only an outer ceiling.
+- The proof is configuration evidence, not runtime/source-recall evidence. #397 remains
+  required before bulk Invo miners can be re-enabled, and #401 still requires
+  post-deploy prospective recall proof.
+- This changes no live-trading permission. `REAL_TRADING_ENABLED` and
+  `NOTIFICATION_TRADER_LIVE` remain disabled.

@@ -13,7 +13,10 @@ import {
   loadEliteDirectTargets,
   isMissedPreDemotionOpen,
   planClosedHydrations,
+  planDeadlineHydrations,
   planDirectHydrations,
+  DirectWatchRequestBudget,
+  runConcurrentHydrations,
   runIsolatedHydrations,
   retiringOpenDispositions,
   signalsFromDirectInvestments,
@@ -923,20 +926,79 @@ test('tombstone restores causal watermarks without consuming resident capacity',
   assert.deepEqual(restored.closedBoundaryIds, []);
 });
 
-test('capacity proof reduces nominal 48 residents to the timeout/page/deadline bound', () => {
+test('default capacity proof sustains hard floor 16 at timeout/page/concurrency/rate bounds', () => {
   const defaults = validateDirectWatchCapacity({ residentCap: 48, scanMs: 3_000,
-    maxOpenHydratesPerScan: 8, openPollMs: 18_000,
-    maxClosedHydratesPerScan: 3, closedPollMs: 60_000,
-    requestTimeoutMs: 4_000, openMaxPages: 3, closedMaxPages: 2, fixedOverheadMs: 5_000 });
-  assert.equal(defaults.sustainableOpenTargetCeiling, 1);
-  assert.equal(defaults.sustainableClosedTargetCeiling, 3);
-  assert.equal(defaults.provenResidentCap, 1);
-  assert.equal(defaults.worstCaseOpenSweepMsAtCap, 17_000);
+    maxOpenHydratesPerScan: 24, openPollMs: 18_000,
+    maxClosedHydratesPerScan: 24, closedPollMs: 60_000,
+    requestTimeoutMs: 2_000, maxAttemptsPerPage: 2,
+    openMaxPages: 3, closedMaxPages: 2, fixedOverheadMs: 2_000,
+    concurrency: 16, requestBudgetPerSecond: 12, requestBudgetBurst: 32,
+    fixedReserveRequestsPerSecond: 4 });
+  assert.equal(defaults.sustainableOpenTargetCeiling, 16);
+  assert.ok(defaults.sustainableClosedTargetCeiling >= 16);
+  assert.equal(defaults.hardProvenResidentCap, 16);
+  assert.equal(defaults.worstCaseOpenSweepMsAtCap, 14_000);
   assert.throws(() => validateDirectWatchCapacity({ residentCap: 48, scanMs: 3_000,
     maxOpenHydratesPerScan: 8, openPollMs: 18_000,
     maxClosedHydratesPerScan: 3, closedPollMs: 60_000,
-    requestTimeoutMs: 4_000, openMaxPages: 3, closedMaxPages: 2, fixedOverheadMs: 18_000 }),
+    requestTimeoutMs: 2_000, maxAttemptsPerPage: 2,
+    openMaxPages: 3, closedMaxPages: 2, fixedOverheadMs: 18_000,
+    concurrency: 1, requestBudgetPerSecond: 12, requestBudgetBurst: 32,
+    fixedReserveRequestsPerSecond: 4 }),
   /cannot prove even one/);
+});
+
+test('worst-case max-page virtual latency keeps 16 OPEN and CLOSED residents inside deadlines', () => {
+  const residents = 16; const workers = 16; const timeoutMs = 4_000; const overheadMs = 2_000;
+  const simulatePhase = (startMs: number, pages: number) => {
+    const workerReady = Array.from({ length: workers }, () => startMs);
+    for (let targetIndex = 0; targetIndex < residents; targetIndex += 1) {
+      const worker = workerReady.indexOf(Math.min(...workerReady));
+      workerReady[worker] += pages * timeoutMs;
+    }
+    return Math.max(...workerReady) + overheadMs;
+  };
+  const openCompletedAtMs = simulatePhase(0, 3);
+  const closedCompletedAtMs = simulatePhase(openCompletedAtMs - overheadMs, 2);
+  assert.equal(openCompletedAtMs, 14_000);
+  assert.ok(openCompletedAtMs <= 18_000);
+  assert.ok(closedCompletedAtMs <= 60_000,
+    'even a simultaneous CLOSED sweep queued behind worst-case OPEN completes by its deadline');
+  assert.ok(16 * (6 / 18 + 4 / 60) <= 8,
+    'steady-state max-page demand fits the post-reserve direct request rate');
+});
+
+test('deadline scheduler interleaves overdue CLOSED ahead of newer OPEN work', () => {
+  const stored = { ...target, baselineAtMs: BASE, processedThroughMs: BASE, selectorInitialized: true,
+    lastSelectorUpdatedAtMs: BASE, lastFallbackPollAtMs: BASE + 50_000,
+    closedHistoryInitialized: true, closedProcessedThroughMs: BASE, closedBoundaryIds: [],
+    lastClosedPollAtMs: BASE, lifecycle: 'ACTIVE' as const };
+  const open = [{ target: stored, selectorUpdatedAtMs: null, reason: 'periodic_direct_poll' as const }];
+  const closed = [{ target: stored, reason: 'periodic_closed_poll' as const }];
+  assert.equal(planDeadlineHydrations(open, closed, 18_000, 60_000)[0].phase, 'CLOSED');
+});
+
+test('bounded concurrent workers isolate failure and stop launching peers after 429', async () => {
+  let active = 0; let maxActive = 0;
+  const result = await runConcurrentHydrations([0, 1, 2, 3, 4], 2, () => {}, async item => {
+    active += 1; maxActive = Math.max(maxActive, active);
+    await new Promise(resolve => setTimeout(resolve, item === 0 ? 2 : 5));
+    active -= 1;
+    if (item === 0) throw Object.assign(new Error('quota'), { status: 429 });
+  });
+  assert.equal(maxActive, 2);
+  assert.equal(result.rateLimited, true);
+  assert.ok(result.skippedAfterRateLimit.length >= 2);
+});
+
+test('token bucket never exceeds burst plus configured refill and 429 pauses acquisition', async () => {
+  let now = 0;
+  const budget = new DirectWatchRequestBudget(2, 2, () => now, async ms => { now += ms; });
+  const granted: number[] = [];
+  for (let index = 0; index < 5; index += 1) { await budget.acquire(); granted.push(now); }
+  assert.deepEqual(granted, [0, 0, 500, 1000, 1500]);
+  budget.note429(2_500);
+  await assert.rejects(() => budget.acquire(), (error: any) => error.status === 429);
 });
 
 test('v4 state migrates without resetting causal fields and fails closed above cap', () => {

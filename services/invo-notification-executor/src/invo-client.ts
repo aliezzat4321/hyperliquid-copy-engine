@@ -63,8 +63,9 @@ function decodeResponse(text: string): unknown {
   return text;
 }
 
-async function post(path: string, body: unknown, retried = false): Promise<any> {
+async function post(path: string, body: unknown, retried = false, beforeRequest?: () => Promise<void>): Promise<any> {
   await ensureToken();
+  await beforeRequest?.();
   const resp = await fetch(`${BASE}${path}`, {
     method: 'POST',
     headers: {
@@ -76,7 +77,7 @@ async function post(path: string, body: unknown, retried = false): Promise<any> 
     signal: AbortSignal.timeout(INVO_HTTP_REQUEST_TIMEOUT_MS),
   });
   const data = decodeResponse(await resp.text());
-  if (resp.status === 401 && !retried && await refreshAccessToken()) return post(path, body, true);
+  if (resp.status === 401 && !retried && await refreshAccessToken()) return post(path, body, true, beforeRequest);
   if (resp.status >= 400) throw new InvoHttpError(path, resp.status, data);
   return data;
 }
@@ -98,12 +99,14 @@ export async function getFeed(filter = 'following', lastPostId: string | null = 
   });
 }
 
-export async function getPortfolioInvestments(portfolioId: string, isOpen: boolean, page = 1, size = 100) {
+export async function getPortfolioInvestments(
+  portfolioId: string, isOpen: boolean, page = 1, size = 100, beforeRequest?: () => Promise<void>,
+) {
   return post('/v1_0/investments/get_investments', {
     portfolioId,
     isOpen,
     params: { page, size },
-  });
+  }, false, beforeRequest);
 }
 
 export async function checkAccountReady() {
