@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "snapshot_at": "2026-09-20T15:33:56Z",
+  "snapshot_at": "2026-09-20T16:07:05Z",
   "updated_by": "CODEX_CHATGPT",
   "head_observed": "fd63de5c60fc9d19ec643a2c491d5a815581765a",
   "mission": "Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.",
@@ -142,21 +142,21 @@
       "facts": [
         {
           "key": "feed_candidate_assimilation_implementation",
-          "label": "Lane 3 bounded feed-candidate assimilation implementation commit",
-          "value": "18c003f63cdfbc02a486ef505db4384daddece51",
+          "label": "Lane 3 bounded verified feed-candidate implementation commit",
+          "value": "2d4485e",
           "unit": "text",
-          "observed_at": "2026-09-20T15:33:56Z",
+          "observed_at": "2026-09-20T16:07:05Z",
           "source_type": "COMMIT",
-          "source_ref": "18c003f63cdfbc02a486ef505db4384daddece51"
+          "source_ref": "2d4485e6fffefa44ad87c8e37406a8937166ddcb"
         },
         {
           "key": "feed_candidate_builder_validation",
-          "label": "builder-validated executor test files passing",
-          "value": 25,
+          "label": "builder-validated executor subtests passing after feed-candidate repair",
+          "value": 193,
           "unit": "count",
-          "observed_at": "2026-09-20T15:33:56Z",
+          "observed_at": "2026-09-20T16:07:05Z",
           "source_type": "COMMIT",
-          "source_ref": "18c003f63cdfbc02a486ef505db4384daddece51"
+          "source_ref": "2d4485e6fffefa44ad87c8e37406a8937166ddcb"
         },
         {
           "key": "source_capture_pr_head",
@@ -222,8 +222,8 @@
           "source_ref": "VM runtime env 2026-09-17T23:10Z"
         }
       ],
-      "blocker": "The #403 implementation is builder-validated only and requires independent review of the final exact SHA; production is unchanged and no runtime candidate-expansion proof exists. PR #404 still requires final exact-SHA review and post-deploy prospective source/event-recall proof, while #397 shared-quota arbitration remains separate.",
-      "next": "Issue #403"
+      "blocker": "Issue #403 repaired commit 2d4485e is locally validated only and requires independent exact-SHA review; production is unchanged and no runtime candidate-expansion proof exists. PR #404 and #397 remain separate gates.",
+      "next": "Issue #403 exact-SHA review"
     }
   },
   "infrastructure": {
