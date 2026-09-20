@@ -60,7 +60,7 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 | real trading enabled | False | `2026-09-17T23:10:50Z` | manual `VM runtime env 2026-09-17T23:10Z` |
 
 **Blocker:** Issue #403 repaired commit 2d4485e is locally validated only and requires independent exact-SHA review; production is unchanged and no runtime candidate-expansion proof exists. PR #404 and #397 remain separate gates.
-**Next:** Issue #403 exact-SHA review.
+**Next:** Issue #403.
 
 ## Infrastructure
 **Status:** `DEGRADED`

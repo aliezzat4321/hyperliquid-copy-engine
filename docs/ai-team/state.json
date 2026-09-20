@@ -223,7 +223,7 @@
         }
       ],
       "blocker": "Issue #403 repaired commit 2d4485e is locally validated only and requires independent exact-SHA review; production is unchanged and no runtime candidate-expansion proof exists. PR #404 and #397 remain separate gates.",
-      "next": "Issue #403 exact-SHA review"
+      "next": "Issue #403"
     }
   },
   "infrastructure": {
