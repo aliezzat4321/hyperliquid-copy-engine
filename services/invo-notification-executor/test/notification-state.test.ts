@@ -1,9 +1,123 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { NotificationState } from '../src/notification-state.js';
+
+function statePath(prefix = 'invo-notify-state-') {
+  return join(mkdtempSync(join(tmpdir(), prefix)), 'state.json');
+}
+
+test('missing state file initializes clean defaults without creating a file', () => {
+  const path = statePath('notification-missing-');
+  const state = new NotificationState(path);
+  assert.equal(existsSync(path), false);
+  assert.deepEqual(state.snapshot(), {
+    version: 1, seen: [], managed: {}, feedCursors: {}, feedBaselines: {},
+    observedOpenSourceIds: [], handledCloseSourceIds: [],
+  });
+});
+
+test('valid legacy state migrates deterministically and preserves causal and exposure data', () => {
+  const path = statePath('notification-legacy-full-');
+  const legacy = {
+    seen: ['dedupe-1', 'source-close:closed-1'],
+    managed: {
+      BTC: {
+        coin: 'BTC', sourceBaseId: 'base-1', sourceBaseShortId: 'short-1', sourcePostId: 'post-1',
+        username: 'trader', ownerId: 'owner-1', portfolioId: 'portfolio-1', side: 'long', openedAtMs: 10,
+        size: 0.25, sourceSize: 0.5, unresolvedAfterSourceClose: true, fundingCarryUsd: 1.25,
+        fundingAccruedThroughMs: 20, exposureCheckpoints: [{ atMs: 11, size: 0.25 }],
+        fundingOracleCheckpoints: [{ fundingTimeMs: 12, observedAtMs: 13, oraclePx: 100 }],
+      },
+    },
+    feedCursors: { following: { postId: 'cursor-post', observedAtMs: 30, source: 'poll' } },
+    feedBaselines: { fire_moves: 31 },
+    observedOpenSourceIds: ['base-1'],
+    handledCloseSourceIds: ['closed-2'],
+  };
+  writeFileSync(path, JSON.stringify(legacy));
+  const state = new NotificationState(path);
+  assert.equal(state.snapshot().version, 1);
+  assert.equal(state.hasSeen('dedupe-1'), true);
+  assert.equal(state.hasObservedOpen('base-1'), true);
+  assert.equal(state.hasHandledClose('closed-1'), true);
+  assert.equal(state.hasHandledClose('closed-2'), true);
+  assert.deepEqual(state.getFeedCursor('following'), legacy.feedCursors.following);
+  assert.equal(state.hasFeedBaseline('following'), true);
+  assert.equal(state.hasFeedBaseline('fire_moves'), true);
+  const position = state.getManagedBySource('base-1');
+  assert.equal(position?.portfolioId, 'portfolio-1');
+  assert.equal(position?.fundingCarryUsd, 1.25);
+  assert.deepEqual(position?.exposureCheckpoints, [{ atMs: 11, size: 0.25 }]);
+  assert.deepEqual(position?.fundingOracleCheckpoints, [{ fundingTimeMs: 12, observedAtMs: 13, oraclePx: 100 }]);
+  assert.equal(position?.pendingSourceClose?.action, 'close');
+  state.markSeen('forces-versioned-write');
+  assert.equal(JSON.parse(readFileSync(path, 'utf8')).version, 1);
+});
+
+test('corrupt JSON logs then throws without changing the file', () => {
+  const path = statePath('notification-corrupt-');
+  const corrupt = '{"seen": [broken';
+  writeFileSync(path, corrupt);
+  const logged: string[] = [];
+  const originalError = console.error;
+  console.error = (message?: unknown) => { logged.push(String(message)); };
+  try {
+    assert.throws(() => new NotificationState(path), SyntaxError);
+  } finally {
+    console.error = originalError;
+  }
+  assert.equal(JSON.parse(logged[0] ?? '{}').type, 'state_load_error');
+  assert.equal(readFileSync(path, 'utf8'), corrupt);
+});
+
+test('wrong top-level shape fails closed', () => {
+  const path = statePath('notification-shape-');
+  writeFileSync(path, JSON.stringify([]));
+  assert.throws(() => new NotificationState(path), /state must be an object/);
+});
+
+test('unknown state version fails closed', () => {
+  const path = statePath('notification-version-');
+  writeFileSync(path, JSON.stringify({ version: 999 }));
+  assert.throws(() => new NotificationState(path), /unsupported notification state version/);
+});
+
+test('malformed managed and feed state fail closed instead of defaulting away', () => {
+  const malformedManaged = statePath('notification-bad-managed-');
+  writeFileSync(malformedManaged, JSON.stringify({ seen: [], managed: { BTC: { coin: 'BTC' } } }));
+  assert.throws(() => new NotificationState(malformedManaged), /sourceBaseId/);
+
+  const malformedCursor = statePath('notification-bad-cursor-');
+  writeFileSync(malformedCursor, JSON.stringify({ seen: [], managed: {}, feedCursors: { following: { postId: 'p' } } }));
+  assert.throws(() => new NotificationState(malformedCursor), /observedAtMs/);
+
+  const malformedBaseline = statePath('notification-bad-baseline-');
+  writeFileSync(malformedBaseline, JSON.stringify({ seen: [], managed: {}, feedBaselines: { following: 'now' } }));
+  assert.throws(() => new NotificationState(malformedBaseline), /finite number/);
+});
+
+test('valid versioned restart preserves dedupe, lifecycle, cursors, baselines, and managed exposure', () => {
+  const path = statePath('notification-versioned-restart-');
+  writeFileSync(path, JSON.stringify({
+    version: 1,
+    seen: ['event-1'],
+    managed: { 'base-1': { coin: 'ETH', sourceBaseId: 'base-1', sourceBaseShortId: 'short-1', sourcePostId: 'post-1', side: 'short', openedAtMs: 1, size: 2, fundingCarryUsd: -0.5 } },
+    feedCursors: { recent: { postId: 'post-2', observedAtMs: 2, source: 'backfill' } },
+    feedBaselines: { moves: 3 },
+    observedOpenSourceIds: ['base-1'],
+    handledCloseSourceIds: ['base-closed'],
+  }));
+  const restarted = new NotificationState(path);
+  assert.equal(restarted.hasSeen('event-1'), true);
+  assert.equal(restarted.hasObservedOpen('base-1'), true);
+  assert.equal(restarted.hasHandledClose('base-closed'), true);
+  assert.equal(restarted.getManagedBySource('base-1')?.fundingCarryUsd, -0.5);
+  assert.deepEqual(restarted.getFeedCursor('recent'), { postId: 'post-2', observedAtMs: 2, source: 'backfill' });
+  assert.equal(restarted.hasFeedBaseline('moves'), true);
+});
 
 test('persists dedupe and source-position ownership across restart', () => {
   const dir = mkdtempSync(join(tmpdir(), 'invo-notify-state-'));
