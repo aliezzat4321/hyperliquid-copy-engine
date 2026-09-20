@@ -7,7 +7,7 @@ test('service wires elite direct watch only in shadow and through normal execute
   const hydrate = source.indexOf('async function hydrateDirectTarget');
   const execute = source.indexOf('await execute(signal, `elite_direct:${reason}`', hydrate);
   const scan = source.indexOf('async function scanEliteDirectWatch');
-  const liveGuard = source.indexOf('if (cfg.live || nowMs < directWatchBackoffUntilMs) return', scan);
+  const liveGuard = source.indexOf('if (cfg.live) return', scan);
   const bounded = source.indexOf('cfg.directWatchMaxHydratesPerScan', scan);
   const dedicatedLoop = source.indexOf('async function directWatchLoop()');
   const shadowScheduler = source.indexOf('else await Promise.all([pollLoop(), directWatchLoop()])');
@@ -18,7 +18,13 @@ test('service wires elite direct watch only in shadow and through normal execute
   assert.match(source, /planDirectHydrations\([\s\S]*cfg\.directWatchFallbackPollMs,[\s\S]*cfg\.directWatchMaxHydratesPerScan/, 'deadline-first planner must bound periodic direct polling');
   assert.match(source, /planClosedHydrations\([\s\S]*cfg\.directWatchClosedPollMs,[\s\S]*cfg\.directWatchMaxClosedHydratesPerScan/, 'closed history must be scheduled for every selected target with a separate bound');
   assert.match(source, /closed_history_baseline[\s\S]*replayedSignals: 0/, 'first closed-history observation must only establish a baseline');
-  assert.match(source, /unownedCloseEvidence\(signal, observedOpen\)/, 'closed-only lifecycle evidence must use the explicit classifier');
+  assert.match(source, /unownedCloseEvidence\(signal, observedOpen, directTarget\?\.admittedAtMs\)/,
+    'closed-only lifecycle evidence must use enrollment-aware classification');
+  assert.match(source, /setAdmissionHealth\(false, 'scan_in_progress'\)/,
+    'every scan must revoke copy authorization before its freshness proof');
+  assert.match(source, /ensureTokenFreshFor\(/, 'direct scans must preflight auth for the hard scan horizon');
+  assert.match(source, /getPortfolioInvestments\([\s\S]*}, false\)/,
+    'direct requests must not hide an unbudgeted 401 refresh retry');
   assert.match(source, /retiringOpenDispositions\(/, 'retiring rows must be causally classified before execution');
   assert.match(source, /retirement_post_demotion_open_ignored/, 'post-demotion opens must be handled without retry');
   assert.match(source, /missed_pre_demotion_open/, 'stale first observations must leave explicit recall evidence');

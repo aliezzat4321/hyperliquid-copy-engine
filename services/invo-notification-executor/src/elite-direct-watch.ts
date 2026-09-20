@@ -4,7 +4,8 @@ import type { InvoSignal } from './notification-signal.js';
 import { ELITE_SELECTOR_VERSION, type PortfolioBucket } from './portfolio-candidates.js';
 import { signalWasSeen } from './source-event-dedupe.js';
 
-export const ELITE_DIRECT_WATCH_VERSION = 'lane3-elite-direct-watch-v6-20260920';
+export const ELITE_DIRECT_WATCH_VERSION = 'lane3-elite-direct-watch-v7-20260920';
+const LEGACY_VERSION_6 = 'lane3-elite-direct-watch-v6-20260920';
 const LEGACY_VERSION_5 = 'lane3-elite-direct-watch-v5-20260920';
 const LEGACY_VERSION_4 = 'lane3-elite-direct-watch-v4-20260918';
 const LEGACY_VERSION = 'lane3-elite-direct-watch-v1-20260917';
@@ -39,10 +40,12 @@ export interface StoredTarget extends EliteDirectTarget {
   selectorInitialized: boolean;
   lastSelectorUpdatedAtMs: number | null;
   lastFallbackPollAtMs: number;
+  lastOpenSuccessAtMs?: number;
   closedHistoryInitialized: boolean;
   closedProcessedThroughMs: number;
   closedBoundaryIds: string[];
   lastClosedPollAtMs: number;
+  lastClosedSuccessAtMs?: number;
 }
 
 export interface Tombstone extends EliteDirectTarget {
@@ -435,6 +438,7 @@ export function planClosedHydrations(
 
 interface DirectWatchDiskState {
   version: string;
+  snapshotAppliedJournalSeq?: number;
   targets: Record<string, StoredTarget>;
   tombstones: Record<string, Tombstone>;
   deferredAdmissions: Record<string, DeferredAdmission>;
@@ -474,6 +478,8 @@ export interface DirectWatchStatus {
   retirementRelevantOpenCount: number;
   retirementOpenEmptyProofCount: number;
   retirementClosedProofCount: number;
+  admissionsHealthy: boolean;
+  admissionSuspensionReason: string | null;
 }
 
 export interface DirectWatchCapacity {
@@ -666,10 +672,20 @@ export class EliteDirectWatchState {
   private readonly maxRetainedTombstones = 256;
   private readonly maxDeferredAdmissions = 256;
   private readonly maxJournalBytes = 1024 * 1024;
-  private enforcedResidentCap = Number.POSITIVE_INFINITY;
-  private admissionsEnabled = true;
+  private enforcedResidentCap: number;
+  private admissionsEnabled = false;
+  private admissionSuspensionReason: string | null = 'startup_before_first_healthy_scan';
+  private nextJournalSeq = 1;
 
-  constructor(private readonly path: string, admissionIndexPath = `${path}.admissions.json`) {
+  constructor(
+    private readonly path: string,
+    admissionIndexPath = `${path}.admissions.json`,
+    enforcedResidentCap = 0,
+  ) {
+    if (!Number.isSafeInteger(enforcedResidentCap) || enforcedResidentCap < 0) {
+      throw new Error('direct-watch resident cap must be a non-negative safe integer');
+    }
+    this.enforcedResidentCap = enforcedResidentCap;
     this.journalPath = `${path}.journal.jsonl`;
     this.admissionIndexPath = admissionIndexPath;
     this.load();
@@ -682,7 +698,7 @@ export class EliteDirectWatchState {
     }
     try {
       const parsed = JSON.parse(readFileSync(this.path, 'utf8')) as DirectWatchDiskState;
-      if (![ELITE_DIRECT_WATCH_VERSION, LEGACY_VERSION_5, LEGACY_VERSION_4, LEGACY_VERSION_3, LEGACY_VERSION_2, LEGACY_VERSION].includes(parsed?.version)) {
+      if (![ELITE_DIRECT_WATCH_VERSION, LEGACY_VERSION_6, LEGACY_VERSION_5, LEGACY_VERSION_4, LEGACY_VERSION_3, LEGACY_VERSION_2, LEGACY_VERSION].includes(parsed?.version)) {
         throw new Error(`unsupported direct-watch state version: ${String(parsed?.version)}`);
       }
       if (!isPlainObject(parsed?.targets) || (parsed.tombstones != null && !isPlainObject(parsed.tombstones))
@@ -690,8 +706,11 @@ export class EliteDirectWatchState {
         throw new Error('invalid direct-watch state wrapper');
       }
       {
-        this.state = { version: ELITE_DIRECT_WATCH_VERSION, targets: {},
+        this.state = { version: ELITE_DIRECT_WATCH_VERSION,
+          snapshotAppliedJournalSeq: Number.isSafeInteger(parsed.snapshotAppliedJournalSeq)
+            ? Number(parsed.snapshotAppliedJournalSeq) : 0, targets: {},
           tombstones: parsed.tombstones ?? {}, deferredAdmissions: parsed.deferredAdmissions ?? {} };
+        this.nextJournalSeq = (this.state.snapshotAppliedJournalSeq ?? 0) + 1;
         for (const [portfolioId, raw] of Object.entries(this.state.tombstones)) {
           if (!isPlainObject(raw) || raw.portfolioId !== portfolioId || raw.lifecycle !== 'TOMBSTONE'
             || !Number.isFinite(raw.processedThroughMs) || !Number.isFinite(raw.closedProcessedThroughMs)) {
@@ -736,6 +755,8 @@ export class EliteDirectWatchState {
             closedProcessedThroughMs: target.closedProcessedThroughMs ?? 0,
             closedBoundaryIds: target.closedBoundaryIds ?? [],
             lastClosedPollAtMs: target.lastClosedPollAtMs ?? 0,
+            lastOpenSuccessAtMs: target.lastOpenSuccessAtMs ?? target.lastFallbackPollAtMs ?? 0,
+            lastClosedSuccessAtMs: target.lastClosedSuccessAtMs ?? target.lastClosedPollAtMs ?? 0,
           };
         }
         this.replayJournal();
@@ -753,11 +774,22 @@ export class EliteDirectWatchState {
     for (const [index, line] of text.split('\n').entries()) {
       if (!line.trim()) continue;
       const entry = JSON.parse(line);
-      if (!isPlainObject(entry) || entry.version !== 1 || typeof entry.portfolioId !== 'string'
+      if (!isPlainObject(entry) || ![1, 2].includes(Number(entry.version)) || typeof entry.portfolioId !== 'string'
         || !isPlainObject(entry.target) || entry.target.portfolioId !== entry.portfolioId) {
         throw new Error(`invalid direct-watch journal row ${index + 1}`);
       }
-      if (this.state.targets[entry.portfolioId]) this.state.targets[entry.portfolioId] = entry.target as unknown as StoredTarget;
+      const seq = entry.version === 2 && Number.isSafeInteger(entry.seq) ? Number(entry.seq) : null;
+      if (seq != null && seq <= (this.state.snapshotAppliedJournalSeq ?? 0)) continue;
+      if (this.state.targets[entry.portfolioId]) {
+        const replayed = entry.target as unknown as StoredTarget;
+        replayed.lastOpenSuccessAtMs ??= replayed.lastFallbackPollAtMs ?? 0;
+        replayed.lastClosedSuccessAtMs ??= replayed.lastClosedPollAtMs ?? 0;
+        this.state.targets[entry.portfolioId] = replayed;
+      }
+      if (seq != null) {
+        this.state.snapshotAppliedJournalSeq = Math.max(this.state.snapshotAppliedJournalSeq ?? 0, seq);
+        this.nextJournalSeq = Math.max(this.nextJournalSeq, seq + 1);
+      }
     }
   }
 
@@ -772,7 +804,9 @@ export class EliteDirectWatchState {
 
   private persistTarget(target: StoredTarget) {
     mkdirSync(dirname(this.path), { recursive: true });
-    appendFileSync(this.journalPath, `${JSON.stringify({ version: 1, portfolioId: target.portfolioId, target })}\n`);
+    const seq = this.nextJournalSeq++;
+    appendFileSync(this.journalPath, `${JSON.stringify({ version: 2, seq, portfolioId: target.portfolioId, target })}\n`);
+    this.state.snapshotAppliedJournalSeq = seq;
     this.writeAdmissionIndex();
     if (statSync(this.journalPath).size >= this.maxJournalBytes) this.save();
   }
@@ -780,7 +814,7 @@ export class EliteDirectWatchState {
   private writeAdmissionIndex() {
     const rows: Record<string, AdmissionIndexRow> = {};
     const capacityHealthy = Object.keys(this.state.targets).length <= this.enforcedResidentCap;
-    for (const target of capacityHealthy ? Object.values(this.state.targets) : []) {
+    for (const target of capacityHealthy && this.admissionsEnabled ? Object.values(this.state.targets) : []) {
       if (target.lifecycle !== 'ACTIVE' || !target.openHistoryInitialized || !target.closedHistoryInitialized
         || !Number.isFinite(target.admittedAtMs)) continue;
       rows[target.portfolioId] = { portfolioId: target.portfolioId,
@@ -792,6 +826,12 @@ export class EliteDirectWatchState {
     const index: AdmissionIndexDiskState = { version: 1, generatedAtMs: Date.now(), rows };
     writeFileSync(temp, JSON.stringify(index));
     renameSync(temp, this.admissionIndexPath);
+  }
+
+  setAdmissionHealth(healthy: boolean, reason: string | null = null) {
+    this.admissionsEnabled = healthy;
+    this.admissionSuspensionReason = healthy ? null : (reason ?? 'monitoring_unhealthy');
+    this.writeAdmissionIndex();
   }
 
   private compactAuxiliaryState(nowMs: number, qualifiedIds: ReadonlySet<string>): boolean {
@@ -825,6 +865,7 @@ export class EliteDirectWatchState {
     if (!authoritative) return;
     this.enforcedResidentCap = residentCap;
     this.admissionsEnabled = admissionsHealthy;
+    this.admissionSuspensionReason = admissionsHealthy ? null : 'capacity_or_monitoring_unhealthy';
     let changed = false;
     const rankedTargets = [...targets].sort((a, b) => b.score - a.score || a.portfolioId.localeCompare(b.portfolioId));
     const qualifiedIds = new Set(rankedTargets.map(target => target.portfolioId));
@@ -909,11 +950,13 @@ export class EliteDirectWatchState {
           selectorInitialized: tombstone?.selectorInitialized ?? false,
           lastSelectorUpdatedAtMs: tombstone?.lastSelectorUpdatedAtMs ?? null,
           lastFallbackPollAtMs: 0,
+          lastOpenSuccessAtMs: 0,
           closedHistoryInitialized: tombstone?.closedHistoryInitialized ?? false,
           closedProcessedThroughMs: restoredClosedThroughMs,
           closedBoundaryIds: tombstone && restoredClosedThroughMs === tombstone.closedProcessedThroughMs
             ? tombstone.closedBoundaryIds : [],
           lastClosedPollAtMs: 0,
+          lastClosedSuccessAtMs: 0,
         };
         delete this.state.tombstones[target.portfolioId];
         delete this.state.deferredAdmissions[target.portfolioId];
@@ -1041,6 +1084,7 @@ export class EliteDirectWatchState {
     });
     target.lastRetirementOpenPollAtMs = polledAtMs;
     target.lastFallbackPollAtMs = polledAtMs;
+    target.lastOpenSuccessAtMs = polledAtMs;
     target.retirementRelevantOpenCount = relevant.length;
     target.retirementOpenEmptyProofs = polledAtMs >= (target.retireAfterMs ?? Number.POSITIVE_INFINITY) && relevant.length === 0
       ? (target.retirementOpenEmptyProofs ?? 0) + 1 : 0;
@@ -1080,6 +1124,7 @@ export class EliteDirectWatchState {
     target.closedProcessedThroughMs = newestMs;
     target.closedBoundaryIds = [...boundaryIds].sort();
     target.lastClosedPollAtMs = polledAtMs;
+    target.lastClosedSuccessAtMs = polledAtMs;
     if (target.lifecycle === 'RETIRING' && polledAtMs >= (target.retireAfterMs ?? Number.POSITIVE_INFINITY)) {
       target.retirementClosedProofs = (target.retirementClosedProofs ?? 0) + 1;
     }
@@ -1089,7 +1134,7 @@ export class EliteDirectWatchState {
   commitOpenBaseline(portfolioId: string, rows: any[], polledAtMs: number) {
     const target = this.state.targets[portfolioId];
     if (!target || target.lifecycle !== 'ENROLLING' || !target.closedHistoryInitialized
-      || !this.admissionsEnabled || Object.keys(this.state.targets).length > this.enforcedResidentCap) return;
+      || Object.keys(this.state.targets).length > this.enforcedResidentCap) return;
     const newest = rows.reduce((value, row) => Math.max(value,
       directSourceTimeMs(row?.updatedAt) ?? directSourceTimeMs(row?.createdAt) ?? 0), target.processedThroughMs);
     target.processedThroughMs = Math.max(newest, polledAtMs);
@@ -1097,6 +1142,7 @@ export class EliteDirectWatchState {
     target.admittedAtMs = polledAtMs;
     target.lifecycle = 'ACTIVE';
     target.lastFallbackPollAtMs = polledAtMs;
+    target.lastOpenSuccessAtMs = polledAtMs;
     this.persistTarget(target);
   }
 
@@ -1104,6 +1150,7 @@ export class EliteDirectWatchState {
     const target = this.state.targets[portfolioId];
     if (!target) return;
     target.processedThroughMs = Math.max(target.processedThroughMs, processedThroughMs);
+    target.lastOpenSuccessAtMs = Math.max(target.lastOpenSuccessAtMs ?? 0, target.lastFallbackPollAtMs);
     if (selectorUpdatedAtMs != null) {
       target.selectorInitialized = true;
       target.lastSelectorUpdatedAtMs = Math.max(target.lastSelectorUpdatedAtMs ?? 0, selectorUpdatedAtMs);
@@ -1124,8 +1171,8 @@ export class EliteDirectWatchState {
       oldestProcessedThroughMs: processed.length ? Math.min(...processed) : null,
       closedInitializedCount: targets.filter(target => target.closedHistoryInitialized).length,
       oldestClosedProcessedThroughMs: closedProcessed.length ? Math.min(...closedProcessed) : null,
-      oldestOpenPollAtMs: targets.length ? Math.min(...targets.map(target => target.lastFallbackPollAtMs)) : null,
-      oldestClosedPollAtMs: targets.length ? Math.min(...targets.map(target => target.lastClosedPollAtMs)) : null,
+      oldestOpenPollAtMs: targets.length ? Math.min(...targets.map(target => target.lastOpenSuccessAtMs ?? 0)) : null,
+      oldestClosedPollAtMs: targets.length ? Math.min(...targets.map(target => target.lastClosedSuccessAtMs ?? 0)) : null,
       retiringTargetCount: targets.filter(target => target.lifecycle === 'RETIRING').length,
       activeTargetCount: targets.filter(target => target.lifecycle === 'ACTIVE').length,
       enrollingTargetCount: targets.filter(target => target.lifecycle === 'ENROLLING').length,
@@ -1139,6 +1186,8 @@ export class EliteDirectWatchState {
       retirementRelevantOpenCount: targets.reduce((sum, target) => sum + (target.retirementRelevantOpenCount ?? 0), 0),
       retirementOpenEmptyProofCount: targets.reduce((sum, target) => sum + (target.retirementOpenEmptyProofs ?? 0), 0),
       retirementClosedProofCount: targets.reduce((sum, target) => sum + (target.retirementClosedProofs ?? 0), 0),
+      admissionsHealthy: this.admissionsEnabled,
+      admissionSuspensionReason: this.admissionSuspensionReason,
     };
   }
 }
@@ -1393,11 +1442,16 @@ export function classifyClosedHydrationRows(
   return { signals, freshRowCount, unemittableFreshRows };
 }
 
-export function unownedCloseEvidence(signal: InvoSignal, observedOpen: boolean) {
+export function unownedCloseEvidence(signal: InvoSignal, observedOpen: boolean, admittedAtMs?: number | null) {
+  const preEnrollment = !observedOpen && admittedAtMs != null && signal.openedSourceTimeMs != null
+    && signal.openedSourceTimeMs < admittedAtMs;
   return {
-    type: observedOpen ? 'close_ownership_gap' : 'missed_short_roundtrip',
-    reason: observedOpen ? 'close_not_owned_by_service' : 'open_and_close_not_observed_while_open',
-    lifecycleCopyability: observedOpen ? 'NOT_OWNED' : 'NON_COPYABLE_CLOSED_ONLY',
+    type: observedOpen ? 'close_ownership_gap'
+      : preEnrollment ? 'pre_enrollment_close_ignored' : 'missed_short_roundtrip',
+    reason: observedOpen ? 'close_not_owned_by_service'
+      : preEnrollment ? 'source_open_predates_direct_watch_admission' : 'open_and_close_not_observed_while_open',
+    lifecycleCopyability: observedOpen ? 'NOT_OWNED'
+      : preEnrollment ? 'NON_COPYABLE_PRE_ENROLLMENT' : 'NON_COPYABLE_CLOSED_ONLY',
     reconstructedOpenExecuted: false,
     sourceCreatedAtMs: signal.openedSourceTimeMs ?? null,
     sourceClosedAtMs: signal.sourceTimeMs,

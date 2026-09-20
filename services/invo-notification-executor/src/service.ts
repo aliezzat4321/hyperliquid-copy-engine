@@ -192,8 +192,11 @@ const tracker = new TraderTracker(cfg.trackerPath, {
   staleAfterMs: cfg.staleAfterMs,
   inactiveAfterMs: cfg.inactiveAfterMs,
 });
-const directWatch = new EliteDirectWatchState(cfg.directWatchStatePath, cfg.directWatchAdmissionIndexPath);
-directWatch.assertResidentCap(cfg.directWatchResidentCap);
+const directWatch = new EliteDirectWatchState(
+  cfg.directWatchStatePath, cfg.directWatchAdmissionIndexPath,
+  directWatchConfiguredCapacity.hardProvenResidentCap,
+);
+directWatch.assertResidentCap(directWatchConfiguredCapacity.hardProvenResidentCap);
 const inFlight = new Set<string>();
 const inFlightSourceEvents = new Set<string>();
 const sourceLifecycleQueue = new SourceLifecycleQueue();
@@ -663,8 +666,9 @@ async function executeUnlocked(signal: InvoSignal, wakeSource: string, receivedA
       if (!managed) {
         state.markSeen(signal.key);
         const observedOpen = state.hasObservedOpen(signal.sourceBaseId);
+        const directTarget = directWatch.targets().find(row => row.portfolioId === signal.portfolioId);
         log({
-          ...unownedCloseEvidence(signal, observedOpen),
+          ...unownedCloseEvidence(signal, observedOpen, directTarget?.admittedAtMs),
           managed: null, signal, wakeSource, ...closeFreshness(signal, receivedAtMs),
         });
         return;
@@ -1413,7 +1417,7 @@ async function getBudgetedDirectInvestments(
     directWatchMetrics.hydrationRequests += 1;
     if (phase === 'OPEN') directWatchMetrics.openPhaseRequests += 1;
     else directWatchMetrics.closedPhaseRequests += 1;
-  });
+  }, false);
 }
 
 async function hydrateDirectTarget(
@@ -1435,6 +1439,7 @@ async function hydrateDirectTarget(
       overflow: openResult.overflow, orderingViolation: openResult.orderingViolation,
       admitted: openResult.complete, admittedAtMs: openResult.complete ? observedAtMs : null,
       replayedSignals: 0, live: false });
+    if (!openResult.complete) throw new Error(`incomplete OPEN baseline for ${target.portfolioId}`);
     return;
   }
   if (target.lifecycle === 'RETIRING') {
@@ -1499,6 +1504,9 @@ async function hydrateDirectTarget(
       signalCount: dispositions.length, allHandled, highWaterMs,
       pagesFetched: openResult.pagesFetched, endpointComplete: openResult.complete,
       overflow: openResult.overflow, orderingViolation: openResult.orderingViolation, live: false });
+    if (!openResult.complete || !allHandled) {
+      throw new Error(`incomplete retirement OPEN proof for ${target.portfolioId}`);
+    }
     return;
   }
   const signals = signalsFromDirectInvestments(
@@ -1540,6 +1548,7 @@ async function hydrateDirectTarget(
     watermarkCommitted: allHandled && openResult.complete,
     live: false,
   });
+  if (!openResult.complete || !allHandled) throw new Error(`incomplete OPEN proof for ${target.portfolioId}`);
 }
 
 async function hydrateClosedHistory(
@@ -1575,6 +1584,7 @@ async function hydrateClosedHistory(
       orderingViolation: baseline.orderingViolation,
       watermarkCommitted: baseline.boundaryReached, replayedSignals: 0, live: false,
     });
+    if (!baseline.boundaryReached) throw new Error(`incomplete CLOSED baseline for ${target.portfolioId}`);
     return;
   }
   const rows: any[] = [];
@@ -1617,7 +1627,7 @@ async function hydrateClosedHistory(
       portfolioId: target.portfolioId, reason, pagesFetched, orderingViolation,
       overflowRiskCounted: true, watermarkCommitted: false, live: false,
     });
-    return;
+    throw new Error(`CLOSED ordering violation for ${target.portfolioId}`);
   }
 
   const classified = classifyClosedHydrationRows(
@@ -1651,6 +1661,7 @@ async function hydrateClosedHistory(
     pagesFetched, boundaryReached, boundaryReason,
     allHandled, allFreshRowsEmittable, watermarkCommitted, live: false,
   });
+  if (!watermarkCommitted) throw new Error(`incomplete CLOSED proof for ${target.portfolioId}`);
 }
 
 function applyDirectWatchRateLimit(nowMs: number) {
@@ -1658,6 +1669,7 @@ function applyDirectWatchRateLimit(nowMs: number) {
   directWatchBackoffMs = Math.min(Math.max(directWatchBackoffMs * 2, 2_000), 30_000);
   directWatchBackoffUntilMs = nowMs + directWatchBackoffMs;
   directWatchRequestBudget.note429(directWatchBackoffUntilMs);
+  directWatch.setAdmissionHealth(false, 'rate_limit_cooldown');
 }
 
 function logTargetFailures(phase: string, failed: Array<{ item: any; error: unknown }>) {
@@ -1669,8 +1681,17 @@ function logTargetFailures(phase: string, failed: Array<{ item: any; error: unkn
 }
 
 async function scanEliteDirectWatch(nowMs = Date.now()) {
-  if (cfg.live || nowMs < directWatchBackoffUntilMs) return;
+  if (cfg.live) return;
+  if (nowMs < directWatchBackoffUntilMs) {
+    directWatch.setAdmissionHealth(false, 'rate_limit_cooldown');
+    return;
+  }
+  directWatch.setAdmissionHealth(false, 'scan_in_progress');
   try {
+    await invo.ensureTokenFreshFor(Math.max(
+      directWatchConfiguredCapacity.worstCaseClosedSweepMsAtCap,
+      directWatchConfiguredCapacity.worstCaseOpenSweepMsAtCap,
+    ) + 30_000 + cfg.directWatchRequestTimeoutMs);
     const candidate = loadEliteDirectTargets(cfg.candidateStatePath, nowMs, cfg.candidateStateMaxAgeMs);
     if (candidate.validationError) {
       directWatchMetrics.candidateStateRejections += 1;
@@ -1680,13 +1701,7 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
     } else {
       directWatchMetrics.candidateStateLastError = null;
     }
-    const preSyncStatus = directWatch.status();
-    const openOverdue = preSyncStatus.oldestOpenPollAtMs != null && preSyncStatus.oldestOpenPollAtMs > 0
-      && nowMs - preSyncStatus.oldestOpenPollAtMs > cfg.directWatchFallbackPollMs;
-    const closedOverdue = preSyncStatus.oldestClosedPollAtMs != null && preSyncStatus.oldestClosedPollAtMs > 0
-      && nowMs - preSyncStatus.oldestClosedPollAtMs > cfg.directWatchClosedPollMs;
-    const admissionsHealthy = preSyncStatus.targetCount <= directWatchConfiguredCapacity.provenResidentCap
-      && !openOverdue && !closedOverdue && nowMs >= directWatchBackoffUntilMs;
+    const admissionsHealthy = false;
     const deferredBefore = new Set(directWatch.deferredAdmissions().map(row => row.portfolioId));
     directWatch.syncTargets(candidate.targets, ownedDirectPortfolioIds(), nowMs, !candidate.stale,
       120_000, new Set(candidate.demotedPortfolioIds), directWatchConfiguredCapacity.provenResidentCap,
@@ -1756,6 +1771,23 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
         skipped: run.skippedAfterRateLimit.length, backoffMs: directWatchBackoffMs, live: false });
       return;
     }
+    if (run.failed.length > 0) {
+      directWatch.setAdmissionHealth(false, 'target_hydration_failure');
+      return;
+    }
+    const proofAtMs = Date.now();
+    const postScan = directWatch.status();
+    const openHealthy = postScan.oldestOpenPollAtMs == null
+      || proofAtMs - postScan.oldestOpenPollAtMs <= cfg.directWatchFallbackPollMs;
+    const closedHealthy = postScan.oldestClosedPollAtMs == null
+      || proofAtMs - postScan.oldestClosedPollAtMs <= cfg.directWatchClosedPollMs;
+    if (candidate.stale || postScan.targetCount > directWatchConfiguredCapacity.hardProvenResidentCap
+      || !openHealthy || !closedHealthy) {
+      directWatch.setAdmissionHealth(false, candidate.stale ? 'candidate_state_not_authoritative'
+        : !openHealthy || !closedHealthy ? 'successful_observation_overdue' : 'resident_capacity_unhealthy');
+      return;
+    }
+    directWatch.setAdmissionHealth(true);
     directWatchBackoffMs = 0;
     directWatchBackoffUntilMs = 0;
     directWatchMetrics.lastSuccessAtMs = Date.now();
@@ -1764,6 +1796,7 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
     // isolated above and never reach this guard.
     log({ type: 'elite_direct_watch_error', source: 'portfolio_specific_read_only', status: err?.status,
       backoffMs: directWatchBackoffMs, error: err instanceof Error ? err.message : String(err), live: false });
+    directWatch.setAdmissionHealth(false, err?.status === 401 ? 'authentication_failure' : 'scan_failure');
   } finally {
     directWatchMetrics.lastScanAtMs = nowMs;
   }
@@ -1805,7 +1838,7 @@ function startServer() {
       const directWatchCapacityHealthy = directStatus.targetCount <= directWatchConfiguredCapacity.provenResidentCap
         && (oldestOpenPollAgeMs == null || oldestOpenPollAgeMs <= cfg.directWatchFallbackPollMs)
         && (oldestClosedPollAgeMs == null || oldestClosedPollAgeMs <= cfg.directWatchClosedPollMs)
-        && healthNowMs >= directWatchBackoffUntilMs;
+        && healthNowMs >= directWatchBackoffUntilMs && directStatus.admissionsHealthy;
       const paperPositions = Object.values(snapshot.managed).filter(position => position.paper);
       const unresolvedPaperPositions = paperPositions.filter(position => position.unresolvedAfterSourceClose);
       const markablePaperPositions = paperPositions.filter(position => !position.unresolvedAfterSourceClose);
@@ -1882,7 +1915,7 @@ function startServer() {
             : healthNowMs < directWatchBackoffUntilMs ? 'rate_limit_cooldown'
               : (oldestOpenPollAgeMs != null && oldestOpenPollAgeMs > cfg.directWatchFallbackPollMs)
                   || (oldestClosedPollAgeMs != null && oldestClosedPollAgeMs > cfg.directWatchClosedPollMs)
-                ? 'sweep_overdue' : null,
+                ? 'sweep_overdue' : directStatus.admissionSuspensionReason,
           backoffMs: directWatchBackoffMs,
           backoffUntilMs: directWatchBackoffUntilMs,
         },

@@ -289,3 +289,42 @@ This supersedes the earlier task-class policy that withheld automatic merge from
   post-deploy prospective recall proof.
 - This changes no live-trading permission. `REAL_TRADING_ENABLED` and
   `NOTIFICATION_TRADER_LIVE` remain disabled.
+
+## 2026-09-20 — Superseding Lane 3 capacity and admission-health decision
+
+- This decision explicitly supersedes the earlier same-day statements that 48 residents
+  were sustainable, that startup rejected only above 48, and that fresh evidence
+  immediately restored `ACTIVE`. The outer configured value 48 is not an executable
+  capacity claim. With the final defaults the hard-proven resident cap is **16**; fresh
+  evidence re-enters `ENROLLING`, and only complete prospective CLOSED then OPEN
+  baselines can restore `ACTIVE` lifecycle state.
+- The proof assumes OPEN at most 3 pages, CLOSED at most 2 pages, at most 2 attempts per
+  page, a 2-second request timeout, 16 target workers, an 18-second OPEN deadline, a
+  60-second CLOSED deadline, 2 seconds of fixed overhead, a 12 request/second envelope,
+  burst 32, and a fixed 4 request/second feed/selector reserve. OPEN and CLOSED share one
+  earliest-deadline queue. At cap, the conservative wall-clock bounds are 14 seconds for
+  OPEN and 22 seconds for the combined OPEN+CLOSED sweep; steady-state direct demand is
+  below the remaining 8 request/second budget. The unchanged signal-age and endpoint
+  completeness gates still apply.
+- Capacity and authorization health are pinned independently of candidate-state
+  authority. Construction uses the hard cap and publishes an empty admission index.
+  Every scan atomically suspends NEW/ADD authorization before work. Missing, stale, or
+  malformed candidate state cannot relax the cap or enable admission. Authorization is
+  republished only after an authoritative candidate read and complete successful OPEN
+  and CLOSED observations inside both deadlines. Attempt timestamps exist only for fair
+  scheduling and never count as freshness.
+- A 429/cooldown, deadline violation, capacity violation, token preflight failure,
+  unexpected 401, target error, incomplete pagination, or scan-level source failure
+  leaves the admission index empty without deleting targets or lifecycle watermarks.
+  Token freshness is preflighted for the full 22-second scan horizon plus the client's
+  30-second refresh margin and one request timeout. The preflight refresh is covered by
+  fixed overhead; direct-watch 401 retry is disabled, so an unexpected 401 makes the
+  scan unhealthy instead of silently consuming an unbudgeted retry.
+- Direct-watch journal v2 assigns monotonic sequences and snapshots record the highest
+  applied sequence. Replay ignores entries at or below that sequence, closing the crash
+  window between snapshot rename and journal truncation while retaining legacy journal
+  migration. CLOSED evidence whose source OPEN predates admission is classified
+  `pre_enrollment_close_ignored`, not a selected-elite missed short round trip.
+- This is configuration/test evidence, not prospective runtime recall proof. Issues #397
+  and #401 remain open gates. No deployment or real-trading permission changed;
+  `REAL_TRADING_ENABLED=NO`.

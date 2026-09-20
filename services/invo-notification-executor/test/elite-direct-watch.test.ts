@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -343,6 +343,86 @@ test('closed-only round trip after a baseline is evidence, never a replayed shad
     sourceClosedAtMs: BASE + 200,
     portfolioId: 'p1',
   });
+});
+
+test('pre-enrollment close is ignored evidence and not a selected-elite recall miss', () => {
+  const closed = openRow({ isOpen: false, closingPrice: 0.8,
+    createdAt: BASE - 100, updatedAt: BASE + 200, closedAt: BASE + 200 });
+  const [signal] = closedSignalsAfterBoundary([closed], target, BASE, [], BASE + 300);
+  assert.deepEqual(unownedCloseEvidence(signal, false, BASE), {
+    type: 'pre_enrollment_close_ignored',
+    reason: 'source_open_predates_direct_watch_admission',
+    lifecycleCopyability: 'NON_COPYABLE_PRE_ENROLLMENT',
+    reconstructedOpenExecuted: false,
+    sourceCreatedAtMs: BASE - 100,
+    sourceClosedAtMs: BASE + 200,
+    portfolioId: 'p1',
+  });
+});
+
+test('startup cap and admission health publish zero persisted ACTIVE admissions until recovery', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elite-startup-cap-'));
+  const path = join(dir, 'state.json');
+  const admissionPath = join(dir, 'admissions.json');
+  const first = new EliteDirectWatchState(path, admissionPath, 3);
+  const targets = Array.from({ length: 3 }, (_, index) => ({ ...target, portfolioId: `p${index}` }));
+  first.syncTargets(targets, new Set(), BASE, true, 120_000, new Set(), 3, 2, 600_000, BASE,
+    ELITE_SELECTOR_VERSION, true);
+  for (const row of targets) {
+    first.commitClosedHydration(row.portfolioId, [], BASE + 1);
+    first.commitOpenBaseline(row.portfolioId, [], BASE + 2);
+  }
+  assert.equal(Object.keys(JSON.parse(readFileSync(admissionPath, 'utf8')).rows).length, 3);
+
+  const restarted = new EliteDirectWatchState(path, admissionPath, 2);
+  assert.equal(restarted.status().activeTargetCount, 3);
+  assert.equal(restarted.status().admissionsHealthy, false);
+  assert.deepEqual(JSON.parse(readFileSync(admissionPath, 'utf8')).rows, {});
+  restarted.syncTargets([], new Set(), BASE + 3, false, 120_000, new Set(), 999,
+    2, 600_000, BASE + 3, ELITE_SELECTOR_VERSION, true);
+  assert.deepEqual(JSON.parse(readFileSync(admissionPath, 'utf8')).rows, {},
+    'missing/stale/malformed candidate authority cannot make startup permissive');
+});
+
+test('attempt rotation cannot refresh admission health; suspension and successful recovery are atomic', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elite-success-freshness-'));
+  const admissionPath = join(dir, 'admissions.json');
+  const state = new EliteDirectWatchState(join(dir, 'state.json'), admissionPath, 1);
+  state.syncTargets([target], new Set(), BASE, true, 120_000, new Set(), 1, 2, 600_000, BASE,
+    ELITE_SELECTOR_VERSION, true);
+  state.commitClosedHydration('p1', [], BASE + 1);
+  state.commitOpenBaseline('p1', [], BASE + 2);
+  const successfulAt = state.status().oldestOpenPollAtMs;
+  state.noteFallbackPoll('p1', BASE + 50_000);
+  state.noteClosedPoll('p1', BASE + 50_000);
+  assert.equal(state.status().oldestOpenPollAtMs, successfulAt,
+    'failed attempts only rotate scheduling and never refresh health');
+  state.setAdmissionHealth(false, 'rate_limit_cooldown');
+  assert.deepEqual(JSON.parse(readFileSync(admissionPath, 'utf8')).rows, {});
+  state.commitHydration('p1', BASE + 50_000);
+  state.commitClosedHydration('p1', [], BASE + 50_000);
+  state.setAdmissionHealth(true);
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(admissionPath, 'utf8')).rows), ['p1']);
+});
+
+test('snapshot sequence ignores stale journal row from rename-before-truncate crash window', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elite-journal-seq-'));
+  const path = join(dir, 'state.json');
+  const state = new EliteDirectWatchState(path);
+  state.syncTargets([target], new Set(), BASE);
+  state.commitHydration('p1', BASE + 10);
+  state.syncTargets([{ ...target, username: 'new-name' }], new Set(), BASE + 20);
+  const snapshot = JSON.parse(readFileSync(path, 'utf8'));
+  const staleTarget = { ...snapshot.targets.p1, username: 'stale-name', processedThroughMs: BASE + 5 };
+  appendFileSync(`${path}.journal.jsonl`, `${JSON.stringify({ version: 2,
+    seq: snapshot.snapshotAppliedJournalSeq, portfolioId: 'p1', target: staleTarget })}\n`);
+  const restarted = new EliteDirectWatchState(path);
+  assert.equal(restarted.targets()[0].username, 'new-name');
+  assert.equal(restarted.targets()[0].processedThroughMs, BASE + 10);
+  restarted.commitHydration('p1', BASE + 30);
+  const newestJournal = JSON.parse(readFileSync(`${path}.journal.jsonl`, 'utf8').trim());
+  assert.ok(newestJournal.seq > snapshot.snapshotAppliedJournalSeq,
+    'post-restart journal sequence must remain monotonic above the snapshot');
 });
 
 test('first closed-history baseline indexes old rows without replay and survives restart', () => {

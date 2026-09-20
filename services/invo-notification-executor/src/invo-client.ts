@@ -22,7 +22,7 @@ export function setRefreshToken(value: string) {
   refreshToken = value.replace(/^Bearer\s+/i, '');
 }
 
-function accessTokenStillFresh(): boolean {
+function accessTokenStillFresh(minValidityMs = 30_000): boolean {
   if (!token) return false;
   try {
     const raw = token.replace(/^Bearer\s+/i, '').split('.')[1];
@@ -30,7 +30,7 @@ function accessTokenStillFresh(): boolean {
     const padded = normalized + '='.repeat((4 - normalized.length % 4) % 4);
     const payload = JSON.parse(Buffer.from(padded, 'base64').toString('utf8'));
     const expires = Number(payload.expires ?? payload.exp ?? 0);
-    return Number.isFinite(expires) && expires - Date.now() / 1000 > 30;
+    return Number.isFinite(expires) && expires * 1000 - Date.now() > minValidityMs;
   } catch {
     return false;
   }
@@ -57,13 +57,24 @@ export async function ensureToken(): Promise<void> {
   if (!refreshed && !token) throw new Error('No valid Invo token and refresh failed');
 }
 
+/** Direct-watch scans require one token proven valid for their whole hard horizon. */
+export async function ensureTokenFreshFor(minValidityMs: number): Promise<void> {
+  if (accessTokenStillFresh(minValidityMs)) return;
+  const refreshed = await refreshAccessToken();
+  if (!refreshed || !accessTokenStillFresh(minValidityMs)) {
+    throw new Error(`Invo token is not provably fresh for ${minValidityMs}ms direct-watch horizon`);
+  }
+}
+
 function decodeResponse(text: string): unknown {
   try { return JSON.parse(text); } catch {}
   try { return JSON.parse(Buffer.from(text, 'base64').toString('utf8')); } catch {}
   return text;
 }
 
-async function post(path: string, body: unknown, retried = false, beforeRequest?: () => Promise<void>): Promise<any> {
+async function post(
+  path: string, body: unknown, retried = false, beforeRequest?: () => Promise<void>, allowAuthRetry = true,
+): Promise<any> {
   await ensureToken();
   await beforeRequest?.();
   const resp = await fetch(`${BASE}${path}`, {
@@ -77,7 +88,9 @@ async function post(path: string, body: unknown, retried = false, beforeRequest?
     signal: AbortSignal.timeout(INVO_HTTP_REQUEST_TIMEOUT_MS),
   });
   const data = decodeResponse(await resp.text());
-  if (resp.status === 401 && !retried && await refreshAccessToken()) return post(path, body, true, beforeRequest);
+  if (resp.status === 401 && allowAuthRetry && !retried && await refreshAccessToken()) {
+    return post(path, body, true, beforeRequest, allowAuthRetry);
+  }
   if (resp.status >= 400) throw new InvoHttpError(path, resp.status, data);
   return data;
 }
@@ -101,12 +114,13 @@ export async function getFeed(filter = 'following', lastPostId: string | null = 
 
 export async function getPortfolioInvestments(
   portfolioId: string, isOpen: boolean, page = 1, size = 100, beforeRequest?: () => Promise<void>,
+  allowAuthRetry = true,
 ) {
   return post('/v1_0/investments/get_investments', {
     portfolioId,
     isOpen,
     params: { page, size },
-  }, false, beforeRequest);
+  }, false, beforeRequest, allowAuthRetry);
 }
 
 export async function checkAccountReady() {
