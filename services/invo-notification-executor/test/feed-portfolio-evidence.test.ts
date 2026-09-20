@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   FeedPortfolioEvidenceStore,
+  FEED_EVIDENCE_MAX_JOURNAL_BYTES,
+  FEED_EVIDENCE_MAX_PORTFOLIOS,
+  FEED_EVIDENCE_MAX_STATE_BYTES,
   loadFeedPortfolioEvidence,
   normalizeFeedPortfolioObservation,
 } from '../src/feed-portfolio-evidence.js';
@@ -30,9 +33,9 @@ test('all four captured feed surfaces normalize portfolio provenance and aliases
   const normiee = normalizeFeedPortfolioObservation(fixture.most_recent, 'most_recent', capturedAtMs);
   assert.ok(normiee);
   assert.equal(normiee.username, 'normiee');
-  assert.deepEqual(normiee.rawPortfolio.plSnapshot, { start: 10, end: 35 });
+  assert.equal(normiee.profile.plSnapshot, undefined, 'non-allowlisted payload is stripped');
   const withoutCanonicalReturn = classifyPortfolio({
-    ...normiee.rawPortfolio, percentChange: undefined,
+    ...normiee.profile, percentChange: undefined,
   }, capturedAtMs, 'feed:most_recent');
   assert.ok(withoutCanonicalReturn);
   assert.equal(withoutCanonicalReturn.percentChange, null, 'plSnapshot is not guessed to be percentChange');
@@ -50,7 +53,7 @@ test('bounded evidence is restart-safe and deduplicates replayed feed posts', ()
   assert.equal(Object.keys(loadFeedPortfolioEvidence(path).portfolios).length, 1);
 });
 
-test('feed-only strong portfolio becomes selector-visible only at processing time', () => {
+test('feed-only profile without verified proof remains discovery evidence only', () => {
   const dir = mkdtempSync(join(tmpdir(), 'feed-selector-causal-'));
   const evidencePath = join(dir, 'feed.json');
   const statePath = join(dir, 'portfolio-candidates.json');
@@ -64,14 +67,53 @@ test('feed-only strong portfolio becomes selector-visible only at processing tim
   assert.equal(result.observationsProcessed, 1);
   assert.equal(result.totalFeedDiscoveredUniquePortfolios, 1);
   assert.equal(result.newVsBroadDiscovery, 1);
-  assert.equal(result.newlySelectorQualified, 1);
+  assert.equal(result.newlySelectorQualified, 0);
+  assert.equal(result.rejectedUnverified, 1);
+  assert.equal(ledger.get('portfolio-normiee'), null);
+});
+
+test('verified read-only profile hydration can prospectively qualify', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'feed-selector-hydrated-'));
+  const evidencePath = join(dir, 'feed.json');
+  const ledger = new PortfolioCandidateLedger(join(dir, 'state.json'), join(dir, 'snapshots.jsonl'));
+  new FeedPortfolioEvidenceStore(evidencePath).observe([fixture.most_recent], 'most_recent', capturedAtMs);
+  ledger.observe([{ ...fixture.most_recent.update.portfolio, owner: { ...fixture.most_recent.update.owner, verified: true } }], 'trending', processedAtMs - 1);
+  const result = ledger.assimilateFeedEvidence(Object.values(loadFeedPortfolioEvidence(evidencePath).portfolios), processedAtMs);
+  assert.equal(result.newlySelectorQualified, 0, 'already-qualified hydrated profile is not relabelled new');
   assert.equal(ledger.get('portfolio-normiee')?.bucket, 'ELITE_CANDIDATE');
-  assert.equal(ledger.get('portfolio-normiee')?.observedAtMs, processedAtMs);
-  assert.equal(ledger.get('portfolio-normiee')?.closedPositions, 26);
-  assert.equal(ledger.get('portfolio-normiee')?.openPositions, 1);
-  assert.equal(ledger.get('portfolio-normiee')?.wonPositions, 24);
-  assert.equal(ledger.get('portfolio-normiee')?.lostPositions, 2);
-  assert.equal(ledger.firstEliteAtMs('portfolio-normiee'), processedAtMs);
+  assert.equal(ledger.get('portfolio-normiee')?.sourceFilter, 'trending', 'feed evidence must not overwrite canonical verified profile');
+});
+
+test('conflicting owner IDs and normalized usernames are rejected explicitly', () => {
+  const idConflict = structuredClone(fixture.most_recent);
+  idConflict.owner = { id: 'different-owner', username: 'normiee' };
+  const nameConflict = structuredClone(fixture.most_recent);
+  nameConflict.owner = { id: 'owner-normiee', username: 'OTHER' };
+  assert.equal(normalizeFeedPortfolioObservation(idConflict, 'most_recent', capturedAtMs), null);
+  assert.equal(normalizeFeedPortfolioObservation(nameConflict, 'most_recent', capturedAtMs), null);
+});
+
+test('malformed metric consistency cannot qualify', () => {
+  const malformed = structuredClone(fixture.most_recent);
+  malformed.update.owner.verified = true;
+  malformed.update.portfolio.wonPositionsCount = 30;
+  const path = join(mkdtempSync(join(tmpdir(), 'feed-malformed-')), 'feed.json');
+  new FeedPortfolioEvidenceStore(path).observe([malformed], 'most_recent', capturedAtMs);
+  const dir = mkdtempSync(join(tmpdir(), 'feed-malformed-ledger-'));
+  const ledger = new PortfolioCandidateLedger(join(dir, 'state.json'), join(dir, 'snapshots.jsonl'));
+  const result = ledger.assimilateFeedEvidence(Object.values(loadFeedPortfolioEvidence(path).portfolios), processedAtMs);
+  assert.notEqual(ledger.get('portfolio-normiee')?.bucket, 'ELITE_CANDIDATE');
+  assert.equal(result.rejectedMalformed, 1);
+});
+
+test('rotating evidence stays within portfolio, state-byte and journal-byte caps', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'feed-cap-')), 'feed.json');
+  const store = new FeedPortfolioEvidenceStore(path);
+  const posts = Array.from({ length: FEED_EVIDENCE_MAX_PORTFOLIOS + 25 }, (_, index) => ({ id: `post-${index}`, update: { portfolio: { ...fixture.most_recent.update.portfolio, id: `portfolio-${index}` }, owner: { id: `owner-${index}`, username: `user-${index}` } } }));
+  store.observe(posts, 'most_recent', capturedAtMs);
+  assert.ok(store.report().uniquePortfolioCount <= FEED_EVIDENCE_MAX_PORTFOLIOS);
+  assert.ok(statSync(path).size <= FEED_EVIDENCE_MAX_STATE_BYTES);
+  assert.ok(statSync(`${path}.journal.jsonl`).size <= FEED_EVIDENCE_MAX_JOURNAL_BYTES);
 });
 
 test('historical feed trade cannot become copy-eligible after portfolio assimilation', () => {
@@ -81,6 +123,7 @@ test('historical feed trade cannot become copy-eligible after portfolio assimila
   const snapshotsPath = join(dir, 'candidate-snapshots.jsonl');
   new FeedPortfolioEvidenceStore(evidencePath).observe([fixture.most_recent], 'most_recent', capturedAtMs);
   const ledger = new PortfolioCandidateLedger(statePath, snapshotsPath);
+  ledger.observe([{ ...fixture.most_recent.update.portfolio, owner: { ...fixture.most_recent.update.owner, verified: true } }], 'trending', processedAtMs);
   ledger.assimilateFeedEvidence(Object.values(loadFeedPortfolioEvidence(evidencePath).portfolios), processedAtMs);
   const historicalDecision = eliteAdmissionFromState(
     statePath, 'portfolio-normiee', capturedAtMs, 20 * 60_000, snapshotsPath,
@@ -105,5 +148,5 @@ test('research ingestion is durable and does not reprocess evidence after restar
   new PortfolioCandidateLedger(statePath, snapshotsPath).assimilateFeedEvidence(records, processedAtMs);
   const restarted = new PortfolioCandidateLedger(statePath, snapshotsPath);
   assert.equal(restarted.assimilateFeedEvidence(records, processedAtMs + 60_000).observationsProcessed, 0);
-  assert.equal(readFileSync(snapshotsPath, 'utf8').trim().split('\n').length, 1);
+  assert.equal(existsSync(snapshotsPath), false, 'unverified evidence never writes a candidate snapshot');
 });

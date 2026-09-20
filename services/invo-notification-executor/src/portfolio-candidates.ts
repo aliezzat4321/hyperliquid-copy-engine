@@ -1,5 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
 import { dirname } from 'path';
+import { createHash } from 'crypto';
 import type { FeedPortfolioRecord } from './feed-portfolio-evidence.js';
 
 export const ELITE_SELECTOR_VERSION = 'invo-portfolio-hybrid-v3-20260916';
@@ -92,28 +93,21 @@ interface LedgerDiskState {
   firstEliteAtMs: Record<string, number>;
   lastObservedAtMs: number;
   feedEvidence?: {
-    processedEvidenceIds: string[];
-    feedDiscoveredPortfolioIds: string[];
-    feedOnlyAtFirstIngestionIds: string[];
-    newlySelectorQualifiedIds: string[];
-    firstProcessedAtMs: Record<string, number>;
-    lastProcessedAtMs: Record<string, number>;
-    surfacesByPortfolio: Record<string, string[]>;
-    sourceFirstSeenAtMs: Record<string, number>;
-    sourceLastSeenAtMs: Record<string, number>;
+    version: 2;
+    replayBloomBase64: string;
+    records: Record<string, { firstProcessedAtMs: number; lastProcessedAtMs: number; sourceFirstSeenAtMs: number; sourceLastSeenAtMs: number; surfaces: string[]; feedOnlyAtFirstIngestion: boolean; newlySelectorQualified: boolean }>;
+    lifetime: { discovered: number; feedOnly: number; newlyQualified: number; rejectedUnverified: number; rejectedMalformed: number; rejectedIdentityConflicts: number; dedupedReplayCount: number };
   };
 }
 
+export const FEED_SELECTOR_TRACKING_MAX_PORTFOLIOS = 5_000;
+const SELECTOR_BLOOM_BYTES = 262_144;
+const SELECTOR_BLOOM_HASHES = 7;
 const emptyFeedEvidence = () => ({
-  processedEvidenceIds: [] as string[],
-  feedDiscoveredPortfolioIds: [] as string[],
-  feedOnlyAtFirstIngestionIds: [] as string[],
-  newlySelectorQualifiedIds: [] as string[],
-  firstProcessedAtMs: {} as Record<string, number>,
-  lastProcessedAtMs: {} as Record<string, number>,
-  surfacesByPortfolio: {} as Record<string, string[]>,
-  sourceFirstSeenAtMs: {} as Record<string, number>,
-  sourceLastSeenAtMs: {} as Record<string, number>,
+  version: 2 as const,
+  replayBloomBase64: Buffer.alloc(SELECTOR_BLOOM_BYTES).toString('base64'),
+  records: {} as Record<string, { firstProcessedAtMs: number; lastProcessedAtMs: number; sourceFirstSeenAtMs: number; sourceLastSeenAtMs: number; surfaces: string[]; feedOnlyAtFirstIngestion: boolean; newlySelectorQualified: boolean }>,
+  lifetime: { discovered: 0, feedOnly: 0, newlyQualified: 0, rejectedUnverified: 0, rejectedMalformed: 0, rejectedIdentityConflicts: 0, dedupedReplayCount: 0 },
 });
 
 const PORTFOLIO_BUCKETS = new Set<PortfolioBucket>([
@@ -334,6 +328,13 @@ export function classifyPortfolio(
   // This is a count ratio, not an average-win / average-loss payout ratio. Keep it
   // for observability, but do not double-count it as independent profitability evidence.
   const winLossRatio = lostPositions > 0 ? wonPositions / lostPositions : wonPositions > 0 ? wonPositions : null;
+  const metricsComplete = createdAtMs != null && winRatePct != null && percentChange != null
+    && Number.isFinite(Number(raw?.closedPositions ?? raw?.closedPositionsCount ?? raw?.closedTrades ?? raw?.totalClosedPositions))
+    && Number.isFinite(Number(raw?.wonPositions ?? raw?.wonPositionsCount ?? raw?.winningPositions ?? raw?.wins))
+    && Number.isFinite(Number(raw?.lostPositions ?? raw?.lostPositionsCount ?? raw?.losingPositions ?? raw?.losses));
+  const metricsConsistent = metricsComplete && wonPositions + lostPositions <= closedPositions
+    && winRatePct! >= 0 && winRatePct! <= 100
+    && (closedPositions === 0 || Math.abs((wonPositions / closedPositions) * 100 - winRatePct!) <= 1.0);
 
   const scored = scorePortfolio({
     closedPositions,
@@ -361,6 +362,9 @@ export function classifyPortfolio(
   const enoughHybridSample = hybridRequiredClosedPositions != null
     && closedPositions >= hybridRequiredClosedPositions;
   const elite = !hardReject
+    && (!sourceFilter.startsWith('feed:') || verified === true)
+    && metricsComplete
+    && metricsConsistent
     && enoughBaseSample
     && enoughAge
     && enoughWinRate
@@ -397,6 +401,9 @@ export function classifyPortfolio(
     if (enoughWinRate && hybridRequiredReturnPct != null && !enoughHybridReturn) reasons.push('return_below_win_rate_tradeoff');
     if (enoughWinRate && hybridRequiredClosedPositions != null && !enoughHybridSample) reasons.push('sample_below_win_rate_tradeoff');
     if (scored.score < policy.minQualityScore) reasons.push('weighted_quality_score_below_gate');
+    if (sourceFilter.startsWith('feed:') && verified !== true) reasons.push('verified_profile_required');
+    if (!metricsComplete) reasons.push('incomplete_profile_metrics');
+    else if (!metricsConsistent) reasons.push('inconsistent_profile_metrics');
   }
 
   return {
@@ -462,7 +469,7 @@ export class PortfolioCandidateLedger {
           portfolios: selectorMatches ? (parsed.portfolios ?? {}) : {},
           firstEliteAtMs: selectorMatches ? (parsed.firstEliteAtMs ?? {}) : {},
           lastObservedAtMs: selectorMatches ? (parsed.lastObservedAtMs ?? 0) : 0,
-          feedEvidence: selectorMatches ? (parsed.feedEvidence ?? emptyFeedEvidence()) : emptyFeedEvidence(),
+          feedEvidence: selectorMatches && parsed.feedEvidence?.version === 2 ? parsed.feedEvidence : emptyFeedEvidence(),
         };
       } catch {
         // A malformed prior candidate file must not stop broad research; start a clean candidate view.
@@ -488,52 +495,71 @@ export class PortfolioCandidateLedger {
    */
   assimilateFeedEvidence(records: FeedPortfolioRecord[], processedAtMs = Date.now()) {
     const meta = this.state.feedEvidence ?? emptyFeedEvidence();
-    const processed = new Set(meta.processedEvidenceIds);
-    const feedIds = new Set(meta.feedDiscoveredPortfolioIds);
-    const feedOnlyIds = new Set(meta.feedOnlyAtFirstIngestionIds);
-    const newlyQualified = new Set(meta.newlySelectorQualifiedIds);
+    let bloom = Buffer.from(meta.replayBloomBase64, 'base64');
+    if (bloom.length !== SELECTOR_BLOOM_BYTES) bloom = Buffer.alloc(SELECTOR_BLOOM_BYTES);
+    const bloomIndexes = (id: string) => { const digest = createHash('sha256').update(id).digest(); return Array.from({ length: SELECTOR_BLOOM_HASHES }, (_, index) => digest.readUInt32BE(index * 4) % (SELECTOR_BLOOM_BYTES * 8)); };
+    const seen = (id: string) => bloomIndexes(id).every(index => (bloom[index >> 3] & (1 << (index & 7))) !== 0);
+    const remember = (id: string) => { for (const index of bloomIndexes(id)) bloom[index >> 3] |= 1 << (index & 7); };
     let observationsProcessed = 0;
     for (const record of records.sort((a, b) => a.firstSeenAtMs - b.firstSeenAtMs || a.portfolioId.localeCompare(b.portfolioId))) {
       const wasKnown = this.state.portfolios[record.portfolioId] != null;
       const wasElite = this.state.portfolios[record.portfolioId]?.bucket === 'ELITE_CANDIDATE';
-      const unseen = record.observations.filter(row => !processed.has(row.evidenceId))
+      const unseen = record.observations.filter(row => {
+        if (!seen(row.evidenceId)) return true;
+        meta.lifetime.dedupedReplayCount += 1;
+        return false;
+      })
         .sort((a, b) => a.capturedAtMs - b.capturedAtMs || a.evidenceId.localeCompare(b.evidenceId));
       if (!unseen.length) continue;
-      feedIds.add(record.portfolioId);
-      if (!wasKnown) feedOnlyIds.add(record.portfolioId);
-      meta.firstProcessedAtMs[record.portfolioId] ??= processedAtMs;
-      meta.lastProcessedAtMs[record.portfolioId] = processedAtMs;
-      meta.surfacesByPortfolio[record.portfolioId] = [...new Set([
-        ...(meta.surfacesByPortfolio[record.portfolioId] ?? []), ...record.surfaces,
-      ])].sort();
-      meta.sourceFirstSeenAtMs[record.portfolioId] = Math.min(
-        meta.sourceFirstSeenAtMs[record.portfolioId] ?? record.firstSeenAtMs, record.firstSeenAtMs,
-      );
-      meta.sourceLastSeenAtMs[record.portfolioId] = Math.max(
-        meta.sourceLastSeenAtMs[record.portfolioId] ?? 0, record.lastSeenAtMs,
-      );
-      // The latest captured raw portfolio is evaluated once, through the unchanged selector.
-      const latest = unseen[unseen.length - 1];
-      const raw = {
-        ...latest.rawPortfolio,
-        id: record.portfolioId,
-        ownerId: latest.ownerId ?? latest.rawPortfolio.ownerId,
-        owner: latest.rawPortfolio.owner ?? {
-          id: latest.ownerId,
-          username: latest.username,
-        },
+      const previousMeta = meta.records[record.portfolioId];
+      if (!previousMeta) { meta.lifetime.discovered += 1; if (!wasKnown) meta.lifetime.feedOnly += 1; }
+      meta.records[record.portfolioId] = {
+        firstProcessedAtMs: previousMeta?.firstProcessedAtMs ?? processedAtMs, lastProcessedAtMs: processedAtMs,
+        sourceFirstSeenAtMs: Math.min(previousMeta?.sourceFirstSeenAtMs ?? record.firstSeenAtMs, record.firstSeenAtMs),
+        sourceLastSeenAtMs: Math.max(previousMeta?.sourceLastSeenAtMs ?? 0, record.lastSeenAtMs),
+        surfaces: [...new Set([...(previousMeta?.surfaces ?? []), ...record.surfaces])].sort(),
+        feedOnlyAtFirstIngestion: previousMeta?.feedOnlyAtFirstIngestion ?? !wasKnown,
+        newlySelectorQualified: previousMeta?.newlySelectorQualified ?? false,
       };
-      this.observe([raw], `feed:${latest.surface}`, processedAtMs);
-      for (const row of unseen) processed.add(row.evidenceId);
+      const latest = unseen[unseen.length - 1];
+      const existing = this.state.portfolios[record.portfolioId];
+      const consistent = !existing || ((!existing.ownerId || !latest.ownerId || existing.ownerId === latest.ownerId)
+        && (!existing.username || !latest.username || existing.username === latest.username));
+      if (!consistent) meta.lifetime.rejectedIdentityConflicts += 1;
+      // Feed evidence is additive. It must never refresh, overwrite, or demote an
+      // existing canonical verified candidate. Feed-only rows may enter the selector
+      // only when the feed itself carries internally consistent verified profile data.
+      const feedVerified = latest.verified === true && Boolean(latest.ownerId || latest.username);
+      if (consistent && existing?.verified === true) {
+        // Existing broad/profile state remains authoritative; retain its original
+        // observation timestamp and source so social activity cannot manufacture
+        // freshness for stale selector economics.
+      } else if (consistent && feedVerified) {
+        const raw = {
+          ...latest.profile,
+          id: record.portfolioId,
+          ownerId: latest.ownerId,
+          owner: { id: latest.ownerId, username: latest.username, verified: true },
+        };
+        const candidate = classifyPortfolio(raw, processedAtMs, `feed:${latest.surface}`, this.policy);
+        if (candidate?.reasons.includes('incomplete_profile_metrics') || candidate?.reasons.includes('inconsistent_profile_metrics')) {
+          meta.lifetime.rejectedMalformed += 1;
+        } else {
+          this.observe([raw], `feed:${latest.surface}`, processedAtMs);
+        }
+      } else if (consistent) {
+        meta.lifetime.rejectedUnverified += 1;
+      }
+      for (const row of unseen) remember(row.evidenceId);
       observationsProcessed += unseen.length;
       if (!wasElite && this.state.portfolios[record.portfolioId]?.bucket === 'ELITE_CANDIDATE') {
-        newlyQualified.add(record.portfolioId);
+        if (!meta.records[record.portfolioId].newlySelectorQualified) meta.lifetime.newlyQualified += 1;
+        meta.records[record.portfolioId].newlySelectorQualified = true;
       }
     }
-    meta.processedEvidenceIds = [...processed].slice(-40_000);
-    meta.feedDiscoveredPortfolioIds = [...feedIds].sort();
-    meta.feedOnlyAtFirstIngestionIds = [...feedOnlyIds].sort();
-    meta.newlySelectorQualifiedIds = [...newlyQualified].sort();
+    meta.replayBloomBase64 = bloom.toString('base64');
+    const retained = Object.entries(meta.records).sort((a, b) => b[1].lastProcessedAtMs - a[1].lastProcessedAtMs || a[0].localeCompare(b[0])).slice(0, FEED_SELECTOR_TRACKING_MAX_PORTFOLIOS);
+    meta.records = Object.fromEntries(retained);
     this.state.feedEvidence = meta;
     if (observationsProcessed) this.saveState();
     return { observationsProcessed, ...this.feedExpansionReport(processedAtMs) };
@@ -541,24 +567,22 @@ export class PortfolioCandidateLedger {
 
   feedExpansionReport(nowMs = Date.now()) {
     const meta = this.state.feedEvidence ?? emptyFeedEvidence();
-    const rows = meta.feedDiscoveredPortfolioIds.map(portfolioId => ({
+    const rows = Object.entries(meta.records).map(([portfolioId, record]) => ({
       portfolioId,
-      surfaces: meta.surfacesByPortfolio[portfolioId] ?? [],
-      firstSeenAtMs: meta.sourceFirstSeenAtMs[portfolioId] ?? null,
-      lastSeenAtMs: meta.sourceLastSeenAtMs[portfolioId] ?? null,
-      firstProcessedAtMs: meta.firstProcessedAtMs[portfolioId] ?? null,
-      lastProcessedAtMs: meta.lastProcessedAtMs[portfolioId] ?? null,
-      ingestionLagMs: meta.firstProcessedAtMs[portfolioId] == null || meta.sourceFirstSeenAtMs[portfolioId] == null
-        ? null : Math.max(0, meta.firstProcessedAtMs[portfolioId] - meta.sourceFirstSeenAtMs[portfolioId]),
-      feedOnlyAtFirstIngestion: meta.feedOnlyAtFirstIngestionIds.includes(portfolioId),
-      newlySelectorQualified: meta.newlySelectorQualifiedIds.includes(portfolioId),
+      surfaces: record.surfaces, firstSeenAtMs: record.sourceFirstSeenAtMs, lastSeenAtMs: record.sourceLastSeenAtMs,
+      firstProcessedAtMs: record.firstProcessedAtMs, lastProcessedAtMs: record.lastProcessedAtMs,
+      ingestionLagMs: Math.max(0, record.firstProcessedAtMs - record.sourceFirstSeenAtMs),
+      feedOnlyAtFirstIngestion: record.feedOnlyAtFirstIngestion, newlySelectorQualified: record.newlySelectorQualified,
       currentBucket: this.state.portfolios[portfolioId]?.bucket ?? null,
     }));
     return {
       measuredAtMs: nowMs,
-      totalFeedDiscoveredUniquePortfolios: rows.length,
-      newVsBroadDiscovery: meta.feedOnlyAtFirstIngestionIds.length,
-      newlySelectorQualified: meta.newlySelectorQualifiedIds.length,
+      totalFeedDiscoveredUniquePortfolios: meta.lifetime.discovered,
+      newVsBroadDiscovery: meta.lifetime.feedOnly,
+      newlySelectorQualified: meta.lifetime.newlyQualified,
+      retainedTrackingRecords: rows.length, trackingRecordCap: FEED_SELECTOR_TRACKING_MAX_PORTFOLIOS,
+      rejectedUnverified: meta.lifetime.rejectedUnverified, rejectedMalformed: meta.lifetime.rejectedMalformed,
+      rejectedIdentityConflicts: meta.lifetime.rejectedIdentityConflicts, dedupedReplayCount: meta.lifetime.dedupedReplayCount,
       portfolios: rows,
     };
   }
