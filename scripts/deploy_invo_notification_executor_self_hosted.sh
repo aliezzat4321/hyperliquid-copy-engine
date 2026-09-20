@@ -98,6 +98,9 @@ set_env NOTIFICATION_TRADER_AUDIT_PATH /var/lib/hyperliquid-copy-engine/invo-not
 set_env NOTIFICATION_TRADER_TRACKER_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/trader-population.json
 set_env NOTIFICATION_TRADER_CANDIDATE_STATE_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/portfolio-candidates.json
 set_env NOTIFICATION_TRADER_DIRECT_WATCH_STATE_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/elite-direct-watch.json
+set_env NOTIFICATION_TRADER_DIRECT_WATCH_ADMISSION_INDEX_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/elite-direct-watch-admissions.json
+set_env INVO_HTTP_REQUEST_TIMEOUT_MS 2000
+set_env DIRECT_WATCH_FIXED_OVERHEAD_MS 5000
 set_env NOTIFICATION_TRADER_DIRECT_WATCH_SCAN_MS 3000
 set_env NOTIFICATION_TRADER_DIRECT_WATCH_MAX_HYDRATES_PER_SCAN 8
 set_env NOTIFICATION_TRADER_DIRECT_WATCH_OPEN_MAX_PAGES 3

@@ -45,6 +45,9 @@ DELETE_FILES = (
     "portfolio-candidate-snapshots.jsonl",
     "elite-shadow-report.json",
     "elite-shadow-ledger.jsonl",
+    "elite-direct-watch.json",
+    "elite-direct-watch.json.journal.jsonl",
+    "elite-direct-watch-admissions.json",
 )
 
 # Earlier deployment logic archived contaminated runtime state instead of
@@ -57,6 +60,8 @@ DELETE_ARCHIVE_PATTERNS = (
     "portfolio-candidate-snapshots.pre-*.jsonl",
     "elite-shadow-report.pre-*.json",
     "elite-shadow-ledger.pre-*.jsonl",
+    "elite-direct-watch.pre-*.json",
+    "elite-direct-watch-admissions.pre-*.json",
 )
 
 

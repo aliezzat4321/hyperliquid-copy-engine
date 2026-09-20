@@ -124,6 +124,8 @@ function loadConfig() {
     candidateSnapshotsPath: resolve(process.env.INVO_PORTFOLIO_CANDIDATE_SNAPSHOTS_PATH ?? '/var/lib/hyperliquid-copy-engine/invo-notification-executor/portfolio-candidate-snapshots.jsonl'),
     candidateStateMaxAgeMs: Math.max(60_000, n('NOTIFICATION_TRADER_CANDIDATE_MAX_AGE_MS', 20 * 60 * 1000)),
     directWatchStatePath: resolve(process.env.NOTIFICATION_TRADER_DIRECT_WATCH_STATE_PATH ?? '/var/lib/hyperliquid-copy-engine/invo-notification-executor/elite-direct-watch.json'),
+    directWatchAdmissionIndexPath: resolve(process.env.NOTIFICATION_TRADER_DIRECT_WATCH_ADMISSION_INDEX_PATH
+      ?? '/var/lib/hyperliquid-copy-engine/invo-notification-executor/elite-direct-watch-admissions.json'),
     directWatchScanMs: Math.max(2_000, n('NOTIFICATION_TRADER_DIRECT_WATCH_SCAN_MS', 3_000)),
     directWatchMaxHydratesPerScan: Math.max(1, Math.min(20, Math.trunc(n('NOTIFICATION_TRADER_DIRECT_WATCH_MAX_HYDRATES_PER_SCAN', 8)))),
     directWatchOpenMaxPages: Math.max(1, Math.min(10, Math.trunc(n('NOTIFICATION_TRADER_DIRECT_WATCH_OPEN_MAX_PAGES', 3)))),
@@ -132,6 +134,8 @@ function loadConfig() {
     directWatchMaxClosedHydratesPerScan: Math.max(1, Math.min(10, Math.trunc(n('NOTIFICATION_TRADER_DIRECT_WATCH_MAX_CLOSED_HYDRATES_PER_SCAN', 3)))),
     directWatchClosedMaxPages: Math.max(1, Math.min(3, Math.trunc(n('NOTIFICATION_TRADER_DIRECT_WATCH_CLOSED_MAX_PAGES', 2)))),
     directWatchResidentCap: Math.max(1, Math.trunc(n('MAX_DIRECT_WATCH_RESIDENT_TARGETS', 48))),
+    directWatchRequestTimeoutMs: invo.INVO_HTTP_REQUEST_TIMEOUT_MS,
+    directWatchFixedOverheadMs: Math.max(0, n('DIRECT_WATCH_FIXED_OVERHEAD_MS', 5_000)),
     directWatchNegativeMinObservations: Math.max(2, Math.trunc(n('DIRECT_WATCH_NEGATIVE_MIN_OBSERVATIONS', 2))),
     directWatchNegativeGraceMs: Math.max(600_000, n('DIRECT_WATCH_NEGATIVE_GRACE_MS', 600_000)),
     minEvidenceEvents: Math.max(1, Math.trunc(n('NOTIFICATION_TRADER_MIN_EVIDENCE_EVENTS', 20))),
@@ -149,6 +153,10 @@ const directWatchConfiguredCapacity = validateDirectWatchCapacity({
   openPollMs: cfg.directWatchFallbackPollMs,
   maxClosedHydratesPerScan: cfg.directWatchMaxClosedHydratesPerScan,
   closedPollMs: cfg.directWatchClosedPollMs,
+  requestTimeoutMs: cfg.directWatchRequestTimeoutMs * 2,
+  openMaxPages: cfg.directWatchOpenMaxPages,
+  closedMaxPages: cfg.directWatchClosedMaxPages,
+  fixedOverheadMs: cfg.directWatchFixedOverheadMs,
 });
 const shadowPolicy: ShadowExecutionPolicy = {
   maxBookAgeMs: cfg.shadowMaxBookAgeMs,
@@ -173,7 +181,7 @@ const tracker = new TraderTracker(cfg.trackerPath, {
   staleAfterMs: cfg.staleAfterMs,
   inactiveAfterMs: cfg.inactiveAfterMs,
 });
-const directWatch = new EliteDirectWatchState(cfg.directWatchStatePath);
+const directWatch = new EliteDirectWatchState(cfg.directWatchStatePath, cfg.directWatchAdmissionIndexPath);
 directWatch.assertResidentCap(cfg.directWatchResidentCap);
 const inFlight = new Set<string>();
 const inFlightSourceEvents = new Set<string>();
@@ -184,10 +192,8 @@ let lastSuccessPollMs = 0;
 let backoffMs = 0;
 let discoverySurfaceIndex = 0;
 let lastFundingOracleBoundaryMs = -1;
-let lastDirectWatchScanMs = 0;
 let directWatchBackoffMs = 0;
 let directWatchBackoffUntilMs = 0;
-let directWatchSelectorIndex = 0;
 const directWatchMetrics = {
   selectorRequests: 0, hydrationRequests: 0, hydrationCount: 0,
   closedHydrationCount: 0, closedBaselineCount: 0, closedOverflowRiskCount: 0,
@@ -584,6 +590,7 @@ async function executeUnlocked(signal: InvoSignal, wakeSource: string, receivedA
         eligibilityCutoffMs,
         cfg.candidateStateMaxAgeMs,
         cfg.candidateSnapshotsPath,
+        cfg.directWatchAdmissionIndexPath,
       );
       if (!candidateAdmission.allowed) {
         state.markSeen(signal.key);
@@ -1392,6 +1399,17 @@ async function hydrateDirectTarget(
     return directInvestmentRows(await invo.getPortfolioInvestments(target.portfolioId, true, page, 100));
   }, cfg.directWatchOpenMaxPages, 100);
   const openRows = openResult.rows;
+  if (target.lifecycle === 'ENROLLING') {
+    if (openResult.complete) directWatch.commitOpenBaseline(target.portfolioId, openRows, observedAtMs);
+    if (!openResult.complete) directWatchMetrics.openOverflowRiskCount += 1;
+    if (openResult.orderingViolation) directWatchMetrics.openOrderingViolationCount += 1;
+    log({ type: 'elite_direct_open_baseline', portfolioId: target.portfolioId,
+      pagesFetched: openResult.pagesFetched, endpointComplete: openResult.complete,
+      overflow: openResult.overflow, orderingViolation: openResult.orderingViolation,
+      admitted: openResult.complete, admittedAtMs: openResult.complete ? observedAtMs : null,
+      replayedSignals: 0, live: false });
+    return;
+  }
   if (target.lifecycle === 'RETIRING') {
     const dispositions = retiringOpenDispositions(
       openRows, target, observedAtMs,
@@ -1636,11 +1654,18 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
     } else {
       directWatchMetrics.candidateStateLastError = null;
     }
+    const preSyncStatus = directWatch.status();
+    const openOverdue = preSyncStatus.oldestOpenPollAtMs != null && preSyncStatus.oldestOpenPollAtMs > 0
+      && nowMs - preSyncStatus.oldestOpenPollAtMs > cfg.directWatchFallbackPollMs;
+    const closedOverdue = preSyncStatus.oldestClosedPollAtMs != null && preSyncStatus.oldestClosedPollAtMs > 0
+      && nowMs - preSyncStatus.oldestClosedPollAtMs > cfg.directWatchClosedPollMs;
+    const admissionsHealthy = preSyncStatus.targetCount <= directWatchConfiguredCapacity.provenResidentCap
+      && !openOverdue && !closedOverdue && nowMs >= directWatchBackoffUntilMs;
     const deferredBefore = new Set(directWatch.deferredAdmissions().map(row => row.portfolioId));
     directWatch.syncTargets(candidate.targets, ownedDirectPortfolioIds(), nowMs, !candidate.stale,
-      120_000, new Set(candidate.demotedPortfolioIds), cfg.directWatchResidentCap,
+      120_000, new Set(candidate.demotedPortfolioIds), directWatchConfiguredCapacity.provenResidentCap,
       cfg.directWatchNegativeMinObservations, cfg.directWatchNegativeGraceMs,
-      candidate.observedAtMs ?? nowMs);
+      candidate.observedAtMs ?? nowMs, undefined, admissionsHealthy);
     for (const deferred of directWatch.deferredAdmissions()) {
       if (deferredBefore.has(deferred.portfolioId)) continue;
       directWatchMetrics.deferredAdmissions += 1;
@@ -1652,40 +1677,10 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
         }, selectorReason: 'fresh_elite_candidate', live: false });
     }
     const targets = directWatch.targets();
-    const targetsByFilter = new Map<string, typeof targets>();
-    for (const target of targets) {
-      const rows = targetsByFilter.get(target.sourceFilter) ?? [];
-      rows.push(target);
-      targetsByFilter.set(target.sourceFilter, rows);
-    }
+    // Selector timestamps were only hints and consumed deadline budget. Direct
+    // portfolio polling is authoritative, so the dedicated direct-watch loop does
+    // not issue selector traffic. Candidate research remains a separate producer.
     const selectorChanges = new Map<string, number>();
-    const selectorGroups = [...targetsByFilter.entries()];
-    const rotated = selectorGroups.length === 0 ? [] : selectorGroups.map(
-      (_, offset) => selectorGroups[(directWatchSelectorIndex + offset) % selectorGroups.length],
-    );
-    let selectorRateLimited = false;
-    for (const [sourceFilter, filterTargets] of rotated) {
-      directWatchMetrics.selectorRequests += 1;
-      directWatchSelectorIndex = (directWatchSelectorIndex + 1) % selectorGroups.length;
-      try {
-        const payload = await invo.discoverPortfolios(sourceFilter, 1, 100);
-        const rows = Array.isArray(payload?.items) ? payload.items : [];
-        const byId = new Map(rows.map((row: any) => [String(row?.id ?? ''), row]));
-        for (const target of filterTargets) {
-          const row: any = byId.get(target.portfolioId);
-          const selectorUpdatedAtMs = directSourceTimeMs(row?.updatedAt);
-          if (selectorUpdatedAtMs != null) {
-            const decision = directWatch.observeSelector(target.portfolioId, selectorUpdatedAtMs);
-            if (decision.hydrate) selectorChanges.set(target.portfolioId, selectorUpdatedAtMs);
-          }
-        }
-      } catch (error: any) {
-        directWatchMetrics.selectorErrors += 1;
-        log({ type: 'elite_direct_selector_error', sourceFilter, status: error?.status,
-          error: error instanceof Error ? error.message : String(error), live: false });
-        if (error?.status === 429) { applyDirectWatchRateLimit(Date.now()); selectorRateLimited = true; break; }
-      }
-    }
 
     // Selector timestamps are hints only. Periodic direct plans are constructed
     // even when one or more selector requests fail.
@@ -1697,13 +1692,6 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
       directWatch.targets(), nowMs, cfg.directWatchClosedPollMs,
       cfg.directWatchMaxClosedHydratesPerScan,
     );
-    if (selectorRateLimited) {
-      directWatchMetrics.skippedAfterRateLimit += hydrationPlan.length + closedPlan.length;
-      log({ type: 'elite_direct_rate_limit_skip', phase: 'selector', skippedOpen: hydrationPlan.length,
-        skippedClosed: closedPlan.length, backoffMs: directWatchBackoffMs, live: false });
-      return;
-    }
-
     const openRun = await runIsolatedHydrations(
       hydrationPlan,
       item => directWatch.noteFallbackPoll(item.target.portfolioId, nowMs),
@@ -1741,7 +1729,6 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
     log({ type: 'elite_direct_watch_error', source: 'portfolio_specific_read_only', status: err?.status,
       backoffMs: directWatchBackoffMs, error: err instanceof Error ? err.message : String(err), live: false });
   } finally {
-    lastDirectWatchScanMs = nowMs;
     directWatchMetrics.lastScanAtMs = nowMs;
   }
 }
@@ -1779,6 +1766,10 @@ function startServer() {
         ? null : Math.max(0, healthNowMs - directStatus.oldestOpenPollAtMs);
       const oldestClosedPollAgeMs = directStatus.oldestClosedPollAtMs == null
         ? null : Math.max(0, healthNowMs - directStatus.oldestClosedPollAtMs);
+      const directWatchCapacityHealthy = directStatus.targetCount <= directWatchConfiguredCapacity.provenResidentCap
+        && (oldestOpenPollAgeMs == null || oldestOpenPollAgeMs <= cfg.directWatchFallbackPollMs)
+        && (oldestClosedPollAgeMs == null || oldestClosedPollAgeMs <= cfg.directWatchClosedPollMs)
+        && healthNowMs >= directWatchBackoffUntilMs;
       const paperPositions = Object.values(snapshot.managed).filter(position => position.paper);
       const unresolvedPaperPositions = paperPositions.filter(position => position.unresolvedAfterSourceClose);
       const markablePaperPositions = paperPositions.filter(position => !position.unresolvedAfterSourceClose);
@@ -1822,27 +1813,33 @@ function startServer() {
           maxClosedHydratesPerScan: cfg.directWatchMaxClosedHydratesPerScan,
           closedMaxPages: cfg.directWatchClosedMaxPages,
           residentCap: cfg.directWatchResidentCap,
-          residentBudgetHeadroom: cfg.directWatchResidentCap - directStatus.targetCount,
+          provenResidentCap: directWatchConfiguredCapacity.provenResidentCap,
+          residentBudgetHeadroom: directWatchConfiguredCapacity.provenResidentCap - directStatus.targetCount,
           negativeMinObservations: cfg.directWatchNegativeMinObservations,
           negativeGraceMs: cfg.directWatchNegativeGraceMs,
           sustainableOpenTargetCeiling: directWatchConfiguredCapacity.sustainableOpenTargetCeiling,
           sustainableClosedTargetCeiling: directWatchConfiguredCapacity.sustainableClosedTargetCeiling,
           openTargetHeadroom: directWatchConfiguredCapacity.sustainableOpenTargetCeiling - directStatus.targetCount,
           closedTargetHeadroom: directWatchConfiguredCapacity.sustainableClosedTargetCeiling - directStatus.targetCount,
-          nominalOpenSweepMs: Math.ceil(directStatus.targetCount / cfg.directWatchMaxHydratesPerScan) * cfg.directWatchScanMs,
-          nominalClosedSweepMs: Math.ceil(directStatus.targetCount / cfg.directWatchMaxClosedHydratesPerScan) * cfg.directWatchScanMs,
-          nominalMaxRequestsPerScan: cfg.directWatchMaxHydratesPerScan * cfg.directWatchOpenMaxPages
-            + cfg.directWatchMaxClosedHydratesPerScan * cfg.directWatchClosedMaxPages
-            + new Set(directWatch.targets().map(target => target.sourceFilter)).size,
-          nominalMaxRequestsPerSecond: (cfg.directWatchMaxHydratesPerScan * cfg.directWatchOpenMaxPages
-            + cfg.directWatchMaxClosedHydratesPerScan * cfg.directWatchClosedMaxPages
-            + new Set(directWatch.targets().map(target => target.sourceFilter)).size) / (cfg.directWatchScanMs / 1000),
+          requestTimeoutMs: cfg.directWatchRequestTimeoutMs,
+          worstCaseLogicalRequestMs: cfg.directWatchRequestTimeoutMs * 2,
+          fixedOverheadMs: directWatchConfiguredCapacity.fixedOverheadMs,
+          worstCaseRequestBudget: directWatchConfiguredCapacity.worstCaseRequestBudget,
+          worstCaseOpenSweepMsAtCap: directWatchConfiguredCapacity.worstCaseOpenSweepMsAtCap,
+          worstCaseClosedSweepMsAtCap: directWatchConfiguredCapacity.worstCaseClosedSweepMsAtCap,
           oldestOpenPollAgeMs,
           oldestOpenPollOverdueMs: oldestOpenPollAgeMs == null ? null : Math.max(0, oldestOpenPollAgeMs - cfg.directWatchFallbackPollMs),
           oldestClosedPollAgeMs,
           oldestClosedPollOverdueMs: oldestClosedPollAgeMs == null ? null : Math.max(0, oldestClosedPollAgeMs - cfg.directWatchClosedPollMs),
           openFreshnessGuarantee: false,
-          openFreshnessLimitReason: '18s nominal sweep leaves 7s for feed, selector, transport, execution, and 429 backoff; use observed poll ages',
+          openFreshnessLimitReason: 'hard request-budget proof excludes rate-limit cooldown; observed overdue state is authoritative',
+          capacityHealthy: directWatchCapacityHealthy,
+          unhealthyReason: directStatus.targetCount > directWatchConfiguredCapacity.provenResidentCap
+            ? 'resident_count_exceeds_proven_capacity'
+            : healthNowMs < directWatchBackoffUntilMs ? 'rate_limit_cooldown'
+              : (oldestOpenPollAgeMs != null && oldestOpenPollAgeMs > cfg.directWatchFallbackPollMs)
+                  || (oldestClosedPollAgeMs != null && oldestClosedPollAgeMs > cfg.directWatchClosedPollMs)
+                ? 'sweep_overdue' : null,
           backoffMs: directWatchBackoffMs,
           backoffUntilMs: directWatchBackoffUntilMs,
         },
@@ -1920,10 +1917,16 @@ async function pollLoop() {
       }
     }
     await wake(`api_poll:${surface}`, undefined, Date.now(), surface);
-    const directNowMs = Date.now();
-    if (!cfg.live && directNowMs - lastDirectWatchScanMs >= cfg.directWatchScanMs) {
-      await scanEliteDirectWatch(directNowMs);
-    }
+  }
+}
+
+async function directWatchLoop() {
+  while (true) {
+    const startedAtMs = Date.now();
+    await scanEliteDirectWatch(startedAtMs);
+    const elapsedMs = Date.now() - startedAtMs;
+    await new Promise(resolveSleep => setTimeout(resolveSleep,
+      Math.max(0, cfg.directWatchScanMs - elapsedMs)));
   }
 }
 
@@ -1992,7 +1995,8 @@ async function main() {
     liveMaxPositions: cfg.maxPositions,
     allow: [...cfg.allow],
   });
-  await pollLoop();
+  if (cfg.live) await pollLoop();
+  else await Promise.all([pollLoop(), directWatchLoop()]);
 }
 
 main().catch(err => {

@@ -70,8 +70,8 @@ Update this file only when a component moves, is added, or is retired.
 |---|---|---|
 | Executor service (TypeScript) | `services/invo-notification-executor/src/service.ts` | `hyperliquid-invo-notification-executor.service` |
 | Portfolio selector / candidate ledger | `services/invo-notification-executor/src/portfolio-candidates.ts`, `portfolio-candidate-cli.ts` | `hyperliquid-invo-portfolio-research.service`; selector `invo-portfolio-hybrid-v3-20260916` |
-| Prospective elite admission | `services/invo-notification-executor/src/elite-admission.ts` | NEW/ADD fail closed on exact-portfolio pre-trade elite evidence; CLOSE bypasses admission for managed unwind |
-| Elite direct watch | `services/invo-notification-executor/src/elite-direct-watch.ts`, `invo-client.ts` | Shadow-only selector-change scan + read-only `/v1_0/investments/get_investments`; prospective baseline, bounded hydration, durable high-water state |
+| Prospective elite admission | `services/invo-notification-executor/src/elite-admission.ts` | NEW/ADD requires exact-portfolio pre-trade elite evidence **and** the compact direct-watch admission index; CLOSE bypasses admission for managed unwind |
+| Elite direct watch | `services/invo-notification-executor/src/elite-direct-watch.ts`, `invo-client.ts` | Shadow-only dedicated read-only `/v1_0/investments/get_investments` loop; two-phase OPEN+CLOSED baseline before admission, score-ranked waitlist/safe drain, timeout/page/deadline capacity proof, bounded tombstones/deferred state, append journal, and compact admission index |
 | Close rejection / residual integrity | `services/invo-notification-executor/src/close-rejection.ts` | True dust may terminate incomplete; executable thin-depth residual remains unresolved/retryable |
 | Signal parsing | `services/invo-notification-executor/src/notification-signal.ts` | `verifiedTrade` gate, open/increase/close |
 | Ownership state | `services/invo-notification-executor/src/notification-state.ts` | Persists across restarts |
@@ -92,6 +92,7 @@ Update this file only when a component moves, is added, or is retired.
 | Invo durable state | `/var/lib/hyperliquid-copy-engine/invo/` | `archive.sqlite3`, `resolution_queue/`, `identified_wallets.json` |
 | Lane 2 resolver measurements | `/var/lib/hyperliquid-copy-engine/invo/lane2_measurements/` | Atomic latest funnel plus append-only per-run timing/yield evidence |
 | Lane 3 ledger | `/var/lib/hyperliquid-copy-engine/invo-notification-executor/audit.jsonl` | Append-only decision stream |
+| Lane 3 direct-watch causal state | `/var/lib/hyperliquid-copy-engine/invo-notification-executor/elite-direct-watch.json{,.journal.jsonl}`, `elite-direct-watch-admissions.json` | Bounded resident/tombstone/waitlist snapshot, crash-replayed target journal, and compact currently admitted authorization index; reset together for a clean shadow epoch |
 | Frozen champion report | `/root/hyperliquid-audit/prospective-champions/report.json` | Lane 1 frozen window |
 
 ## Observability workflows

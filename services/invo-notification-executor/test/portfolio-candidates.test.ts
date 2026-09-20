@@ -341,9 +341,14 @@ test('old selector state cannot preserve portfolios or authorize before fresh ob
 
   ledger.observe([portfolio({ id: 'p-fresh' })], 'trending', now);
   assert.equal(ledger.get('p-old'), null);
+  const admissionIndex = join(dir, 'admissions.json');
+  writeFileSync(admissionIndex, JSON.stringify({ version: 1, generatedAtMs: now, rows: {
+    'p-fresh': { portfolioId: 'p-fresh', admittedAtMs: now, score: 1, selectorVersion: ELITE_SELECTOR_VERSION },
+  } }));
   const afterFreshOld = eliteAdmissionFromState(state, 'p-old', now + 1, 20 * 60_000, snapshots);
   assert.equal(afterFreshOld.allowed, false);
   assert.equal(afterFreshOld.reason, 'portfolio_not_in_candidate_state');
-  const afterFreshCurrent = eliteAdmissionFromState(state, 'p-fresh', now + 1, 20 * 60_000, snapshots);
+  const afterFreshCurrent = eliteAdmissionFromState(state, 'p-fresh', now + 1, 20 * 60_000, snapshots,
+    admissionIndex);
   assert.equal(afterFreshCurrent.allowed, true);
 });

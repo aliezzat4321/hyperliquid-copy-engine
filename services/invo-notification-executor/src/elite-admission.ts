@@ -86,6 +86,7 @@ export interface EliteAdmissionDecision {
   liquidated: boolean | null;
   sourceFilter: string | null;
   score: number | null;
+  directWatchAdmittedAtMs: number | null;
 }
 
 function finite(value: unknown): number | null {
@@ -114,6 +115,7 @@ function base(portfolioId: string): EliteAdmissionDecision {
     liquidated: null,
     sourceFilter: null,
     score: null,
+    directWatchAdmittedAtMs: null,
   };
 }
 
@@ -129,6 +131,7 @@ export function eliteAdmissionFromState(
   decisionAtMs: number,
   maxStateAgeMs: number,
   snapshotsPath?: string,
+  admissionIndexPath?: string,
 ): EliteAdmissionDecision {
   const denied = base(portfolioId);
   if (!portfolioId) return { ...denied, reason: 'portfolio_id_missing' };
@@ -223,8 +226,25 @@ export function eliteAdmissionFromState(
     return { ...enriched, reason: 'portfolio_not_elite_at_decision_time' };
   }
 
+  if (!admissionIndexPath || !existsSync(admissionIndexPath)) {
+    return { ...enriched, reason: 'direct_watch_admission_index_missing' };
+  }
+  let admissionIndex: any;
+  try { admissionIndex = JSON.parse(readFileSync(admissionIndexPath, 'utf8')); }
+  catch { return { ...enriched, reason: 'direct_watch_admission_index_unparseable' }; }
+  const admission = admissionIndex?.version === 1 ? admissionIndex?.rows?.[portfolioId] : null;
+  const admittedAtMs = finite(admission?.admittedAtMs);
+  if (admission?.portfolioId !== portfolioId || admission?.selectorVersion !== ELITE_SELECTOR_VERSION
+    || admittedAtMs == null || admittedAtMs <= 0) {
+    return { ...enriched, reason: 'direct_watch_not_admitted' };
+  }
+  if (admittedAtMs > decisionAtMs) {
+    return { ...enriched, directWatchAdmittedAtMs: admittedAtMs, reason: 'direct_watch_not_admitted_at_signal_time' };
+  }
+
   return {
     ...enriched,
+    directWatchAdmittedAtMs: admittedAtMs,
     allowed: true,
     reason: historical ? 'elite_candidate_pretrade_snapshot_qualified' : 'elite_candidate_pretrade_qualified',
   };

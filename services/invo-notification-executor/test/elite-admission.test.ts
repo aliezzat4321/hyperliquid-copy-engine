@@ -13,6 +13,14 @@ function stateFile(state: unknown) {
   return path;
 }
 
+function admissionIndex(statePath: string, admittedAtMs = candidateObservedAtMs - 1_000) {
+  const path = join(statePath, '..', 'elite-direct-watch-admissions.json');
+  writeFileSync(path, JSON.stringify({ version: 1, generatedAtMs: decisionAtMs, rows: {
+    [portfolioId]: { portfolioId, admittedAtMs, score: 63.4, selectorVersion: ELITE_SELECTOR_VERSION },
+  } }));
+  return path;
+}
+
 const decisionAtMs = Date.UTC(2026, 8, 16, 12, 0, 0);
 const candidateObservedAtMs = decisionAtMs - 60_000;
 const portfolioId = 'elite-portfolio';
@@ -44,7 +52,8 @@ function validState(overrides: Record<string, unknown> = {}) {
 }
 
 test('admits only a portfolio proven elite under the exact current selector before the decision', () => {
-  const decision = eliteAdmissionFromState(stateFile(validState()), portfolioId, decisionAtMs, 20 * 60_000);
+  const path = stateFile(validState());
+  const decision = eliteAdmissionFromState(path, portfolioId, decisionAtMs, 20 * 60_000, undefined, admissionIndex(path));
   assert.equal(decision.allowed, true);
   assert.equal(decision.reason, 'elite_candidate_pretrade_qualified');
   assert.equal(decision.portfolioId, portfolioId);
@@ -122,6 +131,21 @@ test('missing candidate state fails closed', () => {
   assert.equal(decision.reason, 'candidate_state_missing');
 });
 
+test('qualified candidate is waitlisted until direct-watch admission and cannot replay pre-admission feed events', () => {
+  const path = stateFile(validState());
+  const waitlisted = eliteAdmissionFromState(path, portfolioId, decisionAtMs, 20 * 60_000);
+  assert.equal(waitlisted.allowed, false);
+  assert.equal(waitlisted.reason, 'direct_watch_admission_index_missing');
+
+  const index = admissionIndex(path, decisionAtMs + 10);
+  const preAdmission = eliteAdmissionFromState(path, portfolioId, decisionAtMs, 20 * 60_000, undefined, index);
+  assert.equal(preAdmission.allowed, false);
+  assert.equal(preAdmission.reason, 'direct_watch_not_admitted_at_signal_time');
+  const prospective = eliteAdmissionFromState(path, portfolioId, decisionAtMs + 11, 20 * 60_000, undefined, index);
+  assert.equal(prospective.allowed, true);
+  assert.equal(prospective.directWatchAdmittedAtMs, decisionAtMs + 10);
+});
+
 test('historical snapshot authorizes a trade when latest aggregate state is newer than the trade', () => {
   const dir = mkdtempSync(join(tmpdir(), 'lane3-elite-history-'));
   const statePath = join(dir, 'portfolio-candidates.json');
@@ -146,7 +170,7 @@ test('historical snapshot authorizes a trade when latest aggregate state is newe
     bucket: 'ELITE_CANDIDATE',
   }] }));
   const decision = eliteAdmissionFromState(
-    statePath, portfolioId, decisionAtMs, 20 * 60_000, snapshotsPath,
+    statePath, portfolioId, decisionAtMs, 20 * 60_000, snapshotsPath, admissionIndex(statePath),
   );
   assert.equal(decision.allowed, true);
   assert.equal(decision.reason, 'elite_candidate_pretrade_snapshot_qualified');
@@ -196,7 +220,8 @@ test('admission latency and memory are independent of a sparse 1GB append-only h
     { ...candidate, selectorVersion: ELITE_SELECTOR_VERSION },
   ] }));
   const before = process.memoryUsage().heapUsed;
-  const decision = eliteAdmissionFromState(statePath, portfolioId, decisionAtMs, 20 * 60_000, snapshotsPath);
+  const decision = eliteAdmissionFromState(statePath, portfolioId, decisionAtMs, 20 * 60_000, snapshotsPath,
+    admissionIndex(statePath));
   assert.equal(decision.allowed, true);
   assert.ok(process.memoryUsage().heapUsed - before < 8 * 1024 * 1024);
 });

@@ -9,7 +9,8 @@ test('service wires elite direct watch only in shadow and through normal execute
   const scan = source.indexOf('async function scanEliteDirectWatch');
   const liveGuard = source.indexOf('if (cfg.live || nowMs < directWatchBackoffUntilMs) return', scan);
   const bounded = source.indexOf('cfg.directWatchMaxHydratesPerScan', scan);
-  const pollGuard = source.indexOf('if (!cfg.live && directNowMs - lastDirectWatchScanMs >= cfg.directWatchScanMs)');
+  const dedicatedLoop = source.indexOf('async function directWatchLoop()');
+  const shadowScheduler = source.indexOf('else await Promise.all([pollLoop(), directWatchLoop()])');
   assert.ok(hydrate >= 0 && scan > hydrate);
   assert.ok(execute > hydrate && execute < scan, 'direct signals must flow through execute()');
   assert.ok(liveGuard > scan, 'direct watcher must fail closed in live mode');
@@ -21,7 +22,8 @@ test('service wires elite direct watch only in shadow and through normal execute
   assert.match(source, /retiringOpenDispositions\(/, 'retiring rows must be causally classified before execution');
   assert.match(source, /retirement_post_demotion_open_ignored/, 'post-demotion opens must be handled without retry');
   assert.match(source, /missed_pre_demotion_open/, 'stale first observations must leave explicit recall evidence');
-  assert.ok(pollGuard > scan, 'runtime scheduler must guard direct watch with !cfg.live');
+  assert.ok(dedicatedLoop > scan && shadowScheduler > dedicatedLoop,
+    'shadow-only direct watch must run independently of feed pagination');
 });
 
 test('service routes feed/direct races through action-aware dedupe and preserves admission/freshness gates', () => {

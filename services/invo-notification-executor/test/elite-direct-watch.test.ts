@@ -27,7 +27,7 @@ import { ELITE_SELECTOR_VERSION } from '../src/portfolio-candidates.js';
 const BASE = 1_780_000_000_000;
 
 const target: EliteDirectTarget = {
-  portfolioId: 'p1', ownerId: 'o1', username: 'elite', sourceFilter: 'trending',
+  portfolioId: 'p1', ownerId: 'o1', username: 'elite', sourceFilter: 'trending', score: 100,
 };
 
 function openRow(overrides: Record<string, unknown> = {}) {
@@ -184,7 +184,7 @@ test('invalid fresh candidate state is non-authoritative and preserves existing 
     watch.syncTargets(loaded.targets, new Set(), BASE + 11, !loaded.stale,
       120_000, new Set(loaded.demotedPortfolioIds));
     assert.equal(watch.targets()[0]?.portfolioId, 'p1');
-    assert.equal(watch.targets()[0]?.lifecycle, 'ACTIVE');
+    assert.equal(watch.targets()[0]?.lifecycle, 'ENROLLING');
   }
 });
 
@@ -309,7 +309,7 @@ test('sanitized captured investment shapes preserve open/increase and owned-clos
     'utf8',
   ));
   const capturedTarget = {
-    portfolioId: 'portfolio-direct', ownerId: 'owner-direct', username: 'captured-shape', sourceFilter: 'fire_moves',
+    portfolioId: 'portfolio-direct', ownerId: 'owner-direct', username: 'captured-shape', sourceFilter: 'fire_moves', score: 100,
   };
   const signals = signalsFromDirectInvestments(
     fixture.investments.open.investmentsTicker,
@@ -555,7 +555,7 @@ test('stale candidate state retains targets; authoritative demotion retires and 
   let state = new EliteDirectWatchState(path);
   state.syncTargets([target], new Set(), BASE);
   state.syncTargets([], new Set(), BASE + 1, false);
-  assert.equal(state.targets()[0].lifecycle, 'ACTIVE');
+  assert.equal(state.targets()[0].lifecycle, 'ENROLLING');
   retireTarget(state, BASE + 10, 100);
   assert.equal(state.targets()[0].lifecycle, 'RETIRING');
   assert.equal(planDirectHydrations(state.targets(), new Map(), BASE + 20, 1, 10).length, 0,
@@ -584,7 +584,7 @@ test('active target absent from a fresh bounded cycle remains active', () => {
   state.syncTargets([target], new Set(), BASE);
   state.commitClosedHydration('p1', [], BASE + 1);
   state.syncTargets([], new Set(), BASE + 10, true, 1, new Set());
-  assert.equal(state.targets()[0].lifecycle, 'ACTIVE');
+  assert.equal(state.targets()[0].lifecycle, 'ENROLLING');
   assert.equal(planDirectHydrations(state.targets(), new Map(), BASE + 20, 1, 1).length, 1);
   assert.equal(planClosedHydrations(state.targets(), BASE + 20, 1, 1).length, 1);
 });
@@ -741,7 +741,8 @@ test('reactivation mutates the canonical metadata object and clears stale drain 
   const changed = { ...target, ownerId: 'owner-new', username: 'renamed' };
   state.syncTargets([changed], new Set(), BASE + 31, true, 10, new Set());
   const reactivated = state.targets()[0];
-  assert.equal(reactivated.lifecycle, 'ACTIVE');
+  assert.equal(reactivated.lifecycle, 'ENROLLING');
+  assert.equal(reactivated.admittedAtMs, null);
   assert.equal(reactivated.ownerId, 'owner-new');
   assert.equal(reactivated.username, 'renamed');
   assert.equal(reactivated.retiredAtMs, null);
@@ -922,19 +923,20 @@ test('tombstone restores causal watermarks without consuming resident capacity',
   assert.deepEqual(restored.closedBoundaryIds, []);
 });
 
-test('capacity math accepts 48 default residents and rejects either cadence ceiling', () => {
+test('capacity proof reduces nominal 48 residents to the timeout/page/deadline bound', () => {
   const defaults = validateDirectWatchCapacity({ residentCap: 48, scanMs: 3_000,
     maxOpenHydratesPerScan: 8, openPollMs: 18_000,
-    maxClosedHydratesPerScan: 3, closedPollMs: 60_000 });
-  assert.equal(defaults.sustainableOpenTargetCeiling, 48);
-  assert.equal(defaults.sustainableClosedTargetCeiling, 60);
-  assert.equal(defaults.nominalOpenSweepMsAtCap, 18_000);
-  assert.throws(() => validateDirectWatchCapacity({ residentCap: 49, scanMs: 3_000,
+    maxClosedHydratesPerScan: 3, closedPollMs: 60_000,
+    requestTimeoutMs: 4_000, openMaxPages: 3, closedMaxPages: 2, fixedOverheadMs: 5_000 });
+  assert.equal(defaults.sustainableOpenTargetCeiling, 1);
+  assert.equal(defaults.sustainableClosedTargetCeiling, 3);
+  assert.equal(defaults.provenResidentCap, 1);
+  assert.equal(defaults.worstCaseOpenSweepMsAtCap, 17_000);
+  assert.throws(() => validateDirectWatchCapacity({ residentCap: 48, scanMs: 3_000,
     maxOpenHydratesPerScan: 8, openPollMs: 18_000,
-    maxClosedHydratesPerScan: 3, closedPollMs: 60_000 }), /OPEN capacity 48/);
-  assert.throws(() => validateDirectWatchCapacity({ residentCap: 61, scanMs: 3_000,
-    maxOpenHydratesPerScan: 20, openPollMs: 18_000,
-    maxClosedHydratesPerScan: 3, closedPollMs: 60_000 }), /CLOSED capacity 60/);
+    maxClosedHydratesPerScan: 3, closedPollMs: 60_000,
+    requestTimeoutMs: 4_000, openMaxPages: 3, closedMaxPages: 2, fixedOverheadMs: 18_000 }),
+  /cannot prove even one/);
 });
 
 test('v4 state migrates without resetting causal fields and fails closed above cap', () => {
@@ -955,12 +957,99 @@ test('v4 state migrates without resetting causal fields and fails closed above c
   assert.throws(() => state.assertResidentCap(0), /exceeding configured cap/);
 });
 
-test('rotating bounded universes cannot grow residents beyond cap or demote absent incumbents', () => {
+test('rotating bounded universes stay capped and only quality ranking can drain incumbents', () => {
   const state = new EliteDirectWatchState(join(mkdtempSync(join(tmpdir(), 'elite-rotation-cap-')), 'state.json'));
   for (let cycle = 0; cycle < 20; cycle += 1) {
     const rows = Array.from({ length: 4 }, (_, offset) => ({ ...target, portfolioId: `p${cycle * 4 + offset}` }));
     state.syncTargets(rows, new Set(), BASE + cycle, true, 100, new Set(), 3);
     assert.ok(state.targets().length <= 3);
-    assert.ok(state.targets().every(row => row.lifecycle === 'ACTIVE'));
+    assert.ok(state.targets().every(row => row.lifecycle === 'ENROLLING' || (
+      row.lifecycle === 'RETIRING' && row.negativeEvidenceReason === 'capacity_quality_displacement'
+    )));
   }
+});
+
+test('two-phase enrollment absorbs a pre-admission round trip and admits only after both baselines', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elite-two-phase-'));
+  const state = new EliteDirectWatchState(join(dir, 'watch.json'), join(dir, 'admissions.json'));
+  state.syncTargets([target], new Set(), BASE, true, 120_000, new Set(), 1);
+  assert.equal(state.targets()[0].lifecycle, 'ENROLLING');
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'admissions.json'), 'utf8')).rows, {});
+
+  const preAdmissionClose = openRow({ isOpen: false, baseId: 'pre-admission-round-trip',
+    createdAt: BASE + 1, updatedAt: BASE + 2, closedAt: BASE + 2, closingPrice: 0.8 });
+  state.commitClosedHydration('p1', [preAdmissionClose], BASE + 3);
+  assert.equal(state.targets()[0].closedHistoryInitialized, true);
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'admissions.json'), 'utf8')).rows, {});
+
+  state.commitOpenBaseline('p1', [], BASE + 4);
+  const admitted = state.targets()[0];
+  assert.equal(admitted.lifecycle, 'ACTIVE');
+  assert.equal(admitted.openHistoryInitialized, true);
+  assert.equal(admitted.admittedAtMs, BASE + 4);
+  assert.equal(JSON.parse(readFileSync(join(dir, 'admissions.json'), 'utf8')).rows.p1.admittedAtMs, BASE + 4);
+  assert.deepEqual(signalsFromDirectInvestments([], [preAdmissionClose], admitted,
+    Math.max(admitted.closedProcessedThroughMs, admitted.admittedAtMs ?? 0), BASE + 5), []);
+
+  const postAdmissionOpen = openRow({ id: 'post', baseId: 'post', createdAt: BASE + 5, updatedAt: BASE + 5 });
+  assert.equal(signalsFromDirectInvestments([postAdmissionOpen], [], admitted,
+    Math.max(admitted.processedThroughMs, admitted.admittedAtMs ?? 0), BASE + 6)[0]?.sourceBaseId, 'post');
+});
+
+test('higher-score candidate displaces by safe retirement and remains waitlisted until capacity frees', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elite-quality-capacity-'));
+  const state = new EliteDirectWatchState(join(dir, 'watch.json'), join(dir, 'admissions.json'));
+  const low = { ...target, portfolioId: 'z-low', score: 10 };
+  const high = { ...target, portfolioId: 'a-high', score: 99 };
+  state.syncTargets([low], new Set(), BASE, true, 1, new Set(), 1);
+  state.commitClosedHydration(low.portfolioId, [], BASE + 1);
+  state.commitOpenBaseline(low.portfolioId, [], BASE + 2);
+  state.syncTargets([low, high], new Set(), BASE + 3, true, 1, new Set(), 1);
+  assert.equal(state.targets()[0].lifecycle, 'RETIRING');
+  assert.equal(state.targets()[0].negativeEvidenceReason, 'capacity_quality_displacement');
+  assert.equal(state.deferredAdmissions()[0].portfolioId, high.portfolioId);
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'admissions.json'), 'utf8')).rows, {});
+
+  state.commitRetirementOpenPoll(low.portfolioId, [], BASE + 5);
+  state.commitClosedHydration(low.portfolioId, [], BASE + 5);
+  state.commitRetirementOpenPoll(low.portfolioId, [], BASE + 6);
+  state.commitClosedHydration(low.portfolioId, [], BASE + 6);
+  state.syncTargets([high], new Set(), BASE + 7, true, 1, new Set(), 1);
+  state.syncTargets([high], new Set(), BASE + 8, true, 1, new Set(), 1);
+  assert.equal(state.targets()[0].portfolioId, high.portfolioId);
+  assert.equal(state.targets()[0].lifecycle, 'ENROLLING');
+});
+
+test('rotating waitlists and tombstones keep durable cardinality and bytes bounded', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elite-bounded-state-'));
+  const path = join(dir, 'watch.json');
+  const state = new EliteDirectWatchState(path);
+  for (let cycle = 0; cycle < 400; cycle += 1) {
+    const candidates = Array.from({ length: 20 }, (_, offset) => ({ ...target,
+      portfolioId: `p-${cycle}-${offset}`, score: 1_000 - offset }));
+    state.syncTargets(candidates, new Set(), BASE + cycle, true, 1, new Set(), 2);
+  }
+  const status = state.status();
+  assert.ok(status.targetCount <= 2);
+  assert.ok(status.deferredAdmissionCount <= 20);
+  assert.ok(status.tombstoneCount <= 256);
+  assert.ok(status.durableStateCardinality <= 278);
+  assert.ok(status.serializedStateBytes < 256 * 1024);
+});
+
+test('unknown, malformed, and corrupt journal state fail closed loudly', () => {
+  for (const [name, content] of [
+    ['unknown', JSON.stringify({ version: 'future-version', targets: {} })],
+    ['malformed', '{'],
+  ]) {
+    const path = join(mkdtempSync(join(tmpdir(), `elite-corrupt-${name}-`)), 'watch.json');
+    writeFileSync(path, content);
+    assert.throws(() => new EliteDirectWatchState(path), /state load failed closed/);
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'elite-corrupt-journal-'));
+  const path = join(dir, 'watch.json');
+  const state = new EliteDirectWatchState(path);
+  state.syncTargets([target], new Set(), BASE);
+  writeFileSync(`${path}.journal.jsonl`, '{bad\n');
+  assert.throws(() => new EliteDirectWatchState(path), /state load failed closed/);
 });
