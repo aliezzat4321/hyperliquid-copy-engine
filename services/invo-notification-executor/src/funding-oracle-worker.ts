@@ -5,6 +5,7 @@ import {
   type FundingOracleCaptureResult,
   type FundingOracleWorkerOptions,
 } from './funding-oracle-capture.js';
+import { FundingBoundaryStore } from './funding-boundary-store.js';
 
 const DEFAULT_ENDPOINT = 'https://api.hyperliquid.xyz/info';
 
@@ -113,6 +114,8 @@ async function requestOraclePrices(endpoint: string, timeoutMs: number): Promise
 
 function runWorker(options: FundingOracleWorkerOptions): void {
   const intervalMs = options.intervalMs ?? FUNDING_INTERVAL_MS;
+  const heartbeatMs = options.heartbeatMs ?? 1_000;
+  const store = new FundingBoundaryStore(options.stagingPath);
   const capturer = new FundingBoundaryCapturer({
     maxDelayMs: options.maxDelayMs,
     retryBaseMs: options.retryBaseMs ?? 250,
@@ -121,13 +124,33 @@ function runWorker(options: FundingOracleWorkerOptions): void {
   const arm = (boundaryMs: number) => {
     const delayMs = Math.max(0, boundaryMs - Date.now());
     setTimeout(async () => {
-      parentPort?.postMessage(await capturer.capture(boundaryMs));
-      arm(boundaryMs + intervalMs);
+      try {
+        const existing = store.read(boundaryMs);
+        const result = existing?.result ?? await capturer.capture(boundaryMs);
+        // Publication precedes notification. Close accounting can therefore consume
+        // the terminal result even while the main event loop has not handled this message.
+        const terminal = existing ?? store.publish(result);
+        parentPort?.postMessage(terminal.result);
+        arm(boundaryMs + intervalMs);
+      } catch (error) {
+        // A durable-stage or scheduler failure must kill the worker. The manager treats
+        // every exit, including code 0, as fatal and the service exits for restart.
+        setImmediate(() => { throw error; });
+      }
     }, delayMs);
   };
   // Always adjudicate the current boundary on startup. If its strict window has
   // elapsed, capture() emits startup_after_deadline without making a request.
-  arm(Math.floor(Date.now() / intervalMs) * intervalMs);
+  let nextBoundaryMs = options.initialBoundaryMs
+    ?? Math.floor(Date.now() / intervalMs) * intervalMs;
+  arm(nextBoundaryMs);
+  const heartbeat = setInterval(() => {
+    while (nextBoundaryMs <= Date.now()) nextBoundaryMs += intervalMs;
+    parentPort?.postMessage({
+      type: 'funding_oracle_heartbeat', observedAtMs: Date.now(), schedulerNextBoundaryMs: nextBoundaryMs,
+    });
+  }, heartbeatMs);
+  heartbeat.unref();
 }
 
 if (!isMainThread && workerData?.kind === 'funding-oracle-worker') {

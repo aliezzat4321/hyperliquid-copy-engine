@@ -69,8 +69,11 @@ import {
 } from './shadow-execution.js';
 import {
   startFundingOracleWorker,
+  type FundingOracleWorkerManager,
   type FundingOracleCaptureResult,
 } from './funding-oracle-capture.js';
+import { FundingBoundaryStore, defaultFundingBoundaryPath } from './funding-boundary-store.js';
+import { syncStagedFundingForClose } from './funding-boundary-accounting.js';
 
 if (INVO_TOKEN) invo.setToken(INVO_TOKEN);
 if (INVO_REFRESH_TOKEN) invo.setRefreshToken(INVO_REFRESH_TOKEN);
@@ -128,6 +131,8 @@ function loadConfig() {
     allow: new Set(allow),
     statePath: resolve(process.env.NOTIFICATION_TRADER_STATE_PATH ?? 'data/notification-trader-state.json'),
     auditPath: resolve(process.env.NOTIFICATION_TRADER_AUDIT_PATH ?? 'data/notification-trader-audit.jsonl'),
+    fundingBoundaryPath: resolve(process.env.NOTIFICATION_TRADER_FUNDING_BOUNDARY_PATH
+      ?? defaultFundingBoundaryPath(resolve(process.env.NOTIFICATION_TRADER_AUDIT_PATH ?? 'data/notification-trader-audit.jsonl'))),
     trackerPath: resolve(process.env.NOTIFICATION_TRADER_TRACKER_PATH ?? 'data/notification-trader-population.json'),
     candidateStatePath: resolve(process.env.NOTIFICATION_TRADER_CANDIDATE_STATE_PATH ?? '/var/lib/hyperliquid-copy-engine/invo-notification-executor/portfolio-candidates.json'),
     candidateSnapshotsPath: resolve(process.env.INVO_PORTFOLIO_CANDIDATE_SNAPSHOTS_PATH ?? '/var/lib/hyperliquid-copy-engine/invo-notification-executor/portfolio-candidate-snapshots.jsonl'),
@@ -192,6 +197,8 @@ if (cfg.live && cfg.allow.size === 0 && !cfg.copyAllFollowed) {
 validateEnv(cfg.live);
 const WALLET_ADDRESS = resolveWalletAddress();
 const state = new NotificationState(cfg.statePath);
+const fundingBoundaryStore = new FundingBoundaryStore(cfg.fundingBoundaryPath);
+let fundingOracleWorker: FundingOracleWorkerManager | null = null;
 if (cfg.inactiveAfterMs <= cfg.staleAfterMs) throw new Error('NOTIFICATION_TRADER_INACTIVE_AFTER_MS must exceed NOTIFICATION_TRADER_STALE_AFTER_MS');
 const tracker = new TraderTracker(cfg.trackerPath, {
   minEvents: cfg.minEvidenceEvents,
@@ -672,7 +679,7 @@ async function executeUnlocked(signal: InvoSignal, wakeSource: string, receivedA
     if (signal.action !== 'close') state.markObservedOpen(signal.sourceBaseId);
 
     if (signal.action === 'close') {
-      const managed = state.getManagedBySource(signal.sourceBaseId);
+      let managed = state.getManagedBySource(signal.sourceBaseId);
       if (!managed) {
         state.markSeen(signal.key);
         const observedOpen = state.hasObservedOpen(signal.sourceBaseId);
@@ -763,6 +770,18 @@ async function executeUnlocked(signal: InvoSignal, wakeSource: string, receivedA
         }
 
         const fill = result.fill;
+        const stagedFunding = await syncStagedFundingForClose(
+          managed, fill.receivedAtMs, fundingBoundaryStore, cfg.shadowFundingOracleMaxDelayMs,
+        );
+        managed = stagedFunding.position;
+        if (stagedFunding.appliedBoundaries.length || stagedFunding.waited || managed.fundingIncompleteReason) {
+          state.setManaged(managed);
+          log({
+            type: 'funding_boundary_close_sync', sourceBaseId: managed.sourceBaseId,
+            appliedBoundaries: stagedFunding.appliedBoundaries, waited: stagedFunding.waited,
+            fundingIncompleteReason: managed.fundingIncompleteReason ?? null,
+          });
+        }
         const legacy = managed.executionEvidenceVersion !== EXECUTION_EVIDENCE_VERSION
           || !(Number(managed.entryPrice) > 0)
           || !(Number(managed.entryNotionalExecutedUsd) > 0)
@@ -1903,7 +1922,7 @@ function startServer() {
         }
       });
       return json(res, 200, {
-        ok: true,
+        ok: fundingOracleWorker?.health().healthy ?? cfg.live,
         initialized: cfg.discoverySurfaces.every(surface => state.hasFeedBaseline(surface)),
         initializedSurfaces: cfg.discoverySurfaces.filter(surface => state.hasFeedBaseline(surface)),
         live: cfg.live,
@@ -1963,6 +1982,11 @@ function startServer() {
                 ? 'sweep_overdue' : directStatus.admissionSuspensionReason,
           backoffMs: directWatchBackoffMs,
           backoffUntilMs: directWatchBackoffUntilMs,
+        },
+        fundingOracleWorker: cfg.live ? { enabled: false } : {
+          enabled: true,
+          stagingPath: cfg.fundingBoundaryPath,
+          ...fundingOracleWorker?.health(),
         },
         maxSignalAgeMs: cfg.maxSignalAgeMs,
         lastSuccessPollMs,
@@ -2051,8 +2075,8 @@ async function main() {
     await invo.checkAccountReady();
   }
   if (!cfg.live) {
-    startFundingOracleWorker(
-      { maxDelayMs: cfg.shadowFundingOracleMaxDelayMs },
+    fundingOracleWorker = startFundingOracleWorker(
+      { maxDelayMs: cfg.shadowFundingOracleMaxDelayMs, stagingPath: cfg.fundingBoundaryPath },
       applyFundingOracleResult,
       error => {
         log({ type: 'funding_oracle_worker_error', error: error.message });
@@ -2102,6 +2126,7 @@ async function main() {
     },
     shadowExecutionPolicy: shadowPolicy,
     fundingOracleMaxDelayMs: cfg.shadowFundingOracleMaxDelayMs,
+    fundingBoundaryPath: cfg.fundingBoundaryPath,
     executionEvidenceVersion: EXECUTION_EVIDENCE_VERSION,
     costModelVersion: COST_MODEL_VERSION,
     closedOnlyProfitabilityForbidden: true,
