@@ -19,6 +19,7 @@ import {
   signalsFromDirectInvestments,
   unownedCloseEvidence,
   validateClosedPageOrdering,
+  validateDirectWatchCapacity,
   type EliteDirectTarget,
 } from '../src/elite-direct-watch.js';
 import { ELITE_SELECTOR_VERSION } from '../src/portfolio-candidates.js';
@@ -51,6 +52,16 @@ function retirementLifecycle(overrides: Partial<{
     hasSeen: () => false,
     ...overrides,
   };
+}
+
+function retireTarget(
+  state: EliteDirectWatchState, atMs: number, retirementGraceMs: number,
+  owned = new Set<string>(),
+) {
+  state.syncTargets([], owned, atMs - 1, true, retirementGraceMs, new Set(['p1']),
+    Number.POSITIVE_INFINITY, 2, 0, atMs - 1);
+  state.syncTargets([], owned, atMs, true, retirementGraceMs, new Set(['p1']),
+    Number.POSITIVE_INFINITY, 2, 0, atMs);
 }
 test('startup baseline never replays pre-baseline investments', () => {
   const signals = signalsFromDirectInvestments(
@@ -545,7 +556,7 @@ test('stale candidate state retains targets; authoritative demotion retires and 
   state.syncTargets([target], new Set(), BASE);
   state.syncTargets([], new Set(), BASE + 1, false);
   assert.equal(state.targets()[0].lifecycle, 'ACTIVE');
-  state.syncTargets([], new Set(), BASE + 10, true, 100, new Set(['p1']));
+  retireTarget(state, BASE + 10, 100);
   assert.equal(state.targets()[0].lifecycle, 'RETIRING');
   assert.equal(planDirectHydrations(state.targets(), new Map(), BASE + 20, 1, 10).length, 0,
     'OPEN drain waits until CLOSED cursor exists');
@@ -571,15 +582,18 @@ test('active target absent from a fresh bounded cycle remains active', () => {
   const path = join(mkdtempSync(join(tmpdir(), 'elite-bounded-absence-')), 'state.json');
   const state = new EliteDirectWatchState(path);
   state.syncTargets([target], new Set(), BASE);
+  state.commitClosedHydration('p1', [], BASE + 1);
   state.syncTargets([], new Set(), BASE + 10, true, 1, new Set());
   assert.equal(state.targets()[0].lifecycle, 'ACTIVE');
+  assert.equal(planDirectHydrations(state.targets(), new Map(), BASE + 20, 1, 1).length, 1);
+  assert.equal(planClosedHydrations(state.targets(), BASE + 20, 1, 1).length, 1);
 });
 
 test('pre-demotion open blocks deletion and drain proofs survive restart', () => {
   const path = join(mkdtempSync(join(tmpdir(), 'elite-retirement-open-')), 'state.json');
   let state = new EliteDirectWatchState(path);
   state.syncTargets([target], new Set(), BASE);
-  state.syncTargets([], new Set(), BASE + 10, true, 10, new Set(['p1']));
+  retireTarget(state, BASE + 10, 10);
   state.commitRetirementOpenPoll('p1', [openRow({ createdAt: BASE + 1 })], BASE + 30);
   state.commitClosedHydration('p1', [], BASE + 30);
   state.commitClosedHydration('p1', [], BASE + 40);
@@ -599,7 +613,7 @@ test('retirement drain proof excludes pre-selection rows and fails closed on unk
   const path = join(mkdtempSync(join(tmpdir(), 'elite-retirement-relevance-')), 'state.json');
   const state = new EliteDirectWatchState(path);
   state.syncTargets([target], new Set(), BASE);
-  state.syncTargets([], new Set(), BASE + 10, true, 10, new Set(['p1']));
+  retireTarget(state, BASE + 10, 10);
   state.commitRetirementOpenPoll('p1', [openRow({ createdAt: BASE - 1 })], BASE + 30);
   assert.equal(state.targets()[0].retirementRelevantOpenCount, 0);
   state.commitRetirementOpenPoll('p1', [openRow({ createdAt: 'invalid' })], BASE + 40);
@@ -611,7 +625,7 @@ test('retiring hydration executes pre-demotion opens and rejects post-demotion o
   const path = join(mkdtempSync(join(tmpdir(), 'elite-retirement-classify-')), 'state.json');
   const state = new EliteDirectWatchState(path);
   state.syncTargets([target], new Set(), BASE);
-  state.syncTargets([], new Set(), BASE + 200, true, 100, new Set(['p1']));
+  retireTarget(state, BASE + 200, 100);
   const retiring = state.targets()[0];
   const dispositions = retiringOpenDispositions([
     openRow({ id: 'pre', baseId: 'pre', createdAt: BASE + 100, updatedAt: BASE + 100 }),
@@ -661,7 +675,7 @@ test('retiring discovery bypasses portfolio watermark exactly once without lower
   const state = new EliteDirectWatchState(path);
   state.syncTargets([target], new Set(), BASE);
   state.commitHydration('p1', BASE + 180);
-  state.syncTargets([], new Set(), BASE + 200, true, 100, new Set(['p1']));
+  retireTarget(state, BASE + 200, 100);
   const retiring = state.targets()[0];
   const delayed = openRow({ id: 'delayed', baseId: 'delayed', createdAt: BASE + 100, updatedAt: BASE + 100 });
   const [first] = retiringOpenDispositions([delayed], retiring, BASE + 210, retirementLifecycle());
@@ -720,7 +734,7 @@ test('reactivation mutates the canonical metadata object and clears stale drain 
   const path = join(mkdtempSync(join(tmpdir(), 'elite-reactivate-')), 'state.json');
   const state = new EliteDirectWatchState(path);
   state.syncTargets([target], new Set(), BASE);
-  state.syncTargets([], new Set(), BASE + 10, true, 10, new Set(['p1']));
+  retireTarget(state, BASE + 10, 10);
   state.initializeRetirementDrain('p1');
   state.commitRetirementOpenPoll('p1', [], BASE + 30);
   state.commitClosedHydration('p1', [], BASE + 30);
@@ -743,7 +757,7 @@ test('open overflow cannot create a retirement empty proof', async () => {
   const path = join(mkdtempSync(join(tmpdir(), 'elite-retirement-overflow-')), 'state.json');
   const state = new EliteDirectWatchState(path);
   state.syncTargets([target], new Set(), BASE);
-  state.syncTargets([], new Set(), BASE + 1, true, 1, new Set(['p1']));
+  retireTarget(state, BASE + 1, 1);
   const overflow = await fetchCompleteOpenInvestments(async () => Array.from({ length: 100 }, (_, i) =>
     openRow({ id: `i${i}`, baseId: `b${i}`, updatedAt: BASE + 200 - i })), 1);
   assert.equal(overflow.complete, false);
@@ -754,7 +768,7 @@ test('owned retiring target is never deleted after grace and drain proof', () =>
   const path = join(mkdtempSync(join(tmpdir(), 'elite-owned-retire-')), 'state.json');
   const state = new EliteDirectWatchState(path);
   state.syncTargets([target], new Set(), BASE);
-  state.syncTargets([], new Set(['p1']), BASE + 1, true, 1, new Set(['p1']));
+  retireTarget(state, BASE + 1, 1, new Set(['p1']));
   const close = openRow({ isOpen: false, closedAt: BASE + 2 });
   state.commitClosedHydration('p1', [close], BASE + 2);
   state.commitClosedHydration('p1', [close], BASE + 3);
@@ -834,4 +848,119 @@ test('429 stops bounded work, reports skipped targets, and recorded attempt rota
   assert.equal(first.rateLimited, true);
   assert.deepEqual(first.skippedAfterRateLimit, [1, 2]);
   assert.deepEqual(plan(), [1, 2, 0], 'failed target rotates behind unattempted peers after cooldown');
+});
+
+test('authoritative negative evidence requires distinct observations spanning grace', () => {
+  const state = new EliteDirectWatchState(join(mkdtempSync(join(tmpdir(), 'elite-negative-grace-')), 'state.json'));
+  state.syncTargets([target], new Set(), BASE);
+  state.syncTargets([], new Set(), BASE + 10, true, 100, new Set(['p1']), 48, 2, 600_000, BASE + 10);
+  assert.equal(state.targets()[0].lifecycle, 'MISSING_GRACE');
+  assert.equal(state.targets()[0].negativeEvidenceCount, 1);
+  state.syncTargets([], new Set(), BASE + 20, true, 100, new Set(['p1']), 48, 2, 600_000, BASE + 10);
+  assert.equal(state.targets()[0].negativeEvidenceCount, 1, 'duplicate observation timestamp is not independent evidence');
+  state.syncTargets([], new Set(), BASE + 600_010, true, 100, new Set(['p1']), 48, 2, 600_000, BASE + 600_010);
+  assert.equal(state.targets()[0].lifecycle, 'RETIRING');
+  assert.equal(state.targets()[0].negativeEvidenceCount, 2);
+});
+
+test('elite reappearance from grace or retirement preserves every causal watermark', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'elite-reappearance-watermarks-')), 'state.json');
+  const state = new EliteDirectWatchState(path);
+  state.syncTargets([target], new Set(), BASE);
+  state.commitHydration('p1', BASE + 50, BASE + 40);
+  state.commitClosedHydration('p1', [openRow({ isOpen: false, baseId: 'boundary', closedAt: BASE + 60 })], BASE + 61);
+  const expected = state.targets()[0];
+  state.syncTargets([], new Set(), BASE + 70, true, 100, new Set(['p1']), 48, 2, 600_000, BASE + 70);
+  state.syncTargets([target], new Set(), BASE + 80, true);
+  for (const key of ['baselineAtMs', 'processedThroughMs', 'closedProcessedThroughMs', 'closedBoundaryIds',
+    'selectorInitialized', 'lastSelectorUpdatedAtMs'] as const) assert.deepEqual(state.targets()[0][key], expected[key]);
+  retireTarget(state, BASE + 100, 100);
+  state.syncTargets([target], new Set(), BASE + 101, true);
+  for (const key of ['baselineAtMs', 'processedThroughMs', 'closedProcessedThroughMs', 'closedBoundaryIds',
+    'selectorInitialized', 'lastSelectorUpdatedAtMs'] as const) assert.deepEqual(state.targets()[0][key], expected[key]);
+});
+
+test('resident cap defers deterministically, never evicts, and later enrolls prospectively', () => {
+  const state = new EliteDirectWatchState(join(mkdtempSync(join(tmpdir(), 'elite-cap-')), 'state.json'));
+  const p2 = { ...target, portfolioId: 'p2' };
+  state.syncTargets([target, p2], new Set(), BASE, true, 100, new Set(), 1);
+  assert.deepEqual(state.targets().map(row => row.portfolioId), ['p1']);
+  assert.deepEqual(state.deferredAdmissions().map(row => row.portfolioId), ['p2']);
+  retireTarget(state, BASE + 10, 1);
+  state.initializeRetirementDrain('p1');
+  state.commitRetirementOpenPoll('p1', [], BASE + 20);
+  state.commitClosedHydration('p1', [], BASE + 20);
+  state.commitRetirementOpenPoll('p1', [], BASE + 21);
+  state.commitClosedHydration('p1', [], BASE + 21);
+  state.syncTargets([], new Set(), BASE + 22, true, 1, new Set(['p1']), 1);
+  assert.equal(state.targets().length, 0);
+  assert.equal(state.tombstones().length, 1);
+  state.syncTargets([p2], new Set(), BASE + 30, true, 100, new Set(), 1);
+  assert.equal(state.targets()[0].portfolioId, 'p2');
+  assert.equal(state.targets()[0].processedThroughMs, BASE + 30, 'deferred admission starts prospectively');
+});
+
+test('tombstone restores causal watermarks without consuming resident capacity', () => {
+  const state = new EliteDirectWatchState(join(mkdtempSync(join(tmpdir(), 'elite-tombstone-')), 'state.json'));
+  state.syncTargets([target], new Set(), BASE);
+  state.commitHydration('p1', BASE + 50, BASE + 40);
+  state.commitClosedHydration('p1', [openRow({ isOpen: false, baseId: 'boundary', closedAt: BASE + 60 })], BASE + 61);
+  const before = state.targets()[0];
+  retireTarget(state, BASE + 100, 1);
+  state.commitRetirementOpenPoll('p1', [], BASE + 102);
+  state.commitClosedHydration('p1', [], BASE + 102);
+  state.commitRetirementOpenPoll('p1', [], BASE + 103);
+  state.commitClosedHydration('p1', [], BASE + 103);
+  state.syncTargets([], new Set(), BASE + 104, true, 1, new Set(['p1']));
+  assert.equal(state.status().targetCount, 0);
+  assert.equal(state.status().tombstoneCount, 1);
+  state.syncTargets([target], new Set(), BASE + 200, true, 1, new Set(), 1);
+  const restored = state.targets()[0];
+  assert.equal(restored.baselineAtMs, before.baselineAtMs);
+  assert.equal(restored.processedThroughMs, BASE + 200);
+  assert.equal(restored.closedProcessedThroughMs, BASE + 200);
+  assert.deepEqual(restored.closedBoundaryIds, []);
+});
+
+test('capacity math accepts 48 default residents and rejects either cadence ceiling', () => {
+  const defaults = validateDirectWatchCapacity({ residentCap: 48, scanMs: 3_000,
+    maxOpenHydratesPerScan: 8, openPollMs: 18_000,
+    maxClosedHydratesPerScan: 3, closedPollMs: 60_000 });
+  assert.equal(defaults.sustainableOpenTargetCeiling, 48);
+  assert.equal(defaults.sustainableClosedTargetCeiling, 60);
+  assert.equal(defaults.nominalOpenSweepMsAtCap, 18_000);
+  assert.throws(() => validateDirectWatchCapacity({ residentCap: 49, scanMs: 3_000,
+    maxOpenHydratesPerScan: 8, openPollMs: 18_000,
+    maxClosedHydratesPerScan: 3, closedPollMs: 60_000 }), /OPEN capacity 48/);
+  assert.throws(() => validateDirectWatchCapacity({ residentCap: 61, scanMs: 3_000,
+    maxOpenHydratesPerScan: 20, openPollMs: 18_000,
+    maxClosedHydratesPerScan: 3, closedPollMs: 60_000 }), /CLOSED capacity 60/);
+});
+
+test('v4 state migrates without resetting causal fields and fails closed above cap', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'elite-v4-migration-')), 'state.json');
+  writeFileSync(path, JSON.stringify({ version: 'lane3-elite-direct-watch-v4-20260918', targets: {
+    p1: { ...target, lifecycle: 'ACTIVE', baselineAtMs: BASE, processedThroughMs: BASE + 50,
+      selectorInitialized: true, lastSelectorUpdatedAtMs: BASE + 40, lastFallbackPollAtMs: BASE + 45,
+      closedHistoryInitialized: true, closedProcessedThroughMs: BASE + 60,
+      closedBoundaryIds: ['boundary'], lastClosedPollAtMs: BASE + 61 },
+  } }));
+  const state = new EliteDirectWatchState(path);
+  const migrated = state.targets()[0];
+  assert.equal(migrated.processedThroughMs, BASE + 50);
+  assert.equal(migrated.closedProcessedThroughMs, BASE + 60);
+  assert.deepEqual(migrated.closedBoundaryIds, ['boundary']);
+  assert.equal(migrated.negativeEvidenceCount, 0);
+  assert.doesNotThrow(() => state.assertResidentCap(1));
+  assert.throws(() => state.assertResidentCap(0), /exceeding configured cap/);
+});
+
+test('rotating bounded universes cannot grow residents beyond cap or demote absent incumbents', () => {
+  const state = new EliteDirectWatchState(join(mkdtempSync(join(tmpdir(), 'elite-rotation-cap-')), 'state.json'));
+  for (let cycle = 0; cycle < 20; cycle += 1) {
+    const rows = Array.from({ length: 4 }, (_, offset) => ({ ...target, portfolioId: `p${cycle * 4 + offset}` }));
+    state.syncTargets(rows, new Set(), BASE + cycle, true, 100, new Set(), 3);
+    assert.ok(state.targets().length <= 3);
+    assert.ok(state.targets().every(row => row.lifecycle === 'ACTIVE'));
+  }
 });

@@ -36,6 +36,7 @@ import {
   signalsFromDirectInvestments,
   unownedCloseEvidence,
   validateClosedPageOrdering,
+  validateDirectWatchCapacity,
 } from './elite-direct-watch.js';
 import {
   closedLifecycleWasHandled,
@@ -130,6 +131,9 @@ function loadConfig() {
     directWatchClosedPollMs: Math.max(30_000, n('NOTIFICATION_TRADER_DIRECT_WATCH_CLOSED_POLL_MS', 60_000)),
     directWatchMaxClosedHydratesPerScan: Math.max(1, Math.min(10, Math.trunc(n('NOTIFICATION_TRADER_DIRECT_WATCH_MAX_CLOSED_HYDRATES_PER_SCAN', 3)))),
     directWatchClosedMaxPages: Math.max(1, Math.min(3, Math.trunc(n('NOTIFICATION_TRADER_DIRECT_WATCH_CLOSED_MAX_PAGES', 2)))),
+    directWatchResidentCap: Math.max(1, Math.trunc(n('MAX_DIRECT_WATCH_RESIDENT_TARGETS', 48))),
+    directWatchNegativeMinObservations: Math.max(2, Math.trunc(n('DIRECT_WATCH_NEGATIVE_MIN_OBSERVATIONS', 2))),
+    directWatchNegativeGraceMs: Math.max(600_000, n('DIRECT_WATCH_NEGATIVE_GRACE_MS', 600_000)),
     minEvidenceEvents: Math.max(1, Math.trunc(n('NOTIFICATION_TRADER_MIN_EVIDENCE_EVENTS', 20))),
     minObservationDays: Math.max(1, Math.trunc(n('NOTIFICATION_TRADER_MIN_OBSERVATION_DAYS', 7))),
     staleAfterMs: Math.max(60_000, n('NOTIFICATION_TRADER_STALE_AFTER_MS', 3 * 24 * 60 * 60 * 1000)),
@@ -138,6 +142,14 @@ function loadConfig() {
 }
 
 const cfg = loadConfig();
+const directWatchConfiguredCapacity = validateDirectWatchCapacity({
+  residentCap: cfg.directWatchResidentCap,
+  scanMs: cfg.directWatchScanMs,
+  maxOpenHydratesPerScan: cfg.directWatchMaxHydratesPerScan,
+  openPollMs: cfg.directWatchFallbackPollMs,
+  maxClosedHydratesPerScan: cfg.directWatchMaxClosedHydratesPerScan,
+  closedPollMs: cfg.directWatchClosedPollMs,
+});
 const shadowPolicy: ShadowExecutionPolicy = {
   maxBookAgeMs: cfg.shadowMaxBookAgeMs,
   maxSpreadBps: cfg.shadowMaxSpreadBps,
@@ -162,6 +174,7 @@ const tracker = new TraderTracker(cfg.trackerPath, {
   inactiveAfterMs: cfg.inactiveAfterMs,
 });
 const directWatch = new EliteDirectWatchState(cfg.directWatchStatePath);
+directWatch.assertResidentCap(cfg.directWatchResidentCap);
 const inFlight = new Set<string>();
 const inFlightSourceEvents = new Set<string>();
 const sourceLifecycleQueue = new SourceLifecycleQueue();
@@ -182,6 +195,7 @@ const directWatchMetrics = {
   signalsObserved: 0, signalsHandled: 0, http429s: 0,
   targetErrors: 0, selectorErrors: 0, skippedAfterRateLimit: 0,
   candidateStateRejections: 0, candidateStateLastError: null as string | null,
+  deferredAdmissions: 0,
   lastScanAtMs: 0, lastSuccessAtMs: 0,
 };
 const FUNDING_INTERVAL_MS = 60 * 60 * 1000;
@@ -1622,8 +1636,21 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
     } else {
       directWatchMetrics.candidateStateLastError = null;
     }
+    const deferredBefore = new Set(directWatch.deferredAdmissions().map(row => row.portfolioId));
     directWatch.syncTargets(candidate.targets, ownedDirectPortfolioIds(), nowMs, !candidate.stale,
-      120_000, new Set(candidate.demotedPortfolioIds));
+      120_000, new Set(candidate.demotedPortfolioIds), cfg.directWatchResidentCap,
+      cfg.directWatchNegativeMinObservations, cfg.directWatchNegativeGraceMs,
+      candidate.observedAtMs ?? nowMs);
+    for (const deferred of directWatch.deferredAdmissions()) {
+      if (deferredBefore.has(deferred.portfolioId)) continue;
+      directWatchMetrics.deferredAdmissions += 1;
+      const lifecycle = directWatch.status();
+      log({ type: 'elite_direct_admission_deferred', ...deferred,
+        residentCount: lifecycle.targetCount, lifecycleCounts: {
+          active: lifecycle.activeTargetCount, missingGrace: lifecycle.missingGraceTargetCount,
+          retiring: lifecycle.retiringTargetCount,
+        }, selectorReason: 'fresh_elite_candidate', live: false });
+    }
     const targets = directWatch.targets();
     const targetsByFilter = new Map<string, typeof targets>();
     for (const target of targets) {
@@ -1794,6 +1821,14 @@ function startServer() {
           closedPollMs: cfg.directWatchClosedPollMs,
           maxClosedHydratesPerScan: cfg.directWatchMaxClosedHydratesPerScan,
           closedMaxPages: cfg.directWatchClosedMaxPages,
+          residentCap: cfg.directWatchResidentCap,
+          residentBudgetHeadroom: cfg.directWatchResidentCap - directStatus.targetCount,
+          negativeMinObservations: cfg.directWatchNegativeMinObservations,
+          negativeGraceMs: cfg.directWatchNegativeGraceMs,
+          sustainableOpenTargetCeiling: directWatchConfiguredCapacity.sustainableOpenTargetCeiling,
+          sustainableClosedTargetCeiling: directWatchConfiguredCapacity.sustainableClosedTargetCeiling,
+          openTargetHeadroom: directWatchConfiguredCapacity.sustainableOpenTargetCeiling - directStatus.targetCount,
+          closedTargetHeadroom: directWatchConfiguredCapacity.sustainableClosedTargetCeiling - directStatus.targetCount,
           nominalOpenSweepMs: Math.ceil(directStatus.targetCount / cfg.directWatchMaxHydratesPerScan) * cfg.directWatchScanMs,
           nominalClosedSweepMs: Math.ceil(directStatus.targetCount / cfg.directWatchMaxClosedHydratesPerScan) * cfg.directWatchScanMs,
           nominalMaxRequestsPerScan: cfg.directWatchMaxHydratesPerScan * cfg.directWatchOpenMaxPages

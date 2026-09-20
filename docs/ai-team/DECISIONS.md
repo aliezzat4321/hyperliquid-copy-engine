@@ -83,6 +83,30 @@ Append-only record of accepted architecture / policy decisions. New decisions ma
 - This changes shadow source capture only. It does not authorize real trading, capital,
   credentials, signing, order routing, deployment, or bulk mining.
 
+## 2026-09-20 — Lane 3 direct-watch residency is capped and absence is non-authoritative
+
+- The default `trending,all` bounded discovery pages are a sampler, not an authoritative
+  universe. A resident target absent from a fresh cycle remains in its current lifecycle
+  and continues identical OPEN/CLOSED polling. Only a fresh, structurally valid current-cycle
+  non-ELITE row for that exact portfolio is negative evidence. Two distinct observation
+  timestamps spanning at least the 10-minute collector interval are required before
+  `RETIRING`; one observation enters `MISSING_GRACE`, and fresh ELITE evidence immediately
+  restores `ACTIVE` without resetting causal watermarks or dedupe/selector state.
+- `MAX_DIRECT_WATCH_RESIDENT_TARGETS` defaults to 48 and covers `ACTIVE`, `MISSING_GRACE`,
+  and `RETIRING`. At the configured 3s scan, eight OPEN hydrations and 18s OPEN cadence,
+  the sustainable OPEN ceiling is 48; three CLOSED hydrations and 60s cadence yield 60.
+  Startup rejects a cap above either ceiling. A full cap never evicts an incumbent: new
+  ELITE candidates are deterministically deferred with durable state and audit telemetry.
+- A safely drained retirement becomes a compact nonresident tombstone instead of being
+  deleted. The tombstone retains prospective baseline, OPEN/CLOSED high-water and boundary
+  identity, selector metadata, source identity, and demotion provenance. Re-enrollment
+  restores those maxima while rebasing both event watermarks prospectively (and clearing
+  a superseded CLOSED equal-time boundary), preventing historical replay. Existing v1-v4
+  state migrates in place; startup fails closed if its
+  resident count already exceeds the configured cap.
+- This remains shadow-only. It changes no real-trading permission, bulk-miner setting, or
+  candidate-universe policy; Issues #397 and #403 remain separate.
+
 ## 2026-09-03 — Risk eligibility is separate from credible edge
 
 - Promotion policy v2 retains the v1 profitability floors and adds a versioned,
