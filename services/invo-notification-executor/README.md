@@ -166,6 +166,12 @@ Dry mode is an execution-realistic trade-lifecycle ledger, not a mid-price entry
 Funding evidence is prospective: each hourly funding interval must have a fresh Hyperliquid
 `oraclePx` checkpoint; cost is position size × oracle price × funding rate. Missing
 checkpoints make economics incomplete rather than substituting entry/mark prices.
+An independent worker thread arms at each hourly boundary and performs bounded read-only
+HTTP retries only inside the existing 10-second causal window. It sends observations to
+the main thread, which remains the sole durable state writer. Audit rows include every
+attempt timestamp and latency, retry count, final boundary delay, affected positions and
+failure class. Starting after a boundary deadline marks eligible open positions incomplete;
+it never reconstructs a checkpoint after the fact.
 
 The current execution evidence contract is `lane3-causal-l2-v2`; the cost model is
 `hl-taker-l2-oracle-funding-v2`; the shadow admission contract is
