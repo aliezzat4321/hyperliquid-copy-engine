@@ -85,7 +85,8 @@ async function main() {
         const items = Array.isArray(data?.items) ? data.items : [];
         if (!items.length) break;
         rawItems += items.length;
-        accepted += ledger.observe(items, filter, observedAtMs).length;
+        const observed = ledger.observe(items, filter, observedAtMs);
+        accepted += observed.length;
         if (items.length < pageSize) break;
       } catch (err) {
         failure = err instanceof Error ? err.message : String(err);
@@ -94,7 +95,6 @@ async function main() {
     }
     endpointResults.push({ filter, accepted, failure });
   }
-
   const report = ledger.report();
   const leaderboards = leaderboardLedger.report();
   console.log(JSON.stringify({

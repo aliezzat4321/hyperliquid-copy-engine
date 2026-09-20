@@ -62,7 +62,7 @@ def _section(title: str, section: dict[str, Any]) -> list[str]:
         "",
         *_fact_rows(section["facts"]),
         "",
-        f"**Blocker:** {section['blocker']}  ",
+        f"**Blocker:** {section['blocker']}",
         f"**Next:** {section['next']}.",
     ]
 
@@ -75,9 +75,9 @@ def render(data: dict[str, Any]) -> str:
         "",
         "Generated from `docs/ai-team/state.json`. Do not hand-edit.",
         "",
-        f"**Snapshot:** {data['snapshot_at']}  ",
-        f"**Updated by:** {data['updated_by']}  ",
-        f"**Observed main head:** `{data['head_observed']}`  ",
+        f"**Snapshot:** {data['snapshot_at']}",
+        f"**Updated by:** {data['updated_by']}",
+        f"**Observed main head:** `{data['head_observed']}`",
         f"**Mission:** {data['mission']}",
         "",
         "## Live trading",

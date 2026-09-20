@@ -63,6 +63,9 @@ interface DiskState {
   /** Keyed by the Invo source position/base id, not by coin. */
   managed: Record<string, ManagedPosition>;
   feedCursors: Record<string, FeedCursor>;
+  feedBaselines: Record<string, number>;
+  observedOpenSourceIds: string[];
+  handledCloseSourceIds: string[];
 }
 
 export interface FeedCursor {
@@ -113,8 +116,10 @@ function normalizeManaged(raw: Record<string, ManagedPosition> | undefined): Rec
 }
 
 export class NotificationState {
-  private state: DiskState = { seen: [], managed: {}, feedCursors: {} };
+  private state: DiskState = { seen: [], managed: {}, feedCursors: {}, feedBaselines: {}, observedOpenSourceIds: [], handledCloseSourceIds: [] };
   private seen = new Set<string>();
+  private observedOpenSourceIds = new Set<string>();
+  private handledCloseSourceIds = new Set<string>();
 
   constructor(private readonly path: string, private readonly maxSeen = 20_000) {
     this.load();
@@ -128,8 +133,21 @@ export class NotificationState {
         seen: parsed.seen ?? [],
         managed: normalizeManaged(parsed.managed),
         feedCursors: parsed.feedCursors ?? {},
+        feedBaselines: {
+          ...Object.fromEntries(Object.entries(parsed.feedCursors ?? {}).map(([feed, cursor]) => [feed, cursor.observedAtMs])),
+          ...(parsed.feedBaselines ?? {}),
+        },
+        observedOpenSourceIds: parsed.observedOpenSourceIds ?? [],
+        handledCloseSourceIds: [...new Set([
+          ...(Array.isArray(parsed.handledCloseSourceIds) ? parsed.handledCloseSourceIds : [])
+            .filter(value => typeof value === 'string' && value.length > 0),
+          ...(Array.isArray(parsed.seen) ? parsed.seen : []).flatMap(key => typeof key === 'string' && key.startsWith('source-close:')
+            && key.length > 'source-close:'.length ? [key.slice('source-close:'.length)] : []),
+        ])].slice(-this.maxSeen),
       };
       this.seen = new Set(this.state.seen);
+      this.observedOpenSourceIds = new Set(this.state.observedOpenSourceIds);
+      this.handledCloseSourceIds = new Set(this.state.handledCloseSourceIds);
     } catch (err) {
       console.error(JSON.stringify({ type: 'state_load_error', path: this.path, error: String(err) }));
     }
@@ -151,6 +169,32 @@ export class NotificationState {
     while (this.state.seen.length > this.maxSeen) {
       const old = this.state.seen.shift();
       if (old) this.seen.delete(old);
+    }
+    this.save();
+  }
+
+  hasObservedOpen(sourceBaseId: string) { return this.observedOpenSourceIds.has(sourceBaseId); }
+
+  markObservedOpen(sourceBaseId: string) {
+    if (!sourceBaseId || this.observedOpenSourceIds.has(sourceBaseId)) return;
+    this.state.observedOpenSourceIds.push(sourceBaseId);
+    this.observedOpenSourceIds.add(sourceBaseId);
+    while (this.state.observedOpenSourceIds.length > this.maxSeen) {
+      const old = this.state.observedOpenSourceIds.shift();
+      if (old) this.observedOpenSourceIds.delete(old);
+    }
+    this.save();
+  }
+
+  hasHandledClose(sourceBaseId: string) { return this.handledCloseSourceIds.has(sourceBaseId); }
+
+  markHandledClose(sourceBaseId: string) {
+    if (!sourceBaseId || this.handledCloseSourceIds.has(sourceBaseId)) return;
+    this.state.handledCloseSourceIds.push(sourceBaseId);
+    this.handledCloseSourceIds.add(sourceBaseId);
+    while (this.state.handledCloseSourceIds.length > this.maxSeen) {
+      const old = this.state.handledCloseSourceIds.shift();
+      if (old) this.handledCloseSourceIds.delete(old);
     }
     this.save();
   }
@@ -184,6 +228,16 @@ export class NotificationState {
 
   setFeedCursor(feed: string, cursor: FeedCursor) {
     this.state.feedCursors[feed] = cursor;
+    this.state.feedBaselines[feed] = cursor.observedAtMs;
+    this.save();
+  }
+
+  hasFeedBaseline(feed: string) {
+    return Number.isFinite(this.state.feedBaselines[feed]);
+  }
+
+  markFeedBaselined(feed: string, observedAtMs: number) {
+    this.state.feedBaselines[feed] = observedAtMs;
     this.save();
   }
 
