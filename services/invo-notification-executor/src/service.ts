@@ -62,6 +62,10 @@ import {
   simulateL2Fill,
   type ShadowExecutionPolicy,
 } from './shadow-execution.js';
+import {
+  startFundingOracleWorker,
+  type FundingOracleCaptureResult,
+} from './funding-oracle-capture.js';
 
 if (INVO_TOKEN) invo.setToken(INVO_TOKEN);
 if (INVO_REFRESH_TOKEN) invo.setRefreshToken(INVO_REFRESH_TOKEN);
@@ -191,7 +195,7 @@ let pendingWake: { source: string; hints?: NotificationHints; receivedAtMs: numb
 let lastSuccessPollMs = 0;
 let backoffMs = 0;
 let discoverySurfaceIndex = 0;
-let lastFundingOracleBoundaryMs = -1;
+const finalizedFundingOracleBoundaries = new Set<number>();
 let directWatchBackoffMs = 0;
 let directWatchBackoffUntilMs = 0;
 const directWatchMetrics = {
@@ -204,7 +208,6 @@ const directWatchMetrics = {
   deferredAdmissions: 0,
   lastScanAtMs: 0, lastSuccessAtMs: 0,
 };
-const FUNDING_INTERVAL_MS = 60 * 60 * 1000;
 const SOURCE_CLOSE_RETRY_BASE_MS = 250;
 const SOURCE_CLOSE_RETRY_MAX_MS = 30_000;
 const HEALTH_MTM_CONCURRENCY = 4;
@@ -1134,11 +1137,18 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
 }
 
 
-async function captureFundingOracleCheckpoints(nowMs = Date.now()) {
-  if (cfg.live) return;
-  const fundingTimeMs = Math.floor(nowMs / FUNDING_INTERVAL_MS) * FUNDING_INTERVAL_MS;
-  if (fundingTimeMs === lastFundingOracleBoundaryMs) return;
-
+function applyFundingOracleResult(result: FundingOracleCaptureResult) {
+  const { fundingTimeMs } = result;
+  if (finalizedFundingOracleBoundaries.has(fundingTimeMs)) {
+    log({ type: 'funding_oracle_duplicate_ignored', fundingTimeMs });
+    return;
+  }
+  finalizedFundingOracleBoundaries.add(fundingTimeMs);
+  // Bound the process-local dedupe set. Position checkpoints remain the durable guard.
+  if (finalizedFundingOracleBoundaries.size > 48) {
+    const oldest = Math.min(...finalizedFundingOracleBoundaries);
+    finalizedFundingOracleBoundaries.delete(oldest);
+  }
   const snapshot = state.snapshot();
   const targets = Object.values(snapshot.managed).filter(position => (
     position.paper
@@ -1147,9 +1157,8 @@ async function captureFundingOracleCheckpoints(nowMs = Date.now()) {
     && !position.fundingIncompleteReason
     && !(position.fundingOracleCheckpoints ?? []).some(point => point.fundingTimeMs === fundingTimeMs)
   ));
-  const delayAtStartMs = nowMs - fundingTimeMs;
-  if (delayAtStartMs > cfg.shadowFundingOracleMaxDelayMs) {
-    lastFundingOracleBoundaryMs = fundingTimeMs;
+  const affectedSourceBaseIds = targets.map(position => position.sourceBaseId);
+  if (result.failureClass || !result.oraclePrices || result.finalDelayMs > cfg.shadowFundingOracleMaxDelayMs) {
     for (const position of targets) {
       const latest = state.getManagedBySource(position.sourceBaseId);
       if (!latest || latest.fundingIncompleteReason) continue;
@@ -1162,35 +1171,30 @@ async function captureFundingOracleCheckpoints(nowMs = Date.now()) {
       log({
         type: 'funding_oracle_capture_missed',
         fundingTimeMs,
-        delayMs: delayAtStartMs,
+        attemptTimestamps: result.attempts,
+        retryCount: result.retryCount,
+        requestLatenciesMs: result.attempts.map(attempt => attempt.requestLatencyMs),
+        finalDelayMs: result.finalDelayMs,
         maxDelayMs: cfg.shadowFundingOracleMaxDelayMs,
-        affectedSourceBaseIds: targets.map(position => position.sourceBaseId),
+        affectedSourceBaseIds,
+        failureClass: result.failureClass ?? 'response_after_deadline',
+        error: result.error,
       });
     }
     return;
   }
-  if (!targets.length) {
-    lastFundingOracleBoundaryMs = fundingTimeMs;
-    return;
-  }
 
-  const requestedAtMs = Date.now();
-  const oraclePrices = await hl.getOraclePrices();
-  const observedAtMs = Date.now();
-  const delayMs = observedAtMs - fundingTimeMs;
-  lastFundingOracleBoundaryMs = fundingTimeMs;
-
+  const missingOracleSourceBaseIds: string[] = [];
   for (const position of targets) {
     const latest = state.getManagedBySource(position.sourceBaseId);
     if (!latest || latest.fundingIncompleteReason || latest.openedAtMs >= fundingTimeMs) continue;
     if ((latest.fundingOracleCheckpoints ?? []).some(point => point.fundingTimeMs === fundingTimeMs)) continue;
-    const oraclePx = Number(oraclePrices[latest.coin]);
-    if (!(oraclePx > 0) || delayMs > cfg.shadowFundingOracleMaxDelayMs) {
+    const oraclePx = Number(result.oraclePrices[latest.coin]);
+    if (!(oraclePx > 0)) {
+      missingOracleSourceBaseIds.push(position.sourceBaseId);
       state.setManaged({
         ...latest,
-        fundingIncompleteReason: !(oraclePx > 0)
-          ? `missing oraclePx for ${latest.coin} at funding interval ${fundingTimeMs}`
-          : `oracle checkpoint too late for funding interval ${fundingTimeMs}: ${delayMs}ms`,
+        fundingIncompleteReason: `missing oraclePx for ${latest.coin} at funding interval ${fundingTimeMs}`,
       });
       continue;
     }
@@ -1198,18 +1202,23 @@ async function captureFundingOracleCheckpoints(nowMs = Date.now()) {
       ...latest,
       fundingOracleCheckpoints: [
         ...(latest.fundingOracleCheckpoints ?? []),
-        { fundingTimeMs, observedAtMs, oraclePx },
+        { fundingTimeMs, observedAtMs: result.finalObservedAtMs, oraclePx },
       ],
     });
   }
   log({
     type: 'funding_oracle_checkpoint',
     fundingTimeMs,
-    requestedAtMs,
-    observedAtMs,
-    delayMs,
+    attemptTimestamps: result.attempts,
+    retryCount: result.retryCount,
+    requestLatenciesMs: result.attempts.map(attempt => attempt.requestLatencyMs),
+    observedAtMs: result.finalObservedAtMs,
+    finalDelayMs: result.finalDelayMs,
     maxDelayMs: cfg.shadowFundingOracleMaxDelayMs,
     targetCount: targets.length,
+    affectedSourceBaseIds,
+    failureClass: missingOracleSourceBaseIds.length ? 'missing_oracle_prices' : null,
+    missingOracleSourceBaseIds,
   });
 }
 
@@ -1909,13 +1918,6 @@ async function pollLoop() {
     await new Promise(r => setTimeout(r, wait));
     const surface = cfg.discoverySurfaces[discoverySurfaceIndex % cfg.discoverySurfaces.length];
     discoverySurfaceIndex += 1;
-    if (!cfg.live) {
-      try {
-        await captureFundingOracleCheckpoints(Date.now());
-      } catch (err) {
-        log({ type: 'funding_oracle_capture_error', error: err instanceof Error ? err.message : String(err) });
-      }
-    }
     await wake(`api_poll:${surface}`, undefined, Date.now(), surface);
   }
 }
@@ -1937,11 +1939,15 @@ async function main() {
     await invo.checkAccountReady();
   }
   if (!cfg.live) {
-    try {
-      await captureFundingOracleCheckpoints(Date.now());
-    } catch (err) {
-      log({ type: 'funding_oracle_capture_error', phase: 'startup', error: err instanceof Error ? err.message : String(err) });
-    }
+    startFundingOracleWorker(
+      { maxDelayMs: cfg.shadowFundingOracleMaxDelayMs },
+      applyFundingOracleResult,
+      error => {
+        log({ type: 'funding_oracle_worker_error', error: error.message });
+        // Losing the independent capture mechanism is fatal; let systemd restart it.
+        setImmediate(() => { throw error; });
+      },
+    );
   }
   // Establish every configured surface boundary before ingress and the rotating poller
   // start. Sequential requests keep startup bounded/429-safe and minimize the window in
