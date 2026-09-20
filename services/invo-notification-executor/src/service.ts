@@ -52,6 +52,7 @@ import { runSignalBatchBySource, SourceLifecycleQueue } from './source-lifecycle
 import { CapturedSignalBatch, publishThenFlushCapturedSignals } from './scan-capture.js';
 import { eliteAdmissionFromState, ELITE_ADMISSION_VERSION, shouldPersistAdmissionDenial } from './elite-admission.js';
 import { shouldTerminallyDustReconcile } from './close-rejection.js';
+import { FeedPortfolioEvidenceStore } from './feed-portfolio-evidence.js';
 import {
   COST_MODEL_VERSION,
   EXECUTION_EVIDENCE_VERSION,
@@ -143,6 +144,8 @@ function loadConfig() {
     fundingBoundaryPath: resolve(process.env.NOTIFICATION_TRADER_FUNDING_BOUNDARY_PATH
       ?? defaultFundingBoundaryPath(resolve(process.env.NOTIFICATION_TRADER_AUDIT_PATH ?? 'data/notification-trader-audit.jsonl'))),
     trackerPath: resolve(process.env.NOTIFICATION_TRADER_TRACKER_PATH ?? 'data/notification-trader-population.json'),
+    feedPortfolioEvidencePath: resolve(process.env.NOTIFICATION_TRADER_FEED_PORTFOLIO_EVIDENCE_PATH
+      ?? '/var/lib/hyperliquid-copy-engine/invo-notification-executor/feed-portfolio-evidence.json'),
     candidateStatePath: resolve(process.env.NOTIFICATION_TRADER_CANDIDATE_STATE_PATH ?? '/var/lib/hyperliquid-copy-engine/invo-notification-executor/portfolio-candidates.json'),
     candidateSnapshotsPath: resolve(process.env.INVO_PORTFOLIO_CANDIDATE_SNAPSHOTS_PATH ?? '/var/lib/hyperliquid-copy-engine/invo-notification-executor/portfolio-candidate-snapshots.jsonl'),
     candidateStateMaxAgeMs: Math.max(60_000, n('NOTIFICATION_TRADER_CANDIDATE_MAX_AGE_MS', 20 * 60 * 1000)),
@@ -215,6 +218,9 @@ const tracker = new TraderTracker(cfg.trackerPath, {
   staleAfterMs: cfg.staleAfterMs,
   inactiveAfterMs: cfg.inactiveAfterMs,
 });
+// Executor is the sole writer. Portfolio research consumes this store read-only and
+// remains the sole writer of portfolio-candidates.json.
+const feedPortfolioEvidence = new FeedPortfolioEvidenceStore(cfg.feedPortfolioEvidencePath);
 const directWatch = new EliteDirectWatchState(
   cfg.directWatchStatePath, cfg.directWatchAdmissionIndexPath,
   directWatchConfiguredCapacity.hardProvenResidentCap,
@@ -1302,6 +1308,10 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
     cfg.feedMaxPages,
   );
   const posts = backfill.posts;
+  // Capture portfolio evidence even when these posts are an initial baseline or lie
+  // before an unreached cursor. This expands future research only; it never executes
+  // or marks historical trades copy-eligible.
+  feedPortfolioEvidence.observe(posts as any[], feedFilter, Date.now());
   if (saved && !backfill.cursorReached) {
     const gapPlan = planUnrecoverableGap(
       posts,
@@ -1948,6 +1958,7 @@ function startServer() {
         eliteAdmissionVersion: ELITE_ADMISSION_VERSION,
         candidateStatePath: cfg.candidateStatePath,
         candidateStateMaxAgeMs: cfg.candidateStateMaxAgeMs,
+        feedPortfolioEvidence: feedPortfolioEvidence.report(),
         feedFilter: cfg.feedFilter,
         feedMaxPages: cfg.feedMaxPages,
         feedCursors: state.snapshot().feedCursors,
@@ -2127,6 +2138,7 @@ async function main() {
     eliteAdmissionVersion: ELITE_ADMISSION_VERSION,
     candidateStatePath: cfg.candidateStatePath,
     candidateStateMaxAgeMs: cfg.candidateStateMaxAgeMs,
+    feedPortfolioEvidencePath: cfg.feedPortfolioEvidencePath,
     pollMs: cfg.pollMs,
     maxSignalAgeMs: cfg.maxSignalAgeMs,
     feedFilter: cfg.feedFilter,
