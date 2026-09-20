@@ -205,7 +205,7 @@
         }
       ],
       "blocker": "PR #404 final repair commit 9d5bd7c is locally validated but still requires independent exact-SHA review and post-deploy prospective source/event-recall proof; production is unchanged. #403 and #397 remain separate gates.",
-      "next": "Issue #400 / PR #404 exact-SHA review"
+      "next": "Issue #400"
     }
   },
   "infrastructure": {

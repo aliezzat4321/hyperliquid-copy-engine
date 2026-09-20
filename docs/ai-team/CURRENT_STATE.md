@@ -58,7 +58,7 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 | real trading enabled | False | `2026-09-17T23:10:50Z` | manual `VM runtime env 2026-09-17T23:10Z` |
 
 **Blocker:** PR #404 final repair commit 9d5bd7c is locally validated but still requires independent exact-SHA review and post-deploy prospective source/event-recall proof; production is unchanged. #403 and #397 remain separate gates.
-**Next:** Issue #400 / PR #404 exact-SHA review.
+**Next:** Issue #400.
 
 ## Infrastructure
 **Status:** `DEGRADED`
