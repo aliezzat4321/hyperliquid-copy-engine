@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "snapshot_at": "2026-09-20T15:34:12Z",
+  "snapshot_at": "2026-09-20T16:07:04Z",
   "updated_by": "CODEX_CHATGPT",
   "head_observed": "fd63de5c60fc9d19ec643a2c491d5a815581765a",
   "mission": "Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.",
@@ -151,21 +151,21 @@
       "facts": [
         {
           "key": "funding_capture_reliability_implementation",
-          "label": "Lane 3 independent funding capture implementation commit",
-          "value": "7b2c07b",
+          "label": "Lane 3 funding boundary reliability implementation commit",
+          "value": "703ee89",
           "unit": "text",
-          "observed_at": "2026-09-20T15:34:12Z",
+          "observed_at": "2026-09-20T16:07:04Z",
           "source_type": "COMMIT",
-          "source_ref": "7b2c07b89801bce5a46952b1b996e4d2305a360e"
+          "source_ref": "703ee89"
         },
         {
           "key": "funding_capture_builder_validation",
-          "label": "builder-validated executor test files passing after funding capture repair",
-          "value": 25,
+          "label": "builder-validated executor subtests passing after funding repair",
+          "value": 194,
           "unit": "count",
-          "observed_at": "2026-09-20T15:34:12Z",
+          "observed_at": "2026-09-20T16:07:04Z",
           "source_type": "COMMIT",
-          "source_ref": "7b2c07b89801bce5a46952b1b996e4d2305a360e"
+          "source_ref": "703ee89"
         },
         {
           "key": "source_capture_pr_head",
@@ -231,8 +231,8 @@
           "source_ref": "VM runtime env 2026-09-17T23:10Z"
         }
       ],
-      "blocker": "Issue #350 funding capture repair commit 7b2c07b is builder-tested but not deployed, so it has no runtime reliability proof and still requires independent exact-SHA review. PR #404 repair commit 29a6c5f also requires independent review plus post-deploy prospective source/event-recall proof; production is unchanged.",
-      "next": "Issues #350 and #400"
+      "blocker": "Issue #350 repaired commit 703ee89 is locally validated but not deployed and still requires independent exact-SHA review/runtime reliability proof. PR #404 also remains gated by exact-SHA review and post-deploy recall proof.",
+      "next": "Issues #350 and #400 exact-SHA review"
     }
   },
   "infrastructure": {
