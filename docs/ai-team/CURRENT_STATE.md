@@ -2,7 +2,7 @@
 
 Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
-**Snapshot:** 2026-09-20T15:33:55Z
+**Snapshot:** 2026-09-20T16:07:03Z
 **Updated by:** CODEX_CHATGPT
 **Observed main head:** `fd63de5c60fc9d19ec643a2c491d5a815581765a`
 **Mission:** Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.
@@ -49,16 +49,16 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
 | Fact | Value | Observed | Source |
 |---|---:|---|---|
-| Lane 3 concurrent deadline scheduler implementation commit | 67efba6 | `2026-09-20T15:33:55Z` | commit `67efba6` |
-| builder-validated executor test files passing | 24 | `2026-09-20T15:33:55Z` | commit `67efba6` |
+| Lane 3 final source-capture implementation commit | 9d5bd7c | `2026-09-20T16:07:03Z` | commit `9d5bd7c527c07effc42a89fb5a1927a2f7834983` |
+| builder-validated executor subtests passing | 199 | `2026-09-20T16:07:03Z` | commit `9d5bd7c527c07effc42a89fb5a1927a2f7834983` |
 | default direct-watch resident capacity proven by timeout/page/deadline budget | 16 | `2026-09-20T15:33:55Z` | commit `67efba6` |
 | verified Invo trade-feed surfaces | 4 | `2026-09-17T23:46:12Z` | issue `#400` |
 | exploratory feed-exposed portfolios missing from current selector | 109 | `2026-09-17T23:46:12Z` | issue `#403` |
 | exploratory missing portfolios meeting frozen selector on visible evidence | 53 | `2026-09-17T23:46:12Z` | issue `#403` |
 | real trading enabled | False | `2026-09-17T23:10:50Z` | manual `VM runtime env 2026-09-17T23:10Z` |
 
-**Blocker:** PR #404 concurrent scheduler implementation commit 67efba6 still requires independent review of the final exact SHA plus post-deploy prospective source/event-recall proof; production is unchanged, and #403 candidate-universe expansion plus #397 shared-quota arbitration remain separate open work before Lane 3 source-completeness can be claimed.
-**Next:** Issue #400.
+**Blocker:** PR #404 final repair commit 9d5bd7c is locally validated but still requires independent exact-SHA review and post-deploy prospective source/event-recall proof; production is unchanged. #403 and #397 remain separate gates.
+**Next:** Issue #400 / PR #404 exact-SHA review.
 
 ## Infrastructure
 **Status:** `DEGRADED`
