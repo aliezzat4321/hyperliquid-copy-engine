@@ -1,5 +1,8 @@
 const BASE = 'https://api.invoapp.com';
 const APP_HEADERS = { 'x-app-version': '0.0.75', 'x-platform': 'web' } as const;
+export const INVO_HTTP_REQUEST_TIMEOUT_MS = Math.max(250, Number.parseInt(
+  process.env.INVO_HTTP_REQUEST_TIMEOUT_MS ?? '2000', 10,
+) || 2000);
 
 let token = '';
 let refreshToken = '';
@@ -38,6 +41,7 @@ async function refreshAccessToken(): Promise<boolean> {
   const resp = await fetch(`${BASE}/v1_0/auth/refresh_token`, {
     method: 'GET',
     headers: { Authorization: `Bearer ${refreshToken}`, ...APP_HEADERS },
+    signal: AbortSignal.timeout(INVO_HTTP_REQUEST_TIMEOUT_MS),
   });
   if (resp.status !== 200) return false;
   const data: any = await resp.json();
@@ -69,6 +73,7 @@ async function post(path: string, body: unknown, retried = false): Promise<any> 
       ...APP_HEADERS,
     },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(INVO_HTTP_REQUEST_TIMEOUT_MS),
   });
   const data = decodeResponse(await resp.text());
   if (resp.status === 401 && !retried && await refreshAccessToken()) return post(path, body, true);

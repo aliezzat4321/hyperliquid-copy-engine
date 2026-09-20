@@ -1,5 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
 import { dirname } from 'path';
+import { createHash } from 'crypto';
+import type { FeedPortfolioRecord } from './feed-portfolio-evidence.js';
 
 export const ELITE_SELECTOR_VERSION = 'invo-portfolio-hybrid-v3-20260916';
 
@@ -90,6 +92,36 @@ interface LedgerDiskState {
   portfolios: Record<string, PortfolioSnapshot>;
   firstEliteAtMs: Record<string, number>;
   lastObservedAtMs: number;
+  feedEvidence?: {
+    version: 2;
+    replayBloomBase64: string;
+    records: Record<string, { firstProcessedAtMs: number; lastProcessedAtMs: number; sourceFirstSeenAtMs: number; sourceLastSeenAtMs: number; surfaces: string[]; feedOnlyAtFirstIngestion: boolean; newlySelectorQualified: boolean }>;
+    lifetime: { discovered: number; feedOnly: number; newlyQualified: number; rejectedUnverified: number; rejectedMalformed: number; rejectedIdentityConflicts: number; dedupedReplayCount: number };
+  };
+}
+
+export const FEED_SELECTOR_TRACKING_MAX_PORTFOLIOS = 5_000;
+const SELECTOR_BLOOM_BYTES = 262_144;
+const SELECTOR_BLOOM_HASHES = 7;
+const emptyFeedEvidence = () => ({
+  version: 2 as const,
+  replayBloomBase64: Buffer.alloc(SELECTOR_BLOOM_BYTES).toString('base64'),
+  records: {} as Record<string, { firstProcessedAtMs: number; lastProcessedAtMs: number; sourceFirstSeenAtMs: number; sourceLastSeenAtMs: number; surfaces: string[]; feedOnlyAtFirstIngestion: boolean; newlySelectorQualified: boolean }>,
+  lifetime: { discovered: 0, feedOnly: 0, newlyQualified: 0, rejectedUnverified: 0, rejectedMalformed: 0, rejectedIdentityConflicts: 0, dedupedReplayCount: 0 },
+});
+
+const PORTFOLIO_BUCKETS = new Set<PortfolioBucket>([
+  'ELITE_CANDIDATE', 'SPARSE_HIGH_RETURN', 'RESEARCH_WIDE', 'REJECTED_DEMOTED',
+]);
+
+function validRecentSnapshot(row: unknown): row is PortfolioSnapshot {
+  if (row == null || typeof row !== 'object' || Array.isArray(row)) return false;
+  const candidate = row as Partial<PortfolioSnapshot>;
+  return typeof candidate.portfolioId === 'string' && candidate.portfolioId.trim().length > 0
+    && candidate.selectorVersion === ELITE_SELECTOR_VERSION
+    && typeof candidate.observedAtMs === 'number'
+    && Number.isFinite(candidate.observedAtMs) && candidate.observedAtMs > 0
+    && PORTFOLIO_BUCKETS.has(candidate.bucket as PortfolioBucket);
 }
 
 function finite(v: unknown): number | null {
@@ -283,10 +315,10 @@ export function classifyPortfolio(
   const recentActivityDaysAgo = lastActivityAtMs == null
     ? null
     : Math.max(0, (observedAtMs - lastActivityAtMs) / 86_400_000);
-  const closedPositions = integer(raw?.closedPositions ?? raw?.closedTrades ?? raw?.totalClosedPositions);
-  const openPositions = finite(raw?.openPositions ?? raw?.openTrades);
-  const wonPositions = integer(raw?.wonPositions ?? raw?.winningPositions ?? raw?.wins);
-  const lostPositions = integer(raw?.lostPositions ?? raw?.losingPositions ?? raw?.losses);
+  const closedPositions = integer(raw?.closedPositions ?? raw?.closedPositionsCount ?? raw?.closedTrades ?? raw?.totalClosedPositions);
+  const openPositions = finite(raw?.openPositions ?? raw?.openPositionsCount ?? raw?.openTrades);
+  const wonPositions = integer(raw?.wonPositions ?? raw?.wonPositionsCount ?? raw?.winningPositions ?? raw?.wins);
+  const lostPositions = integer(raw?.lostPositions ?? raw?.lostPositionsCount ?? raw?.losingPositions ?? raw?.losses);
   const winRatePct = finite(raw?.winRate ?? raw?.win_rate ?? raw?.winRatePct);
   const percentChange = finite(raw?.percentChange ?? raw?.pnlPercent ?? raw?.profitLossPercent ?? raw?.roi);
   const liquidated = bool(raw?.liquidated ?? raw?.isLiquidated);
@@ -296,6 +328,13 @@ export function classifyPortfolio(
   // This is a count ratio, not an average-win / average-loss payout ratio. Keep it
   // for observability, but do not double-count it as independent profitability evidence.
   const winLossRatio = lostPositions > 0 ? wonPositions / lostPositions : wonPositions > 0 ? wonPositions : null;
+  const metricsComplete = createdAtMs != null && winRatePct != null && percentChange != null
+    && Number.isFinite(Number(raw?.closedPositions ?? raw?.closedPositionsCount ?? raw?.closedTrades ?? raw?.totalClosedPositions))
+    && Number.isFinite(Number(raw?.wonPositions ?? raw?.wonPositionsCount ?? raw?.winningPositions ?? raw?.wins))
+    && Number.isFinite(Number(raw?.lostPositions ?? raw?.lostPositionsCount ?? raw?.losingPositions ?? raw?.losses));
+  const metricsConsistent = metricsComplete && wonPositions + lostPositions <= closedPositions
+    && winRatePct! >= 0 && winRatePct! <= 100
+    && (closedPositions === 0 || Math.abs((wonPositions / closedPositions) * 100 - winRatePct!) <= 1.0);
 
   const scored = scorePortfolio({
     closedPositions,
@@ -323,6 +362,9 @@ export function classifyPortfolio(
   const enoughHybridSample = hybridRequiredClosedPositions != null
     && closedPositions >= hybridRequiredClosedPositions;
   const elite = !hardReject
+    && (!sourceFilter.startsWith('feed:') || verified === true)
+    && metricsComplete
+    && metricsConsistent
     && enoughBaseSample
     && enoughAge
     && enoughWinRate
@@ -359,6 +401,9 @@ export function classifyPortfolio(
     if (enoughWinRate && hybridRequiredReturnPct != null && !enoughHybridReturn) reasons.push('return_below_win_rate_tradeoff');
     if (enoughWinRate && hybridRequiredClosedPositions != null && !enoughHybridSample) reasons.push('sample_below_win_rate_tradeoff');
     if (scored.score < policy.minQualityScore) reasons.push('weighted_quality_score_below_gate');
+    if (sourceFilter.startsWith('feed:') && verified !== true) reasons.push('verified_profile_required');
+    if (!metricsComplete) reasons.push('incomplete_profile_metrics');
+    else if (!metricsConsistent) reasons.push('inconsistent_profile_metrics');
   }
 
   return {
@@ -397,6 +442,7 @@ export function classifyPortfolio(
 
 export class PortfolioCandidateLedger {
   private state: LedgerDiskState;
+  private recentRows: PortfolioSnapshot[] = [];
 
   constructor(
     private readonly statePath: string,
@@ -410,22 +456,141 @@ export class PortfolioCandidateLedger {
       portfolios: {},
       firstEliteAtMs: {},
       lastObservedAtMs: 0,
+      feedEvidence: emptyFeedEvidence(),
     };
     if (existsSync(statePath)) {
       try {
         const parsed = JSON.parse(readFileSync(statePath, 'utf8')) as Partial<LedgerDiskState>;
+        const selectorMatches = parsed.selectorVersion === ELITE_SELECTOR_VERSION;
         this.state = {
           version: 1,
           selectorVersion: ELITE_SELECTOR_VERSION,
           policy,
-          portfolios: parsed.portfolios ?? {},
-          firstEliteAtMs: parsed.selectorVersion === ELITE_SELECTOR_VERSION ? (parsed.firstEliteAtMs ?? {}) : {},
-          lastObservedAtMs: parsed.lastObservedAtMs ?? 0,
+          portfolios: selectorMatches ? (parsed.portfolios ?? {}) : {},
+          firstEliteAtMs: selectorMatches ? (parsed.firstEliteAtMs ?? {}) : {},
+          lastObservedAtMs: selectorMatches ? (parsed.lastObservedAtMs ?? 0) : 0,
+          feedEvidence: selectorMatches && parsed.feedEvidence?.version === 2 ? parsed.feedEvidence : emptyFeedEvidence(),
         };
       } catch {
         // A malformed prior candidate file must not stop broad research; start a clean candidate view.
       }
     }
+    const recentPath = `${snapshotsPath}.recent.json`;
+    if (existsSync(recentPath)) {
+      try {
+        const parsed = JSON.parse(readFileSync(recentPath, 'utf8'));
+        if (parsed?.version === 1 && Array.isArray(parsed.rows)
+          && (parsed.selectorVersion == null || parsed.selectorVersion === ELITE_SELECTOR_VERSION)) {
+          this.recentRows = parsed.rows.filter(validRecentSnapshot);
+        }
+      } catch {
+        // Rebuilt prospectively on the next observation; admission fails closed meanwhile.
+      }
+    }
+  }
+
+  /**
+   * Assimilate executor-owned evidence at research processing time. Source timestamps
+   * remain provenance only and can never backdate selector visibility.
+   */
+  assimilateFeedEvidence(records: FeedPortfolioRecord[], processedAtMs = Date.now()) {
+    const meta = this.state.feedEvidence ?? emptyFeedEvidence();
+    let bloom = Buffer.from(meta.replayBloomBase64, 'base64');
+    if (bloom.length !== SELECTOR_BLOOM_BYTES) bloom = Buffer.alloc(SELECTOR_BLOOM_BYTES);
+    const bloomIndexes = (id: string) => { const digest = createHash('sha256').update(id).digest(); return Array.from({ length: SELECTOR_BLOOM_HASHES }, (_, index) => digest.readUInt32BE(index * 4) % (SELECTOR_BLOOM_BYTES * 8)); };
+    const seen = (id: string) => bloomIndexes(id).every(index => (bloom[index >> 3] & (1 << (index & 7))) !== 0);
+    const remember = (id: string) => { for (const index of bloomIndexes(id)) bloom[index >> 3] |= 1 << (index & 7); };
+    let observationsProcessed = 0;
+    for (const record of records.sort((a, b) => a.firstSeenAtMs - b.firstSeenAtMs || a.portfolioId.localeCompare(b.portfolioId))) {
+      const wasKnown = this.state.portfolios[record.portfolioId] != null;
+      const wasElite = this.state.portfolios[record.portfolioId]?.bucket === 'ELITE_CANDIDATE';
+      const unseen = record.observations.filter(row => {
+        if (!seen(row.evidenceId)) return true;
+        meta.lifetime.dedupedReplayCount += 1;
+        return false;
+      })
+        .sort((a, b) => a.capturedAtMs - b.capturedAtMs || a.evidenceId.localeCompare(b.evidenceId));
+      if (!unseen.length) continue;
+      const previousMeta = meta.records[record.portfolioId];
+      if (!previousMeta) { meta.lifetime.discovered += 1; if (!wasKnown) meta.lifetime.feedOnly += 1; }
+      meta.records[record.portfolioId] = {
+        firstProcessedAtMs: previousMeta?.firstProcessedAtMs ?? processedAtMs, lastProcessedAtMs: processedAtMs,
+        sourceFirstSeenAtMs: Math.min(previousMeta?.sourceFirstSeenAtMs ?? record.firstSeenAtMs, record.firstSeenAtMs),
+        sourceLastSeenAtMs: Math.max(previousMeta?.sourceLastSeenAtMs ?? 0, record.lastSeenAtMs),
+        surfaces: [...new Set([...(previousMeta?.surfaces ?? []), ...record.surfaces])].sort(),
+        feedOnlyAtFirstIngestion: previousMeta?.feedOnlyAtFirstIngestion ?? !wasKnown,
+        newlySelectorQualified: previousMeta?.newlySelectorQualified ?? false,
+      };
+      const latest = unseen[unseen.length - 1];
+      const existing = this.state.portfolios[record.portfolioId];
+      const consistent = !existing || ((!existing.ownerId || !latest.ownerId || existing.ownerId === latest.ownerId)
+        && (!existing.username || !latest.username || existing.username === latest.username));
+      if (!consistent) meta.lifetime.rejectedIdentityConflicts += 1;
+      // Feed evidence is additive. It must never refresh, overwrite, or demote an
+      // existing canonical verified candidate. Feed-only rows may enter the selector
+      // only when the feed itself carries internally consistent verified profile data.
+      const feedVerified = latest.verified === true && Boolean(latest.ownerId || latest.username);
+      if (consistent && existing?.verified === true) {
+        // Existing broad/profile state remains authoritative; retain its original
+        // observation timestamp and source so social activity cannot manufacture
+        // freshness for stale selector economics.
+      } else if (consistent && feedVerified) {
+        const raw = {
+          ...latest.profile,
+          id: record.portfolioId,
+          ownerId: latest.ownerId,
+          owner: { id: latest.ownerId, username: latest.username, verified: true },
+        };
+        const candidate = classifyPortfolio(raw, processedAtMs, `feed:${latest.surface}`, this.policy);
+        if (candidate?.reasons.includes('incomplete_profile_metrics') || candidate?.reasons.includes('inconsistent_profile_metrics')) {
+          meta.lifetime.rejectedMalformed += 1;
+        } else {
+          this.observe([raw], `feed:${latest.surface}`, processedAtMs);
+        }
+      } else if (consistent) {
+        meta.lifetime.rejectedUnverified += 1;
+      }
+      for (const row of unseen) remember(row.evidenceId);
+      observationsProcessed += unseen.length;
+      if (!wasElite && this.state.portfolios[record.portfolioId]?.bucket === 'ELITE_CANDIDATE') {
+        if (!meta.records[record.portfolioId].newlySelectorQualified) meta.lifetime.newlyQualified += 1;
+        meta.records[record.portfolioId].newlySelectorQualified = true;
+      }
+    }
+    meta.replayBloomBase64 = bloom.toString('base64');
+    const retained = Object.entries(meta.records).sort((a, b) => b[1].lastProcessedAtMs - a[1].lastProcessedAtMs || a[0].localeCompare(b[0])).slice(0, FEED_SELECTOR_TRACKING_MAX_PORTFOLIOS);
+    meta.records = Object.fromEntries(retained);
+    this.state.feedEvidence = meta;
+    if (observationsProcessed) this.saveState();
+    return { observationsProcessed, ...this.feedExpansionReport(processedAtMs) };
+  }
+
+  feedExpansionReport(nowMs = Date.now()) {
+    const meta = this.state.feedEvidence ?? emptyFeedEvidence();
+    const rows = Object.entries(meta.records).map(([portfolioId, record]) => ({
+      portfolioId,
+      surfaces: record.surfaces, firstSeenAtMs: record.sourceFirstSeenAtMs, lastSeenAtMs: record.sourceLastSeenAtMs,
+      firstProcessedAtMs: record.firstProcessedAtMs, lastProcessedAtMs: record.lastProcessedAtMs,
+      ingestionLagMs: Math.max(0, record.firstProcessedAtMs - record.sourceFirstSeenAtMs),
+      feedOnlyAtFirstIngestion: record.feedOnlyAtFirstIngestion, newlySelectorQualified: record.newlySelectorQualified,
+      currentBucket: this.state.portfolios[portfolioId]?.bucket ?? null,
+    }));
+    return {
+      measuredAtMs: nowMs,
+      totalFeedDiscoveredUniquePortfolios: meta.lifetime.discovered,
+      newVsBroadDiscovery: meta.lifetime.feedOnly,
+      newlySelectorQualified: meta.lifetime.newlyQualified,
+      retainedTrackingRecords: rows.length, trackingRecordCap: FEED_SELECTOR_TRACKING_MAX_PORTFOLIOS,
+      rejectedUnverified: meta.lifetime.rejectedUnverified, rejectedMalformed: meta.lifetime.rejectedMalformed,
+      rejectedIdentityConflicts: meta.lifetime.rejectedIdentityConflicts, dedupedReplayCount: meta.lifetime.dedupedReplayCount,
+      portfolios: rows,
+    };
+  }
+
+  private saveState() {
+    const tmp = `${this.statePath}.tmp`;
+    writeFileSync(tmp, JSON.stringify(this.state, null, 2));
+    renameSync(tmp, this.statePath);
   }
 
   observe(items: any[], sourceFilter: string, observedAtMs = Date.now()) {
@@ -437,16 +602,46 @@ export class PortfolioCandidateLedger {
       if (!snapshot) continue;
       snapshots.push(snapshot);
       const previous = this.state.portfolios[snapshot.portfolioId];
-      if (!previous || snapshot.observedAtMs >= previous.observedAtMs) this.state.portfolios[snapshot.portfolioId] = snapshot;
+      if (!previous || snapshot.observedAtMs > previous.observedAtMs
+        || (snapshot.observedAtMs === previous.observedAtMs
+          && previous.bucket === 'ELITE_CANDIDATE' && snapshot.bucket !== 'ELITE_CANDIDATE')) {
+        this.state.portfolios[snapshot.portfolioId] = snapshot;
+      }
       if (snapshot.bucket === 'ELITE_CANDIDATE' && this.state.firstEliteAtMs[snapshot.portfolioId] == null) {
         this.state.firstEliteAtMs[snapshot.portfolioId] = observedAtMs;
       }
       appendFileSync(this.snapshotsPath, `${JSON.stringify(snapshot)}\n`);
+      this.recentRows.push(snapshot);
     }
     this.state.lastObservedAtMs = Math.max(this.state.lastObservedAtMs, observedAtMs);
-    const tmp = `${this.statePath}.tmp`;
-    writeFileSync(tmp, JSON.stringify(this.state, null, 2));
-    renameSync(tmp, this.statePath);
+    this.saveState();
+    // The executor reads only this bounded causal index. Three observations cover
+    // the 25s signal window across a 10-minute collector boundary; the 30-minute
+    // time retention also bounds memory independently of append-only history age.
+    const cutoff = observedAtMs - 30 * 60_000;
+    const grouped = new Map<string, Map<number, PortfolioSnapshot>>();
+    for (const row of this.recentRows) {
+      if (!validRecentSnapshot(row) || !(row.observedAtMs >= cutoff)) continue;
+      const observations = grouped.get(row.portfolioId) ?? new Map<number, PortfolioSnapshot>();
+      const prior = observations.get(row.observedAtMs);
+      // A cycle can return the same portfolio from several bounded surfaces. One
+      // timestamp is one observation, and disagreement fails closed: non-elite wins.
+      if (!prior || (prior.bucket === 'ELITE_CANDIDATE' && row.bucket !== 'ELITE_CANDIDATE')) {
+        observations.set(row.observedAtMs, row);
+      }
+      grouped.set(row.portfolioId, observations);
+    }
+    this.recentRows = [...grouped.values()].flatMap(observations => [...observations.values()]
+      .sort((a, b) => b.observedAtMs - a.observedAtMs).slice(0, 3)).sort((a, b) => a.observedAtMs - b.observedAtMs);
+    const recentPath = `${this.snapshotsPath}.recent.json`;
+    const recentTmp = `${recentPath}.tmp`;
+    writeFileSync(recentTmp, JSON.stringify({
+      version: 1,
+      selectorVersion: ELITE_SELECTOR_VERSION,
+      generatedAtMs: observedAtMs,
+      rows: this.recentRows,
+    }));
+    renameSync(recentTmp, recentPath);
     return snapshots;
   }
 

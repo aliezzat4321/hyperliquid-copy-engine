@@ -7,6 +7,8 @@ export interface InvoSignal {
   observedAtMs: number;
   sourceTimeMs: number | null;
   sourceTimeField: string | null;
+  /** Source creation time when the API exposes it separately from this event time. */
+  openedSourceTimeMs?: number | null;
   ownerId: string;
   username: string;
   portfolioId: string;
@@ -18,6 +20,8 @@ export interface InvoSignal {
   entryPrice: number | null;
   closingPrice: number | null;
   entrySize: number | null;
+  /** Resulting total source size, used to identify repeated INCREASE observations. */
+  resultingSourceSize?: number | null;
 }
 
 export interface NotificationHints {
@@ -93,6 +97,7 @@ export function signalFromFeedPost(post: any, observedAtMs = Date.now()): InvoSi
     observedAtMs,
     sourceTimeMs,
     sourceTimeField,
+    openedSourceTimeMs: toMs(update.createdAt),
     ownerId,
     username,
     portfolioId,
@@ -104,6 +109,7 @@ export function signalFromFeedPost(post: any, observedAtMs = Date.now()): InvoSi
     entryPrice: numeric(update.entryPrice),
     closingPrice: numeric(update.closingPrice),
     entrySize: numeric(update.entrySize),
+    resultingSourceSize: action === 'increase' ? numeric(update.entrySize) : null,
   };
 }
 

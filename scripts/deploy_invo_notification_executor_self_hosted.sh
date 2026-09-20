@@ -98,18 +98,28 @@ set_env NOTIFICATION_TRADER_AUDIT_PATH /var/lib/hyperliquid-copy-engine/invo-not
 set_env NOTIFICATION_TRADER_TRACKER_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/trader-population.json
 set_env NOTIFICATION_TRADER_CANDIDATE_STATE_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/portfolio-candidates.json
 set_env NOTIFICATION_TRADER_DIRECT_WATCH_STATE_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/elite-direct-watch.json
-set_env NOTIFICATION_TRADER_DIRECT_WATCH_SCAN_MS 5000
-set_env NOTIFICATION_TRADER_DIRECT_WATCH_MAX_HYDRATES_PER_SCAN 2
-set_env NOTIFICATION_TRADER_DIRECT_WATCH_FALLBACK_POLL_MS 20000
+set_env NOTIFICATION_TRADER_DIRECT_WATCH_ADMISSION_INDEX_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/elite-direct-watch-admissions.json
+set_env INVO_HTTP_REQUEST_TIMEOUT_MS 2000
+set_env DIRECT_WATCH_FIXED_OVERHEAD_MS 5000
+set_env NOTIFICATION_TRADER_DIRECT_WATCH_SCAN_MS 3000
+set_env NOTIFICATION_TRADER_DIRECT_WATCH_MAX_HYDRATES_PER_SCAN 8
+set_env NOTIFICATION_TRADER_DIRECT_WATCH_OPEN_MAX_PAGES 3
+set_env NOTIFICATION_TRADER_DIRECT_WATCH_FALLBACK_POLL_MS 18000
+set_env NOTIFICATION_TRADER_DIRECT_WATCH_CLOSED_POLL_MS 60000
+set_env NOTIFICATION_TRADER_DIRECT_WATCH_MAX_CLOSED_HYDRATES_PER_SCAN 3
+set_env NOTIFICATION_TRADER_DIRECT_WATCH_CLOSED_MAX_PAGES 2
+set_env MAX_DIRECT_WATCH_RESIDENT_TARGETS 48
+set_env DIRECT_WATCH_NEGATIVE_MIN_OBSERVATIONS 2
+set_env DIRECT_WATCH_NEGATIVE_GRACE_MS 600000
 # The clean-epoch seed runs the portfolio CLI directly rather than through its
 # systemd unit, so persist the CLI's own path variables in the sourced env file.
 set_env INVO_PORTFOLIO_CANDIDATE_STATE_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/portfolio-candidates.json
 set_env INVO_PORTFOLIO_CANDIDATE_SNAPSHOTS_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/portfolio-candidate-snapshots.jsonl
 set_env INVO_PORTFOLIO_LEADERBOARD_STATE_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/invo-leaderboards.json
 set_env INVO_PORTFOLIO_LEADERBOARD_SNAPSHOTS_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/invo-leaderboard-snapshots.jsonl
-# Current Invo feed API accepts following/trending; `all` returns HTTP 500 Invalid feed type.
-# Keep discovery broad across valid surfaces without flooding the executor with known-bad requests.
-set_env NOTIFICATION_TRADER_DISCOVERY_SURFACES following,trending
+# Exact current web-app enum values, live-probed read-only on /v1_0/posts/get_feed.
+# Each surface receives its own durable prospective baseline before OPEN/ADD processing.
+set_env NOTIFICATION_TRADER_DISCOVERY_SURFACES following,trending,fire_moves,most_recent
 
 # Remove the obsolete artificial leverage cap; source leverage is used directly.
 sed -i '/^NOTIFICATION_TRADER_MAX_LEVERAGE=/d' "$EXEC_ENV"

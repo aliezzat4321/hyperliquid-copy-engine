@@ -223,3 +223,21 @@ configurations by **our** prospective execution-realistic copied results: realiz
 net PnL, fees, funding, causal L2 slippage, fill/reject rate, latency, profit factor,
 drawdown and concentration. No real-trading promotion is implied or authorized by this
 service.
+
+## Feed-discovered candidate evidence
+
+The executor is the single writer of `feed-portfolio-evidence.json` and its compacted,
+bounded journal. It captures portfolio evidence exposed by Following, Trending, Moves
+(`fire_moves`), and Recent (`most_recent`) without writing `portfolio-candidates.json`.
+The separate portfolio-research process reads that evidence and evaluates it through
+the unchanged `invo-portfolio-hybrid-v3-20260916` selector. Its processing timestamp is
+the causal selector timestamp; source trade/update timestamps are provenance only.
+
+Captured count aliases include `closedPositionsCount`, `openPositionsCount`,
+`wonPositionsCount`, and `lostPositionsCount`. `plSnapshot` is retained raw but is not
+treated as `percentChange`, because this branch contains no captured proof that those
+fields are canonically equivalent. Feed discovery never replays a historical feed trade,
+and a newly selected portfolio remains ineligible for NEW/ADD until the #404 direct-watch
+admission index marks it ACTIVE. Health and the research report expose retained unique
+portfolios, surface contribution, first/last seen, processing lag, new-vs-broad discovery,
+and newly selector-qualified counts.

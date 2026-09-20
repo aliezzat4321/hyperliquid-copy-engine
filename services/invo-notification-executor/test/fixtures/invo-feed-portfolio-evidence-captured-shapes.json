@@ -1,0 +1,11 @@
+{
+  "_evidence": {
+    "kind": "sanitized_captured_shape",
+    "capturedAt": "2026-09-17",
+    "note": "Field structure from authenticated read-only feed probes; identifiers and economics are synthetic. plSnapshot is retained as raw provenance and is not treated as percentChange."
+  },
+  "following": {"id":"post-following","update":{"updatedAt":1789685682001,"portfolio":{"id":"portfolio-following","createdAt":"2026-08-01T00:00:00Z","closedPositions":30,"openPositions":2,"wonPositions":27,"lostPositions":3,"winRate":90,"percentChange":300},"owner":{"id":"owner-following","username":"following_user"}}},
+  "trending": {"id":"post-trending","update":{"updatedAt":1789685682002,"portfolio":{"id":"portfolio-trending","createdAt":"2026-08-01T00:00:00Z","closedPositions":40,"openPositions":1,"wonPositions":34,"lostPositions":6,"winRate":85,"percentChange":500},"owner":{"id":"owner-trending","username":"trending_user"}}},
+  "fire_moves": {"id":"post-fire","update":{"updatedAt":1789685682003,"portfolio":{"id":"portfolio-fire","createdAt":"2026-08-01T00:00:00Z","closedPositions":50,"openPositions":3,"wonPositions":40,"lostPositions":10,"winRate":80,"percentChange":1000},"owner":{"id":"owner-fire","username":"fire_user"}}},
+  "most_recent": {"id":"post-recent","update":{"closedAt":1789685682004,"portfolio":{"id":"portfolio-normiee","createdAt":"2026-08-01T00:00:00Z","closedPositionsCount":26,"openPositionsCount":1,"wonPositionsCount":24,"lostPositionsCount":2,"winRate":92.3,"percentChange":250,"plSnapshot":{"start":10,"end":35}},"owner":{"id":"owner-normiee","username":"normiee"}}}
+}
