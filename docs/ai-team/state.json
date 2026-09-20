@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "snapshot_at": "2026-09-17T23:46:12Z",
+  "snapshot_at": "2026-09-20T10:35:02Z",
   "updated_by": "CODEX_CHATGPT",
   "head_observed": "fd63de5c60fc9d19ec643a2c491d5a815581765a",
   "mission": "Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.",
@@ -142,30 +142,30 @@
       "facts": [
         {
           "key": "source_capture_pr_head",
-          "label": "Lane 3 selected-elite source-capture PR head",
-          "value": "90c078e806f32934b1785099e98f95abdd8c4ee5",
+          "label": "Lane 3 admission/capacity repair implementation commit",
+          "value": "29a6c5f",
           "unit": "text",
-          "observed_at": "2026-09-17T23:46:12Z",
-          "source_type": "PULL_REQUEST",
-          "source_ref": "#404"
+          "observed_at": "2026-09-20T10:35:02Z",
+          "source_type": "COMMIT",
+          "source_ref": "29a6c5f"
         },
         {
-          "key": "executor_ci",
-          "label": "exact-head Lane 3 executor CI",
-          "value": "PASS",
-          "unit": "text",
-          "observed_at": "2026-09-17T23:46:12Z",
-          "source_type": "WORKFLOW_RUN",
-          "source_ref": "35288176104"
+          "key": "executor_builder_validation",
+          "label": "builder-validated executor test files passing",
+          "value": 24,
+          "unit": "count",
+          "observed_at": "2026-09-20T10:35:02Z",
+          "source_type": "COMMIT",
+          "source_ref": "29a6c5f"
         },
         {
-          "key": "live_sensitive_guard",
-          "label": "exact-head live-sensitive classification guard",
-          "value": "PASS",
-          "unit": "text",
-          "observed_at": "2026-09-17T23:46:12Z",
-          "source_type": "WORKFLOW_RUN",
-          "source_ref": "35288176010"
+          "key": "proven_default_resident_cap",
+          "label": "default direct-watch resident capacity proven by timeout/page/deadline budget",
+          "value": 1,
+          "unit": "count",
+          "observed_at": "2026-09-20T10:35:02Z",
+          "source_type": "COMMIT",
+          "source_ref": "29a6c5f"
         },
         {
           "key": "verified_feed_surfaces",
@@ -204,7 +204,7 @@
           "source_ref": "VM runtime env 2026-09-17T23:10Z"
         }
       ],
-      "blocker": "PR #404 still requires independent exact-SHA Codex and Claude/Opus review plus post-deploy prospective source/event-recall proof; #403 candidate-universe expansion and #397 quota arbitration remain open before Lane 3 source-completeness can be claimed.",
+      "blocker": "PR #404 repair commit 29a6c5f still requires independent review of the final exact SHA plus post-deploy prospective source/event-recall proof; production is unchanged, and #403 candidate-universe expansion plus #397 shared-quota arbitration remain separate open work before Lane 3 source-completeness can be claimed.",
       "next": "Issue #400"
     }
   },
