@@ -61,7 +61,7 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 | real trading enabled | False | `2026-09-17T23:10:50Z` | manual `VM runtime env 2026-09-17T23:10Z` |
 
 **Blocker:** Issue #350 repaired commit 703ee89 is locally validated but not deployed and still requires independent exact-SHA review/runtime reliability proof. PR #404 also remains gated by exact-SHA review and post-deploy recall proof.
-**Next:** Issues #350 and #400 exact-SHA review.
+**Next:** Issue #350.
 
 ## Infrastructure
 **Status:** `DEGRADED`

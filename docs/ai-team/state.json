@@ -232,7 +232,7 @@
         }
       ],
       "blocker": "Issue #350 repaired commit 703ee89 is locally validated but not deployed and still requires independent exact-SHA review/runtime reliability proof. PR #404 also remains gated by exact-SHA review and post-deploy recall proof.",
-      "next": "Issues #350 and #400 exact-SHA review"
+      "next": "Issue #350"
     }
   },
   "infrastructure": {
