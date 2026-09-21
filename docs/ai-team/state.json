@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "snapshot_at": "2026-09-20T16:07:05Z",
+  "snapshot_at": "2026-09-21T16:29:00Z",
   "updated_by": "CODEX_CHATGPT",
   "head_observed": "fd63de5c60fc9d19ec643a2c491d5a815581765a",
   "mission": "Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.",
@@ -142,21 +142,21 @@
       "facts": [
         {
           "key": "feed_candidate_assimilation_implementation",
-          "label": "Lane 3 bounded verified feed-candidate implementation commit",
-          "value": "2d4485e",
+          "label": "Lane 3 causal bounded feed-candidate repair commit",
+          "value": "416d4b5",
           "unit": "text",
-          "observed_at": "2026-09-20T16:07:05Z",
+          "observed_at": "2026-09-21T16:29:00Z",
           "source_type": "COMMIT",
-          "source_ref": "2d4485e6fffefa44ad87c8e37406a8937166ddcb"
+          "source_ref": "416d4b5"
         },
         {
           "key": "feed_candidate_builder_validation",
           "label": "builder-validated executor subtests passing after feed-candidate repair",
-          "value": 193,
+          "value": 198,
           "unit": "count",
-          "observed_at": "2026-09-20T16:07:05Z",
+          "observed_at": "2026-09-21T16:29:00Z",
           "source_type": "COMMIT",
-          "source_ref": "2d4485e6fffefa44ad87c8e37406a8937166ddcb"
+          "source_ref": "416d4b5"
         },
         {
           "key": "source_capture_pr_head",

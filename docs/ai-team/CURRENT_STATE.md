@@ -2,7 +2,7 @@
 
 Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
-**Snapshot:** 2026-09-20T16:07:05Z
+**Snapshot:** 2026-09-21T16:29:00Z
 **Updated by:** CODEX_CHATGPT
 **Observed main head:** `fd63de5c60fc9d19ec643a2c491d5a815581765a`
 **Mission:** Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.
@@ -49,8 +49,8 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
 | Fact | Value | Observed | Source |
 |---|---:|---|---|
-| Lane 3 bounded verified feed-candidate implementation commit | 2d4485e | `2026-09-20T16:07:05Z` | commit `2d4485e6fffefa44ad87c8e37406a8937166ddcb` |
-| builder-validated executor subtests passing after feed-candidate repair | 193 | `2026-09-20T16:07:05Z` | commit `2d4485e6fffefa44ad87c8e37406a8937166ddcb` |
+| Lane 3 causal bounded feed-candidate repair commit | 416d4b5 | `2026-09-21T16:29:00Z` | commit `416d4b5` |
+| builder-validated executor subtests passing after feed-candidate repair | 198 | `2026-09-21T16:29:00Z` | commit `416d4b5` |
 | Lane 3 admission/capacity repair implementation commit | 29a6c5f | `2026-09-20T10:35:02Z` | commit `29a6c5f` |
 | builder-validated executor test files passing | 24 | `2026-09-20T10:35:02Z` | commit `29a6c5f` |
 | default direct-watch resident capacity proven by timeout/page/deadline budget | 1 | `2026-09-20T10:35:02Z` | commit `29a6c5f` |
