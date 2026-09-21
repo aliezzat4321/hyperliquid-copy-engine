@@ -1,8 +1,8 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'fs';
 import { dirname } from 'path';
 import { FEED_EVIDENCE_EPOCH, FEED_EVIDENCE_SELECTOR_TTL_MS, type FeedPortfolioRecord } from './feed-portfolio-evidence.js';
 
-export const ELITE_SELECTOR_VERSION = 'invo-portfolio-hybrid-v3-20260916';
+export const ELITE_SELECTOR_VERSION = 'invo-portfolio-hybrid-v4-20260921';
 
 export type PortfolioBucket =
   | 'ELITE_CANDIDATE'
@@ -101,6 +101,10 @@ interface LedgerDiskState {
 }
 
 export const FEED_SELECTOR_TRACKING_MAX_PORTFOLIOS = 5_000;
+export const CANDIDATE_STATE_MAX_PORTFOLIOS = 5_000;
+export const CANDIDATE_STATE_MAX_BYTES = 8 * 1024 * 1024;
+export const CANDIDATE_SNAPSHOT_SEGMENT_MAX_BYTES = 4 * 1024 * 1024;
+export const CANDIDATE_SNAPSHOT_TOTAL_MAX_BYTES = 8 * 1024 * 1024;
 const emptyFeedEvidence = (eligibilityNotBeforeMs = 0) => ({
   version: 3 as const, epoch: FEED_EVIDENCE_EPOCH as typeof FEED_EVIDENCE_EPOCH,
   eligibilityNotBeforeMs,
@@ -130,6 +134,15 @@ function finite(v: unknown): number | null {
 function integer(v: unknown, fallback = 0): number {
   const n = finite(v);
   return n == null ? fallback : Math.max(0, Math.trunc(n));
+}
+
+function consistentAlias(raw: any, keys: string[]): number | null | undefined {
+  const present = keys.map(key => raw?.[key]).filter(value => value !== undefined && value !== null);
+  if (!present.length) return null;
+  const values = present.map(finite);
+  if (values.some(value => value == null)) return undefined;
+  const first = values[0]!;
+  return values.every(value => Math.abs(value! - first) <= 1e-9) ? first : undefined;
 }
 
 function text(v: unknown): string | null {
@@ -313,12 +326,19 @@ export function classifyPortfolio(
   const recentActivityDaysAgo = lastActivityAtMs == null
     ? null
     : Math.max(0, (observedAtMs - lastActivityAtMs) / 86_400_000);
-  const closedPositions = integer(raw?.closedPositions ?? raw?.closedPositionsCount ?? raw?.closedTrades ?? raw?.totalClosedPositions);
+  const closedAlias = consistentAlias(raw, ['closedPositions','closedPositionsCount','closedTrades','totalClosedPositions']);
+  const wonAlias = consistentAlias(raw, ['wonPositions','wonPositionsCount','winningPositions','wins']);
+  const lostAlias = consistentAlias(raw, ['lostPositions','lostPositionsCount','losingPositions','losses']);
+  const winRateAlias = consistentAlias(raw, ['winRate','win_rate','winRatePct']);
+  const returnAlias = consistentAlias(raw, ['percentChange','pnlPercent','profitLossPercent','roi']);
+  const aliasesConsistent = closedAlias !== undefined && wonAlias !== undefined && lostAlias !== undefined
+    && winRateAlias !== undefined && returnAlias !== undefined;
+  const closedPositions = integer(closedAlias);
   const openPositions = finite(raw?.openPositions ?? raw?.openPositionsCount ?? raw?.openTrades);
-  const wonPositions = integer(raw?.wonPositions ?? raw?.wonPositionsCount ?? raw?.winningPositions ?? raw?.wins);
-  const lostPositions = integer(raw?.lostPositions ?? raw?.lostPositionsCount ?? raw?.losingPositions ?? raw?.losses);
-  const winRatePct = finite(raw?.winRate ?? raw?.win_rate ?? raw?.winRatePct);
-  const percentChange = finite(raw?.percentChange ?? raw?.pnlPercent ?? raw?.profitLossPercent ?? raw?.roi);
+  const wonPositions = integer(wonAlias);
+  const lostPositions = integer(lostAlias);
+  const winRatePct = winRateAlias ?? null;
+  const percentChange = returnAlias ?? null;
   const liquidated = bool(raw?.liquidated ?? raw?.isLiquidated);
   const verified = bool(owner?.verified ?? raw?.verified ?? raw?.isVerified);
   const currentWinStreak = finite(raw?.currentWinStreak ?? raw?.winStreak);
@@ -330,7 +350,7 @@ export function classifyPortfolio(
     && Number.isFinite(Number(raw?.closedPositions ?? raw?.closedPositionsCount ?? raw?.closedTrades ?? raw?.totalClosedPositions))
     && Number.isFinite(Number(raw?.wonPositions ?? raw?.wonPositionsCount ?? raw?.winningPositions ?? raw?.wins))
     && Number.isFinite(Number(raw?.lostPositions ?? raw?.lostPositionsCount ?? raw?.losingPositions ?? raw?.losses));
-  const metricsConsistent = metricsComplete && wonPositions + lostPositions <= closedPositions
+  const metricsConsistent = metricsComplete && aliasesConsistent && wonPositions + lostPositions <= closedPositions
     && winRatePct! >= 0 && winRatePct! <= 100
     && (closedPositions === 0 || Math.abs((wonPositions / closedPositions) * 100 - winRatePct!) <= 1.0);
 
@@ -510,7 +530,7 @@ export class PortfolioCandidateLedger {
       if (!unseen.length) continue;
       if (!previousMeta) { meta.lifetime.discovered += 1; if (!wasKnown) meta.lifetime.feedOnly += 1; }
       meta.records[record.portfolioId] = {
-        firstProcessedAtMs: previousMeta?.firstProcessedAtMs ?? unseen[0].processedAtMs, lastProcessedAtMs: unseen[unseen.length - 1].processedAtMs,
+        firstProcessedAtMs: previousMeta?.firstProcessedAtMs ?? processedAtMs, lastProcessedAtMs: processedAtMs,
         sourceFirstSeenAtMs: Math.min(previousMeta?.sourceFirstSeenAtMs ?? record.firstSeenAtMs, record.firstSeenAtMs),
         sourceLastSeenAtMs: Math.max(previousMeta?.sourceLastSeenAtMs ?? 0, record.lastSeenAtMs),
         surfaces: [...new Set([...(previousMeta?.surfaces ?? []), ...record.surfaces])].sort(),
@@ -538,11 +558,14 @@ export class PortfolioCandidateLedger {
           ownerId: latest.ownerId,
           owner: { id: latest.ownerId, username: latest.username, verified: true },
         };
-        const candidate = classifyPortfolio(raw, latest.processedAtMs, `feed:${latest.surface}`, this.policy);
+        const candidate = classifyPortfolio(raw, meta.records[record.portfolioId].firstProcessedAtMs, `feed:${latest.surface}`, this.policy);
         if (candidate?.reasons.includes('incomplete_profile_metrics') || candidate?.reasons.includes('inconsistent_profile_metrics')) {
           meta.lifetime.rejectedMalformed += 1;
         } else {
-          this.observe([raw], `feed:${latest.surface}`, latest.processedAtMs);
+          if (candidate && this.storeCanonical(candidate)) {
+            this.recentRows.push(candidate);
+            this.appendBoundedSnapshot(candidate);
+          }
         }
       } else if (consistent) {
         meta.lifetime.rejectedUnverified += 1;
@@ -590,6 +613,35 @@ export class PortfolioCandidateLedger {
     renameSync(tmp, this.statePath);
   }
 
+  private storeCanonical(snapshot: PortfolioSnapshot) {
+    const previous = this.state.portfolios[snapshot.portfolioId];
+    if (!previous && Object.keys(this.state.portfolios).length >= CANDIDATE_STATE_MAX_PORTFOLIOS) return false;
+    const tentative = { ...this.state.portfolios, [snapshot.portfolioId]: snapshot };
+    if (Buffer.byteLength(JSON.stringify({ ...this.state, portfolios: tentative })) > CANDIDATE_STATE_MAX_BYTES) return false;
+    this.state.portfolios[snapshot.portfolioId] = snapshot;
+    if (snapshot.bucket === 'ELITE_CANDIDATE' && this.state.firstEliteAtMs[snapshot.portfolioId] == null) {
+      this.state.firstEliteAtMs[snapshot.portfolioId] = snapshot.observedAtMs;
+    }
+    return true;
+  }
+
+  private appendBoundedSnapshot(snapshot: PortfolioSnapshot) {
+    const line = `${JSON.stringify(snapshot)}\n`;
+    if (Buffer.byteLength(line) > CANDIDATE_SNAPSHOT_SEGMENT_MAX_BYTES) return false;
+    const archive = `${this.snapshotsPath}.previous`;
+    const currentBytes = existsSync(this.snapshotsPath) ? statSync(this.snapshotsPath).size : 0;
+    const archiveBytes = existsSync(archive) ? statSync(archive).size : 0;
+    if (currentBytes + Buffer.byteLength(line) > CANDIDATE_SNAPSHOT_SEGMENT_MAX_BYTES) {
+      if (existsSync(archive)) return false;
+      renameSync(this.snapshotsPath, archive);
+    }
+    const total = (existsSync(this.snapshotsPath) ? statSync(this.snapshotsPath).size : 0)
+      + (existsSync(archive) ? statSync(archive).size : 0) + Buffer.byteLength(line);
+    if (total > CANDIDATE_SNAPSHOT_TOTAL_MAX_BYTES) return false;
+    appendFileSync(this.snapshotsPath, line);
+    return true;
+  }
+
   observe(items: any[], sourceFilter: string, observedAtMs = Date.now()) {
     mkdirSync(dirname(this.statePath), { recursive: true });
     mkdirSync(dirname(this.snapshotsPath), { recursive: true });
@@ -602,12 +654,9 @@ export class PortfolioCandidateLedger {
       if (!previous || snapshot.observedAtMs > previous.observedAtMs
         || (snapshot.observedAtMs === previous.observedAtMs
           && previous.bucket === 'ELITE_CANDIDATE' && snapshot.bucket !== 'ELITE_CANDIDATE')) {
-        this.state.portfolios[snapshot.portfolioId] = snapshot;
+        if (!this.storeCanonical(snapshot)) continue;
       }
-      if (snapshot.bucket === 'ELITE_CANDIDATE' && this.state.firstEliteAtMs[snapshot.portfolioId] == null) {
-        this.state.firstEliteAtMs[snapshot.portfolioId] = observedAtMs;
-      }
-      appendFileSync(this.snapshotsPath, `${JSON.stringify(snapshot)}\n`);
+      this.appendBoundedSnapshot(snapshot);
       this.recentRows.push(snapshot);
     }
     this.state.lastObservedAtMs = Math.max(this.state.lastObservedAtMs, observedAtMs);

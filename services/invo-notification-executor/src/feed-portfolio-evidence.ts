@@ -12,6 +12,8 @@ export const FEED_EVIDENCE_MAX_STATE_BYTES = 3_000_000;
 export const FEED_EVIDENCE_MAX_JOURNAL_BYTES = 512_000;
 export const FEED_EVIDENCE_SELECTOR_TTL_MS = 7 * 24 * 60 * 60_000;
 export const FEED_EVIDENCE_COMPACT_INTERVAL_MS = 5 * 60_000;
+export const FEED_REPLAY_BLOOM_BYTES = 256 * 1024;
+const FEED_REPLAY_BLOOM_HASHES = 7;
 
 export interface FeedPortfolioObservation {
   evidenceId: string; surface: InvoFeedSurface; postId: string | null;
@@ -35,6 +37,26 @@ function time(v: unknown): number | null { if (typeof v === 'number' && Number.i
 const uniq = (values: Array<string | null>) => [...new Set(values.filter((v): v is string => v != null))];
 const emptyTelemetry = (): Telemetry => ({ evidenceBytes: 0, journalBytes: 0, lastWriteDurationMs: 0, rejectedIdentityConflicts: 0, rejectedOversize: 0, dedupedReplayCount: 0, fullRewriteCount: 0 });
 const emptyState = (): FeedEvidenceState => ({ version: FEED_PORTFOLIO_EVIDENCE_VERSION, epoch: FEED_EVIDENCE_EPOCH, generatedAtMs: 0, portfolios: {}, telemetry: emptyTelemetry() });
+
+class DurableReplayBloom {
+  private bits: Buffer;
+  private dirty = false;
+  constructor(private readonly path: string) {
+    this.bits = existsSync(path) && statSync(path).size === FEED_REPLAY_BLOOM_BYTES
+      ? readFileSync(path) : Buffer.alloc(FEED_REPLAY_BLOOM_BYTES);
+  }
+  private indexes(id: string) {
+    const digest = createHash('sha256').update(id).digest();
+    const indexes: number[] = [];
+    for (let i = 0; i < FEED_REPLAY_BLOOM_HASHES; i++) {
+      indexes.push(digest.readUInt32BE((i * 4) % 28) % (FEED_REPLAY_BLOOM_BYTES * 8));
+    }
+    return indexes;
+  }
+  has(id: string) { return this.indexes(id).every(bit => (this.bits[bit >>> 3] & (1 << (bit & 7))) !== 0); }
+  add(id: string) { for (const bit of this.indexes(id)) this.bits[bit >>> 3] |= 1 << (bit & 7); this.dirty = true; }
+  flush() { if (!this.dirty) return; const tmp = `${this.path}.tmp`; writeFileSync(tmp, this.bits); renameSync(tmp, this.path); this.dirty = false; }
+}
 
 function provenance(post: any, update: Record<string, any>, portfolio: Record<string, any>) {
   const po = obj(post?.owner), uo = obj(update.owner), fo = obj(portfolio.owner) ?? obj(portfolio.user);
@@ -99,15 +121,16 @@ export function loadFeedPortfolioEvidence(path: string): FeedEvidenceState {
   bound(state); state.telemetry.journalBytes = existsSync(journal) ? statSync(journal).size : 0; return state;
 }
 export class FeedPortfolioEvidenceStore {
-  private state: FeedEvidenceState; private replayIds: Set<string>; private lastCompactedAtMs: number;
-  constructor(private readonly path: string) { this.state = loadFeedPortfolioEvidence(path); this.replayIds = new Set(Object.values(this.state.portfolios).flatMap(record => record.observations.map(row => row.evidenceId))); this.lastCompactedAtMs = existsSync(path) ? statSync(path).mtimeMs : 0; }
+  private state: FeedEvidenceState; private replayIds: Set<string>; private lastCompactedAtMs: number; private replayBloom: DurableReplayBloom;
+  constructor(private readonly path: string) { this.state = loadFeedPortfolioEvidence(path); this.replayIds = new Set(Object.values(this.state.portfolios).flatMap(record => record.observations.map(row => row.evidenceId))); this.replayBloom = new DurableReplayBloom(`${path}.replay.bloom`); for (const id of this.replayIds) this.replayBloom.add(id); this.replayBloom.flush(); this.lastCompactedAtMs = existsSync(path) ? statSync(path).mtimeMs : 0; }
   observe(posts: any[], surface: InvoFeedSurface, capturedAtMs = Date.now()) {
     const started = performance.now(); mkdirSync(dirname(this.path), { recursive: true }); const journal = `${this.path}.journal.jsonl`; const accepted: FeedPortfolioObservation[] = [];
-    for (const post of posts) { const n = normalizeFeedPortfolioObservationDetailed(post,surface,capturedAtMs); if (!n.observation) { if (n.rejectionReason?.includes('owner') || n.rejectionReason?.includes('username')) this.state.telemetry.rejectedIdentityConflicts++; if (n.rejectionReason === 'record_byte_cap_exceeded') this.state.telemetry.rejectedOversize++; continue; } if (this.replayIds.has(n.observation.evidenceId)) { this.state.telemetry.dedupedReplayCount++; continue; } const line=`${JSON.stringify(n.observation)}\n`; if ((existsSync(journal)?statSync(journal).size:0)+Buffer.byteLength(line)>FEED_EVIDENCE_MAX_JOURNAL_BYTES) this.compact(capturedAtMs); if (apply(this.state,n.observation,this.replayIds)) { appendFileSync(journal,line); accepted.push(n.observation); } }
+    for (const post of posts) { const n = normalizeFeedPortfolioObservationDetailed(post,surface,capturedAtMs); if (!n.observation) { if (n.rejectionReason?.includes('owner') || n.rejectionReason?.includes('username')) this.state.telemetry.rejectedIdentityConflicts++; if (n.rejectionReason === 'record_byte_cap_exceeded') this.state.telemetry.rejectedOversize++; continue; } if (this.replayIds.has(n.observation.evidenceId) || this.replayBloom.has(n.observation.evidenceId)) { this.state.telemetry.dedupedReplayCount++; continue; } const line=`${JSON.stringify(n.observation)}\n`; if ((existsSync(journal)?statSync(journal).size:0)+Buffer.byteLength(line)>FEED_EVIDENCE_MAX_JOURNAL_BYTES) this.compact(capturedAtMs); if (apply(this.state,n.observation,this.replayIds)) { this.replayBloom.add(n.observation.evidenceId); appendFileSync(journal,line); accepted.push(n.observation); } }
+    this.replayBloom.flush();
     bound(this.state); this.state.telemetry.journalBytes = existsSync(journal) ? statSync(journal).size : 0;
     if (!existsSync(this.path) || capturedAtMs-this.lastCompactedAtMs >= FEED_EVIDENCE_COMPACT_INTERVAL_MS) this.compact(capturedAtMs);
     this.state.telemetry.lastWriteDurationMs = Math.round((performance.now()-started)*1000)/1000; return accepted;
   }
   report() { const records = Object.values(this.state.portfolios); return { version:this.state.version,epoch:this.state.epoch,generatedAtMs:this.state.generatedAtMs,uniquePortfolioCount:records.length,limits:{maxPortfolios:FEED_EVIDENCE_MAX_PORTFOLIOS,maxObservationsPerPortfolio:FEED_EVIDENCE_MAX_OBSERVATIONS_PER_PORTFOLIO,maxRecordBytes:FEED_EVIDENCE_MAX_RECORD_BYTES,maxStateBytes:FEED_EVIDENCE_MAX_STATE_BYTES,maxJournalBytes:FEED_EVIDENCE_MAX_JOURNAL_BYTES,selectorTtlMs:FEED_EVIDENCE_SELECTOR_TTL_MS,compactIntervalMs:FEED_EVIDENCE_COMPACT_INTERVAL_MS},...this.state.telemetry,countsBySurface:Object.fromEntries(['following','trending','fire_moves','most_recent'].map(s => [s,records.filter(r => r.surfaces.includes(s as InvoFeedSurface)).length]))}; }
-  private compact(nowMs:number) { bound(this.state); this.state.telemetry.fullRewriteCount++; const tmp=`${this.path}.tmp`; writeFileSync(tmp,JSON.stringify(this.state)); if(statSync(tmp).size>FEED_EVIDENCE_MAX_STATE_BYTES) throw new Error('feed evidence state byte cap exceeded'); renameSync(tmp,this.path); const jt=`${this.path}.journal.jsonl.tmp`; writeFileSync(jt,''); renameSync(jt,`${this.path}.journal.jsonl`); this.state.telemetry.journalBytes=0; this.replayIds=new Set(Object.values(this.state.portfolios).flatMap(record=>record.observations.map(row=>row.evidenceId))); this.lastCompactedAtMs=nowMs; }
+  private compact(nowMs:number) { bound(this.state); this.state.telemetry.fullRewriteCount++; const tmp=`${this.path}.tmp`; writeFileSync(tmp,JSON.stringify(this.state)); if(statSync(tmp).size>FEED_EVIDENCE_MAX_STATE_BYTES) throw new Error('feed evidence state byte cap exceeded'); renameSync(tmp,this.path); const jt=`${this.path}.journal.jsonl.tmp`; writeFileSync(jt,''); renameSync(jt,`${this.path}.journal.jsonl`); this.state.telemetry.journalBytes=0; this.lastCompactedAtMs=nowMs; }
 }

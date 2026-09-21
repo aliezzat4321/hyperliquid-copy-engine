@@ -141,7 +141,7 @@ test('candidate loader tracks only fresh elite portfolios', () => {
   assert.deepEqual(stale.targets, []);
 });
 
-test('bounded discovery absence is not demotion; only same-cycle non-elite is explicit', () => {
+test('canonical rows remain visible across cycle clocks; only fresh non-elite is explicit', () => {
   const dir = mkdtempSync(join(tmpdir(), 'elite-authoritative-universe-'));
   const path = join(dir, 'candidates.json');
   writeFileSync(path, JSON.stringify({
@@ -154,7 +154,7 @@ test('bounded discovery absence is not demotion; only same-cycle non-elite is ex
   }));
   const fresh = loadEliteDirectTargets(path, BASE + 11, 20_000);
   assert.equal(fresh.stale, false);
-  assert.deepEqual(fresh.targets, []);
+  assert.deepEqual(fresh.targets, [target]);
   assert.deepEqual(fresh.demotedPortfolioIds, ['p2']);
 });
 
