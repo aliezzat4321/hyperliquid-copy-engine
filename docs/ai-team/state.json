@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "snapshot_at": "2026-09-20T16:07:03Z",
+  "snapshot_at": "2026-09-21T16:20:48Z",
   "updated_by": "CODEX_CHATGPT",
   "head_observed": "fd63de5c60fc9d19ec643a2c491d5a815581765a",
   "mission": "Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.",
@@ -143,20 +143,20 @@
         {
           "key": "source_capture_pr_head",
           "label": "Lane 3 final source-capture implementation commit",
-          "value": "9d5bd7c",
+          "value": "c4c7cc9",
           "unit": "text",
-          "observed_at": "2026-09-20T16:07:03Z",
+          "observed_at": "2026-09-21T16:20:48Z",
           "source_type": "COMMIT",
-          "source_ref": "9d5bd7c527c07effc42a89fb5a1927a2f7834983"
+          "source_ref": "c4c7cc973aa72061d7f1e36a969523897e157c15"
         },
         {
           "key": "executor_builder_validation",
           "label": "builder-validated executor subtests passing",
-          "value": 199,
+          "value": 203,
           "unit": "count",
-          "observed_at": "2026-09-20T16:07:03Z",
+          "observed_at": "2026-09-21T16:20:48Z",
           "source_type": "COMMIT",
-          "source_ref": "9d5bd7c527c07effc42a89fb5a1927a2f7834983"
+          "source_ref": "c4c7cc973aa72061d7f1e36a969523897e157c15"
         },
         {
           "key": "proven_default_resident_cap",
@@ -204,7 +204,7 @@
           "source_ref": "VM runtime env 2026-09-17T23:10Z"
         }
       ],
-      "blocker": "PR #404 final repair commit 9d5bd7c is locally validated but still requires independent exact-SHA review and post-deploy prospective source/event-recall proof; production is unchanged. #403 and #397 remain separate gates.",
+      "blocker": "PR #404 repair commit c4c7cc9 is locally validated but still requires independent exact-SHA Codex and Opus review plus post-deploy prospective source/event-recall proof; production is unchanged. #403 and #397 remain separate gates.",
       "next": "Issue #400"
     }
   },
