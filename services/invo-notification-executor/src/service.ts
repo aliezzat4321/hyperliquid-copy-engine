@@ -53,6 +53,7 @@ import { CapturedSignalBatch, publishThenFlushCapturedSignals } from './scan-cap
 import { eliteAdmissionFromState, ELITE_ADMISSION_VERSION, shouldPersistAdmissionDenial } from './elite-admission.js';
 import { shouldTerminallyDustReconcile } from './close-rejection.js';
 import { FeedPortfolioEvidenceStore } from './feed-portfolio-evidence.js';
+import { scheduleDeferredPersistence } from './deferred-persistence.js';
 import {
   COST_MODEL_VERSION,
   EXECUTION_EVIDENCE_VERSION,
@@ -221,6 +222,19 @@ const tracker = new TraderTracker(cfg.trackerPath, {
 // Executor is the sole writer. Portfolio research consumes this store read-only and
 // remains the sole writer of portfolio-candidates.json.
 const feedPortfolioEvidence = new FeedPortfolioEvidenceStore(cfg.feedPortfolioEvidencePath);
+let feedEvidencePersistenceErrors = 0;
+let feedEvidenceAssimilationSuspended = false;
+function scheduleFeedEvidencePersistence(posts: any[], feedFilter: InvoFeedSurface, processedAtMs: number) {
+  scheduleDeferredPersistence(
+    () => feedPortfolioEvidence.observe(posts, feedFilter, processedAtMs),
+    error => {
+      feedEvidencePersistenceErrors += 1;
+      feedEvidenceAssimilationSuspended = true;
+      log({ type: 'feed_portfolio_evidence_persistence_error', feedFilter, feedEvidencePersistenceErrors,
+        assimilationSuspended: true, error: error instanceof Error ? error.message : String(error) });
+    },
+  );
+}
 const directWatch = new EliteDirectWatchState(
   cfg.directWatchStatePath, cfg.directWatchAdmissionIndexPath,
   directWatchConfiguredCapacity.hardProvenResidentCap,
@@ -1308,10 +1322,10 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
     cfg.feedMaxPages,
   );
   const posts = backfill.posts;
-  // Capture portfolio evidence even when these posts are an initial baseline or lie
-  // before an unreached cursor. This expands future research only; it never executes
-  // or marks historical trades copy-eligible.
-  feedPortfolioEvidence.observe(posts as any[], feedFilter, Date.now());
+  // Persistence is scheduled only after the core reconciliation path below. A disk
+  // failure suspends new feed-derived assimilation, but can never block owned closes,
+  // gap handling, or cursor-safe processing.
+  const persistFeedEvidence = () => scheduleFeedEvidencePersistence(posts as any[], feedFilter, Date.now());
   if (saved && !backfill.cursorReached) {
     const gapPlan = planUnrecoverableGap(
       posts,
@@ -1371,9 +1385,11 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
         productionTrading: false,
       });
       lastSuccessPollMs = Date.now();
+      persistFeedEvidence();
       return gapPlan.ownedCloses.length;
     }
     lastSuccessPollMs = Date.now();
+    persistFeedEvidence();
     return gapPlan.ownedCloses.length;
   }
   const tracked = (posts as any[]).map((post: any) => {
@@ -1406,6 +1422,7 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
         state.setFeedCursor(feedFilter, { postId: backfill.newestPostId, observedAtMs: baselineAtMs, source: 'startup_baseline' });
       }
     }
+    persistFeedEvidence();
     return baseline.recoverableCloses.length;
   }
 
@@ -1427,6 +1444,7 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
   const allHandled = ordered.every(signal => state.hasSeen(signal.key));
   if (allHandled && backfill.newestPostId) state.setFeedCursor(feedFilter, { postId: backfill.newestPostId, observedAtMs: Date.now(), source });
   lastSuccessPollMs = Date.now();
+  persistFeedEvidence();
   return ordered.length;
 }
 
@@ -1958,7 +1976,8 @@ function startServer() {
         eliteAdmissionVersion: ELITE_ADMISSION_VERSION,
         candidateStatePath: cfg.candidateStatePath,
         candidateStateMaxAgeMs: cfg.candidateStateMaxAgeMs,
-        feedPortfolioEvidence: feedPortfolioEvidence.report(),
+        feedPortfolioEvidence: { ...feedPortfolioEvidence.report(), persistenceErrors: feedEvidencePersistenceErrors,
+          assimilationSuspended: feedEvidenceAssimilationSuspended },
         feedFilter: cfg.feedFilter,
         feedMaxPages: cfg.feedMaxPages,
         feedCursors: state.snapshot().feedCursors,

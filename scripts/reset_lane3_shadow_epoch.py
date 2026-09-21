@@ -48,6 +48,10 @@ DELETE_FILES = (
     "elite-direct-watch.json",
     "elite-direct-watch.json.journal.jsonl",
     "elite-direct-watch-admissions.json",
+    # Feed evidence and selector replay metadata form one causal epoch. Clearing
+    # both prevents retained economics from being re-stamped after a clean reset.
+    "feed-portfolio-evidence.json",
+    "feed-portfolio-evidence.json.journal.jsonl",
 )
 
 # Earlier deployment logic archived contaminated runtime state instead of
@@ -62,6 +66,8 @@ DELETE_ARCHIVE_PATTERNS = (
     "elite-shadow-ledger.pre-*.jsonl",
     "elite-direct-watch.pre-*.json",
     "elite-direct-watch-admissions.pre-*.json",
+    "feed-portfolio-evidence.pre-*.json",
+    "feed-portfolio-evidence.pre-*.json.journal.jsonl",
 )
 
 
