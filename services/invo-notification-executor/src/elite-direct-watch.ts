@@ -101,8 +101,8 @@ export function planDeadlineHydrations(
         ? item.target.lastRetirementOpenPollAtMs ?? 0 : item.target.lastFallbackPollAtMs) + openPollMs })),
     ...closedItems.map(item => ({ phase: 'CLOSED' as const, item,
       dueAtMs: item.target.lastClosedPollAtMs + closedPollMs })),
-  ].sort((a, b) => a.dueAtMs - b.dueAtMs
-    || a.phase.localeCompare(b.phase)
+  ].sort((a, b) => (a.phase === b.phase ? 0 : a.phase === 'OPEN' ? -1 : 1)
+    || a.dueAtMs - b.dueAtMs
     || a.item.target.portfolioId.localeCompare(b.item.target.portfolioId));
 }
 
@@ -454,6 +454,8 @@ interface AdmissionIndexRow {
 interface AdmissionIndexDiskState {
   version: 1;
   generatedAtMs: number;
+  healthy: boolean;
+  suspensionReason: string | null;
   rows: Record<string, AdmissionIndexRow>;
 }
 
@@ -836,7 +838,9 @@ export class EliteDirectWatchState {
     }
     mkdirSync(dirname(this.admissionIndexPath), { recursive: true });
     const temp = `${this.admissionIndexPath}.tmp`;
-    const index: AdmissionIndexDiskState = { version: 1, generatedAtMs: Date.now(), rows };
+    const index: AdmissionIndexDiskState = { version: 1, generatedAtMs: Date.now(),
+      healthy: capacityHealthy && this.admissionsEnabled,
+      suspensionReason: capacityHealthy ? this.admissionSuspensionReason : 'resident_capacity_unhealthy', rows };
     writeFileSync(temp, JSON.stringify(index));
     renameSync(temp, this.admissionIndexPath);
   }
@@ -893,7 +897,7 @@ export class EliteDirectWatchState {
         .sort((a, b) => a.score - b.score || b.portfolioId.localeCompare(a.portfolioId))
         .slice(0, overflowCount);
       for (const victim of overflowVictims) {
-        Object.assign(victim, { lifecycle: 'RETIRING', admittedAtMs: null,
+        Object.assign(victim, { lifecycle: 'RETIRING',
           retiredAtMs: baselineAtMs, retireAfterMs: baselineAtMs + retirementGraceMs,
           lastRetirementOpenPollAtMs: 0, retirementRelevantOpenCount: null,
           retirementOpenEmptyProofs: 0, retirementClosedProofs: 0,
@@ -916,7 +920,7 @@ export class EliteDirectWatchState {
           || (bestWaiting.score === worstDisplaceable.score
             && bestWaiting.portfolioId.localeCompare(worstDisplaceable.portfolioId) < 0))) {
         Object.assign(worstDisplaceable, {
-          lifecycle: 'RETIRING', admittedAtMs: null, retiredAtMs: baselineAtMs,
+          lifecycle: 'RETIRING', retiredAtMs: baselineAtMs,
           retireAfterMs: baselineAtMs + retirementGraceMs, lastRetirementOpenPollAtMs: 0,
           retirementRelevantOpenCount: null, retirementOpenEmptyProofs: 0, retirementClosedProofs: 0,
           negativeEvidenceReason: 'capacity_quality_displacement', negativeSelectorVersion,
@@ -1013,7 +1017,6 @@ export class EliteDirectWatchState {
           existing.retirementClosedProofs = 0;
         } else {
           existing.lifecycle = 'MISSING_GRACE';
-          existing.admittedAtMs = null;
         }
         changed = true;
       }

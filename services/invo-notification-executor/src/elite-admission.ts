@@ -68,6 +68,8 @@ function latestHistoricalSnapshot(
 
 export interface EliteAdmissionDecision {
   allowed: boolean;
+  disposition: 'ALLOWED' | 'TERMINAL' | 'TRANSIENT';
+  retryable: boolean;
   reason: string;
   admissionVersion: string;
   selectorVersion: string | null;
@@ -89,6 +91,11 @@ export interface EliteAdmissionDecision {
   directWatchAdmittedAtMs: number | null;
 }
 
+/** Only structural admission denials are terminal and safe to dedupe. */
+export function shouldPersistAdmissionDenial(decision: EliteAdmissionDecision): boolean {
+  return !decision.allowed && decision.disposition === 'TERMINAL' && !decision.retryable;
+}
+
 function finite(value: unknown): number | null {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
@@ -97,6 +104,8 @@ function finite(value: unknown): number | null {
 function base(portfolioId: string): EliteAdmissionDecision {
   return {
     allowed: false,
+    disposition: 'TERMINAL',
+    retryable: false,
     reason: 'candidate_state_unavailable',
     admissionVersion: ELITE_ADMISSION_VERSION,
     selectorVersion: null,
@@ -135,6 +144,23 @@ export function eliteAdmissionFromState(
 ): EliteAdmissionDecision {
   const denied = base(portfolioId);
   if (!portfolioId) return { ...denied, reason: 'portfolio_id_missing' };
+  // Monitoring suspension is evaluated before candidate freshness. Otherwise a
+  // temporary scan/cooldown can be mislabeled as a terminal stale-candidate denial
+  // and ingress will consume the signal that the direct watcher is trying to protect.
+  let admissionIndex: any = null;
+  if (admissionIndexPath) {
+    if (!existsSync(admissionIndexPath)) return { ...denied, disposition: 'TRANSIENT', retryable: true,
+      reason: 'direct_watch_admission_index_missing' };
+    try { admissionIndex = JSON.parse(readFileSync(admissionIndexPath, 'utf8')); }
+    catch { return { ...denied, disposition: 'TRANSIENT', retryable: true,
+      reason: 'direct_watch_admission_index_unparseable' }; }
+    if (admissionIndex?.version === 1 && admissionIndex?.healthy === false) {
+      const suspensionReason = typeof admissionIndex?.suspensionReason === 'string'
+        ? admissionIndex.suspensionReason : 'monitoring_unhealthy';
+      return { ...denied, disposition: 'TRANSIENT', retryable: true,
+        reason: `direct_watch_admission_suspended:${suspensionReason}` };
+    }
+  }
   if (!existsSync(statePath)) return { ...denied, reason: 'candidate_state_missing' };
 
   let state: any;
@@ -227,11 +253,9 @@ export function eliteAdmissionFromState(
   }
 
   if (!admissionIndexPath || !existsSync(admissionIndexPath)) {
-    return { ...enriched, reason: 'direct_watch_admission_index_missing' };
+    return { ...enriched, disposition: 'TRANSIENT', retryable: true,
+      reason: 'direct_watch_admission_index_missing' };
   }
-  let admissionIndex: any;
-  try { admissionIndex = JSON.parse(readFileSync(admissionIndexPath, 'utf8')); }
-  catch { return { ...enriched, reason: 'direct_watch_admission_index_unparseable' }; }
   const admission = admissionIndex?.version === 1 ? admissionIndex?.rows?.[portfolioId] : null;
   const admittedAtMs = finite(admission?.admittedAtMs);
   if (admission?.portfolioId !== portfolioId || admission?.selectorVersion !== ELITE_SELECTOR_VERSION
@@ -246,6 +270,8 @@ export function eliteAdmissionFromState(
     ...enriched,
     directWatchAdmittedAtMs: admittedAtMs,
     allowed: true,
+    disposition: 'ALLOWED',
+    retryable: false,
     reason: historical ? 'elite_candidate_pretrade_snapshot_qualified' : 'elite_candidate_pretrade_qualified',
   };
 }

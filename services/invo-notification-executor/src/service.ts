@@ -35,6 +35,7 @@ import {
   planDirectHydrations,
   retiringOpenDispositions,
   runConcurrentHydrations,
+  RetirementOpenDisposition,
   DirectWatchRequestBudget,
   signalsFromDirectInvestments,
   unownedCloseEvidence,
@@ -48,7 +49,8 @@ import {
   sourceEventKey,
 } from './source-event-dedupe.js';
 import { runSignalBatchBySource, SourceLifecycleQueue } from './source-lifecycle.js';
-import { eliteAdmissionFromState, ELITE_ADMISSION_VERSION } from './elite-admission.js';
+import { CapturedSignalBatch, publishThenFlushCapturedSignals } from './scan-capture.js';
+import { eliteAdmissionFromState, ELITE_ADMISSION_VERSION, shouldPersistAdmissionDenial } from './elite-admission.js';
 import { shouldTerminallyDustReconcile } from './close-rejection.js';
 import {
   COST_MODEL_VERSION,
@@ -613,9 +615,9 @@ async function executeUnlocked(signal: InvoSignal, wakeSource: string, receivedA
         cfg.directWatchAdmissionIndexPath,
       );
       if (!candidateAdmission.allowed) {
-        state.markSeen(signal.key);
+        if (shouldPersistAdmissionDenial(candidateAdmission)) state.markSeen(signal.key);
         log({
-          type: 'skip',
+          type: candidateAdmission.retryable ? 'admission_deferred' : 'skip',
           reason: `shadow_${candidateAdmission.reason}`,
           shadowAdmissionMode: 'ELITE_ONLY',
           eligibilityCutoffMs,
@@ -1426,7 +1428,7 @@ async function hydrateDirectTarget(
   selectorUpdatedAtMs: number | null,
   reason: string,
   observedAtMs: number,
-) {
+): Promise<CapturedSignalBatch | null> {
   const openResult = await fetchCompleteOpenInvestments(async page => {
     return directInvestmentRows(await getBudgetedDirectInvestments(target.portfolioId, true, page, 'OPEN'));
   }, cfg.directWatchOpenMaxPages, 100);
@@ -1441,7 +1443,7 @@ async function hydrateDirectTarget(
       admitted: openResult.complete, admittedAtMs: openResult.complete ? observedAtMs : null,
       replayedSignals: 0, live: false });
     if (!openResult.complete) throw new Error(`incomplete OPEN baseline for ${target.portfolioId}`);
-    return;
+    return null;
   }
   if (target.lifecycle === 'RETIRING') {
     const dispositions = retiringOpenDispositions(
@@ -1469,7 +1471,6 @@ async function hydrateDirectTarget(
         continue;
       }
       if (disposition.kind === 'execute') {
-        await execute(disposition.signal, `elite_direct:${reason}`, observedAtMs, target.sourceFilter);
         continue;
       }
       state.markSeen(disposition.signal.key);
@@ -1486,7 +1487,13 @@ async function hydrateDirectTarget(
         wakeSource: `elite_direct:${reason}`,
       });
     }
-    const allHandled = dispositions.every(disposition => disposition.kind === 'invalid_lifecycle_open'
+    const buffered = dispositions.filter(
+      (disposition): disposition is Extract<RetirementOpenDisposition, { kind: 'execute' }> => (
+        disposition.kind === 'execute'
+      ),
+    ).map(disposition => disposition.signal);
+    const allHandled = dispositions.every(disposition => disposition.kind === 'execute'
+      ? true : disposition.kind === 'invalid_lifecycle_open'
       ? state.hasSeen(disposition.evidenceKey)
       : signalWasSeen(disposition.signal, key => state.hasSeen(key)));
     const highWaterMs = dispositions.reduce(
@@ -1494,11 +1501,13 @@ async function hydrateDirectTarget(
         ? highWater : Math.max(highWater, disposition.signal.sourceTimeMs ?? highWater),
       target.processedThroughMs,
     );
-    if (allHandled && openResult.complete) {
+    if (allHandled && openResult.complete && buffered.length === 0) {
       directWatch.commitHydration(target.portfolioId, highWaterMs);
       directWatchMetrics.signalsHandled += dispositions.length;
     }
-    if (openResult.complete) directWatch.commitRetirementOpenPoll(target.portfolioId, openRows, observedAtMs);
+    if (openResult.complete && buffered.length === 0) {
+      directWatch.commitRetirementOpenPoll(target.portfolioId, openRows, observedAtMs);
+    }
     if (!openResult.complete) directWatchMetrics.openOverflowRiskCount += 1;
     if (openResult.orderingViolation) directWatchMetrics.openOrderingViolationCount += 1;
     log({ type: 'elite_direct_retirement_open_drain', portfolioId: target.portfolioId,
@@ -1508,22 +1517,23 @@ async function hydrateDirectTarget(
     if (!openResult.complete || !allHandled) {
       throw new Error(`incomplete retirement OPEN proof for ${target.portfolioId}`);
     }
-    return;
+    if (!buffered.length) return null;
+    return { portfolioId: target.portfolioId, signals: buffered, highWaterMs,
+      commit: watermark => {
+        directWatch.commitHydration(target.portfolioId, watermark);
+        directWatch.commitRetirementOpenPoll(target.portfolioId, openRows, observedAtMs);
+      } };
   }
   const signals = signalsFromDirectInvestments(
     openRows, [], target, target.processedThroughMs, observedAtMs,
   );
   directWatchMetrics.hydrationCount += 1;
   directWatchMetrics.signalsObserved += signals.length;
-  for (const signal of signals) {
-    await execute(signal, `elite_direct:${reason}`, observedAtMs, target.sourceFilter);
-  }
-  const allHandled = signals.every(signal => signalWasSeen(signal, key => state.hasSeen(key)));
   const highWaterMs = signals.reduce(
     (highWater, signal) => Math.max(highWater, signal.sourceTimeMs ?? highWater),
     target.processedThroughMs,
   );
-  if (allHandled && openResult.complete) {
+  if (signals.length === 0 && openResult.complete) {
     directWatch.commitHydration(
       target.portfolioId,
       highWaterMs,
@@ -1544,12 +1554,16 @@ async function hydrateDirectTarget(
     previousProcessedThroughMs: target.processedThroughMs,
     highWaterMs,
     signalCount: signals.length,
-    allHandled, pagesFetched: openResult.pagesFetched, endpointComplete: openResult.complete,
+    allHandled: signals.length === 0, pagesFetched: openResult.pagesFetched, endpointComplete: openResult.complete,
     overflow: openResult.overflow, orderingViolation: openResult.orderingViolation,
-    watermarkCommitted: allHandled && openResult.complete,
+    watermarkCommitted: signals.length === 0 && openResult.complete,
     live: false,
   });
-  if (!openResult.complete || !allHandled) throw new Error(`incomplete OPEN proof for ${target.portfolioId}`);
+  if (!openResult.complete) throw new Error(`incomplete OPEN proof for ${target.portfolioId}`);
+  if (!signals.length) return null;
+  return { portfolioId: target.portfolioId, signals, highWaterMs,
+    commit: watermark => directWatch.commitHydration(target.portfolioId, watermark,
+      selectorUpdatedAtMs == null ? undefined : selectorUpdatedAtMs) };
 }
 
 async function hydrateClosedHistory(
@@ -1688,6 +1702,7 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
     return;
   }
   directWatch.setAdmissionHealth(false, 'scan_in_progress');
+  const capturedOpenSignals: CapturedSignalBatch[] = [];
   try {
     await invo.ensureTokenFreshFor(Math.max(
       directWatchConfiguredCapacity.worstCaseClosedSweepMsAtCap,
@@ -1756,9 +1771,12 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
       },
       async work => {
         try {
-          if (work.phase === 'OPEN') await hydrateDirectTarget(
-            work.item.target, work.item.selectorUpdatedAtMs, work.item.reason, nowMs,
-          );
+          if (work.phase === 'OPEN') {
+            const captured = await hydrateDirectTarget(
+              work.item.target, work.item.selectorUpdatedAtMs, work.item.reason, nowMs,
+            );
+            if (captured) capturedOpenSignals.push(captured);
+          }
           else await hydrateClosedHistory(work.item.target, work.item.reason, nowMs);
         } catch (error: any) {
           if (error?.status === 429 && error?.cooldownUntilMs == null) applyDirectWatchRateLimit(Date.now());
@@ -1789,7 +1807,22 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
         : !openHealthy || !closedHealthy ? 'successful_observation_overdue' : 'resident_capacity_unhealthy');
       return;
     }
-    directWatch.setAdmissionHealth(true);
+    const flush = await publishThenFlushCapturedSignals(
+      capturedOpenSignals,
+      () => directWatch.setAdmissionHealth(true),
+      signal => execute(signal, 'elite_direct:post_scan_admission_flush', nowMs, 'direct_watch'),
+      signal => signalWasSeen(signal, key => state.hasSeen(key)),
+    );
+    directWatchMetrics.signalsHandled += capturedOpenSignals
+      .filter(batch => flush.committed.includes(batch.portfolioId))
+      .reduce((count, batch) => count + batch.signals.length, 0);
+    if (flush.pending.length) {
+      directWatch.setAdmissionHealth(false, 'buffered_signal_not_terminal');
+      log({ type: 'elite_direct_buffered_signal_pending', portfolioIds: flush.pending,
+        signalCount: capturedOpenSignals.filter(batch => flush.pending.includes(batch.portfolioId))
+          .reduce((count, batch) => count + batch.signals.length, 0), live: false });
+      return;
+    }
     directWatchBackoffMs = 0;
     directWatchBackoffUntilMs = 0;
     directWatchMetrics.lastSuccessAtMs = Date.now();

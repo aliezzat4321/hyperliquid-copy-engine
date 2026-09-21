@@ -1094,14 +1094,50 @@ test('worst-case max-page virtual latency keeps 16 OPEN and CLOSED residents ins
     'steady-state max-page demand fits the post-reserve direct request rate');
 });
 
-test('deadline scheduler interleaves overdue CLOSED ahead of newer OPEN work', () => {
+test('deadline scheduler gives OPEN unconditional deadline priority on the shared queue', () => {
   const stored = { ...target, baselineAtMs: BASE, processedThroughMs: BASE, selectorInitialized: true,
     lastSelectorUpdatedAtMs: BASE, lastFallbackPollAtMs: BASE + 50_000,
     closedHistoryInitialized: true, closedProcessedThroughMs: BASE, closedBoundaryIds: [],
     lastClosedPollAtMs: BASE, lifecycle: 'ACTIVE' as const };
   const open = [{ target: stored, selectorUpdatedAtMs: null, reason: 'periodic_direct_poll' as const }];
   const closed = [{ target: stored, reason: 'periodic_closed_poll' as const }];
-  assert.equal(planDeadlineHydrations(open, closed, 18_000, 60_000)[0].phase, 'CLOSED');
+  assert.equal(planDeadlineHydrations(open, closed, 18_000, 60_000)[0].phase, 'OPEN');
+});
+
+test('shared-queue worst case schedules all 16 OPEN targets inside 18s before CLOSED work', () => {
+  const residents = 16;
+  const stored = Array.from({ length: residents }, (_, index) => ({ ...target,
+    portfolioId: `p${index.toString().padStart(2, '0')}`, lifecycle: 'ACTIVE' as const,
+    baselineAtMs: BASE, processedThroughMs: BASE, selectorInitialized: true,
+    lastSelectorUpdatedAtMs: BASE, lastFallbackPollAtMs: 0,
+    closedHistoryInitialized: true, closedProcessedThroughMs: BASE,
+    closedBoundaryIds: [], lastClosedPollAtMs: -100_000 }));
+  const open = stored.map(row => ({ target: row, selectorUpdatedAtMs: null,
+    reason: 'periodic_direct_poll' as const }));
+  const closed = stored.map(row => ({ target: row, reason: 'periodic_closed_poll' as const }));
+  const schedule = planDeadlineHydrations(open, closed, 18_000, 60_000);
+  assert.ok(schedule.slice(0, residents).every(work => work.phase === 'OPEN'));
+  const workers = Array.from({ length: 16 }, () => 0);
+  let lastOpenCompletionMs = 0;
+  for (const work of schedule) {
+    const worker = workers.indexOf(Math.min(...workers));
+    workers[worker] += work.phase === 'OPEN' ? 12_000 : 8_000;
+    if (work.phase === 'OPEN') lastOpenCompletionMs = Math.max(lastOpenCompletionMs, workers[worker]);
+  }
+  assert.equal(lastOpenCompletionMs + 2_000, 14_000);
+  assert.ok(lastOpenCompletionMs + 2_000 <= 18_000);
+});
+
+test('ACTIVE to RETIRING preserves original admission time for close classification', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elite-retiring-admission-'));
+  const state = new EliteDirectWatchState(join(dir, 'watch.json'), join(dir, 'admissions.json'));
+  state.syncTargets([target], new Set(), BASE);
+  state.commitClosedHydration('p1', [], BASE + 1);
+  state.commitOpenBaseline('p1', [], BASE + 2);
+  const admittedAtMs = state.targets()[0].admittedAtMs;
+  state.syncTargets([], new Set(), BASE + 20, true, 1, new Set(['p1']), 48, 1, 0, BASE + 20);
+  assert.equal(state.targets()[0].lifecycle, 'RETIRING');
+  assert.equal(state.targets()[0].admittedAtMs, admittedAtMs);
 });
 
 test('bounded concurrent workers isolate failure and stop launching peers after 429', async () => {

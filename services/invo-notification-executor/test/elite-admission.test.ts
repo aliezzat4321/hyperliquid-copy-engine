@@ -3,7 +3,7 @@ import { mkdtempSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { eliteAdmissionFromState } from '../src/elite-admission.js';
+import { eliteAdmissionFromState, shouldPersistAdmissionDenial } from '../src/elite-admission.js';
 import { ELITE_SELECTOR_VERSION } from '../src/portfolio-candidates.js';
 
 function stateFile(state: unknown) {
@@ -144,6 +144,48 @@ test('qualified candidate is waitlisted until direct-watch admission and cannot 
   const prospective = eliteAdmissionFromState(path, portfolioId, decisionAtMs + 11, 20 * 60_000, undefined, index);
   assert.equal(prospective.allowed, true);
   assert.equal(prospective.directWatchAdmittedAtMs, decisionAtMs + 10);
+});
+
+test('feed NEW during scan suspension remains unseen and cursor-safe, then executes once after health returns', () => {
+  const path = stateFile(validState());
+  const index = admissionIndex(path);
+  writeFileSync(index, JSON.stringify({ version: 1, generatedAtMs: decisionAtMs,
+    healthy: false, suspensionReason: 'scan_in_progress', rows: {} }));
+  const duringScan = eliteAdmissionFromState(
+    path, portfolioId, decisionAtMs, 20 * 60_000, undefined, index,
+  );
+  let seen = false; let cursorAdvanced = false; let executions = 0;
+  if (shouldPersistAdmissionDenial(duringScan)) seen = true;
+  if (seen) cursorAdvanced = true;
+  assert.equal(duringScan.disposition, 'TRANSIENT');
+  assert.equal(duringScan.retryable, true);
+  assert.equal(seen, false);
+  assert.equal(cursorAdvanced, false);
+
+  writeFileSync(index, JSON.stringify({ version: 1, generatedAtMs: decisionAtMs + 1,
+    healthy: true, suspensionReason: null, rows: {
+      [portfolioId]: { portfolioId, admittedAtMs: candidateObservedAtMs - 1_000,
+        score: 63.4, selectorVersion: ELITE_SELECTOR_VERSION },
+    } }));
+  const recovered = eliteAdmissionFromState(
+    path, portfolioId, decisionAtMs, 20 * 60_000, undefined, index,
+  );
+  if (recovered.allowed && !seen) { executions += 1; seen = true; }
+  if (seen) cursorAdvanced = true;
+  assert.equal(recovered.disposition, 'ALLOWED');
+  assert.equal(executions, 1);
+  assert.equal(cursorAdvanced, true);
+  if (recovered.allowed && !seen) executions += 1;
+  assert.equal(executions, 1);
+});
+
+test('structural non-elite admission remains terminal', () => {
+  const state = validState({ portfolios: { [portfolioId]: {
+    ...(validState().portfolios as any)[portfolioId], bucket: 'RESEARCH_WIDE',
+  } } });
+  const decision = eliteAdmissionFromState(stateFile(state), portfolioId, decisionAtMs, 20 * 60_000);
+  assert.equal(decision.disposition, 'TERMINAL');
+  assert.equal(shouldPersistAdmissionDenial(decision), true);
 });
 
 test('historical snapshot authorizes a trade when latest aggregate state is newer than the trade', () => {
