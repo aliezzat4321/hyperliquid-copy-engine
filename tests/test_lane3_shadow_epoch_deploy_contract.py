@@ -39,3 +39,12 @@ def test_portfolio_research_deploy_uses_source_selector_version() -> None:
     assert "selectorMatch" in deploy
     assert "candidate.selectorVersion !== expectedSelector" in deploy
     assert "invo-portfolio-elite-v1-20260916" not in deploy
+
+
+def test_lane3_deploy_pins_durable_funding_boundary_path() -> None:
+    deploy = Path("scripts/deploy_invo_notification_executor_self_hosted.sh").read_text()
+    expected = (
+        "set_env NOTIFICATION_TRADER_FUNDING_BOUNDARY_PATH "
+        "/var/lib/hyperliquid-copy-engine/invo-notification-executor/funding-boundaries"
+    )
+    assert expected in deploy

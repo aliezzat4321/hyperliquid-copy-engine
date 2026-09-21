@@ -78,6 +78,8 @@ Update this file only when a component moves, is added, or is retired.
 | Trader discovery / lifecycle | `services/invo-notification-executor/src/trader-tracker.ts` | PnL-blind multi-surface funnel and shadow-assessment queue |
 | Invo API client | `services/invo-notification-executor/src/invo-client.ts` | `/v1_0/posts/get_feed`; **live-sensitive** (`/dex/position/*`) |
 | Hyperliquid client | `services/invo-notification-executor/src/hl-client.ts` | **live-sensitive** (order placement) |
+| Funding boundary capture | `services/invo-notification-executor/src/funding-oracle-capture.ts`, `funding-oracle-worker.ts`, `funding-startup.ts` | Shadow-only worker thread starts before Invo authentication; read-only Hyperliquid oracle capture is hard-capped at 10s |
+| Funding boundary durability/accounting | `services/invo-notification-executor/src/funding-boundary-store.ts`, `funding-boundary-accounting.ts` | Immutable stage-before-message terminal records; close/restart paths fail closed on missing, late, failed, or corrupt evidence |
 | Signal import (Python) | `src/hlcopy/signals/invo.py`, `generic_csv.py` | — |
 | Net executable profitability ledger | `src/hlcopy/lane3/`, `scripts/lane3_net_edge_report.py` | Offline, fail-closed Phase A/B2 measurement; no live permissions |
 
@@ -93,6 +95,7 @@ Update this file only when a component moves, is added, or is retired.
 | Lane 2 resolver measurements | `/var/lib/hyperliquid-copy-engine/invo/lane2_measurements/` | Atomic latest funnel plus append-only per-run timing/yield evidence |
 | Lane 3 ledger | `/var/lib/hyperliquid-copy-engine/invo-notification-executor/audit.jsonl` | Append-only decision stream |
 | Lane 3 direct-watch causal state | `/var/lib/hyperliquid-copy-engine/invo-notification-executor/elite-direct-watch.json{,.journal.jsonl}`, `elite-direct-watch-admissions.json` | Bounded resident/tombstone/waitlist snapshot, crash-replayed target journal, and compact currently admitted authorization index; reset together for a clean shadow epoch |
+| Lane 3 funding boundaries | `/var/lib/hyperliquid-copy-engine/invo-notification-executor/funding-boundaries/` | Worker-owned immutable hourly terminal oracle records, staged before main-thread notification |
 | Frozen champion report | `/root/hyperliquid-audit/prospective-champions/report.json` | Lane 1 frozen window |
 
 ## Observability workflows

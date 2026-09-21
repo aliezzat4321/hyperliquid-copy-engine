@@ -69,6 +69,7 @@ import {
   type FundingOracleCaptureResult,
 } from './funding-oracle-capture.js';
 import { FundingBoundaryStore, defaultFundingBoundaryPath } from './funding-boundary-store.js';
+import { startFundingBeforeInvoAuthentication } from './funding-startup.js';
 import {
   applyFundingOracleResultToPosition,
   firstUnappliedFundingBoundary,
@@ -1833,7 +1834,7 @@ function startServer() {
         }
       });
       return json(res, 200, {
-        ok: fundingOracleWorker?.health().healthy ?? cfg.live,
+        ok: cfg.live ? true : (fundingOracleWorker?.health().healthy ?? false),
         initialized: cfg.discoverySurfaces.every(surface => state.hasFeedBaseline(surface)),
         initializedSurfaces: cfg.discoverySurfaces.filter(surface => state.hasFeedBaseline(surface)),
         live: cfg.live,
@@ -1887,7 +1888,12 @@ function startServer() {
           backoffMs: directWatchBackoffMs,
           backoffUntilMs: directWatchBackoffUntilMs,
         },
-        fundingOracleWorker: cfg.live ? { enabled: false } : {
+        fundingEconomicsReady: !cfg.live && (fundingOracleWorker?.health().healthy ?? false),
+        liveFundingGate: cfg.live ? {
+          ready: false,
+          reason: 'live funding capture is not implemented; production live economics gate remains blocked',
+        } : { ready: false, reason: 'live trading disabled' },
+        fundingOracleWorker: cfg.live ? { enabled: false, economicsReady: false } : {
           enabled: true,
           stagingPath: cfg.fundingBoundaryPath,
           ...fundingOracleWorker?.health(),
@@ -1973,21 +1979,25 @@ async function directWatchLoop() {
 }
 
 async function main() {
-  await invo.ensureToken();
+  if (!cfg.live) {
+    await startFundingBeforeInvoAuthentication(
+      () => startFundingOracleWorker(
+        { maxDelayMs: cfg.shadowFundingOracleMaxDelayMs, stagingPath: cfg.fundingBoundaryPath },
+        applyFundingOracleResult,
+        error => {
+          log({ type: 'funding_oracle_worker_error', error: error.message });
+          setImmediate(() => { throw error; });
+        },
+      ),
+      invo.ensureToken,
+      manager => { fundingOracleWorker = manager; },
+    );
+  } else {
+    await invo.ensureToken();
+  }
   if (cfg.live) {
     await hl.connect(HL_AGENT_KEY, WALLET_ADDRESS);
     await invo.checkAccountReady();
-  }
-  if (!cfg.live) {
-    fundingOracleWorker = startFundingOracleWorker(
-      { maxDelayMs: cfg.shadowFundingOracleMaxDelayMs, stagingPath: cfg.fundingBoundaryPath },
-      applyFundingOracleResult,
-      error => {
-        log({ type: 'funding_oracle_worker_error', error: error.message });
-        // Losing the independent capture mechanism is fatal; let systemd restart it.
-        setImmediate(() => { throw error; });
-      },
-    );
   }
   // Establish every configured surface boundary before ingress and the rotating poller
   // start. Sequential requests keep startup bounded/429-safe and minimize the window in

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
 import { execFile } from 'node:child_process';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -84,7 +84,7 @@ test('restart after the boundary deadline fails closed without an oracle request
   assert.equal(calls, 0);
 });
 
-test('worker durably captures while the actual main thread is blocked beyond 10s', { timeout: 15_000 }, async () => {
+test('production startup arms worker before Invo authentication delayed beyond 10s', { timeout: 15_000 }, async () => {
   const stagingPath = mkdtempSync(join(tmpdir(), 'funding-blocked-'));
   const harness = new URL('./fixtures/funding-worker-block-harness.js', import.meta.url);
   await promisify(execFile)(process.execPath, [harness.pathname, stagingPath], {
@@ -238,6 +238,42 @@ test('clean worker exit code 0 is fatal', () => {
   );
   worker.emit('exit', 0);
   assert.equal(fatal, 'funding oracle worker exited with code 0');
+});
+
+test('nonzero worker exit is fatal and visible in health', () => {
+  const worker = new FakeWorker();
+  let fatal = '';
+  const manager = new FundingOracleWorkerManager(
+    { maxDelayMs: 100, stagingPath: '/unused', heartbeatMs: 1_000 }, () => {}, error => { fatal = error.message; },
+    () => worker as any,
+  );
+  worker.emit('exit', 17);
+  assert.equal(fatal, 'funding oracle worker exited with code 17');
+  assert.equal(manager.health().healthy, false);
+  assert.equal(manager.health().failure, 'funding oracle worker exited with code 17');
+});
+
+test('corrupt staged record fails loudly instead of producing complete economics', async () => {
+  const path = mkdtempSync(join(tmpdir(), 'funding-corrupt-'));
+  writeFileSync(join(path, '1000.json'), '{"version":1,"terminal":true,"result":');
+  const store = new FundingBoundaryStore(path);
+  assert.throws(() => store.read(1_000), /corrupt funding boundary record .*1000\.json/);
+  await assert.rejects(
+    syncStagedFundingForClose(position(), 1_020, store, 100, { intervalMs: 1_000, now: () => 1_020 }),
+    /corrupt funding boundary record/,
+  );
+});
+
+test('internally inconsistent staged success is corrupt and fails closed', () => {
+  const path = mkdtempSync(join(tmpdir(), 'funding-corrupt-success-'));
+  writeFileSync(join(path, '1000.json'), JSON.stringify({
+    version: 1, terminal: true,
+    result: terminalResult({ finalObservedAtMs: 1_010, finalDelayMs: 1 }),
+  }));
+  assert.throws(
+    () => new FundingBoundaryStore(path).read(1_000),
+    /corrupt funding boundary record .*inconsistent funding boundary result metadata/,
+  );
 });
 
 test('missed heartbeat is fatal', async () => {
