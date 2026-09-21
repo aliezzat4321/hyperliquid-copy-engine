@@ -328,3 +328,30 @@ This supersedes the earlier task-class policy that withheld automatic merge from
 - This is configuration/test evidence, not prospective runtime recall proof. Issues #397
   and #401 remain open gates. No deployment or real-trading permission changed;
   `REAL_TRADING_ENABLED=NO`.
+
+## 2026-09-21 — Lane 3 scan suspension is replay-safe capture, not a terminal decision
+
+- Every direct-watch scan still publishes an unhealthy/empty authorization index before
+  source I/O, but the index now records explicit health and suspension reason. Admission
+  decisions distinguish `ALLOWED`, structural `TERMINAL`, and health-related
+  `TRANSIENT` outcomes. Feed NEW/ADD denied during scan, cooldown, capacity-health, or
+  pre-publication suspension remains unseen and cannot advance its surface cursor.
+- Direct OPEN/ADD hydration is capture-first. Complete endpoint observations are buffered
+  without advancing `processedThroughMs`; CLOSED signals retain their immediate unwind
+  path. Only after the whole scan proves healthy are ACTIVE admissions atomically
+  published, buffered signals decided against that index, and each target watermark
+  advanced after all of its signals reach a durable terminal disposition. A scan error,
+  429, incomplete page, or transient execution/admission outcome leaves those signals
+  replayable on the next healthy scan.
+- ACTIVE-to-RETIRING and MISSING_GRACE transitions retain the original `admittedAtMs` so
+  later unowned closes can distinguish pre-enrollment history from a selected-elite short
+  round trip.
+- The shared worker schedule is now explicitly OPEN-first, then CLOSED, with deadline
+  ordering inside each phase. This policy is part of the hard-cap proof: at 16 residents,
+  worst-case three-page/two-attempt OPEN work completes in 14 seconds including fixed
+  overhead, inside the 18-second OPEN deadline; the following CLOSED work remains inside
+  its 60-second deadline. The configured 48 remains only an outer ceiling.
+- This is implementation and deterministic-test evidence at commit
+  `367d3d8c31cad5d2a40db55d789bec8b37c840c8`, not prospective runtime recall proof.
+  Issues #397 and #401 remain open gates. Production and live-trading permissions are
+  unchanged; `REAL_TRADING_ENABLED=NO`.
