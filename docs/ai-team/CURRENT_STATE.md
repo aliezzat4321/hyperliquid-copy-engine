@@ -2,7 +2,7 @@
 
 Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
-**Snapshot:** 2026-09-21T16:29:00Z
+**Snapshot:** 2026-09-21T18:57:41Z
 **Updated by:** CODEX_CHATGPT
 **Observed main head:** `fd63de5c60fc9d19ec643a2c491d5a815581765a`
 **Mission:** Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.
@@ -49,8 +49,10 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
 | Fact | Value | Observed | Source |
 |---|---:|---|---|
-| Lane 3 causal bounded feed-candidate repair commit | 416d4b5 | `2026-09-21T16:29:00Z` | commit `416d4b5` |
-| builder-validated executor subtests passing after feed-candidate repair | 198 | `2026-09-21T16:29:00Z` | commit `416d4b5` |
+| Lane 3 causal bounded feed-candidate repair commit | 6b39872434997992e9adefc3538d329d7f74480f | `2026-09-21T18:57:41Z` | commit `commit 6b39872434997992e9adefc3538d329d7f74480f` |
+| builder-validated executor subtests passing after feed-candidate repair | 201 | `2026-09-21T18:57:41Z` | commit `commit 6b39872434997992e9adefc3538d329d7f74480f; npm run check` |
+| candidate state portfolio cap / state bytes / snapshot total bytes / replay Bloom bytes | 5000 / 8388608 / 8388608 / 262144 | `2026-09-21T18:57:41Z` | commit `commit 6b39872434997992e9adefc3538d329d7f74480f` |
+| PR #406 live-sensitive classification / authorization / real trading | LIVE-SENSITIVE: YES / authorization NONE / REAL_TRADING_ENABLED=NO | `2026-09-21T18:57:41Z` | commit `commit 6b39872434997992e9adefc3538d329d7f74480f; docs/ai-team/LIVE_TRADING_GATE.md` |
 | Lane 3 admission/capacity repair implementation commit | 29a6c5f | `2026-09-20T10:35:02Z` | commit `29a6c5f` |
 | builder-validated executor test files passing | 24 | `2026-09-20T10:35:02Z` | commit `29a6c5f` |
 | default direct-watch resident capacity proven by timeout/page/deadline budget | 1 | `2026-09-20T10:35:02Z` | commit `29a6c5f` |

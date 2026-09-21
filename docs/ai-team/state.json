@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "snapshot_at": "2026-09-21T16:29:00Z",
+  "snapshot_at": "2026-09-21T18:57:41Z",
   "updated_by": "CODEX_CHATGPT",
   "head_observed": "fd63de5c60fc9d19ec643a2c491d5a815581765a",
   "mission": "Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.",
@@ -143,20 +143,38 @@
         {
           "key": "feed_candidate_assimilation_implementation",
           "label": "Lane 3 causal bounded feed-candidate repair commit",
-          "value": "416d4b5",
+          "value": "6b39872434997992e9adefc3538d329d7f74480f",
           "unit": "text",
-          "observed_at": "2026-09-21T16:29:00Z",
+          "observed_at": "2026-09-21T18:57:41Z",
           "source_type": "COMMIT",
-          "source_ref": "416d4b5"
+          "source_ref": "commit 6b39872434997992e9adefc3538d329d7f74480f"
         },
         {
           "key": "feed_candidate_builder_validation",
           "label": "builder-validated executor subtests passing after feed-candidate repair",
-          "value": 198,
+          "value": 201,
           "unit": "count",
-          "observed_at": "2026-09-21T16:29:00Z",
+          "observed_at": "2026-09-21T18:57:41Z",
           "source_type": "COMMIT",
-          "source_ref": "416d4b5"
+          "source_ref": "commit 6b39872434997992e9adefc3538d329d7f74480f; npm run check"
+        },
+        {
+          "key": "feed_candidate_storage_bounds",
+          "label": "candidate state portfolio cap / state bytes / snapshot total bytes / replay Bloom bytes",
+          "value": "5000 / 8388608 / 8388608 / 262144",
+          "unit": "text",
+          "observed_at": "2026-09-21T18:57:41Z",
+          "source_type": "COMMIT",
+          "source_ref": "commit 6b39872434997992e9adefc3538d329d7f74480f"
+        },
+        {
+          "key": "feed_candidate_live_sensitive_classification",
+          "label": "PR #406 live-sensitive classification / authorization / real trading",
+          "value": "LIVE-SENSITIVE: YES / authorization NONE / REAL_TRADING_ENABLED=NO",
+          "unit": "text",
+          "observed_at": "2026-09-21T18:57:41Z",
+          "source_type": "COMMIT",
+          "source_ref": "commit 6b39872434997992e9adefc3538d329d7f74480f; docs/ai-team/LIVE_TRADING_GATE.md"
         },
         {
           "key": "source_capture_pr_head",
