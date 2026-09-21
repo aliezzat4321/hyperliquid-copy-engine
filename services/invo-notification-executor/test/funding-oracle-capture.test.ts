@@ -1,17 +1,24 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import {
   FundingOracleWorkerManager,
-  startFundingOracleWorker,
+  clampFundingOracleMaxDelayMs,
   type FundingOracleCaptureResult,
 } from '../src/funding-oracle-capture.js';
 import { FundingBoundaryCapturer } from '../src/funding-oracle-worker.js';
 import { FundingBoundaryStore } from '../src/funding-boundary-store.js';
-import { syncStagedFundingForClose } from '../src/funding-boundary-accounting.js';
+import {
+  applyFundingOracleResultToPosition,
+  boundaryExposure,
+  isPositionExposedAcrossBoundary,
+  syncStagedFundingForClose,
+} from '../src/funding-boundary-accounting.js';
 import type { ManagedPosition } from '../src/notification-state.js';
 
 function capturerFixture(request: (endpoint: string, timeoutMs: number) => Promise<Record<string, number>>) {
@@ -77,25 +84,27 @@ test('restart after the boundary deadline fails closed without an oracle request
   assert.equal(calls, 0);
 });
 
-test('worker durably captures while the actual main thread is blocked beyond 10s', { timeout: 15_000 }, async t => {
+test('worker durably captures while the actual main thread is blocked beyond 10s', { timeout: 15_000 }, async () => {
   const stagingPath = mkdtempSync(join(tmpdir(), 'funding-blocked-'));
-  const payload = encodeURIComponent(JSON.stringify([
-    { universe: [{ name: 'BTC' }] }, [{ oraclePx: '123.5' }],
-  ]));
-  const intervalMs = 60_000;
-  const boundary = Date.now() + 500;
-  const manager = startFundingOracleWorker(
-    { maxDelayMs: 10_000, retryBaseMs: 10, intervalMs, heartbeatMs: 500,
-      initialBoundaryMs: boundary, endpoint: 'data:application/json,' + payload, stagingPath },
-    () => {}, () => {},
-  );
-  t.after(async () => { await manager.worker.terminate(); });
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10_100);
-  const result = new FundingBoundaryStore(stagingPath).read(boundary)?.result;
+  const harness = new URL('./fixtures/funding-worker-block-harness.js', import.meta.url);
+  await promisify(execFile)(process.execPath, [harness.pathname, stagingPath], {
+    timeout: 14_000,
+    // Do not inherit the test runner's child-process protocol marker: this is an
+    // application harness whose stdout is the asserted result, not a nested test file.
+    env: { PATH: process.env.PATH ?? '' },
+  });
+  const output = readFileSync(join(stagingPath, 'harness-result.json'), 'utf8');
+  const { result, fatal, health } = JSON.parse(output) as {
+    result?: FundingOracleCaptureResult;
+    fatal: string;
+    health: ReturnType<FundingOracleWorkerManager['health']>;
+  };
   assert.ok(result, 'worker must publish before main-thread message delivery');
   assert.equal(result.failureClass, undefined);
   assert.equal(result.oraclePrices?.BTC, 123.5);
   assert.ok(result.finalDelayMs <= 10_000);
+  assert.equal(fatal, '');
+  assert.equal(health.healthy, true);
 });
 
 function position(): ManagedPosition {
@@ -136,6 +145,86 @@ test('position eligibility excludes opens after and zero exposure before boundar
     { intervalMs: 1_000, now: () => 1_200 })).appliedBoundaries, []);
 });
 
+function terminalResult(overrides: Partial<FundingOracleCaptureResult> = {}): FundingOracleCaptureResult {
+  return {
+    type: 'funding_oracle_result', fundingTimeMs: 1_000, attempts: [], retryCount: 0,
+    finalObservedAtMs: 1_010, finalDelayMs: 10, oraclePrices: { BTC: 100 }, ...overrides,
+  };
+}
+
+test('async result uses canonical positive boundary exposure eligibility', () => {
+  const closedBefore = { ...position(), exposureCheckpoints: [{ atMs: 500, size: 1 }, { atMs: 999, size: 0 }] };
+  const closedAt = { ...position(), exposureCheckpoints: [{ atMs: 500, size: 1 }, { atMs: 1_000, size: 0 }] };
+  const partial = { ...position(), exposureCheckpoints: [{ atMs: 500, size: 2 }, { atMs: 900, size: 0.25 }] };
+  const openedAfter = { ...position(), openedAtMs: 1_001, exposureCheckpoints: [{ atMs: 1_001, size: 1 }] };
+
+  for (const excluded of [closedBefore, closedAt, openedAfter]) {
+    const application = applyFundingOracleResultToPosition(excluded, terminalResult(), 100);
+    assert.equal(application.applied, false);
+    assert.equal(application.incomplete, false);
+    assert.deepEqual(application.position.fundingOracleCheckpoints ?? [], []);
+    assert.equal(application.position.fundingIncompleteReason, undefined);
+  }
+  assert.equal(boundaryExposure(partial, 1_000), 0.25);
+  assert.equal(isPositionExposedAcrossBoundary(partial, 1_000), true);
+  const applied = applyFundingOracleResultToPosition(partial, terminalResult(), 100);
+  assert.equal(applied.applied, true);
+  assert.deepEqual(applied.position.fundingOracleCheckpoints,
+    [{ fundingTimeMs: 1_000, observedAtMs: 1_010, oraclePx: 100 }]);
+});
+
+test('async duplicate terminal result is idempotent', () => {
+  const first = applyFundingOracleResultToPosition(position(), terminalResult(), 100);
+  const duplicate = applyFundingOracleResultToPosition(first.position, terminalResult(), 100);
+  assert.equal(duplicate.applied, false);
+  assert.equal(duplicate.incomplete, false);
+  assert.deepEqual(duplicate.position.fundingOracleCheckpoints, first.position.fundingOracleCheckpoints);
+});
+
+test('close waits for a staged terminal record and applies it', async () => {
+  const store = new FundingBoundaryStore(mkdtempSync(join(tmpdir(), 'funding-wait-')));
+  let now = 1_000;
+  let sleeps = 0;
+  const synced = await syncStagedFundingForClose(position(), 1_020, store, 100, {
+    intervalMs: 1_000, now: () => now, pollMs: 10,
+    sleep: async delay => {
+      sleeps += 1;
+      now += delay;
+      store.publish(terminalResult());
+    },
+  });
+  assert.equal(synced.waited, true);
+  assert.equal(sleeps, 1);
+  assert.deepEqual(synced.appliedBoundaries, [1_000]);
+});
+
+test('close marks missing durable evidence incomplete after the deadline', async () => {
+  const store = new FundingBoundaryStore(mkdtempSync(join(tmpdir(), 'funding-missing-')));
+  const synced = await syncStagedFundingForClose(position(), 1_020, store, 100, {
+    intervalMs: 1_000, now: () => 1_101,
+  });
+  assert.match(synced.position.fundingIncompleteReason ?? '', /missed durable oracle checkpoint/);
+});
+
+test('close rejects a late or failed staged terminal record', async () => {
+  for (const [name, result] of [
+    ['late', terminalResult({ finalObservedAtMs: 1_101, finalDelayMs: 101 })],
+    ['failed', terminalResult({ oraclePrices: undefined, failureClass: 'deadline_exhausted' })],
+  ] as const) {
+    const store = new FundingBoundaryStore(mkdtempSync(join(tmpdir(), `funding-${name}-`)));
+    store.publish(result);
+    const synced = await syncStagedFundingForClose(position(), 1_020, store, 100,
+      { intervalMs: 1_000, now: () => 1_020 });
+    assert.match(synced.position.fundingIncompleteReason ?? '', /terminal oracle capture incomplete/);
+  }
+});
+
+test('funding oracle causal delay is hard-clamped to ten seconds', () => {
+  assert.equal(clampFundingOracleMaxDelayMs(60_000), 10_000);
+  assert.equal(clampFundingOracleMaxDelayMs(9_000), 9_000);
+  assert.equal(clampFundingOracleMaxDelayMs(1), 500);
+});
+
 class FakeWorker extends EventEmitter {
   terminate(): Promise<number> { return Promise.resolve(0); }
 }
@@ -160,6 +249,6 @@ test('missed heartbeat is fatal', async () => {
     () => worker as any, () => now,
   );
   now = 16;
-  await new Promise(resolve => setTimeout(resolve, 10));
-  assert.match(fatal, /missed heartbeat/);
+  await new Promise(resolve => setTimeout(resolve, 1_000));
+  assert.match(fatal, /missed .*heartbeat/);
 });

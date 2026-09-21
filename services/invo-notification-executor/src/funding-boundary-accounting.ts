@@ -1,5 +1,5 @@
 import type { ManagedPosition } from './notification-state.js';
-import { FUNDING_INTERVAL_MS } from './funding-oracle-capture.js';
+import { FUNDING_INTERVAL_MS, type FundingOracleCaptureResult } from './funding-oracle-capture.js';
 import { FundingBoundaryStore } from './funding-boundary-store.js';
 
 export interface FundingBoundarySyncResult {
@@ -8,13 +8,68 @@ export interface FundingBoundarySyncResult {
   appliedBoundaries: number[];
 }
 
-function activeSizeAt(position: ManagedPosition, boundaryMs: number): number {
+export function boundaryExposure(position: ManagedPosition, boundaryMs: number): number {
+  if (!(position.openedAtMs < boundaryMs)) return 0;
   let size = 0;
   for (const checkpoint of [...(position.exposureCheckpoints ?? [])].sort((a, b) => a.atMs - b.atMs)) {
     if (checkpoint.atMs <= boundaryMs) size = Number(checkpoint.size);
     else break;
   }
   return Number.isFinite(size) ? size : 0;
+}
+
+export function isPositionExposedAcrossBoundary(position: ManagedPosition, boundaryMs: number): boolean {
+  return boundaryExposure(position, boundaryMs) > 0;
+}
+
+export interface FundingBoundaryApplication {
+  position: ManagedPosition;
+  applied: boolean;
+  incomplete: boolean;
+}
+
+/** Canonical terminal-result application shared by worker delivery and close sync. */
+export function applyFundingOracleResultToPosition(
+  original: ManagedPosition,
+  result: FundingOracleCaptureResult,
+  maxDelayMs: number,
+): FundingBoundaryApplication {
+  const boundary = result.fundingTimeMs;
+  if (original.fundingIncompleteReason
+      || (original.fundingOracleCheckpoints ?? []).some(point => point.fundingTimeMs === boundary)
+      || !isPositionExposedAcrossBoundary(original, boundary)) {
+    return { position: original, applied: false, incomplete: false };
+  }
+  const deadlineMs = boundary + maxDelayMs;
+  const causallyValid = !result.failureClass && result.oraclePrices
+    && result.finalObservedAtMs <= deadlineMs
+    && result.finalDelayMs >= 0 && result.finalDelayMs <= maxDelayMs;
+  if (!causallyValid) {
+    return {
+      position: { ...original, fundingIncompleteReason: `terminal oracle capture incomplete for funding interval ${boundary}` },
+      applied: false,
+      incomplete: true,
+    };
+  }
+  const oraclePx = Number(result.oraclePrices![original.coin]);
+  if (!(oraclePx > 0)) {
+    return {
+      position: { ...original, fundingIncompleteReason: `missing oraclePx for ${original.coin} at funding interval ${boundary}` },
+      applied: false,
+      incomplete: true,
+    };
+  }
+  return {
+    position: {
+      ...original,
+      fundingOracleCheckpoints: [
+        ...(original.fundingOracleCheckpoints ?? []),
+        { fundingTimeMs: boundary, observedAtMs: result.finalObservedAtMs, oraclePx },
+      ],
+    },
+    applied: true,
+    incomplete: false,
+  };
 }
 
 export function crossedFundingBoundaries(
@@ -29,9 +84,20 @@ export function crossedFundingBoundaries(
   for (let boundary = first; boundary <= closedAtMs; boundary += intervalMs) {
     // Strictly-open-before plus the exposure ledger prevents applying evidence to a
     // position opened after, or already reduced to zero before, this boundary.
-    if (position.openedAtMs < boundary && activeSizeAt(position, boundary) > 0) boundaries.push(boundary);
+    if (isPositionExposedAcrossBoundary(position, boundary)) boundaries.push(boundary);
   }
   return boundaries;
+}
+
+export function firstUnappliedFundingBoundary(
+  position: ManagedPosition,
+  intervalMs = FUNDING_INTERVAL_MS,
+): number {
+  const accruedThroughMs = Number(position.fundingAccruedThroughMs ?? position.openedAtMs);
+  let boundary = Math.floor(Math.max(position.openedAtMs, accruedThroughMs) / intervalMs) * intervalMs + intervalMs;
+  const applied = new Set((position.fundingOracleCheckpoints ?? []).map(point => point.fundingTimeMs));
+  while (applied.has(boundary)) boundary += intervalMs;
+  return boundary;
 }
 
 export async function syncStagedFundingForClose(
@@ -49,7 +115,10 @@ export async function syncStagedFundingForClose(
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? (delayMs => new Promise(resolve => setTimeout(resolve, delayMs)));
   const pollMs = options.pollMs ?? 25;
-  let position = { ...original, fundingOracleCheckpoints: [...(original.fundingOracleCheckpoints ?? [])] };
+  let position: ManagedPosition = {
+    ...original,
+    fundingOracleCheckpoints: [...(original.fundingOracleCheckpoints ?? [])],
+  };
   let waited = false;
   const appliedBoundaries: number[] = [];
   for (const boundary of crossedFundingBoundaries(position, closedAtMs, options.intervalMs)) {
@@ -66,23 +135,10 @@ export async function syncStagedFundingForClose(
       position = { ...position, fundingIncompleteReason: `missed durable oracle checkpoint for funding interval ${boundary}` };
       break;
     }
-    const result = record.result;
-    const causallyValid = !result.failureClass && result.oraclePrices
-      && result.finalObservedAtMs <= deadlineMs
-      && result.finalDelayMs >= 0 && result.finalDelayMs <= maxDelayMs;
-    if (!causallyValid) {
-      position = { ...position, fundingIncompleteReason: `terminal oracle capture incomplete for funding interval ${boundary}` };
-      break;
-    }
-    const oraclePx = Number(result.oraclePrices![position.coin]);
-    if (!(oraclePx > 0)) {
-      position = { ...position, fundingIncompleteReason: `missing oraclePx for ${position.coin} at funding interval ${boundary}` };
-      break;
-    }
-    position.fundingOracleCheckpoints!.push({
-      fundingTimeMs: boundary, observedAtMs: result.finalObservedAtMs, oraclePx,
-    });
-    appliedBoundaries.push(boundary);
+    const application = applyFundingOracleResultToPosition(position, record.result, maxDelayMs);
+    position = application.position;
+    if (application.applied) appliedBoundaries.push(boundary);
+    if (application.incomplete) break;
   }
   return { position, waited, appliedBoundaries };
 }

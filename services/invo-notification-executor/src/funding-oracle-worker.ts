@@ -115,6 +115,10 @@ async function requestOraclePrices(endpoint: string, timeoutMs: number): Promise
 function runWorker(options: FundingOracleWorkerOptions): void {
   const intervalMs = options.intervalMs ?? FUNDING_INTERVAL_MS;
   const heartbeatMs = options.heartbeatMs ?? 1_000;
+  if (!(options.livenessBuffer instanceof SharedArrayBuffer)) {
+    throw new Error('funding oracle worker requires shared atomic liveness');
+  }
+  const liveness = new Int32Array(options.livenessBuffer);
   const store = new FundingBoundaryStore(options.stagingPath);
   const capturer = new FundingBoundaryCapturer({
     maxDelayMs: options.maxDelayMs,
@@ -145,6 +149,7 @@ function runWorker(options: FundingOracleWorkerOptions): void {
     ?? Math.floor(Date.now() / intervalMs) * intervalMs;
   arm(nextBoundaryMs);
   const heartbeat = setInterval(() => {
+    Atomics.add(liveness, 0, 1);
     while (nextBoundaryMs <= Date.now()) nextBoundaryMs += intervalMs;
     parentPort?.postMessage({
       type: 'funding_oracle_heartbeat', observedAtMs: Date.now(), schedulerNextBoundaryMs: nextBoundaryMs,
