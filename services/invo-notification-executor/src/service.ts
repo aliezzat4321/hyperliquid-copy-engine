@@ -197,12 +197,23 @@ function scheduleFeedEvidencePersistence(posts: any[], feedFilter: InvoFeedSurfa
     error => {
       feedEvidencePersistenceErrors += 1;
       feedEvidenceAssimilationSuspended = true;
+      const reason = error instanceof Error ? error.message : String(error);
       const tmp = `${feedEvidenceSuspensionPath}.tmp`;
-      writeFileSync(tmp, JSON.stringify({ version: 1, suspended: true, failedAtMs: Date.now(),
-        reason: error instanceof Error ? error.message : String(error) }));
-      renameSync(tmp, feedEvidenceSuspensionPath);
-      log({ type: 'feed_portfolio_evidence_persistence_error', feedFilter, feedEvidencePersistenceErrors,
-        assimilationSuspended: true, error: error instanceof Error ? error.message : String(error) });
+      let markerPersisted = false;
+      try {
+        writeFileSync(tmp, JSON.stringify({ version: 1, suspended: true, failedAtMs: Date.now(), reason }));
+        renameSync(tmp, feedEvidenceSuspensionPath);
+        markerPersisted = true;
+      } catch {
+        // Discovery-side persistence failures must never terminate the executor.
+        // The in-memory suspension remains authoritative for this process lifetime.
+      }
+      try {
+        log({ type: 'feed_portfolio_evidence_persistence_error', feedFilter, feedEvidencePersistenceErrors,
+          assimilationSuspended: true, markerPersisted, error: reason });
+      } catch {
+        // Logging shares storage failure modes; CLOSE/gap reconciliation still wins.
+      }
     },
   );
 }

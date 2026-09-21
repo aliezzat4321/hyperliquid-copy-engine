@@ -13,9 +13,9 @@ EXEC_ENV=/etc/hyperliquid-copy-engine/invo-notification-executor.env
 RESET_SCRIPT="$REPO/scripts/reset_lane3_shadow_epoch.py"
 # Start the repaired selector/execution model from one clean prospective epoch.
 # Subsequent deploys inside this same epoch must preserve the observation window.
-EVIDENCE_EPOCH=lane3-hybrid-v3-clean-20260916
+EVIDENCE_EPOCH=lane3-hybrid-v4-clean-20260921
 EVIDENCE_MARKER="$STATE/evidence-epoch"
-EXPECTED_SELECTOR=invo-portfolio-hybrid-v3-20260916
+EXPECTED_SELECTOR=invo-portfolio-hybrid-v4-20260921
 
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "invo notification executor deployment requires root" >&2
@@ -154,7 +154,7 @@ if [[ "$current_epoch" != "$EVIDENCE_EPOCH" ]]; then
     # It is safe to merge/deploy this guard before PR #373: keep the current
     # epoch untouched until the repaired selector arrives on canonical main.
     reset_deferred=1
-    echo "INVO_NOTIFICATION_EXECUTOR_EVIDENCE_RESET_DEFERRED=selector_v3_not_deployed"
+    echo "INVO_NOTIFICATION_EXECUTOR_EVIDENCE_RESET_DEFERRED=selector_v4_not_deployed"
   else
     if [[ ! -f "$RESET_SCRIPT" ]]; then
       echo "missing Lane 3 reset helper: $RESET_SCRIPT" >&2

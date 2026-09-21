@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -44,6 +44,50 @@ test('all four captured feed surfaces normalize portfolio provenance and aliases
   }, capturedAtMs, 'feed:most_recent');
   assert.ok(withoutCanonicalReturn);
   assert.equal(withoutCanonicalReturn.percentChange, null, 'plSnapshot is not guessed to be percentChange');
+});
+
+
+
+test('top-level verified flag cannot verify a portfolio owner', () => {
+  const forged = structuredClone(fixture.most_recent);
+  forged.verified = true;
+  forged.isVerified = true;
+  delete forged.update.owner.verified;
+  const row = normalizeFeedPortfolioObservation(forged, 'most_recent', capturedAtMs);
+  assert.ok(row);
+  assert.equal(row.verified, null);
+});
+
+test('partial identity observations cannot synthesize an unattested ownerId username pair', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'feed-identity-pair-')), 'feed.json');
+  const first = structuredClone(fixture.most_recent);
+  first.id = 'id-only';
+  first.update.owner = { id: 'owner-normiee' };
+  first.update.portfolio = { ...first.update.portfolio, ownerId: 'owner-normiee' };
+  delete first.update.portfolio.username;
+  const second = structuredClone(fixture.most_recent);
+  second.id = 'name-only';
+  second.update.owner = { username: 'normiee' };
+  delete second.update.portfolio.ownerId;
+  second.update.portfolio.username = 'normiee';
+  const store = new FeedPortfolioEvidenceStore(path);
+  assert.equal(store.observe([first], 'most_recent', capturedAtMs).length, 1);
+  assert.equal(store.observe([second], 'most_recent', capturedAtMs + 1).length, 0);
+  const record = loadFeedPortfolioEvidence(path).portfolios['portfolio-normiee'];
+  assert.equal(record.ownerId, 'owner-normiee');
+  assert.equal(record.username, null);
+});
+
+test('replay bloom is durable before journal append failure', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'feed-replay-crash-'));
+  const path = join(dir, 'feed.json');
+  const store = new FeedPortfolioEvidenceStore(path);
+  const journal = `${path}.journal.jsonl`;
+  mkdirSync(journal);
+  assert.throws(() => store.observe([fixture.most_recent], 'most_recent', capturedAtMs));
+  rmSync(journal, { recursive: true, force: true });
+  const restarted = new FeedPortfolioEvidenceStore(path);
+  assert.equal(restarted.observe([fixture.most_recent], 'most_recent', capturedAtMs + 60_000).length, 0);
 });
 
 test('bounded evidence is restart-safe and deduplicates replayed feed posts', () => {

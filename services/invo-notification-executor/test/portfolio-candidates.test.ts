@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtempSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import {
+  CANDIDATE_SNAPSHOT_SEGMENT_MAX_BYTES,
+  CANDIDATE_STATE_MAX_BYTES,
   classifyPortfolio,
   ELITE_SELECTOR_VERSION,
   PortfolioCandidateLedger,
@@ -351,4 +353,33 @@ test('old selector state cannot preserve portfolios or authorize before fresh ob
   const afterFreshCurrent = eliteAdmissionFromState(state, 'p-fresh', now + 1, 20 * 60_000, snapshots,
     admissionIndex);
   assert.equal(afterFreshCurrent.allowed, true);
+});
+
+
+test('oversized candidate state fails closed on load', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'candidate-oversize-load-'));
+  const state = join(dir, 'state.json');
+  const snapshots = join(dir, 'snapshots.jsonl');
+  writeFileSync(state, ' '.repeat(CANDIDATE_STATE_MAX_BYTES + 1));
+  assert.throws(
+    () => new PortfolioCandidateLedger(state, snapshots),
+    /candidate state byte cap exceeded on load/,
+  );
+});
+
+test('hot snapshot rotation archives prior segment instead of dropping causal audit evidence', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'candidate-audit-rotation-'));
+  const state = join(dir, 'state.json');
+  const snapshots = join(dir, 'snapshots.jsonl');
+  writeFileSync(snapshots, 'x'.repeat(CANDIDATE_SNAPSHOT_SEGMENT_MAX_BYTES));
+  writeFileSync(`${snapshots}.previous`, 'previous-audit-segment\n');
+  const ledger = new PortfolioCandidateLedger(state, snapshots);
+  ledger.observe([portfolio({ id: 'p-archive-proof' })], 'trending', now);
+  const archiveDir = `${snapshots}.archive`;
+  assert.equal(existsSync(archiveDir), true);
+  const archived = readdirSync(archiveDir);
+  assert.equal(archived.length, 1);
+  assert.equal(readFileSync(join(archiveDir, archived[0]), 'utf8'), 'previous-audit-segment\n');
+  assert.equal(statSync(`${snapshots}.previous`).size, CANDIDATE_SNAPSHOT_SEGMENT_MAX_BYTES);
+  assert.ok(statSync(snapshots).size > 0);
 });
