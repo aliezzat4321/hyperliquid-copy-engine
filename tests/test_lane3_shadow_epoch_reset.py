@@ -53,6 +53,7 @@ def test_reset_clears_derived_shadow_data_but_preserves_source_evidence(
         "trader-population.json": '{"traders":{"alice":{}}}\n',
         "invo-leaderboards.json": '{"leaderboardVersion":"raw-source"}\n',
         "invo-leaderboard-snapshots.jsonl": '{"surface":"1D"}\n',
+        "feed-portfolio-evidence.json.replay.bloom": "durable-replay-memory\n",
     }
     for name, content in preserved.items():
         write(tmp_path / name, content)
@@ -63,10 +64,13 @@ def test_reset_clears_derived_shadow_data_but_preserves_source_evidence(
     write(tmp_path / "audit.pre-old-epoch-1.jsonl", "old audit\n")
     historical_tracker = tmp_path / "trader-population.pre-old-epoch-1.json"
     write(historical_tracker, "historical discovery evidence\n")
+    causal_archive = tmp_path / "portfolio-candidate-snapshots.jsonl.archive"
+    causal_archive.mkdir()
+    write(causal_archive / "segment-1.jsonl", "historical selector audit evidence\n")
 
     result = reset_state_root(
         tmp_path,
-        epoch="lane3-hybrid-v3-clean-20260916",
+        epoch="lane3-hybrid-v4-clean-20260921",
         now=dt.datetime(
             2026, 9, 16, 20, 0, tzinfo=dt.timezone.utc  # noqa: UP017
         ),
@@ -92,6 +96,9 @@ def test_reset_clears_derived_shadow_data_but_preserves_source_evidence(
     assert historical_tracker.read_text(encoding="utf-8") == (
         "historical discovery evidence\n"
     )
+    assert (causal_archive / "segment-1.jsonl").read_text(encoding="utf-8") == (
+        "historical selector audit evidence\n"
+    )
 
     assert result["managedPositionsRemoved"] == 1
     assert result["seenKeysPreserved"] == 2
@@ -105,7 +112,7 @@ def test_reset_clears_derived_shadow_data_but_preserves_source_evidence(
         encoding="utf-8"
     ).splitlines()
     assert len(tombstones) == 1
-    assert json.loads(tombstones[0])["epoch"] == "lane3-hybrid-v3-clean-20260916"
+    assert json.loads(tombstones[0])["epoch"] == "lane3-hybrid-v4-clean-20260921"
 
 
 def test_invalid_state_fails_before_any_derived_file_is_deleted(

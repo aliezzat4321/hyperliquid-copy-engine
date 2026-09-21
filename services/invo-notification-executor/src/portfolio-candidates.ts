@@ -92,7 +92,7 @@ interface LedgerDiskState {
   firstEliteAtMs: Record<string, number>;
   lastObservedAtMs: number;
   feedEvidence?: {
-    version: 3;
+    version: 4;
     epoch: typeof FEED_EVIDENCE_EPOCH;
     eligibilityNotBeforeMs: number;
     records: Record<string, { firstProcessedAtMs: number; lastProcessedAtMs: number; sourceFirstSeenAtMs: number; sourceLastSeenAtMs: number; surfaces: string[]; processedEvidenceIds: string[]; feedOnlyAtFirstIngestion: boolean; newlySelectorQualified: boolean }>;
@@ -106,7 +106,7 @@ export const CANDIDATE_STATE_MAX_BYTES = 8 * 1024 * 1024;
 export const CANDIDATE_SNAPSHOT_SEGMENT_MAX_BYTES = 4 * 1024 * 1024;
 export const CANDIDATE_SNAPSHOT_TOTAL_MAX_BYTES = 8 * 1024 * 1024;
 const emptyFeedEvidence = (eligibilityNotBeforeMs = 0) => ({
-  version: 3 as const, epoch: FEED_EVIDENCE_EPOCH as typeof FEED_EVIDENCE_EPOCH,
+  version: 4 as const, epoch: FEED_EVIDENCE_EPOCH as typeof FEED_EVIDENCE_EPOCH,
   eligibilityNotBeforeMs,
   records: {} as Record<string, { firstProcessedAtMs: number; lastProcessedAtMs: number; sourceFirstSeenAtMs: number; sourceLastSeenAtMs: number; surfaces: string[]; processedEvidenceIds: string[]; feedOnlyAtFirstIngestion: boolean; newlySelectorQualified: boolean }>,
   lifetime: { discovered: 0, feedOnly: 0, newlyQualified: 0, rejectedUnverified: 0, rejectedMalformed: 0, rejectedIdentityConflicts: 0, dedupedReplayCount: 0 },
@@ -477,20 +477,34 @@ export class PortfolioCandidateLedger {
       feedEvidence: emptyFeedEvidence(),
     };
     if (existsSync(statePath)) {
+      const raw = readFileSync(statePath, 'utf8');
+      if (Buffer.byteLength(raw) > CANDIDATE_STATE_MAX_BYTES) {
+        throw new Error('candidate state byte cap exceeded on load');
+      }
       try {
-        const parsed = JSON.parse(readFileSync(statePath, 'utf8')) as Partial<LedgerDiskState>;
+        const parsed = JSON.parse(raw) as Partial<LedgerDiskState>;
         const selectorMatches = parsed.selectorVersion === ELITE_SELECTOR_VERSION;
+        const parsedPortfolios = selectorMatches ? (parsed.portfolios ?? {}) : {};
+        if (Object.keys(parsedPortfolios).length > CANDIDATE_STATE_MAX_PORTFOLIOS) {
+          throw new Error('candidate state portfolio cap exceeded on load');
+        }
         this.state = {
           version: 1,
           selectorVersion: ELITE_SELECTOR_VERSION,
           policy,
-          portfolios: selectorMatches ? (parsed.portfolios ?? {}) : {},
+          portfolios: parsedPortfolios,
           firstEliteAtMs: selectorMatches ? (parsed.firstEliteAtMs ?? {}) : {},
           lastObservedAtMs: selectorMatches ? (parsed.lastObservedAtMs ?? 0) : 0,
-          feedEvidence: selectorMatches && parsed.feedEvidence?.version === 3 && parsed.feedEvidence.epoch === FEED_EVIDENCE_EPOCH ? parsed.feedEvidence : emptyFeedEvidence(Date.now()),
+          feedEvidence: selectorMatches && parsed.feedEvidence?.version === 4 && parsed.feedEvidence.epoch === FEED_EVIDENCE_EPOCH
+            ? parsed.feedEvidence : emptyFeedEvidence(Date.now()),
         };
-      } catch {
-        // A malformed prior candidate file must not stop broad research; start a clean candidate view.
+      } catch (error) {
+        if (error instanceof Error && error.message.includes('candidate state portfolio cap exceeded')) throw error;
+        // Malformed state cannot become selector eligibility evidence.
+        this.state = {
+          version: 1, selectorVersion: ELITE_SELECTOR_VERSION, policy, portfolios: {},
+          firstEliteAtMs: {}, lastObservedAtMs: 0, feedEvidence: emptyFeedEvidence(Date.now()),
+        };
       }
     }
     const recentPath = `${snapshotsPath}.recent.json`;
@@ -546,7 +560,7 @@ export class PortfolioCandidateLedger {
       // Feed evidence is additive. It must never refresh, overwrite, or demote an
       // existing canonical verified candidate. Feed-only rows may enter the selector
       // only when the feed itself carries internally consistent verified profile data.
-      const feedVerified = latest.verified === true && Boolean(latest.ownerId || latest.username);
+      const feedVerified = latest.verified === true && Boolean(latest.ownerId && latest.username);
       if (consistent && existing) {
         // Existing broad/profile state remains authoritative; retain its original
         // observation timestamp and source so social activity cannot manufacture
@@ -608,38 +622,70 @@ export class PortfolioCandidateLedger {
   }
 
   private saveState() {
+    if (Object.keys(this.state.portfolios).length > CANDIDATE_STATE_MAX_PORTFOLIOS) {
+      throw new Error('candidate state portfolio cap exceeded');
+    }
+    const serialized = JSON.stringify(this.state, null, 2);
+    if (Buffer.byteLength(serialized) > CANDIDATE_STATE_MAX_BYTES) {
+      throw new Error('candidate state byte cap exceeded');
+    }
     const tmp = `${this.statePath}.tmp`;
-    writeFileSync(tmp, JSON.stringify(this.state, null, 2));
+    writeFileSync(tmp, serialized);
     renameSync(tmp, this.statePath);
   }
 
   private storeCanonical(snapshot: PortfolioSnapshot) {
     const previous = this.state.portfolios[snapshot.portfolioId];
     if (!previous && Object.keys(this.state.portfolios).length >= CANDIDATE_STATE_MAX_PORTFOLIOS) return false;
-    const tentative = { ...this.state.portfolios, [snapshot.portfolioId]: snapshot };
-    if (Buffer.byteLength(JSON.stringify({ ...this.state, portfolios: tentative })) > CANDIDATE_STATE_MAX_BYTES) return false;
-    this.state.portfolios[snapshot.portfolioId] = snapshot;
-    if (snapshot.bucket === 'ELITE_CANDIDATE' && this.state.firstEliteAtMs[snapshot.portfolioId] == null) {
-      this.state.firstEliteAtMs[snapshot.portfolioId] = snapshot.observedAtMs;
+    const tentativePortfolios = { ...this.state.portfolios, [snapshot.portfolioId]: snapshot };
+    const tentativeFirstEliteAtMs = { ...this.state.firstEliteAtMs };
+    if (snapshot.bucket === 'ELITE_CANDIDATE' && tentativeFirstEliteAtMs[snapshot.portfolioId] == null) {
+      tentativeFirstEliteAtMs[snapshot.portfolioId] = snapshot.observedAtMs;
     }
+    const tentativeState = {
+      ...this.state,
+      portfolios: tentativePortfolios,
+      firstEliteAtMs: tentativeFirstEliteAtMs,
+    };
+    if (Buffer.byteLength(JSON.stringify(tentativeState)) > CANDIDATE_STATE_MAX_BYTES) return false;
+    this.state.portfolios = tentativePortfolios;
+    this.state.firstEliteAtMs = tentativeFirstEliteAtMs;
     return true;
   }
 
-  private appendBoundedSnapshot(snapshot: PortfolioSnapshot) {
-    const line = `${JSON.stringify(snapshot)}\n`;
-    if (Buffer.byteLength(line) > CANDIDATE_SNAPSHOT_SEGMENT_MAX_BYTES) return false;
-    const archive = `${this.snapshotsPath}.previous`;
-    const currentBytes = existsSync(this.snapshotsPath) ? statSync(this.snapshotsPath).size : 0;
-    const archiveBytes = existsSync(archive) ? statSync(archive).size : 0;
-    if (currentBytes + Buffer.byteLength(line) > CANDIDATE_SNAPSHOT_SEGMENT_MAX_BYTES) {
-      if (existsSync(archive)) return false;
-      renameSync(this.snapshotsPath, archive);
+  private archivePreviousSnapshot() {
+    const previous = `${this.snapshotsPath}.previous`;
+    if (!existsSync(previous)) return;
+    const archiveDir = `${this.snapshotsPath}.archive`;
+    mkdirSync(archiveDir, { recursive: true });
+    let suffix = Math.max(1, Math.trunc(statSync(previous).mtimeMs));
+    let destination = `${archiveDir}/segment-${suffix}.jsonl`;
+    while (existsSync(destination)) {
+      suffix += 1;
+      destination = `${archiveDir}/segment-${suffix}.jsonl`;
     }
-    const total = (existsSync(this.snapshotsPath) ? statSync(this.snapshotsPath).size : 0)
-      + (existsSync(archive) ? statSync(archive).size : 0) + Buffer.byteLength(line);
-    if (total > CANDIDATE_SNAPSHOT_TOTAL_MAX_BYTES) return false;
+    renameSync(previous, destination);
+  }
+
+  private appendBoundedSnapshot(snapshot: PortfolioSnapshot) {
+    const line = `${JSON.stringify(snapshot)}
+`;
+    const lineBytes = Buffer.byteLength(line);
+    if (lineBytes > CANDIDATE_SNAPSHOT_SEGMENT_MAX_BYTES) {
+      throw new Error('candidate snapshot exceeds segment byte cap');
+    }
+    const previous = `${this.snapshotsPath}.previous`;
+    const currentBytes = existsSync(this.snapshotsPath) ? statSync(this.snapshotsPath).size : 0;
+    if (currentBytes + lineBytes > CANDIDATE_SNAPSHOT_SEGMENT_MAX_BYTES) {
+      this.archivePreviousSnapshot();
+      if (existsSync(this.snapshotsPath)) renameSync(this.snapshotsPath, previous);
+    }
     appendFileSync(this.snapshotsPath, line);
-    return true;
+    const hotBytes = (existsSync(this.snapshotsPath) ? statSync(this.snapshotsPath).size : 0)
+      + (existsSync(previous) ? statSync(previous).size : 0);
+    if (hotBytes > CANDIDATE_SNAPSHOT_TOTAL_MAX_BYTES) {
+      throw new Error('candidate hot snapshot journal byte cap exceeded');
+    }
   }
 
   observe(items: any[], sourceFilter: string, observedAtMs = Date.now()) {

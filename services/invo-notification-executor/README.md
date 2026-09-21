@@ -47,7 +47,7 @@ Portfolio identity is the qualification unit. Multiple portfolios belonging to t
 owner may all enter shadow research if **each portfolio independently qualifies**. A strong
 portfolio does not automatically transfer eligibility to a weaker sibling portfolio.
 
-The current selector version is `invo-portfolio-hybrid-v3-20260916`. It deliberately treats
+The current selector version is `invo-portfolio-hybrid-v4-20260921`. It deliberately treats
 **win rate and return as a pair** rather than making 80% win rate a universal hard boundary.
 Broad discovery remains broad, while shadow admission uses all of the following:
 
@@ -244,7 +244,7 @@ The executor is the single writer of `feed-portfolio-evidence.json` and its comp
 bounded journal. It captures portfolio evidence exposed by Following, Trending, Moves
 (`fire_moves`), and Recent (`most_recent`) without writing `portfolio-candidates.json`.
 The separate portfolio-research process reads that evidence through the unchanged
-`invo-portfolio-hybrid-v3-20260916` selector. Each record carries immutable
+`invo-portfolio-hybrid-v4-20260921` selector. Each record carries immutable
 `firstObservedAtMs`, `processedAtMs`, and `epoch`; the first processing timestamp is the
 causal selector timestamp and source trade/update timestamps are provenance only.
 
@@ -261,6 +261,9 @@ portfolios, surface contribution, first/last seen, processing lag, new-vs-broad 
 and newly selector-qualified counts.
 
 Evidence is bounded to 1,000 portfolios, two observations each, a 3,000,000-byte snapshot,
-and a 512,000-byte journal. Selector eligibility expires after seven days. The hot poll
+and a 512,000-byte journal. The canonical selector hot state is capped at 5,000 portfolios
+and 8 MiB. Its current + previous causal snapshot segments are capped at 8 MiB total; older
+segments are moved intact to the separate `portfolio-candidate-snapshots.jsonl.archive/`
+audit archive instead of being silently dropped. Selector eligibility expires after seven days. The hot poll
 appends small records and compacts at most once per five-minute interval or before the
 journal cap; evidence persistence runs after core CLOSE/gap/cursor-safe reconciliation.

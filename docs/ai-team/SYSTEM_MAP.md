@@ -69,8 +69,8 @@ Update this file only when a component moves, is added, or is retired.
 | Stage | Path | Runtime |
 |---|---|---|
 | Executor service (TypeScript) | `services/invo-notification-executor/src/service.ts` | `hyperliquid-invo-notification-executor.service` |
-| Portfolio selector / candidate ledger | `services/invo-notification-executor/src/portfolio-candidates.ts`, `portfolio-candidate-cli.ts` | `hyperliquid-invo-portfolio-research.service`; selector `invo-portfolio-hybrid-v3-20260916` |
-| Feed-discovered candidate evidence | `services/invo-notification-executor/src/feed-portfolio-evidence.ts` | Executor-only bounded atomic snapshot + compacted journal; portfolio research ingests prospectively at processing time through the unchanged selector |
+| Portfolio selector / candidate ledger | `services/invo-notification-executor/src/portfolio-candidates.ts`, `portfolio-candidate-cli.ts` | `hyperliquid-invo-portfolio-research.service`; selector `invo-portfolio-hybrid-v4-20260921` |
+| Feed-discovered candidate evidence | `services/invo-notification-executor/src/feed-portfolio-evidence.ts` | Executor-only bounded atomic snapshot + compacted journal; portfolio research ingests prospectively at processing time through the v4 selector |
 | Prospective elite admission | `services/invo-notification-executor/src/elite-admission.ts` | NEW/ADD requires exact-portfolio pre-trade elite evidence **and** the compact direct-watch admission index; CLOSE bypasses admission for managed unwind |
 | Elite direct watch | `services/invo-notification-executor/src/elite-direct-watch.ts`, `invo-client.ts` | Shadow-only dedicated read-only `/v1_0/investments/get_investments` loop; two-phase OPEN+CLOSED baseline before admission, score-ranked waitlist/safe drain, timeout/page/deadline capacity proof, bounded tombstones/deferred state, append journal, and compact admission index |
 | Close rejection / residual integrity | `services/invo-notification-executor/src/close-rejection.ts` | True dust may terminate incomplete; executable thin-depth residual remains unresolved/retryable |

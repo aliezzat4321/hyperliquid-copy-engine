@@ -26,7 +26,7 @@ CANONICAL_STATE_ROOT = Path(
 DEFAULT_ENV_FILE = Path(
     "/etc/hyperliquid-copy-engine/invo-notification-executor.env"
 )
-SELECTOR_VERSION = "invo-portfolio-hybrid-v3-20260916"
+SELECTOR_VERSION = "invo-portfolio-hybrid-v4-20260921"
 TOMBSTONE_NAME = "dataset-resets.jsonl"
 
 # Raw/source discovery is intentionally retained. These hashes prove this reset
@@ -35,10 +35,12 @@ PRESERVE_FILES = (
     "trader-population.json",
     "invo-leaderboards.json",
     "invo-leaderboard-snapshots.jsonl",
+    # Cross-epoch replay memory prevents retained historical feed posts from becoming fresh.
+    "feed-portfolio-evidence.json.replay.bloom",
 )
 
 # These are derived from the flawed/superseded shadow measurement epoch and
-# must not be mixed into the prospective v3 run.
+# must not be mixed into the prospective v4 run.
 DELETE_FILES = (
     "audit.jsonl",
     "portfolio-candidates.json",
@@ -49,8 +51,8 @@ DELETE_FILES = (
     "elite-direct-watch.json",
     "elite-direct-watch.json.journal.jsonl",
     "elite-direct-watch-admissions.json",
-    # Feed evidence and selector replay metadata form one causal epoch. Clearing
-    # both prevents retained economics from being re-stamped after a clean reset.
+    # Feed selector material is epoch-scoped, but the replay Bloom is deliberately
+    # preserved across epochs so historical posts can never be re-stamped as fresh.
     "feed-portfolio-evidence.json",
     "feed-portfolio-evidence.json.journal.jsonl",
     "feed-portfolio-evidence.json.assimilation-suspended.json",
@@ -59,6 +61,7 @@ DELETE_FILES = (
 # Earlier deployment logic archived contaminated runtime state instead of
 # deleting it. Remove only derived/shadow archives. Historical trader-population
 # archives remain source discovery evidence and are deliberately preserved.
+
 DELETE_ARCHIVE_PATTERNS = (
     "state.pre-*.json",
     "audit.pre-*.jsonl",
