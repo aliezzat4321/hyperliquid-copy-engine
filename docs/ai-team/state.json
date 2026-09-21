@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "snapshot_at": "2026-09-21T16:32:31Z",
+  "snapshot_at": "2026-09-21T18:50:27Z",
   "updated_by": "CODEX_CHATGPT",
   "head_observed": "fd63de5c60fc9d19ec643a2c491d5a815581765a",
   "mission": "Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.",
@@ -152,20 +152,20 @@
         {
           "key": "funding_capture_reliability_implementation",
           "label": "Lane 3 funding boundary reliability implementation commit",
-          "value": "477802845e0611ad63cdae7d7a478fdbdaf429ce",
+          "value": "279ac31ae2821179e0d7e4d0474b265df2d12651",
           "unit": "text",
-          "observed_at": "2026-09-21T16:32:31Z",
+          "observed_at": "2026-09-21T18:50:27Z",
           "source_type": "COMMIT",
-          "source_ref": "477802845e0611ad63cdae7d7a478fdbdaf429ce"
+          "source_ref": "279ac31ae2821179e0d7e4d0474b265df2d12651"
         },
         {
           "key": "funding_capture_builder_validation",
           "label": "builder-validated executor subtests passing after funding repair",
-          "value": 200,
+          "value": 204,
           "unit": "count",
-          "observed_at": "2026-09-21T16:32:31Z",
+          "observed_at": "2026-09-21T18:50:27Z",
           "source_type": "COMMIT",
-          "source_ref": "477802845e0611ad63cdae7d7a478fdbdaf429ce"
+          "source_ref": "279ac31ae2821179e0d7e4d0474b265df2d12651"
         },
         {
           "key": "source_capture_pr_head",
@@ -231,7 +231,7 @@
           "source_ref": "VM runtime env 2026-09-17T23:10Z"
         }
       ],
-      "blocker": "Issue #350 repaired commit 477802845e0611ad63cdae7d7a478fdbdaf429ce is locally validated but not deployed and still requires independent exact-SHA review/runtime reliability proof. Durable funding-boundary pruning remains telemetry-only until restart and unresolved-position safety is formally proven. PR #404 also remains gated by exact-SHA review and post-deploy recall proof.",
+      "blocker": "Issue #350 repaired implementation commit 279ac31ae2821179e0d7e4d0474b265df2d12651 is locally validated but not deployed and still requires independent exact-SHA review/runtime reliability proof. Live funding capture is not implemented, so production live economics remain blocked. Durable funding-boundary pruning remains telemetry-only until restart and unresolved-position safety is formally proven. PR #404 also remains gated by exact-SHA review and post-deploy recall proof.",
       "next": "Issue #350"
     }
   },

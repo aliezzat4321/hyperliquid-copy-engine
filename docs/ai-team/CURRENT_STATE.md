@@ -2,7 +2,7 @@
 
 Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
-**Snapshot:** 2026-09-21T16:32:31Z
+**Snapshot:** 2026-09-21T18:50:27Z
 **Updated by:** CODEX_CHATGPT
 **Observed main head:** `fd63de5c60fc9d19ec643a2c491d5a815581765a`
 **Mission:** Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.
@@ -50,8 +50,8 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
 | Fact | Value | Observed | Source |
 |---|---:|---|---|
-| Lane 3 funding boundary reliability implementation commit | 477802845e0611ad63cdae7d7a478fdbdaf429ce | `2026-09-21T16:32:31Z` | commit `477802845e0611ad63cdae7d7a478fdbdaf429ce` |
-| builder-validated executor subtests passing after funding repair | 200 | `2026-09-21T16:32:31Z` | commit `477802845e0611ad63cdae7d7a478fdbdaf429ce` |
+| Lane 3 funding boundary reliability implementation commit | 279ac31ae2821179e0d7e4d0474b265df2d12651 | `2026-09-21T18:50:27Z` | commit `279ac31ae2821179e0d7e4d0474b265df2d12651` |
+| builder-validated executor subtests passing after funding repair | 204 | `2026-09-21T18:50:27Z` | commit `279ac31ae2821179e0d7e4d0474b265df2d12651` |
 | Lane 3 admission/capacity repair implementation commit | 29a6c5f | `2026-09-20T10:35:02Z` | commit `29a6c5f` |
 | builder-validated executor test files passing | 24 | `2026-09-20T10:35:02Z` | commit `29a6c5f` |
 | default direct-watch resident capacity proven by timeout/page/deadline budget | 1 | `2026-09-20T10:35:02Z` | commit `29a6c5f` |
@@ -60,7 +60,7 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 | exploratory missing portfolios meeting frozen selector on visible evidence | 53 | `2026-09-17T23:46:12Z` | issue `#403` |
 | real trading enabled | False | `2026-09-17T23:10:50Z` | manual `VM runtime env 2026-09-17T23:10Z` |
 
-**Blocker:** Issue #350 repaired commit 477802845e0611ad63cdae7d7a478fdbdaf429ce is locally validated but not deployed and still requires independent exact-SHA review/runtime reliability proof. Durable funding-boundary pruning remains telemetry-only until restart and unresolved-position safety is formally proven. PR #404 also remains gated by exact-SHA review and post-deploy recall proof.
+**Blocker:** Issue #350 repaired implementation commit 279ac31ae2821179e0d7e4d0474b265df2d12651 is locally validated but not deployed and still requires independent exact-SHA review/runtime reliability proof. Live funding capture is not implemented, so production live economics remain blocked. Durable funding-boundary pruning remains telemetry-only until restart and unresolved-position safety is formally proven. PR #404 also remains gated by exact-SHA review and post-deploy recall proof.
 **Next:** Issue #350.
 
 ## Infrastructure
