@@ -95,6 +95,7 @@ set_env NOTIFICATION_TRADER_HOST 127.0.0.1
 set_env NOTIFICATION_TRADER_PORT 8787
 set_env NOTIFICATION_TRADER_STATE_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/state.json
 set_env NOTIFICATION_TRADER_AUDIT_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/audit.jsonl
+set_env NOTIFICATION_TRADER_FUNDING_BOUNDARY_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/funding-boundaries
 set_env NOTIFICATION_TRADER_TRACKER_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/trader-population.json
 set_env NOTIFICATION_TRADER_CANDIDATE_STATE_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/portfolio-candidates.json
 set_env NOTIFICATION_TRADER_DIRECT_WATCH_STATE_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/elite-direct-watch.json

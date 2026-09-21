@@ -88,3 +88,13 @@ test('closed hydration fails closed on explicit ordering violations', () => {
   assert.match(source, /type: 'ordering_violation'/);
   assert.match(source, /overflowRiskCounted: true, watermarkCommitted: false/);
 });
+
+test('service arms shadow funding capture before any Invo authentication await', () => {
+  const source = readFileSync(new URL('../../src/service.ts', import.meta.url), 'utf8');
+  const main = source.slice(source.indexOf('async function main()'));
+  const startup = main.indexOf('startFundingBeforeInvoAuthentication(');
+  const directEnsure = main.indexOf('await invo.ensureToken()');
+  const startupSurface = main.indexOf('startup_surface:');
+  assert.ok(startup >= 0 && startup < directEnsure && directEnsure < startupSurface);
+  assert.match(main, /startFundingBeforeInvoAuthentication\([\s\S]*startFundingOracleWorker\([\s\S]*invo\.ensureToken/);
+});

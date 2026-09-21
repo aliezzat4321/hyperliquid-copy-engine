@@ -93,9 +93,12 @@ jobs:
               unique_close_by_source.setdefault(source_id, r)
           closes=list(unique_close_by_source.values())
           duplicate_close_rows=len(raw_closes)-len(closes)
+          incomplete_funding_closes=sum(
+              r.get('economicsCompleteness') == 'INCOMPLETE_FUNDING' for r in closes
+          )
 
           managed_now=len((json.loads(state.read_text()).get('managed') or {})) if state.exists() else 0
-          print(f'shadow_opens={len(opens)} shadow_reups={len(reups)} raw_shadow_closes={len(raw_closes)} unique_shadow_closes={len(closes)} duplicate_close_rows={duplicate_close_rows} managed_now={managed_now}')
+          print(f'shadow_opens={len(opens)} shadow_reups={len(reups)} raw_shadow_closes={len(raw_closes)} unique_shadow_closes={len(closes)} duplicate_close_rows={duplicate_close_rows} incomplete_funding_closes_excluded={incomplete_funding_closes} managed_now={managed_now}')
 
           by_user=defaultdict(lambda: {'opens':0,'reups':0,'closes':0,'wins':0,'losses':0,'pnl':0.0,'ret_bps':[]})
           for r in opens:

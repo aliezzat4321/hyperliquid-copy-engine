@@ -32,6 +32,16 @@ function validate(record: FundingBoundaryRecord, expectedBoundary?: number): Fun
       || !Array.isArray(result.attempts) || !Number.isFinite(result.retryCount)) {
     throw new Error('invalid funding boundary result metadata');
   }
+  if (result.finalDelayMs !== result.finalObservedAtMs - result.fundingTimeMs
+      || !Number.isSafeInteger(result.retryCount) || result.retryCount < 0) {
+    throw new Error('inconsistent funding boundary result metadata');
+  }
+  if (result.failureClass == null) {
+    const prices = Object.values(result.oraclePrices ?? {});
+    if (prices.length === 0 || prices.some(price => !Number.isFinite(price) || price <= 0)) {
+      throw new Error('successful funding boundary record requires positive oracle prices');
+    }
+  }
   return record;
 }
 
@@ -47,7 +57,12 @@ export class FundingBoundaryStore {
   read(fundingTimeMs: number): FundingBoundaryRecord | null {
     const path = this.path(fundingTimeMs);
     if (!existsSync(path)) return null;
-    return validate(JSON.parse(readFileSync(path, 'utf8')) as FundingBoundaryRecord, fundingTimeMs);
+    try {
+      return validate(JSON.parse(readFileSync(path, 'utf8')) as FundingBoundaryRecord, fundingTimeMs);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(`corrupt funding boundary record ${path}: ${reason}`, { cause: error });
+    }
   }
 
   publish(result: FundingOracleCaptureResult): FundingBoundaryRecord {
