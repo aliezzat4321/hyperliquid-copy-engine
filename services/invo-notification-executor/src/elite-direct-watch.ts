@@ -521,7 +521,7 @@ export function loadEliteDirectTargets(
       || typeof rowObservedAtMs !== 'number' || !Number.isFinite(rowObservedAtMs) || rowObservedAtMs <= 0) {
       return rejectedTargets(observedAtMs, 'candidate_row_invalid');
     }
-    if (rowObservedAtMs !== observedAtMs) continue;
+    if (rowObservedAtMs > observedAtMs || nowMs - rowObservedAtMs > maxAgeMs) continue;
     if (row.selectorVersion !== ELITE_SELECTOR_VERSION
       || !PORTFOLIO_BUCKETS.has(row.bucket as PortfolioBucket)) {
       return rejectedTargets(observedAtMs, 'candidate_fresh_row_invalid');

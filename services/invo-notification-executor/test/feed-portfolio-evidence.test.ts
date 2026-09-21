@@ -15,6 +15,7 @@ import {
 import { INVO_FEED_SURFACES } from '../src/feed-surfaces.js';
 import { classifyPortfolio, PortfolioCandidateLedger } from '../src/portfolio-candidates.js';
 import { eliteAdmissionFromState } from '../src/elite-admission.js';
+import { EliteDirectWatchState, loadEliteDirectTargets } from '../src/elite-direct-watch.js';
 
 const fixture = JSON.parse(readFileSync(
   new URL('../../test/fixtures/invo-feed-portfolio-evidence-captured-shapes.json', import.meta.url), 'utf8',
@@ -55,6 +56,21 @@ test('bounded evidence is restart-safe and deduplicates replayed feed posts', ()
   assert.equal(restarted.observe([fixture.most_recent], 'most_recent', capturedAtMs).length, 0);
   assert.ok(existsSync(`${path}.journal.jsonl`));
   assert.equal(Object.keys(loadFeedPortfolioEvidence(path).portfolios).length, 1);
+});
+
+test('durable replay bloom survives observation rotation, compaction, restart, and selector reset', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'feed-replay-bloom-')), 'evidence.json');
+  const store = new FeedPortfolioEvidenceStore(path);
+  assert.equal(store.observe([fixture.most_recent], 'most_recent', capturedAtMs).length, 1);
+  for (let i = 0; i < 3; i++) {
+    const changed = structuredClone(fixture.most_recent);
+    changed.id = `rotation-${i}`;
+    changed.update.portfolio.percentChange += i + 1;
+    store.observe([changed], 'most_recent', capturedAtMs + (i + 1) * 6 * 60_000);
+  }
+  writeFileSync(path, JSON.stringify({ version: 'obsolete', portfolios: {} }));
+  const restarted = new FeedPortfolioEvidenceStore(path);
+  assert.equal(restarted.observe([fixture.most_recent], 'most_recent', capturedAtMs + 24 * 60 * 60_000).length, 0);
 });
 
 test('feed-only profile without verified proof remains discovery evidence only', () => {
@@ -136,6 +152,40 @@ test('malformed metric consistency cannot qualify', () => {
   const result = ledger.assimilateFeedEvidence(Object.values(loadFeedPortfolioEvidence(path).portfolios), processedAtMs);
   assert.notEqual(ledger.get('portfolio-normiee')?.bucket, 'ELITE_CANDIDATE');
   assert.equal(result.rejectedMalformed, 1);
+});
+
+test('conflicting metric aliases fail closed instead of selecting a favorable value', () => {
+  const raw = { ...fixture.most_recent.update.portfolio, owner: { ...fixture.most_recent.update.owner, verified: true },
+    closedPositions: 999, closedPositionsCount: 25, winRate: 99, winRatePct: 84,
+    percentChange: 9999, pnlPercent: 250 };
+  const row = classifyPortfolio(raw, processedAtMs, 'trending');
+  assert.ok(row);
+  assert.notEqual(row.bucket, 'ELITE_CANDIDATE');
+  assert.ok(row.reasons.includes('inconsistent_profile_metrics') || row.reasons.includes('incomplete_profile_metrics'));
+});
+
+test('feed assimilation cannot move canonical cycle freshness or displace active incumbent at capacity', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'feed-direct-race-'));
+  const statePath = join(dir, 'candidates.json');
+  const snapshotsPath = join(dir, 'snapshots.jsonl');
+  const evidencePath = join(dir, 'feed.json');
+  const ledger = new PortfolioCandidateLedger(statePath, snapshotsPath);
+  ledger.observe([{ ...fixture.most_recent.update.portfolio, id: 'incumbent', owner: { id: 'owner-inc', username: 'inc', verified: true } }], 'trending', processedAtMs);
+  const before = readFileSync(statePath, 'utf8');
+  new FeedPortfolioEvidenceStore(evidencePath).observe([fixture.most_recent], 'most_recent', processedAtMs + 1);
+  ledger.assimilateFeedEvidence(Object.values(loadFeedPortfolioEvidence(evidencePath).portfolios), processedAtMs);
+  const after = JSON.parse(readFileSync(statePath, 'utf8'));
+  assert.equal(after.lastObservedAtMs, processedAtMs);
+  assert.deepEqual(after.portfolios.incumbent, JSON.parse(before).portfolios.incumbent);
+  const loaded = loadEliteDirectTargets(statePath, processedAtMs + 2, 20 * 60_000);
+  const watch = new EliteDirectWatchState(join(dir, 'watch.json'));
+  const incumbent = loaded.targets.find(row => row.portfolioId === 'incumbent')!;
+  watch.syncTargets([incumbent], new Set(), processedAtMs, true, 120_000, new Set(), 1);
+  watch.commitClosedHydration('incumbent', [], processedAtMs);
+  watch.commitOpenBaseline('incumbent', [], processedAtMs);
+  watch.syncTargets(loaded.targets, new Set(), processedAtMs + 2, true, 120_000, new Set(loaded.demotedPortfolioIds), 1);
+  assert.equal(watch.status().activeTargetCount, 1);
+  assert.ok(JSON.parse(readFileSync(join(dir, 'watch.json'), 'utf8')).targets.incumbent);
 });
 
 test('rotating evidence stays within portfolio, state-byte and journal-byte caps', () => {

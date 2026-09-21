@@ -1,4 +1,5 @@
 import { resolve } from 'path';
+import { existsSync } from 'fs';
 import { INVO_REFRESH_TOKEN, INVO_TOKEN, validateEnv } from './env.js';
 import * as invo from './invo-client.js';
 import { PortfolioCandidateLedger } from './portfolio-candidates.js';
@@ -100,11 +101,13 @@ async function main() {
   }
   // Feed evidence is ingested only here, after the broad endpoint cycle. Its source
   // trade time is provenance; observedAtMs is this research processing boundary.
+  const assimilationSuspensionPath = `${feedEvidencePath}.assimilation-suspended.json`;
   const feedEvidence = loadFeedPortfolioEvidence(feedEvidencePath);
-  const feedAssimilation = ledger.assimilateFeedEvidence(
-    Object.values(feedEvidence.portfolios),
-    observedAtMs,
-  );
+  const feedAssimilation = existsSync(assimilationSuspensionPath)
+    ? { ...ledger.feedExpansionReport(observedAtMs), observationsProcessed: 0,
+      assimilationSuspended: true, suspensionMarkerPath: assimilationSuspensionPath }
+    : { ...ledger.assimilateFeedEvidence(Object.values(feedEvidence.portfolios), observedAtMs),
+      assimilationSuspended: false };
   const report = ledger.report();
   const leaderboards = leaderboardLedger.report();
   console.log(JSON.stringify({

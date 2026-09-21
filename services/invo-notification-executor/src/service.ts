@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync } from 'fs';
+import { appendFileSync, mkdirSync, renameSync, writeFileSync } from 'fs';
 import { createServer, IncomingMessage, ServerResponse } from 'http';
 import { dirname, resolve } from 'path';
 import { randomUUID } from 'crypto';
@@ -190,12 +190,17 @@ const tracker = new TraderTracker(cfg.trackerPath, {
 const feedPortfolioEvidence = new FeedPortfolioEvidenceStore(cfg.feedPortfolioEvidencePath);
 let feedEvidencePersistenceErrors = 0;
 let feedEvidenceAssimilationSuspended = false;
+const feedEvidenceSuspensionPath = `${cfg.feedPortfolioEvidencePath}.assimilation-suspended.json`;
 function scheduleFeedEvidencePersistence(posts: any[], feedFilter: InvoFeedSurface, processedAtMs: number) {
   scheduleDeferredPersistence(
     () => feedPortfolioEvidence.observe(posts, feedFilter, processedAtMs),
     error => {
       feedEvidencePersistenceErrors += 1;
       feedEvidenceAssimilationSuspended = true;
+      const tmp = `${feedEvidenceSuspensionPath}.tmp`;
+      writeFileSync(tmp, JSON.stringify({ version: 1, suspended: true, failedAtMs: Date.now(),
+        reason: error instanceof Error ? error.message : String(error) }));
+      renameSync(tmp, feedEvidenceSuspensionPath);
       log({ type: 'feed_portfolio_evidence_persistence_error', feedFilter, feedEvidencePersistenceErrors,
         assimilationSuspended: true, error: error instanceof Error ? error.message : String(error) });
     },
@@ -603,7 +608,7 @@ async function executeUnlocked(signal: InvoSignal, wakeSource: string, receivedA
     // Lane 3 shadow exposure is portfolio-level elite-only. Closes bypass this gate so
     // previously owned broad-research exposure can always unwind after a demotion.
     if (!cfg.live && signal.action !== 'close') {
-      const eligibilityCutoffMs = signal.sourceTimeMs ?? receivedAtMs;
+      const eligibilityCutoffMs = decisionAtMs;
       const candidateAdmission = eliteAdmissionFromState(
         cfg.candidateStatePath,
         signal.portfolioId,

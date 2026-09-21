@@ -43,6 +43,7 @@ DELETE_FILES = (
     "audit.jsonl",
     "portfolio-candidates.json",
     "portfolio-candidate-snapshots.jsonl",
+    "portfolio-candidate-snapshots.jsonl.previous",
     "elite-shadow-report.json",
     "elite-shadow-ledger.jsonl",
     "elite-direct-watch.json",
@@ -52,6 +53,7 @@ DELETE_FILES = (
     # both prevents retained economics from being re-stamped after a clean reset.
     "feed-portfolio-evidence.json",
     "feed-portfolio-evidence.json.journal.jsonl",
+    "feed-portfolio-evidence.json.assimilation-suspended.json",
 )
 
 # Earlier deployment logic archived contaminated runtime state instead of
