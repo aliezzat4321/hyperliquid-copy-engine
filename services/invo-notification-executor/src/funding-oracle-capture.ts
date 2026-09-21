@@ -1,6 +1,12 @@
 import { Worker } from 'node:worker_threads';
 
 export const FUNDING_INTERVAL_MS = 60 * 60 * 1000;
+export const MAX_FUNDING_ORACLE_DELAY_MS = 10_000;
+
+export function clampFundingOracleMaxDelayMs(value: number): number {
+  if (!Number.isFinite(value)) throw new Error(`invalid funding oracle max delay: ${value}`);
+  return Math.min(MAX_FUNDING_ORACLE_DELAY_MS, Math.max(500, value));
+}
 
 export type FundingOracleFailureClass =
   | 'startup_after_deadline'
@@ -34,6 +40,8 @@ export interface FundingOracleWorkerOptions {
   intervalMs?: number;
   endpoint?: string;
   heartbeatMs?: number;
+  /** Worker-owned liveness counter. Injected by the manager; never configured by operators. */
+  livenessBuffer?: SharedArrayBuffer;
   // Test/recovery harness override. Production omits this and uses the current hourly boundary.
   initialBoundaryMs?: number;
 }
@@ -64,6 +72,9 @@ export class FundingOracleWorkerManager {
   private lastResultAtMs: number | null = null;
   private failure: Error | null = null;
   private readonly heartbeatTimer: NodeJS.Timeout;
+  private readonly liveness: Int32Array;
+  private lastLivenessCounter = 0;
+  private missedLivenessChecks = 0;
 
   constructor(
     options: FundingOracleWorkerOptions,
@@ -76,13 +87,25 @@ export class FundingOracleWorkerManager {
     this.lastMessageAtMs = this.startedAtMs;
     this.lastHeartbeatAtMs = this.startedAtMs;
     const heartbeatMs = options.heartbeatMs ?? 1_000;
-    this.worker = factory(options);
+    this.liveness = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+    this.worker = factory({ ...options, livenessBuffer: this.liveness.buffer as SharedArrayBuffer });
     this.worker.on('message', (message: unknown) => this.handleMessage(message));
     this.worker.on('error', (error: Error) => this.fail(error instanceof Error ? error : new Error(String(error))));
     this.worker.on('exit', (code: number) => this.fail(new Error(`funding oracle worker exited with code ${code}`)));
     this.heartbeatTimer = setInterval(() => {
-      if (this.now() - this.lastHeartbeatAtMs > heartbeatMs * 3) {
-        this.fail(new Error(`funding oracle worker missed heartbeat for ${this.now() - this.lastHeartbeatAtMs}ms`));
+      const counter = Atomics.load(this.liveness, 0);
+      if (counter !== this.lastLivenessCounter) {
+        this.lastLivenessCounter = counter;
+        this.missedLivenessChecks = 0;
+        this.lastHeartbeatAtMs = this.now();
+      } else {
+        this.missedLivenessChecks += 1;
+      }
+      // Delivery of worker messages depends on the main event loop. The shared atomic
+      // does not, so a long main-thread pause observes accumulated worker progress
+      // instead of falsely declaring the worker dead after unblocking.
+      if (this.missedLivenessChecks > 3) {
+        this.fail(new Error(`funding oracle worker missed ${this.missedLivenessChecks} atomic heartbeats`));
       }
     }, heartbeatMs);
     this.heartbeatTimer.unref();

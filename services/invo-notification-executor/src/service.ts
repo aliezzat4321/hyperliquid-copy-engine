@@ -63,12 +63,18 @@ import {
   type ShadowExecutionPolicy,
 } from './shadow-execution.js';
 import {
+  clampFundingOracleMaxDelayMs,
   startFundingOracleWorker,
   type FundingOracleWorkerManager,
   type FundingOracleCaptureResult,
 } from './funding-oracle-capture.js';
 import { FundingBoundaryStore, defaultFundingBoundaryPath } from './funding-boundary-store.js';
-import { syncStagedFundingForClose } from './funding-boundary-accounting.js';
+import {
+  applyFundingOracleResultToPosition,
+  firstUnappliedFundingBoundary,
+  isPositionExposedAcrossBoundary,
+  syncStagedFundingForClose,
+} from './funding-boundary-accounting.js';
 
 if (INVO_TOKEN) invo.setToken(INVO_TOKEN);
 if (INVO_REFRESH_TOKEN) invo.setRefreshToken(INVO_REFRESH_TOKEN);
@@ -112,7 +118,9 @@ function loadConfig() {
     shadowMaxBookAgeMs: Math.max(50, n('NOTIFICATION_TRADER_SHADOW_MAX_BOOK_AGE_MS', 1000)),
     shadowMaxSpreadBps: Math.max(0, n('NOTIFICATION_TRADER_SHADOW_MAX_SPREAD_BPS', 50)),
     shadowTakerFeeBps: Math.max(0, n('NOTIFICATION_TRADER_SHADOW_TAKER_FEE_BPS', 4.5)),
-    shadowFundingOracleMaxDelayMs: Math.max(500, n('NOTIFICATION_TRADER_SHADOW_FUNDING_ORACLE_MAX_DELAY_MS', 10_000)),
+    // This is a causal evidence ceiling, not an operator-tunable availability window.
+    shadowFundingOracleMaxDelayMs: clampFundingOracleMaxDelayMs(
+      n('NOTIFICATION_TRADER_SHADOW_FUNDING_ORACLE_MAX_DELAY_MS', 10_000)),
     shadowMinNotionalUsd: Math.max(1, n('NOTIFICATION_TRADER_SHADOW_MIN_NOTIONAL_USD', 10)),
     marginPct: Math.max(0.01, n('NOTIFICATION_TRADER_MARGIN_PCT', 1)),
     // These are live-account safety controls only. Shadow research is intentionally uncapped.
@@ -1172,19 +1180,35 @@ function applyFundingOracleResult(result: FundingOracleCaptureResult) {
   const targets = Object.values(snapshot.managed).filter(position => (
     position.paper
     && position.executionEvidenceVersion === EXECUTION_EVIDENCE_VERSION
-    && position.openedAtMs < fundingTimeMs
+    && isPositionExposedAcrossBoundary(position, fundingTimeMs)
     && !position.fundingIncompleteReason
     && !(position.fundingOracleCheckpoints ?? []).some(point => point.fundingTimeMs === fundingTimeMs)
   ));
   const affectedSourceBaseIds = targets.map(position => position.sourceBaseId);
+  const logBoundaryRetention = () => {
+    const boundaries = fundingBoundaryStore.boundaries();
+    const unresolved = Object.values(state.snapshot().managed).filter(position => (
+      position.paper && position.executionEvidenceVersion === EXECUTION_EVIDENCE_VERSION
+      && !position.fundingIncompleteReason
+    ));
+    const earliestNeededBoundary = unresolved.length
+      ? Math.min(...unresolved.map(position => firstUnappliedFundingBoundary(position)))
+      : null;
+    log({
+      type: 'funding_boundary_retention_status', recordCount: boundaries.length,
+      oldestBoundaryMs: boundaries[0] ?? null,
+      newestBoundaryMs: boundaries.at(-1) ?? null,
+      earliestNeededBoundary,
+      pruningEnabled: false,
+      reason: 'telemetry_only_until_restart_and_unresolved_position_retention_is_formally_proven',
+    });
+  };
   if (result.failureClass || !result.oraclePrices || result.finalDelayMs > cfg.shadowFundingOracleMaxDelayMs) {
     for (const position of targets) {
       const latest = state.getManagedBySource(position.sourceBaseId);
-      if (!latest || latest.fundingIncompleteReason) continue;
-      state.setManaged({
-        ...latest,
-        fundingIncompleteReason: `missed oracle checkpoint for funding interval ${fundingTimeMs}`,
-      });
+      if (!latest) continue;
+      const application = applyFundingOracleResultToPosition(latest, result, cfg.shadowFundingOracleMaxDelayMs);
+      if (application.incomplete) state.setManaged(application.position);
     }
     if (targets.length) {
       log({
@@ -1200,30 +1224,21 @@ function applyFundingOracleResult(result: FundingOracleCaptureResult) {
         error: result.error,
       });
     }
+    logBoundaryRetention();
     return;
   }
 
   const missingOracleSourceBaseIds: string[] = [];
   for (const position of targets) {
     const latest = state.getManagedBySource(position.sourceBaseId);
-    if (!latest || latest.fundingIncompleteReason || latest.openedAtMs >= fundingTimeMs) continue;
-    if ((latest.fundingOracleCheckpoints ?? []).some(point => point.fundingTimeMs === fundingTimeMs)) continue;
-    const oraclePx = Number(result.oraclePrices[latest.coin]);
-    if (!(oraclePx > 0)) {
+    if (!latest) continue;
+    const application = applyFundingOracleResultToPosition(latest, result, cfg.shadowFundingOracleMaxDelayMs);
+    if (application.incomplete) {
       missingOracleSourceBaseIds.push(position.sourceBaseId);
-      state.setManaged({
-        ...latest,
-        fundingIncompleteReason: `missing oraclePx for ${latest.coin} at funding interval ${fundingTimeMs}`,
-      });
-      continue;
+      state.setManaged(application.position);
+    } else if (application.applied) {
+      state.setManaged(application.position);
     }
-    state.setManaged({
-      ...latest,
-      fundingOracleCheckpoints: [
-        ...(latest.fundingOracleCheckpoints ?? []),
-        { fundingTimeMs, observedAtMs: result.finalObservedAtMs, oraclePx },
-      ],
-    });
   }
   log({
     type: 'funding_oracle_checkpoint',
@@ -1239,6 +1254,7 @@ function applyFundingOracleResult(result: FundingOracleCaptureResult) {
     failureClass: missingOracleSourceBaseIds.length ? 'missing_oracle_prices' : null,
     missingOracleSourceBaseIds,
   });
+  logBoundaryRetention();
 }
 
 async function fetchAndProcess(source: string, hints: NotificationHints | undefined, receivedAtMs: number, feedFilter = cfg.feedFilter): Promise<number> {
