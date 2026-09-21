@@ -2,7 +2,7 @@
 
 Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
-**Snapshot:** 2026-09-21T20:10:13Z
+**Snapshot:** 2026-09-21T20:11:05Z
 **Updated by:** CODEX_CHATGPT
 **Observed main head:** `fd63de5c60fc9d19ec643a2c491d5a815581765a`
 **Mission:** Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.
@@ -49,10 +49,10 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
 | Fact | Value | Observed | Source |
 |---|---:|---|---|
-| Lane 3 hardened causal feed-candidate implementation commit | 590cb70baf56edb89c9c7f8bf27c4573ffcc6909 | `2026-09-21T20:10:13Z` | commit `590cb70baf56edb89c9c7f8bf27c4573ffcc6909` |
-| builder-validated executor subtests passing after hardened feed-candidate repair | 207 | `2026-09-21T20:10:13Z` | commit `590cb70baf56edb89c9c7f8bf27c4573ffcc6909; npm run check; focused feed/durability 41/41; reset pytest 9/9` |
-| candidate state portfolio cap / state bytes / snapshot total bytes / replay Bloom bytes | 5000 / 8388608 / 8388608 / 262144 | `2026-09-21T20:10:13Z` | commit `590cb70baf56edb89c9c7f8bf27c4573ffcc6909` |
-| PR #406 live-sensitive classification / authorization / real trading | LIVE-SENSITIVE: YES / authorization NONE / REAL_TRADING_ENABLED=NO | `2026-09-21T20:10:13Z` | commit `590cb70baf56edb89c9c7f8bf27c4573ffcc6909; docs/ai-team/LIVE_TRADING_GATE.md` |
+| Lane 3 hardened causal feed-candidate implementation commit | 1c87e23ddac492fea30578339f80fc7ec4bfd3a7 | `2026-09-21T20:11:05Z` | commit `1c87e23ddac492fea30578339f80fc7ec4bfd3a7` |
+| builder-validated executor subtests passing after hardened feed-candidate repair | 207 | `2026-09-21T20:11:05Z` | commit `1c87e23ddac492fea30578339f80fc7ec4bfd3a7; npm run check; focused feed/durability 41/41; reset+deploy-contract pytest 12/12` |
+| candidate state portfolio cap / state bytes / snapshot total bytes / replay Bloom bytes | 5000 / 8388608 / 8388608 / 262144 | `2026-09-21T20:11:05Z` | commit `1c87e23ddac492fea30578339f80fc7ec4bfd3a7; hot selector snapshots bounded to 8 MiB with older causal segments preserved in audit archive; replay Bloom preserved across reset` |
+| PR #406 live-sensitive classification / authorization / real trading | LIVE-SENSITIVE: YES / authorization NONE / REAL_TRADING_ENABLED=NO | `2026-09-21T20:11:05Z` | commit `1c87e23ddac492fea30578339f80fc7ec4bfd3a7; docs/ai-team/LIVE_TRADING_GATE.md` |
 | Lane 3 admission/capacity repair implementation commit | 29a6c5f | `2026-09-20T10:35:02Z` | commit `29a6c5f` |
 | builder-validated executor test files passing | 24 | `2026-09-20T10:35:02Z` | commit `29a6c5f` |
 | default direct-watch resident capacity proven by timeout/page/deadline budget | 1 | `2026-09-20T10:35:02Z` | commit `29a6c5f` |
@@ -61,7 +61,7 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 | exploratory missing portfolios meeting selector economics but lacking captured verified hydration | 53 | `2026-09-17T23:46:12Z` | issue `#403` |
 | real trading enabled | False | `2026-09-17T23:10:50Z` | manual `VM runtime env 2026-09-17T23:10Z` |
 
-**Blocker:** Issue #403 hardened repair is locally validated at exact implementation commit 590cb70baf56edb89c9c7f8bf27c4573ffcc6909 (207/207 executor subtests; focused feed/durability 41/41; reset 9/9) but still requires fresh independent exact-SHA review before merge/deploy. Captured feed fixtures without owner-bound verification remain discovery/hydration-queue only; production is unchanged and no prospective v4 runtime candidate-assimilation proof exists. PR #404 and #397 remain separate gates.
+**Blocker:** Issue #403 hardened repair is locally validated at exact implementation commit 1c87e23ddac492fea30578339f80fc7ec4bfd3a7 (207/207 executor subtests; focused feed/durability 41/41; reset+deploy-contract 12/12) but still requires fresh independent exact-SHA review before merge/deploy. Replay memory and historical causal snapshot archives are preserved across the v4 clean epoch reset; captured feed fixtures without owner-bound verification remain discovery/hydration-queue only. Production is unchanged and no prospective v4 runtime candidate-assimilation proof exists. PR #404 and #397 remain separate gates.
 **Next:** Issue #403.
 
 ## Infrastructure

@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "snapshot_at": "2026-09-21T20:10:13Z",
+  "snapshot_at": "2026-09-21T20:11:05Z",
   "updated_by": "CODEX_CHATGPT",
   "head_observed": "fd63de5c60fc9d19ec643a2c491d5a815581765a",
   "mission": "Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.",
@@ -143,38 +143,38 @@
         {
           "key": "feed_candidate_assimilation_implementation",
           "label": "Lane 3 hardened causal feed-candidate implementation commit",
-          "value": "590cb70baf56edb89c9c7f8bf27c4573ffcc6909",
+          "value": "1c87e23ddac492fea30578339f80fc7ec4bfd3a7",
           "unit": "text",
-          "observed_at": "2026-09-21T20:10:13Z",
+          "observed_at": "2026-09-21T20:11:05Z",
           "source_type": "COMMIT",
-          "source_ref": "590cb70baf56edb89c9c7f8bf27c4573ffcc6909"
+          "source_ref": "1c87e23ddac492fea30578339f80fc7ec4bfd3a7"
         },
         {
           "key": "feed_candidate_builder_validation",
           "label": "builder-validated executor subtests passing after hardened feed-candidate repair",
           "value": 207,
           "unit": "count",
-          "observed_at": "2026-09-21T20:10:13Z",
+          "observed_at": "2026-09-21T20:11:05Z",
           "source_type": "COMMIT",
-          "source_ref": "590cb70baf56edb89c9c7f8bf27c4573ffcc6909; npm run check; focused feed/durability 41/41; reset pytest 9/9"
+          "source_ref": "1c87e23ddac492fea30578339f80fc7ec4bfd3a7; npm run check; focused feed/durability 41/41; reset+deploy-contract pytest 12/12"
         },
         {
           "key": "feed_candidate_storage_bounds",
           "label": "candidate state portfolio cap / state bytes / snapshot total bytes / replay Bloom bytes",
           "value": "5000 / 8388608 / 8388608 / 262144",
           "unit": "text",
-          "observed_at": "2026-09-21T20:10:13Z",
+          "observed_at": "2026-09-21T20:11:05Z",
           "source_type": "COMMIT",
-          "source_ref": "590cb70baf56edb89c9c7f8bf27c4573ffcc6909"
+          "source_ref": "1c87e23ddac492fea30578339f80fc7ec4bfd3a7; hot selector snapshots bounded to 8 MiB with older causal segments preserved in audit archive; replay Bloom preserved across reset"
         },
         {
           "key": "feed_candidate_live_sensitive_classification",
           "label": "PR #406 live-sensitive classification / authorization / real trading",
           "value": "LIVE-SENSITIVE: YES / authorization NONE / REAL_TRADING_ENABLED=NO",
           "unit": "text",
-          "observed_at": "2026-09-21T20:10:13Z",
+          "observed_at": "2026-09-21T20:11:05Z",
           "source_type": "COMMIT",
-          "source_ref": "590cb70baf56edb89c9c7f8bf27c4573ffcc6909; docs/ai-team/LIVE_TRADING_GATE.md"
+          "source_ref": "1c87e23ddac492fea30578339f80fc7ec4bfd3a7; docs/ai-team/LIVE_TRADING_GATE.md"
         },
         {
           "key": "source_capture_pr_head",
@@ -240,7 +240,7 @@
           "source_ref": "VM runtime env 2026-09-17T23:10Z"
         }
       ],
-      "blocker": "Issue #403 hardened repair is locally validated at exact implementation commit 590cb70baf56edb89c9c7f8bf27c4573ffcc6909 (207/207 executor subtests; focused feed/durability 41/41; reset 9/9) but still requires fresh independent exact-SHA review before merge/deploy. Captured feed fixtures without owner-bound verification remain discovery/hydration-queue only; production is unchanged and no prospective v4 runtime candidate-assimilation proof exists. PR #404 and #397 remain separate gates.",
+      "blocker": "Issue #403 hardened repair is locally validated at exact implementation commit 1c87e23ddac492fea30578339f80fc7ec4bfd3a7 (207/207 executor subtests; focused feed/durability 41/41; reset+deploy-contract 12/12) but still requires fresh independent exact-SHA review before merge/deploy. Replay memory and historical causal snapshot archives are preserved across the v4 clean epoch reset; captured feed fixtures without owner-bound verification remain discovery/hydration-queue only. Production is unchanged and no prospective v4 runtime candidate-assimilation proof exists. PR #404 and #397 remain separate gates.",
       "next": "Issue #403"
     }
   },
