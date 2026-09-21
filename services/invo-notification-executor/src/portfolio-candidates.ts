@@ -1,7 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
 import { dirname } from 'path';
-import { createHash } from 'crypto';
-import type { FeedPortfolioRecord } from './feed-portfolio-evidence.js';
+import { FEED_EVIDENCE_EPOCH, FEED_EVIDENCE_SELECTOR_TTL_MS, type FeedPortfolioRecord } from './feed-portfolio-evidence.js';
 
 export const ELITE_SELECTOR_VERSION = 'invo-portfolio-hybrid-v3-20260916';
 
@@ -93,20 +92,19 @@ interface LedgerDiskState {
   firstEliteAtMs: Record<string, number>;
   lastObservedAtMs: number;
   feedEvidence?: {
-    version: 2;
-    replayBloomBase64: string;
-    records: Record<string, { firstProcessedAtMs: number; lastProcessedAtMs: number; sourceFirstSeenAtMs: number; sourceLastSeenAtMs: number; surfaces: string[]; feedOnlyAtFirstIngestion: boolean; newlySelectorQualified: boolean }>;
+    version: 3;
+    epoch: typeof FEED_EVIDENCE_EPOCH;
+    eligibilityNotBeforeMs: number;
+    records: Record<string, { firstProcessedAtMs: number; lastProcessedAtMs: number; sourceFirstSeenAtMs: number; sourceLastSeenAtMs: number; surfaces: string[]; processedEvidenceIds: string[]; feedOnlyAtFirstIngestion: boolean; newlySelectorQualified: boolean }>;
     lifetime: { discovered: number; feedOnly: number; newlyQualified: number; rejectedUnverified: number; rejectedMalformed: number; rejectedIdentityConflicts: number; dedupedReplayCount: number };
   };
 }
 
 export const FEED_SELECTOR_TRACKING_MAX_PORTFOLIOS = 5_000;
-const SELECTOR_BLOOM_BYTES = 262_144;
-const SELECTOR_BLOOM_HASHES = 7;
-const emptyFeedEvidence = () => ({
-  version: 2 as const,
-  replayBloomBase64: Buffer.alloc(SELECTOR_BLOOM_BYTES).toString('base64'),
-  records: {} as Record<string, { firstProcessedAtMs: number; lastProcessedAtMs: number; sourceFirstSeenAtMs: number; sourceLastSeenAtMs: number; surfaces: string[]; feedOnlyAtFirstIngestion: boolean; newlySelectorQualified: boolean }>,
+const emptyFeedEvidence = (eligibilityNotBeforeMs = 0) => ({
+  version: 3 as const, epoch: FEED_EVIDENCE_EPOCH as typeof FEED_EVIDENCE_EPOCH,
+  eligibilityNotBeforeMs,
+  records: {} as Record<string, { firstProcessedAtMs: number; lastProcessedAtMs: number; sourceFirstSeenAtMs: number; sourceLastSeenAtMs: number; surfaces: string[]; processedEvidenceIds: string[]; feedOnlyAtFirstIngestion: boolean; newlySelectorQualified: boolean }>,
   lifetime: { discovered: 0, feedOnly: 0, newlyQualified: 0, rejectedUnverified: 0, rejectedMalformed: 0, rejectedIdentityConflicts: 0, dedupedReplayCount: 0 },
 });
 
@@ -469,7 +467,7 @@ export class PortfolioCandidateLedger {
           portfolios: selectorMatches ? (parsed.portfolios ?? {}) : {},
           firstEliteAtMs: selectorMatches ? (parsed.firstEliteAtMs ?? {}) : {},
           lastObservedAtMs: selectorMatches ? (parsed.lastObservedAtMs ?? 0) : 0,
-          feedEvidence: selectorMatches && parsed.feedEvidence?.version === 2 ? parsed.feedEvidence : emptyFeedEvidence(),
+          feedEvidence: selectorMatches && parsed.feedEvidence?.version === 3 && parsed.feedEvidence.epoch === FEED_EVIDENCE_EPOCH ? parsed.feedEvidence : emptyFeedEvidence(Date.now()),
         };
       } catch {
         // A malformed prior candidate file must not stop broad research; start a clean candidate view.
@@ -495,29 +493,28 @@ export class PortfolioCandidateLedger {
    */
   assimilateFeedEvidence(records: FeedPortfolioRecord[], processedAtMs = Date.now()) {
     const meta = this.state.feedEvidence ?? emptyFeedEvidence();
-    let bloom = Buffer.from(meta.replayBloomBase64, 'base64');
-    if (bloom.length !== SELECTOR_BLOOM_BYTES) bloom = Buffer.alloc(SELECTOR_BLOOM_BYTES);
-    const bloomIndexes = (id: string) => { const digest = createHash('sha256').update(id).digest(); return Array.from({ length: SELECTOR_BLOOM_HASHES }, (_, index) => digest.readUInt32BE(index * 4) % (SELECTOR_BLOOM_BYTES * 8)); };
-    const seen = (id: string) => bloomIndexes(id).every(index => (bloom[index >> 3] & (1 << (index & 7))) !== 0);
-    const remember = (id: string) => { for (const index of bloomIndexes(id)) bloom[index >> 3] |= 1 << (index & 7); };
     let observationsProcessed = 0;
     for (const record of records.sort((a, b) => a.firstSeenAtMs - b.firstSeenAtMs || a.portfolioId.localeCompare(b.portfolioId))) {
       const wasKnown = this.state.portfolios[record.portfolioId] != null;
       const wasElite = this.state.portfolios[record.portfolioId]?.bucket === 'ELITE_CANDIDATE';
+      const previousMeta = meta.records[record.portfolioId];
+      const processedIds = new Set(previousMeta?.processedEvidenceIds ?? []);
       const unseen = record.observations.filter(row => {
-        if (!seen(row.evidenceId)) return true;
+        if (row.epoch !== FEED_EVIDENCE_EPOCH || row.processedAtMs < meta.eligibilityNotBeforeMs
+          || row.processedAtMs < processedAtMs - FEED_EVIDENCE_SELECTOR_TTL_MS) return false;
+        if (!processedIds.has(row.evidenceId)) return true;
         meta.lifetime.dedupedReplayCount += 1;
         return false;
       })
         .sort((a, b) => a.capturedAtMs - b.capturedAtMs || a.evidenceId.localeCompare(b.evidenceId));
       if (!unseen.length) continue;
-      const previousMeta = meta.records[record.portfolioId];
       if (!previousMeta) { meta.lifetime.discovered += 1; if (!wasKnown) meta.lifetime.feedOnly += 1; }
       meta.records[record.portfolioId] = {
-        firstProcessedAtMs: previousMeta?.firstProcessedAtMs ?? processedAtMs, lastProcessedAtMs: processedAtMs,
+        firstProcessedAtMs: previousMeta?.firstProcessedAtMs ?? unseen[0].processedAtMs, lastProcessedAtMs: unseen[unseen.length - 1].processedAtMs,
         sourceFirstSeenAtMs: Math.min(previousMeta?.sourceFirstSeenAtMs ?? record.firstSeenAtMs, record.firstSeenAtMs),
         sourceLastSeenAtMs: Math.max(previousMeta?.sourceLastSeenAtMs ?? 0, record.lastSeenAtMs),
         surfaces: [...new Set([...(previousMeta?.surfaces ?? []), ...record.surfaces])].sort(),
+        processedEvidenceIds: [...new Set([...(previousMeta?.processedEvidenceIds ?? []), ...unseen.map(row => row.evidenceId)])].slice(-8),
         feedOnlyAtFirstIngestion: previousMeta?.feedOnlyAtFirstIngestion ?? !wasKnown,
         newlySelectorQualified: previousMeta?.newlySelectorQualified ?? false,
       };
@@ -530,7 +527,7 @@ export class PortfolioCandidateLedger {
       // existing canonical verified candidate. Feed-only rows may enter the selector
       // only when the feed itself carries internally consistent verified profile data.
       const feedVerified = latest.verified === true && Boolean(latest.ownerId || latest.username);
-      if (consistent && existing?.verified === true) {
+      if (consistent && existing) {
         // Existing broad/profile state remains authoritative; retain its original
         // observation timestamp and source so social activity cannot manufacture
         // freshness for stale selector economics.
@@ -541,23 +538,21 @@ export class PortfolioCandidateLedger {
           ownerId: latest.ownerId,
           owner: { id: latest.ownerId, username: latest.username, verified: true },
         };
-        const candidate = classifyPortfolio(raw, processedAtMs, `feed:${latest.surface}`, this.policy);
+        const candidate = classifyPortfolio(raw, latest.processedAtMs, `feed:${latest.surface}`, this.policy);
         if (candidate?.reasons.includes('incomplete_profile_metrics') || candidate?.reasons.includes('inconsistent_profile_metrics')) {
           meta.lifetime.rejectedMalformed += 1;
         } else {
-          this.observe([raw], `feed:${latest.surface}`, processedAtMs);
+          this.observe([raw], `feed:${latest.surface}`, latest.processedAtMs);
         }
       } else if (consistent) {
         meta.lifetime.rejectedUnverified += 1;
       }
-      for (const row of unseen) remember(row.evidenceId);
       observationsProcessed += unseen.length;
       if (!wasElite && this.state.portfolios[record.portfolioId]?.bucket === 'ELITE_CANDIDATE') {
         if (!meta.records[record.portfolioId].newlySelectorQualified) meta.lifetime.newlyQualified += 1;
         meta.records[record.portfolioId].newlySelectorQualified = true;
       }
     }
-    meta.replayBloomBase64 = bloom.toString('base64');
     const retained = Object.entries(meta.records).sort((a, b) => b[1].lastProcessedAtMs - a[1].lastProcessedAtMs || a[0].localeCompare(b[0])).slice(0, FEED_SELECTOR_TRACKING_MAX_PORTFOLIOS);
     meta.records = Object.fromEntries(retained);
     this.state.feedEvidence = meta;
@@ -583,6 +578,8 @@ export class PortfolioCandidateLedger {
       retainedTrackingRecords: rows.length, trackingRecordCap: FEED_SELECTOR_TRACKING_MAX_PORTFOLIOS,
       rejectedUnverified: meta.lifetime.rejectedUnverified, rejectedMalformed: meta.lifetime.rejectedMalformed,
       rejectedIdentityConflicts: meta.lifetime.rejectedIdentityConflicts, dedupedReplayCount: meta.lifetime.dedupedReplayCount,
+      hydrationQueuePortfolioIds: rows.filter(row => row.currentBucket == null).map(row => row.portfolioId),
+      hydrationSource: '/v1_0/trending/get_portfolios_pl broad/profile cycle',
       portfolios: rows,
     };
   }

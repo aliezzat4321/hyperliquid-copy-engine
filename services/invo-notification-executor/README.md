@@ -229,15 +229,24 @@ service.
 The executor is the single writer of `feed-portfolio-evidence.json` and its compacted,
 bounded journal. It captures portfolio evidence exposed by Following, Trending, Moves
 (`fire_moves`), and Recent (`most_recent`) without writing `portfolio-candidates.json`.
-The separate portfolio-research process reads that evidence and evaluates it through
-the unchanged `invo-portfolio-hybrid-v3-20260916` selector. Its processing timestamp is
-the causal selector timestamp; source trade/update timestamps are provenance only.
+The separate portfolio-research process reads that evidence through the unchanged
+`invo-portfolio-hybrid-v3-20260916` selector. Each record carries immutable
+`firstObservedAtMs`, `processedAtMs`, and `epoch`; the first processing timestamp is the
+causal selector timestamp and source trade/update timestamps are provenance only.
 
 Captured count aliases include `closedPositionsCount`, `openPositionsCount`,
-`wonPositionsCount`, and `lostPositionsCount`. `plSnapshot` is retained raw but is not
-treated as `percentChange`, because this branch contains no captured proof that those
-fields are canonically equivalent. Feed discovery never replays a historical feed trade,
+`wonPositionsCount`, and `lostPositionsCount`. `plSnapshot` is not retained or treated as
+`percentChange`, because this branch contains no captured proof that those fields are
+canonically equivalent. Captured feed fixtures contain no `verified`/`isVerified` field,
+so they remain discovery-only and are explicitly reported in the hydration queue for the
+proven broad/profile cycle. There is no runtime claim that the exploratory 109/53 can be
+assimilated without that independent verification. Feed discovery never replays a historical feed trade,
 and a newly selected portfolio remains ineligible for NEW/ADD until the #404 direct-watch
 admission index marks it ACTIVE. Health and the research report expose retained unique
 portfolios, surface contribution, first/last seen, processing lag, new-vs-broad discovery,
 and newly selector-qualified counts.
+
+Evidence is bounded to 1,000 portfolios, two observations each, a 3,000,000-byte snapshot,
+and a 512,000-byte journal. Selector eligibility expires after seven days. The hot poll
+appends small records and compacts at most once per five-minute interval or before the
+journal cap; evidence persistence runs after core CLOSE/gap/cursor-safe reconciliation.

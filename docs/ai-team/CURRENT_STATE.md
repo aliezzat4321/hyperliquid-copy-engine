@@ -56,10 +56,10 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 | default direct-watch resident capacity proven by timeout/page/deadline budget | 1 | `2026-09-20T10:35:02Z` | commit `29a6c5f` |
 | verified Invo trade-feed surfaces | 4 | `2026-09-17T23:46:12Z` | issue `#400` |
 | exploratory feed-exposed portfolios missing from current selector | 109 | `2026-09-17T23:46:12Z` | issue `#403` |
-| exploratory missing portfolios meeting frozen selector on visible evidence | 53 | `2026-09-17T23:46:12Z` | issue `#403` |
+| exploratory missing portfolios meeting selector economics but lacking captured verified hydration | 53 | `2026-09-17T23:46:12Z` | issue `#403` |
 | real trading enabled | False | `2026-09-17T23:10:50Z` | manual `VM runtime env 2026-09-17T23:10Z` |
 
-**Blocker:** Issue #403 repaired commit 2d4485e is locally validated only and requires independent exact-SHA review; production is unchanged and no runtime candidate-expansion proof exists. PR #404 and #397 remain separate gates.
+**Blocker:** Issue #403 repair remains under review; captured feed fixtures lack verified/isVerified, so the exploratory 109/53 are discovery-only pending proven broad/profile hydration. Production is unchanged and no runtime candidate assimilation proof exists. PR #404 and #397 remain separate gates.
 **Next:** Issue #403.
 
 ## Infrastructure

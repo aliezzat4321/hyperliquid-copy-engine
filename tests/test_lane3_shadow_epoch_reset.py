@@ -85,6 +85,8 @@ def test_reset_clears_derived_shadow_data_but_preserves_source_evidence(
         assert not (tmp_path / name).exists()
     assert "elite-direct-watch-admissions.json" in DELETE_FILES
     assert "elite-direct-watch.json.journal.jsonl" in DELETE_FILES
+    assert "feed-portfolio-evidence.json" in DELETE_FILES
+    assert "feed-portfolio-evidence.json.journal.jsonl" in DELETE_FILES
     assert not (tmp_path / "state.pre-old-epoch-1.json").exists()
     assert not (tmp_path / "audit.pre-old-epoch-1.jsonl").exists()
     assert historical_tracker.read_text(encoding="utf-8") == (

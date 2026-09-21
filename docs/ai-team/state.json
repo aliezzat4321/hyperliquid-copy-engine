@@ -205,7 +205,7 @@
         },
         {
           "key": "feed_exposed_would_be_elite",
-          "label": "exploratory missing portfolios meeting frozen selector on visible evidence",
+          "label": "exploratory missing portfolios meeting selector economics but lacking captured verified hydration",
           "value": 53,
           "unit": "count",
           "observed_at": "2026-09-17T23:46:12Z",
@@ -222,7 +222,7 @@
           "source_ref": "VM runtime env 2026-09-17T23:10Z"
         }
       ],
-      "blocker": "Issue #403 repaired commit 2d4485e is locally validated only and requires independent exact-SHA review; production is unchanged and no runtime candidate-expansion proof exists. PR #404 and #397 remain separate gates.",
+      "blocker": "Issue #403 repair remains under review; captured feed fixtures lack verified/isVerified, so the exploratory 109/53 are discovery-only pending proven broad/profile hydration. Production is unchanged and no runtime candidate assimilation proof exists. PR #404 and #397 remain separate gates.",
       "next": "Issue #403"
     }
   },
