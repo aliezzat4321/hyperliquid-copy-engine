@@ -2,7 +2,7 @@
 
 Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
-**Snapshot:** 2026-09-21T18:52:20Z
+**Snapshot:** 2026-09-21T19:49:53Z
 **Updated by:** CODEX_CHATGPT
 **Observed main head:** `fd63de5c60fc9d19ec643a2c491d5a815581765a`
 **Mission:** Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.
@@ -49,15 +49,15 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
 | Fact | Value | Observed | Source |
 |---|---:|---|---|
-| Lane 3 final source-capture implementation commit | 367d3d8 | `2026-09-21T18:52:20Z` | commit `367d3d8c31cad5d2a40db55d789bec8b37c840c8` |
-| builder-validated executor subtests passing | 210 | `2026-09-21T18:52:20Z` | commit `367d3d8c31cad5d2a40db55d789bec8b37c840c8` |
+| Lane 3 final source-capture implementation commit | bbc574f | `2026-09-21T19:49:53Z` | commit `bbc574feb7ff31bcc1026e1c3522f4d9887a17aa` |
+| builder-validated executor subtests passing | 211 | `2026-09-21T19:49:53Z` | commit `bbc574feb7ff31bcc1026e1c3522f4d9887a17aa` |
 | default direct-watch resident capacity proven by timeout/page/deadline budget | 16 | `2026-09-20T15:33:55Z` | commit `67efba6` |
 | verified Invo trade-feed surfaces | 4 | `2026-09-17T23:46:12Z` | issue `#400` |
 | exploratory feed-exposed portfolios missing from current selector | 109 | `2026-09-17T23:46:12Z` | issue `#403` |
 | exploratory missing portfolios meeting frozen selector on visible evidence | 53 | `2026-09-17T23:46:12Z` | issue `#403` |
 | real trading enabled | False | `2026-09-17T23:10:50Z` | manual `VM runtime env 2026-09-17T23:10Z` |
 
-**Blocker:** PR #404 repair commit 367d3d8 is locally validated but still requires independent exact-SHA Codex and Opus review plus post-deploy prospective source/event-recall proof; production is unchanged. #403 and #397 remain separate gates.
+**Blocker:** PR #404 repair commit bbc574f is locally validated (211 executor subtests, 9 reset tests, contract/diff/deploy syntax pass) but still requires independent exact-SHA Codex and Opus review plus post-deploy prospective source/event-recall proof; production is unchanged. #403 and #397 remain separate gates.
 **Next:** Issue #400.
 
 ## Infrastructure

@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "snapshot_at": "2026-09-21T18:52:20Z",
+  "snapshot_at": "2026-09-21T19:49:53Z",
   "updated_by": "CODEX_CHATGPT",
   "head_observed": "fd63de5c60fc9d19ec643a2c491d5a815581765a",
   "mission": "Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.",
@@ -143,20 +143,20 @@
         {
           "key": "source_capture_pr_head",
           "label": "Lane 3 final source-capture implementation commit",
-          "value": "367d3d8",
+          "value": "bbc574f",
           "unit": "text",
-          "observed_at": "2026-09-21T18:52:20Z",
+          "observed_at": "2026-09-21T19:49:53Z",
           "source_type": "COMMIT",
-          "source_ref": "367d3d8c31cad5d2a40db55d789bec8b37c840c8"
+          "source_ref": "bbc574feb7ff31bcc1026e1c3522f4d9887a17aa"
         },
         {
           "key": "executor_builder_validation",
           "label": "builder-validated executor subtests passing",
-          "value": 210,
+          "value": 211,
           "unit": "count",
-          "observed_at": "2026-09-21T18:52:20Z",
+          "observed_at": "2026-09-21T19:49:53Z",
           "source_type": "COMMIT",
-          "source_ref": "367d3d8c31cad5d2a40db55d789bec8b37c840c8"
+          "source_ref": "bbc574feb7ff31bcc1026e1c3522f4d9887a17aa"
         },
         {
           "key": "proven_default_resident_cap",
@@ -204,7 +204,7 @@
           "source_ref": "VM runtime env 2026-09-17T23:10Z"
         }
       ],
-      "blocker": "PR #404 repair commit 367d3d8 is locally validated but still requires independent exact-SHA Codex and Opus review plus post-deploy prospective source/event-recall proof; production is unchanged. #403 and #397 remain separate gates.",
+      "blocker": "PR #404 repair commit bbc574f is locally validated (211 executor subtests, 9 reset tests, contract/diff/deploy syntax pass) but still requires independent exact-SHA Codex and Opus review plus post-deploy prospective source/event-recall proof; production is unchanged. #403 and #397 remain separate gates.",
       "next": "Issue #400"
     }
   },
