@@ -22,6 +22,10 @@ test('service wires elite direct watch only in shadow and through normal execute
     'closed-only lifecycle evidence must use enrollment-aware classification');
   assert.match(source, /setAdmissionHealth\(false, 'scan_in_progress'\)/,
     'every scan must revoke copy authorization before its freshness proof');
+  assert.match(source, /const enrollmentPreconditionsHealthy = !candidate\.stale[\s\S]*provenResidentCap > 0/,
+    'validated source/configuration preconditions must permit enrollment independently of publication health');
+  assert.doesNotMatch(source, /const admissionsHealthy = false/,
+    'scan-start authorization suspension must not deadlock clean-state enrollment');
   assert.match(source, /ensureTokenFreshFor\(/, 'direct scans must preflight auth for the hard scan horizon');
   assert.match(source, /getPortfolioInvestments\([\s\S]*}, false\)/,
     'direct requests must not hide an unbudgeted 401 refresh retry');
@@ -30,6 +34,25 @@ test('service wires elite direct watch only in shadow and through normal execute
   assert.match(source, /missed_pre_demotion_open/, 'stale first observations must leave explicit recall evidence');
   assert.ok(dedicatedLoop > scan && shadowScheduler > dedicatedLoop,
     'shadow-only direct watch must run independently of feed pagination');
+});
+
+test('direct OPEN evidence is recorded only after production admission and freshness gates', () => {
+  const source = readFileSync(new URL('../../src/service.ts', import.meta.url), 'utf8');
+  const denied = source.indexOf('if (!candidateAdmission.allowed)');
+  const stale = source.indexOf("reason: missedPreDemotion ? 'missed_pre_demotion_open'", denied);
+  const observed = source.indexOf('state.markObservedOpen(signal.sourceBaseId)', denied);
+  const close = source.indexOf("if (signal.action === 'close')", observed);
+  assert.ok(denied >= 0 && stale > denied && observed > stale && close > observed,
+    'denied/stale OPEN must return before owned observed-open evidence is recorded');
+});
+
+test('malformed HTTP-200 direct-investment envelopes throw for both OPEN and CLOSED paths', () => {
+  const source = readFileSync(new URL('../../src/service.ts', import.meta.url), 'utf8');
+  assert.match(source, /directInvestmentRows/);
+  assert.match(source, /fetchCompleteOpenInvestments\([\s\S]*directInvestmentRows\(await getBudgetedDirectInvestments/,
+    'OPEN pagination must validate the envelope before establishing freshness');
+  assert.match(source, /establishClosedBaseline\([\s\S]*directInvestmentRows\(await getBudgetedDirectInvestments/,
+    'CLOSED baseline must validate the envelope before initialization');
 });
 
 test('service routes feed/direct races through action-aware dedupe and preserves admission/freshness gates', () => {

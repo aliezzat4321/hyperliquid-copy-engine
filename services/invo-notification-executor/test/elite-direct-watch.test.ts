@@ -10,6 +10,7 @@ import {
   closedBoundaryProof,
   closedSignalsAfterBoundary,
   classifyClosedHydrationRows,
+  directInvestmentRows,
   loadEliteDirectTargets,
   isMissedPreDemotionOpen,
   planClosedHydrations,
@@ -360,6 +361,13 @@ test('pre-enrollment close is ignored evidence and not a selected-elite recall m
   });
 });
 
+test('direct investment response schema rejects malformed HTTP-200 success envelopes', () => {
+  assert.deepEqual(directInvestmentRows({ investmentsTicker: [] }), []);
+  for (const malformed of [null, {}, [], { investmentsTicker: null }, { investmentsTicker: {} }]) {
+    assert.throws(() => directInvestmentRows(malformed), /investmentsTicker must be an array/);
+  }
+});
+
 test('startup cap and admission health publish zero persisted ACTIVE admissions until recovery', () => {
   const dir = mkdtempSync(join(tmpdir(), 'elite-startup-cap-'));
   const path = join(dir, 'state.json');
@@ -372,6 +380,7 @@ test('startup cap and admission health publish zero persisted ACTIVE admissions 
     first.commitClosedHydration(row.portfolioId, [], BASE + 1);
     first.commitOpenBaseline(row.portfolioId, [], BASE + 2);
   }
+  first.setAdmissionHealth(true);
   assert.equal(Object.keys(JSON.parse(readFileSync(admissionPath, 'utf8')).rows).length, 3);
 
   const restarted = new EliteDirectWatchState(path, admissionPath, 2);
@@ -382,6 +391,43 @@ test('startup cap and admission health publish zero persisted ACTIVE admissions 
     2, 600_000, BASE + 3, ELITE_SELECTOR_VERSION, true);
   assert.deepEqual(JSON.parse(readFileSync(admissionPath, 'utf8')).rows, {},
     'missing/stale/malformed candidate authority cannot make startup permissive');
+});
+
+test('clean startup enrolls up to proven cap while publication is suspended, then publishes only healthy ACTIVE rows', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elite-clean-enrollment-'));
+  const admissionPath = join(dir, 'admissions.json');
+  const watch = new EliteDirectWatchState(join(dir, 'state.json'), admissionPath, 16);
+  const candidates = Array.from({ length: 20 }, (_, index) => ({
+    ...target, portfolioId: `p${String(index).padStart(2, '0')}`, score: 100 - index,
+  }));
+
+  watch.setAdmissionHealth(false, 'scan_in_progress');
+  watch.syncTargets(candidates, new Set(), BASE, true, 120_000, new Set(), 16, 2, 600_000,
+    BASE, ELITE_SELECTOR_VERSION, true);
+  assert.equal(watch.status().residentCount, 16);
+  assert.equal(watch.status().enrollingTargetCount, 16);
+  assert.equal(watch.status().deferredCount, 4);
+  assert.equal(watch.status().admissionPublished, false);
+  assert.deepEqual(JSON.parse(readFileSync(admissionPath, 'utf8')).rows, {});
+
+  for (const row of watch.targets()) {
+    watch.commitClosedHydration(row.portfolioId, [], BASE + 1);
+    watch.commitOpenBaseline(row.portfolioId, [], BASE + 2);
+  }
+  assert.equal(watch.status().activeTargetCount, 16);
+  assert.equal(watch.status().admissionPublished, false,
+    'baseline completion during a scan remains non-authorizing');
+  watch.setAdmissionHealth(true);
+  assert.equal(Object.keys(JSON.parse(readFileSync(admissionPath, 'utf8')).rows).length, 16);
+  assert.equal(watch.status().scanHealthy, true);
+  assert.equal(watch.status().admissionPublished, true);
+
+  watch.setAdmissionHealth(false, 'rate_limit_cooldown');
+  assert.deepEqual(JSON.parse(readFileSync(admissionPath, 'utf8')).rows, {});
+  assert.equal(watch.status().residentCount, 16, 'unhealthy scans revoke authorization without deleting baselines');
+  assert.equal(watch.status().closedInitializedCount, 16);
+  assert.equal(watch.status().activeTargetCount, 16);
+  assert.equal(watch.status().admissionPublished, false);
 });
 
 test('attempt rotation cannot refresh admission health; suspension and successful recovery are atomic', () => {
@@ -1129,6 +1175,7 @@ test('two-phase enrollment absorbs a pre-admission round trip and admits only af
   assert.equal(admitted.lifecycle, 'ACTIVE');
   assert.equal(admitted.openHistoryInitialized, true);
   assert.equal(admitted.admittedAtMs, BASE + 4);
+  state.setAdmissionHealth(true);
   assert.equal(JSON.parse(readFileSync(join(dir, 'admissions.json'), 'utf8')).rows.p1.admittedAtMs, BASE + 4);
   assert.deepEqual(signalsFromDirectInvestments([], [preAdmissionClose], admitted,
     Math.max(admitted.closedProcessedThroughMs, admitted.admittedAtMs ?? 0), BASE + 5), []);

@@ -67,7 +67,7 @@ export interface DeferredAdmission {
   portfolioId: string;
   deferredAtMs: number;
   selectorVersion: string;
-  reason: 'resident_capacity_full' | 'capacity_unhealthy';
+  reason: 'resident_capacity_full' | 'source_preconditions_unhealthy';
   cap: number;
   score: number;
 }
@@ -479,6 +479,10 @@ export interface DirectWatchStatus {
   retirementOpenEmptyProofCount: number;
   retirementClosedProofCount: number;
   admissionsHealthy: boolean;
+  scanHealthy: boolean;
+  admissionPublished: boolean;
+  residentCount: number;
+  deferredCount: number;
   admissionSuspensionReason: string | null;
 }
 
@@ -594,6 +598,15 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (value == null || typeof value !== 'object' || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
+}
+
+/** Validate a successful direct-investments envelope before it can establish
+ * any baseline, freshness proof, or watermark. */
+export function directInvestmentRows(payload: unknown): any[] {
+  if (!isPlainObject(payload) || !Array.isArray(payload.investmentsTicker)) {
+    throw new Error('malformed direct-investments response: investmentsTicker must be an array');
+  }
+  return payload.investmentsTicker;
 }
 
 export interface EliteDirectTargetLoadResult {
@@ -859,13 +872,11 @@ export class EliteDirectWatchState {
     residentCap = Number.POSITIVE_INFINITY, minimumNegativeObservations = 2,
     negativeGraceMs = 600_000, negativeObservedAtMs = baselineAtMs,
     negativeSelectorVersion = ELITE_SELECTOR_VERSION,
-    admissionsHealthy = true,
+    enrollmentPreconditionsHealthy = true,
   ) {
     // Missing, malformed, or stale candidate state is not a demotion signal.
     if (!authoritative) return;
     this.enforcedResidentCap = residentCap;
-    this.admissionsEnabled = admissionsHealthy;
-    this.admissionSuspensionReason = admissionsHealthy ? null : 'capacity_or_monitoring_unhealthy';
     let changed = false;
     const rankedTargets = [...targets].sort((a, b) => b.score - a.score || a.portfolioId.localeCompare(b.portfolioId));
     const qualifiedIds = new Set(rankedTargets.map(target => target.portfolioId));
@@ -919,12 +930,12 @@ export class EliteDirectWatchState {
       const existing = this.state.targets[target.portfolioId];
       let canonical = existing;
       if (!existing) {
-        if (!this.admissionsEnabled || Object.keys(this.state.targets).length >= residentCap) {
+        if (!enrollmentPreconditionsHealthy || Object.keys(this.state.targets).length >= residentCap) {
           const prior = this.state.deferredAdmissions[target.portfolioId];
           const next: DeferredAdmission = {
             portfolioId: target.portfolioId, deferredAtMs: baselineAtMs,
             selectorVersion: negativeSelectorVersion,
-            reason: this.admissionsEnabled ? 'resident_capacity_full' : 'capacity_unhealthy', cap: residentCap,
+            reason: enrollmentPreconditionsHealthy ? 'resident_capacity_full' : 'source_preconditions_unhealthy', cap: residentCap,
             score: target.score,
           };
           if (!prior || prior.score !== next.score || prior.cap !== next.cap
@@ -1163,6 +1174,10 @@ export class EliteDirectWatchState {
     const processed = targets.map(target => target.processedThroughMs).filter(Number.isFinite);
     const closedProcessed = targets.filter(target => target.closedHistoryInitialized)
       .map(target => target.closedProcessedThroughMs).filter(Number.isFinite);
+    const admissionPublished = this.admissionsEnabled && targets.length <= this.enforcedResidentCap
+      && targets.some(target =>
+      target.lifecycle === 'ACTIVE' && target.openHistoryInitialized && target.closedHistoryInitialized
+        && Number.isFinite(target.admittedAtMs));
     return {
       version: ELITE_DIRECT_WATCH_VERSION,
       targetCount: targets.length,
@@ -1187,6 +1202,10 @@ export class EliteDirectWatchState {
       retirementOpenEmptyProofCount: targets.reduce((sum, target) => sum + (target.retirementOpenEmptyProofs ?? 0), 0),
       retirementClosedProofCount: targets.reduce((sum, target) => sum + (target.retirementClosedProofs ?? 0), 0),
       admissionsHealthy: this.admissionsEnabled,
+      scanHealthy: this.admissionsEnabled,
+      admissionPublished,
+      residentCount: targets.length,
+      deferredCount: Object.keys(this.state.deferredAdmissions).length,
       admissionSuspensionReason: this.admissionSuspensionReason,
     };
   }

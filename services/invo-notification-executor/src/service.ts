@@ -21,6 +21,7 @@ import {
 } from './feed-surfaces.js';
 import {
   directSourceTimeMs,
+  directInvestmentRows,
   fetchCompleteOpenInvestments,
   establishClosedBaseline,
   closedBoundaryProof,
@@ -598,7 +599,6 @@ async function executeUnlocked(signal: InvoSignal, wakeSource: string, receivedA
       log({ type: 'skip', reason: 'lifecycle_already_closed', signal, wakeSource });
       return;
     }
-    if (signal.action !== 'close') state.markObservedOpen(signal.sourceBaseId);
     // Discovery remains broad in the separate portfolio-research collector, but NEW
     // Lane 3 shadow exposure is portfolio-level elite-only. Closes bypass this gate so
     // previously owned broad-research exposure can always unwind after a demotion.
@@ -660,6 +660,11 @@ async function executeUnlocked(signal: InvoSignal, wakeSource: string, receivedA
       });
       return;
     }
+
+    // An observed OPEN is ownership-gap evidence only after it has passed the
+    // admission/scope/freshness gates for this shadow epoch. A denied
+    // pre-enrollment OPEN must not turn its later CLOSE into an elite recall miss.
+    if (signal.action !== 'close') state.markObservedOpen(signal.sourceBaseId);
 
     if (signal.action === 'close') {
       const managed = state.getManagedBySource(signal.sourceBaseId);
@@ -1397,10 +1402,6 @@ async function wake(source: string, hints?: NotificationHints, receivedAtMs = Da
   }
 }
 
-function directInvestmentRows(payload: any): any[] {
-  return Array.isArray(payload?.investmentsTicker) ? payload.investmentsTicker : [];
-}
-
 function ownedDirectPortfolioIds(): Set<string> {
   return new Set(
     Object.values(state.snapshot().managed)
@@ -1701,12 +1702,13 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
     } else {
       directWatchMetrics.candidateStateLastError = null;
     }
-    const admissionsHealthy = false;
+    const enrollmentPreconditionsHealthy = !candidate.stale
+      && directWatchConfiguredCapacity.provenResidentCap > 0;
     const deferredBefore = new Set(directWatch.deferredAdmissions().map(row => row.portfolioId));
     directWatch.syncTargets(candidate.targets, ownedDirectPortfolioIds(), nowMs, !candidate.stale,
       120_000, new Set(candidate.demotedPortfolioIds), directWatchConfiguredCapacity.provenResidentCap,
       cfg.directWatchNegativeMinObservations, cfg.directWatchNegativeGraceMs,
-      candidate.observedAtMs ?? nowMs, undefined, admissionsHealthy);
+      candidate.observedAtMs ?? nowMs, undefined, enrollmentPreconditionsHealthy);
     for (const deferred of directWatch.deferredAdmissions()) {
       if (deferredBefore.has(deferred.portfolioId)) continue;
       directWatchMetrics.deferredAdmissions += 1;
@@ -1835,7 +1837,8 @@ function startServer() {
         ? null : Math.max(0, healthNowMs - directStatus.oldestOpenPollAtMs);
       const oldestClosedPollAgeMs = directStatus.oldestClosedPollAtMs == null
         ? null : Math.max(0, healthNowMs - directStatus.oldestClosedPollAtMs);
-      const directWatchCapacityHealthy = directStatus.targetCount <= directWatchConfiguredCapacity.provenResidentCap
+      const directWatchCapacityHealthy = directWatchConfiguredCapacity.provenResidentCap > 0
+        && directStatus.targetCount <= directWatchConfiguredCapacity.provenResidentCap
         && (oldestOpenPollAgeMs == null || oldestOpenPollAgeMs <= cfg.directWatchFallbackPollMs)
         && (oldestClosedPollAgeMs == null || oldestClosedPollAgeMs <= cfg.directWatchClosedPollMs)
         && healthNowMs >= directWatchBackoffUntilMs && directStatus.admissionsHealthy;
