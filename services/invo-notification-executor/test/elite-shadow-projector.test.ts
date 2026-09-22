@@ -69,3 +69,17 @@ test('same-timestamp conflicting selector evidence resolves non-elite conservati
   assert.equal(report.openElitePositions, 0);
   assert.equal(report.selectorSnapshotUnresolvedOpenEvents, 0);
 });
+
+
+test('runtime unresolved exposure count conservatively invalidates profitability even if audit missed the row', () => {
+  const report = projectEliteShadow(
+    [snap('p', 100)],
+    [opened('x', 'p', 200)],
+    { shadowMarks: [{ sourceBaseId: 'x', status: 'MARKED', netPnlUsd: 3 }],
+      unresolvedSourceCloseExposureCount: 1 },
+  );
+  assert.equal(report.unresolvedSourceCloseExposureCount, 1);
+  assert.equal(report.openNetPnlUsd, null);
+  assert.equal(report.totalObservedNetPnlUsd, null);
+  assert.equal(report.profitabilityComplete, false);
+});

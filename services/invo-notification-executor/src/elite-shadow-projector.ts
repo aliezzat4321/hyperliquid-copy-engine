@@ -75,7 +75,17 @@ export function projectEliteShadow(snapshots: PortfolioSnapshot[], audit: Row[],
   }
   const ids = new Set(active.keys()), marks = new Map((Array.isArray(health?.shadowMarks) ? health.shadowMarks : [])
     .filter((m: any) => ids.has(String(m?.sourceBaseId ?? ''))).map((m: any) => [String(m.sourceBaseId), m]));
-  const unresolvedSourceCloseExposureCount = [...active.values()].filter(m => m.unresolvedAfterSourceClose).length;
+  const projectedUnresolvedSourceCloseExposureCount =
+    [...active.values()].filter(m => m.unresolvedAfterSourceClose).length;
+  const healthUnresolvedSourceCloseExposureCount = Number.isFinite(Number(health?.unresolvedSourceCloseExposureCount))
+    ? Math.max(0, Number(health.unresolvedSourceCloseExposureCount)) : 0;
+  // Runtime state is allowed to be more conservative than audit projection. If it
+  // knows about unresolved paper exposure that the audit cannot reconstruct, never
+  // let the headline profitability artifact silently treat that exposure as complete.
+  const unresolvedSourceCloseExposureCount = Math.max(
+    projectedUnresolvedSourceCloseExposureCount,
+    healthUnresolvedSourceCloseExposureCount,
+  );
   let markedElitePositions = 0, openMarkIncompletePositions = 0, openNet = 0;
   for (const membership of active.values()) { const mark: any = marks.get(membership.sourceBaseId);
     if (!membership.unresolvedAfterSourceClose && mark?.status === 'MARKED' && Number.isFinite(Number(mark.netPnlUsd))) {
@@ -95,7 +105,7 @@ export function projectEliteShadow(snapshots: PortfolioSnapshot[], audit: Row[],
   const otherIncompleteCloses = incomplete.filter(r => r.type !== 'shadow_partially_closed'
     && r.type !== 'shadow_close_dust_reconciled' && !['INCOMPLETE_FUNDING', 'INCOMPLETE_LEGACY_ENTRY', 'UNRESOLVED_EXPOSURE']
       .includes(String(r.economicsCompleteness))).length;
-  const openNetPnlUsd = openMarkIncompletePositions === 0 ? openNet : null;
+  const openNetPnlUsd = openMarkIncompletePositions === 0 && unresolvedSourceCloseExposureCount === 0 ? openNet : null;
   const profitabilityComplete = selectorSnapshotUnresolvedOpenEvents === 0 && openMarkIncompletePositions === 0
     && unresolvedSourceCloseExposureCount === 0 && incomplete.length === 0;
   const openByPortfolio: Record<string, number> = {}; for (const m of active.values())
