@@ -221,7 +221,14 @@ export function eliteAdmissionFromState(
   }
 
   const historicalResult = latestHistoricalSnapshot(snapshotsPath, portfolioId, decisionAtMs);
-  if (historicalResult.error) return { ...common, reason: historicalResult.error };
+  if (historicalResult.error) {
+    return {
+      ...common,
+      disposition: 'TRANSIENT',
+      retryable: true,
+      reason: historicalResult.error,
+    };
+  }
   const historical = historicalResult.row;
   const current = state?.portfolios?.[portfolioId];
   const candidate = historical ?? (
@@ -287,16 +294,27 @@ export function eliteAdmissionFromState(
     return { ...enriched, disposition: 'TRANSIENT', retryable: true,
       reason: 'direct_watch_admission_index_missing' };
   }
-  const admission = admissionIndex.rows?.[portfolioId] ?? null;
-  const admittedAtMs = finite(admission?.admittedAtMs);
-  const indexGeneratedAtMs = finite(admissionIndex.generatedAtMs);
-  if (admission?.portfolioId !== portfolioId || admission?.selectorVersion !== ELITE_SELECTOR_VERSION
-    || admittedAtMs == null || admittedAtMs <= 0 || indexGeneratedAtMs == null) {
+  const hasAdmissionRow = Object.prototype.hasOwnProperty.call(admissionIndex.rows, portfolioId);
+  if (!hasAdmissionRow) {
     return { ...enriched, reason: 'direct_watch_not_admitted' };
   }
-  if (admittedAtMs > indexGeneratedAtMs) {
-    return { ...enriched, disposition: 'TRANSIENT', retryable: true,
-      reason: 'direct_watch_admission_index_invalid' };
+  const admission = admissionIndex.rows[portfolioId];
+  const admittedAtMs = finite(admission?.admittedAtMs);
+  const indexGeneratedAtMs = finite(admissionIndex.generatedAtMs);
+  const admissionRowValid = isPlainObject(admission)
+    && admission.portfolioId === portfolioId
+    && admission.selectorVersion === ELITE_SELECTOR_VERSION
+    && admittedAtMs != null
+    && admittedAtMs > 0
+    && indexGeneratedAtMs != null
+    && admittedAtMs <= indexGeneratedAtMs;
+  if (!admissionRowValid) {
+    return {
+      ...enriched,
+      disposition: 'TRANSIENT',
+      retryable: true,
+      reason: 'direct_watch_admission_index_invalid',
+    };
   }
   if (admittedAtMs > decisionAtMs) {
     return { ...enriched, directWatchAdmittedAtMs: admittedAtMs, reason: 'direct_watch_not_admitted_at_signal_time' };
