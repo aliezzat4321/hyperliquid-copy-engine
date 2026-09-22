@@ -2,7 +2,7 @@
 
 Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
-**Snapshot:** 2026-09-22T13:21:29Z
+**Snapshot:** 2026-09-22T13:32:53Z
 **Updated by:** CODEX_CHATGPT
 **Observed main head:** `fd63de5c60fc9d19ec643a2c491d5a815581765a`
 **Mission:** Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.
@@ -49,12 +49,12 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
 | Fact | Value | Observed | Source |
 |---|---:|---|---|
-| integrated RC live authorization / real trading | authorization NONE / REAL_TRADING_ENABLED=NO | `2026-09-22T13:21:29Z` | commit `b107f86b62476ea4b340e198060dbd9130427ee6` |
-| reset/deploy/health pytest tests passing | 17 | `2026-09-22T13:21:29Z` | commit `b107f86b62476ea4b340e198060dbd9130427ee6` |
-| focused strict-schema projector/admission/index subtests passing | 45 | `2026-09-22T13:21:29Z` | commit `b107f86b62476ea4b340e198060dbd9130427ee6` |
-| AI-team contract pytest tests passing | 61 | `2026-09-22T13:21:29Z` | commit `b107f86b62476ea4b340e198060dbd9130427ee6` |
-| integrated RC full executor subtests passing | 286 | `2026-09-22T13:21:29Z` | commit `b107f86b62476ea4b340e198060dbd9130427ee6` |
-| integrated Lane 3 RC implementation commit | b107f86b62476ea4b340e198060dbd9130427ee6 | `2026-09-22T13:21:29Z` | commit `b107f86b62476ea4b340e198060dbd9130427ee6` |
+| integrated RC live authorization / real trading | authorization NONE / REAL_TRADING_ENABLED=NO | `2026-09-22T13:32:53Z` | commit `d82f8787257197a63a1b84fbc9859e56eec451b6` |
+| reset/deploy/health pytest tests passing | 17 | `2026-09-22T13:32:53Z` | commit `d82f8787257197a63a1b84fbc9859e56eec451b6` |
+| focused strict lifecycle/projector subtests passing | 17 | `2026-09-22T13:32:53Z` | commit `d82f8787257197a63a1b84fbc9859e56eec451b6` |
+| AI-team contract pytest tests passing | 61 | `2026-09-22T13:32:53Z` | commit `d82f8787257197a63a1b84fbc9859e56eec451b6` |
+| integrated RC full executor subtests passing | 286 | `2026-09-22T13:32:53Z` | commit `d82f8787257197a63a1b84fbc9859e56eec451b6` |
+| integrated Lane 3 RC implementation commit | d82f8787257197a63a1b84fbc9859e56eec451b6 | `2026-09-22T13:32:53Z` | commit `d82f8787257197a63a1b84fbc9859e56eec451b6` |
 | Lane 3 final source-capture implementation commit | bbc574f | `2026-09-21T19:49:53Z` | commit `bbc574feb7ff31bcc1026e1c3522f4d9887a17aa` |
 | builder-validated executor subtests passing | 211 | `2026-09-21T19:49:53Z` | commit `bbc574feb7ff31bcc1026e1c3522f4d9887a17aa` |
 | default direct-watch resident capacity proven by timeout/page/deadline budget | 16 | `2026-09-20T15:33:55Z` | commit `67efba6` |
@@ -63,7 +63,7 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 | exploratory missing portfolios meeting frozen selector on visible evidence | 53 | `2026-09-17T23:46:12Z` | issue `#403` |
 | real trading enabled | False | `2026-09-17T23:10:50Z` | manual `VM runtime env 2026-09-17T23:10Z` |
 
-**Blocker:** Integrated Lane 3 RC implementation b107f86b62476ea4b340e198060dbd9130427ee6 closes the remaining exact-SHA Codex structural fail-open blockers. Selector/audit JSONL now rejects parseable malformed rows with explicit path/line; candidate-state admission uses the canonical LedgerDiskState/PortfolioSnapshot schema; admission rows require the complete writer schema; runtime profitability reuses canonical ManagedPosition and ShadowMark validators with non-coercive lifecycle identities/times/PnL; and elite report+ledger publication is generation-based with an atomic manifest so readers never accept a mixed pair. Independent validation on this exact implementation passes 286/286 full executor subtests, 45/45 focused strict-schema projector/admission/index subtests, 17/17 reset/deploy/health pytest tests, AI-team validator, 61/61 contract tests, git diff check, and both deploy shell syntax checks. This is not profitability evidence. Production remains fd63de5 and real trading is OFF. Remaining gate: GitHub CI and BOTH independent exact-SHA reviews must PASS the final RC head before shadow-only deployment.
+**Blocker:** Integrated Lane 3 RC implementation d82f8787257197a63a1b84fbc9859e56eec451b6 closes the final exact-SHA Codex parser gap: any shadow_open*, shadow_close*, shadow_partial*, or shadow_reup* event must match an exact recognized lifecycle type, so malformed PARTIAL/REUP variants cannot silently disappear from close denominators. All prior strict selector/audit JSONL validation, canonical candidate/admission state validation, canonical ManagedPosition/ShadowMark runtime validation, non-coercive lifecycle time/identity/PnL checks, atomic report+ledger manifest publication, source capture, funding, replay, direct-watch, cross-surface dedupe, readiness, reset, and live-off invariants remain intact. Exact implementation validation passes 286/286 full executor subtests, 17/17 focused lifecycle/projector subtests, 17/17 reset/deploy/health pytest tests, 61/61 contract tests, AI-team validator, ai_team_contract, git diff check, and both deploy shell syntax checks. This is not profitability evidence. Production remains fd63de5 and real trading is OFF. Remaining gate: GitHub CI and BOTH independent exact-SHA reviews must PASS before shadow-only deployment.
 **Next:** Issue #400.
 
 ## Infrastructure
