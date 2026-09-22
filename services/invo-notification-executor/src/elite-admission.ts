@@ -141,6 +141,7 @@ export function eliteAdmissionFromState(
   maxStateAgeMs: number,
   snapshotsPath?: string,
   admissionIndexPath?: string,
+  maxAdmissionIndexAgeMs = Math.min(maxStateAgeMs, 60_000),
 ): EliteAdmissionDecision {
   const denied = base(portfolioId);
   if (!portfolioId) return { ...denied, reason: 'portfolio_id_missing' };
@@ -154,11 +155,41 @@ export function eliteAdmissionFromState(
     try { admissionIndex = JSON.parse(readFileSync(admissionIndexPath, 'utf8')); }
     catch { return { ...denied, disposition: 'TRANSIENT', retryable: true,
       reason: 'direct_watch_admission_index_unparseable' }; }
-    if (admissionIndex?.version === 1 && admissionIndex?.healthy === false) {
-      const suspensionReason = typeof admissionIndex?.suspensionReason === 'string'
+    const indexGeneratedAtMs = finite(admissionIndex?.generatedAtMs);
+    const indexRows = admissionIndex?.rows;
+    const indexEnvelopeValid = admissionIndex != null
+      && typeof admissionIndex === 'object'
+      && !Array.isArray(admissionIndex)
+      && admissionIndex.version === 1
+      && typeof admissionIndex.healthy === 'boolean'
+      && indexGeneratedAtMs != null
+      && indexGeneratedAtMs > 0
+      && indexRows != null
+      && typeof indexRows === 'object'
+      && !Array.isArray(indexRows)
+      && (admissionIndex.suspensionReason === null
+        || typeof admissionIndex.suspensionReason === 'string');
+    if (!indexEnvelopeValid) {
+      return { ...denied, disposition: 'TRANSIENT', retryable: true,
+        reason: 'direct_watch_admission_index_invalid' };
+    }
+    if (indexGeneratedAtMs > decisionAtMs) {
+      return { ...denied, disposition: 'TRANSIENT', retryable: true,
+        reason: 'direct_watch_admission_index_from_future' };
+    }
+    if (decisionAtMs - indexGeneratedAtMs > maxAdmissionIndexAgeMs) {
+      return { ...denied, disposition: 'TRANSIENT', retryable: true,
+        reason: 'direct_watch_admission_index_stale' };
+    }
+    if (admissionIndex.healthy !== true) {
+      const suspensionReason = typeof admissionIndex.suspensionReason === 'string'
         ? admissionIndex.suspensionReason : 'monitoring_unhealthy';
       return { ...denied, disposition: 'TRANSIENT', retryable: true,
         reason: `direct_watch_admission_suspended:${suspensionReason}` };
+    }
+    if (admissionIndex.suspensionReason !== null) {
+      return { ...denied, disposition: 'TRANSIENT', retryable: true,
+        reason: 'direct_watch_admission_index_invalid' };
     }
   }
   if (!existsSync(statePath)) return { ...denied, reason: 'candidate_state_missing' };
@@ -256,10 +287,12 @@ export function eliteAdmissionFromState(
     return { ...enriched, disposition: 'TRANSIENT', retryable: true,
       reason: 'direct_watch_admission_index_missing' };
   }
-  const admission = admissionIndex?.version === 1 ? admissionIndex?.rows?.[portfolioId] : null;
+  const admission = admissionIndex.rows?.[portfolioId] ?? null;
   const admittedAtMs = finite(admission?.admittedAtMs);
+  const indexGeneratedAtMs = finite(admissionIndex.generatedAtMs);
   if (admission?.portfolioId !== portfolioId || admission?.selectorVersion !== ELITE_SELECTOR_VERSION
-    || admittedAtMs == null || admittedAtMs <= 0) {
+    || admittedAtMs == null || admittedAtMs <= 0 || indexGeneratedAtMs == null
+    || admittedAtMs > indexGeneratedAtMs) {
     return { ...enriched, reason: 'direct_watch_not_admitted' };
   }
   if (admittedAtMs > decisionAtMs) {

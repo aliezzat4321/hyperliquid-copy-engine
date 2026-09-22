@@ -32,3 +32,9 @@ test('source close rejection uses requested-residual dust classifier instead of 
   assert.match(serviceSource, /economicsCompleteness: 'UNRESOLVED_EXPOSURE'/);
   assert.match(serviceSource, /sourceCloseNextRetryAtMs:/);
 });
+
+
+test('cross-surface canonical completion persists ingress key and feed completion uses canonical dedupe', () => {
+  assert.match(serviceSource, /if \(alreadySeen\) \{[\s\S]*state\.markSeen\(signal\.key\);[\s\S]*return;[\s\S]*\}/);
+  assert.match(serviceSource, /const allHandled = ordered\.every\(signal => signalWasSeen\(signal, key => state\.hasSeen\(key\)\)\);/);
+});

@@ -15,7 +15,8 @@ function stateFile(state: unknown) {
 
 function admissionIndex(statePath: string, admittedAtMs = candidateObservedAtMs - 1_000) {
   const path = join(statePath, '..', 'elite-direct-watch-admissions.json');
-  writeFileSync(path, JSON.stringify({ version: 1, generatedAtMs: decisionAtMs, rows: {
+  writeFileSync(path, JSON.stringify({ version: 1, generatedAtMs: decisionAtMs,
+    healthy: true, suspensionReason: null, rows: {
     [portfolioId]: { portfolioId, admittedAtMs, score: 63.4, selectorVersion: ELITE_SELECTOR_VERSION },
   } }));
   return path;
@@ -131,16 +132,79 @@ test('missing candidate state fails closed', () => {
   assert.equal(decision.reason, 'candidate_state_missing');
 });
 
+
+test('admission index requires a structurally valid healthy fresh envelope', () => {
+  const path = stateFile(validState());
+  const index = admissionIndex(path);
+  const maxIndexAgeMs = 10_000;
+
+  writeFileSync(index, JSON.stringify({ version: 1, generatedAtMs: decisionAtMs, rows: {
+    [portfolioId]: { portfolioId, admittedAtMs: candidateObservedAtMs - 1_000,
+      score: 63.4, selectorVersion: ELITE_SELECTOR_VERSION },
+  } }));
+  const missingHealthy = eliteAdmissionFromState(
+    path, portfolioId, decisionAtMs, 20 * 60_000, undefined, index, maxIndexAgeMs,
+  );
+  assert.equal(missingHealthy.allowed, false);
+  assert.equal(missingHealthy.disposition, 'TRANSIENT');
+  assert.equal(missingHealthy.reason, 'direct_watch_admission_index_invalid');
+  assert.equal(shouldPersistAdmissionDenial(missingHealthy), false);
+
+  writeFileSync(index, JSON.stringify({ version: 1, generatedAtMs: decisionAtMs - maxIndexAgeMs - 1,
+    healthy: true, suspensionReason: null, rows: {
+      [portfolioId]: { portfolioId, admittedAtMs: candidateObservedAtMs - 1_000,
+        score: 63.4, selectorVersion: ELITE_SELECTOR_VERSION },
+    } }));
+  const stale = eliteAdmissionFromState(
+    path, portfolioId, decisionAtMs, 20 * 60_000, undefined, index, maxIndexAgeMs,
+  );
+  assert.equal(stale.allowed, false);
+  assert.equal(stale.disposition, 'TRANSIENT');
+  assert.equal(stale.reason, 'direct_watch_admission_index_stale');
+
+  writeFileSync(index, JSON.stringify({ version: 1, generatedAtMs: decisionAtMs + 1,
+    healthy: true, suspensionReason: null, rows: {
+      [portfolioId]: { portfolioId, admittedAtMs: candidateObservedAtMs - 1_000,
+        score: 63.4, selectorVersion: ELITE_SELECTOR_VERSION },
+    } }));
+  const future = eliteAdmissionFromState(
+    path, portfolioId, decisionAtMs, 20 * 60_000, undefined, index, maxIndexAgeMs,
+  );
+  assert.equal(future.allowed, false);
+  assert.equal(future.disposition, 'TRANSIENT');
+  assert.equal(future.reason, 'direct_watch_admission_index_from_future');
+
+  writeFileSync(index, JSON.stringify({ version: 1, generatedAtMs: decisionAtMs,
+    healthy: true, suspensionReason: 'contradictory', rows: {
+      [portfolioId]: { portfolioId, admittedAtMs: candidateObservedAtMs - 1_000,
+        score: 63.4, selectorVersion: ELITE_SELECTOR_VERSION },
+    } }));
+  const contradictory = eliteAdmissionFromState(
+    path, portfolioId, decisionAtMs, 20 * 60_000, undefined, index, maxIndexAgeMs,
+  );
+  assert.equal(contradictory.allowed, false);
+  assert.equal(contradictory.reason, 'direct_watch_admission_index_invalid');
+});
+
 test('qualified candidate is waitlisted until direct-watch admission and cannot replay pre-admission feed events', () => {
   const path = stateFile(validState());
   const waitlisted = eliteAdmissionFromState(path, portfolioId, decisionAtMs, 20 * 60_000);
   assert.equal(waitlisted.allowed, false);
   assert.equal(waitlisted.reason, 'direct_watch_admission_index_missing');
 
-  const index = admissionIndex(path, decisionAtMs + 10);
+  const index = join(path, '..', 'elite-direct-watch-admissions.json');
+  writeFileSync(index, JSON.stringify({ version: 1, generatedAtMs: decisionAtMs,
+    healthy: true, suspensionReason: null, rows: {} }));
   const preAdmission = eliteAdmissionFromState(path, portfolioId, decisionAtMs, 20 * 60_000, undefined, index);
   assert.equal(preAdmission.allowed, false);
-  assert.equal(preAdmission.reason, 'direct_watch_not_admitted_at_signal_time');
+  assert.equal(preAdmission.reason, 'direct_watch_not_admitted');
+  assert.equal(preAdmission.disposition, 'TERMINAL');
+
+  writeFileSync(index, JSON.stringify({ version: 1, generatedAtMs: decisionAtMs + 10,
+    healthy: true, suspensionReason: null, rows: {
+      [portfolioId]: { portfolioId, admittedAtMs: decisionAtMs + 10,
+        score: 63.4, selectorVersion: ELITE_SELECTOR_VERSION },
+    } }));
   const prospective = eliteAdmissionFromState(path, portfolioId, decisionAtMs + 11, 20 * 60_000, undefined, index);
   assert.equal(prospective.allowed, true);
   assert.equal(prospective.directWatchAdmittedAtMs, decisionAtMs + 10);
@@ -168,7 +232,7 @@ test('feed NEW during scan suspension remains unseen and cursor-safe, then execu
         score: 63.4, selectorVersion: ELITE_SELECTOR_VERSION },
     } }));
   const recovered = eliteAdmissionFromState(
-    path, portfolioId, decisionAtMs, 20 * 60_000, undefined, index,
+    path, portfolioId, decisionAtMs + 2, 20 * 60_000, undefined, index,
   );
   if (recovered.allowed && !seen) { executions += 1; seen = true; }
   if (seen) cursorAdvanced = true;

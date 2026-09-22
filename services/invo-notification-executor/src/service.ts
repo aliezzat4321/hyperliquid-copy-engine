@@ -640,12 +640,16 @@ async function executeUnlocked(signal: InvoSignal, wakeSource: string, receivedA
   const lifecycleKey = closeLifecycleKey(signal);
   const inFlightKey = eventKey ?? signal.key;
   const alreadySeen = signalWasSeen(signal, key => state.hasSeen(key));
-  if (alreadySeen && signal.action === 'close') state.markHandledClose(signal.sourceBaseId);
-  if (
-    alreadySeen
-    || inFlight.has(signal.key)
-    || inFlightSourceEvents.has(inFlightKey)
-  ) return;
+  if (alreadySeen) {
+    // The same source event can arrive through direct watch and one or more feed
+    // surfaces with different surface-specific keys. Canonical completion proves the
+    // event is terminally handled, so persist this ingress key too; otherwise the feed
+    // surface cursor can remain pinned forever replaying an event already executed.
+    state.markSeen(signal.key);
+    if (signal.action === 'close') state.markHandledClose(signal.sourceBaseId);
+    return;
+  }
+  if (inFlight.has(signal.key) || inFlightSourceEvents.has(inFlightKey)) return;
   inFlight.add(signal.key);
   inFlightSourceEvents.add(inFlightKey);
   const decisionAtMs = Date.now();
@@ -668,6 +672,7 @@ async function executeUnlocked(signal: InvoSignal, wakeSource: string, receivedA
         cfg.candidateStateMaxAgeMs,
         cfg.candidateSnapshotsPath,
         cfg.directWatchAdmissionIndexPath,
+        Math.max(10_000, Math.min(60_000, cfg.directWatchScanMs * 2)),
       );
       if (!candidateAdmission.allowed) {
         if (shouldPersistAdmissionDenial(candidateAdmission)) state.markSeen(signal.key);
@@ -1457,7 +1462,7 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
   } else {
     await runSignalBatchBySource(ordered, signal => execute(signal, source, receivedAtMs, feedFilter));
   }
-  const allHandled = ordered.every(signal => state.hasSeen(signal.key));
+  const allHandled = ordered.every(signal => signalWasSeen(signal, key => state.hasSeen(key)));
   if (allHandled && backfill.newestPostId) state.setFeedCursor(feedFilter, { postId: backfill.newestPostId, observedAtMs: Date.now(), source });
   lastSuccessPollMs = Date.now();
   persistFeedEvidence();
