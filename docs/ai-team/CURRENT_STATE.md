@@ -2,7 +2,7 @@
 
 Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
-**Snapshot:** 2026-09-22T10:25:58Z
+**Snapshot:** 2026-09-22T10:37:06Z
 **Updated by:** CODEX_CHATGPT
 **Observed main head:** `fd63de5c60fc9d19ec643a2c491d5a815581765a`
 **Mission:** Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.
@@ -49,12 +49,12 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
 | Fact | Value | Observed | Source |
 |---|---:|---|---|
-| integrated RC live authorization / real trading | authorization NONE / REAL_TRADING_ENABLED=NO | `2026-09-22T10:25:58Z` | commit `9a3648cdca1e0fdea72cc83d79af24bf868b8d38` |
-| integrated RC reset, deploy-contract, and shadow-health pytest tests passing | 17 | `2026-09-22T10:25:58Z` | commit `9a3648cdca1e0fdea72cc83d79af24bf868b8d38` |
-| integrated RC focused non-funding admission/discovery/durability/projector/readiness subtests passing | 79 | `2026-09-22T10:25:58Z` | commit `9a3648cdca1e0fdea72cc83d79af24bf868b8d38` |
-| integrated RC focused funding subtests passing | 28 | `2026-09-22T10:25:58Z` | commit `9a3648cdca1e0fdea72cc83d79af24bf868b8d38` |
-| integrated RC full executor subtests passing | 271 | `2026-09-22T10:25:58Z` | commit `9a3648cdca1e0fdea72cc83d79af24bf868b8d38` |
-| integrated Lane 3 release-candidate implementation commit | 9a3648cdca1e0fdea72cc83d79af24bf868b8d38 | `2026-09-22T10:25:58Z` | commit `9a3648cdca1e0fdea72cc83d79af24bf868b8d38` |
+| integrated RC live authorization / real trading | authorization NONE / REAL_TRADING_ENABLED=NO | `2026-09-22T10:37:06Z` | commit `054dc958189239ae6e5edd0f93f05a44fef3839a` |
+| integrated RC reset, deploy-contract, and shadow-health pytest tests passing | 17 | `2026-09-22T10:37:06Z` | commit `054dc958189239ae6e5edd0f93f05a44fef3839a` |
+| integrated RC focused non-funding admission/discovery/durability/projector/readiness subtests passing | 81 | `2026-09-22T10:37:06Z` | commit `054dc958189239ae6e5edd0f93f05a44fef3839a` |
+| integrated RC focused funding subtests passing | 28 | `2026-09-22T10:37:06Z` | commit `054dc958189239ae6e5edd0f93f05a44fef3839a` |
+| integrated RC full executor subtests passing | 273 | `2026-09-22T10:37:06Z` | commit `054dc958189239ae6e5edd0f93f05a44fef3839a` |
+| integrated Lane 3 release-candidate implementation commit | 054dc958189239ae6e5edd0f93f05a44fef3839a | `2026-09-22T10:37:06Z` | commit `054dc958189239ae6e5edd0f93f05a44fef3839a` |
 | Lane 3 final source-capture implementation commit | bbc574f | `2026-09-21T19:49:53Z` | commit `bbc574feb7ff31bcc1026e1c3522f4d9887a17aa` |
 | builder-validated executor subtests passing | 211 | `2026-09-21T19:49:53Z` | commit `bbc574feb7ff31bcc1026e1c3522f4d9887a17aa` |
 | default direct-watch resident capacity proven by timeout/page/deadline budget | 16 | `2026-09-20T15:33:55Z` | commit `67efba6` |
@@ -63,7 +63,7 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 | exploratory missing portfolios meeting frozen selector on visible evidence | 53 | `2026-09-17T23:46:12Z` | issue `#403` |
 | real trading enabled | False | `2026-09-17T23:10:50Z` | manual `VM runtime env 2026-09-17T23:10Z` |
 
-**Blocker:** Integrated Lane 3 RC implementation 9a3648cdca1e0fdea72cc83d79af24bf868b8d38 unifies the final admission-corruption and profitability-evidence repairs. Admission/snapshot corruption is transient and non-consumable; profitability fails closed on missing/malformed runtime health, runtime/audit exposure mismatch, unresolved runtime exposure, and orphan elite closes. All prior integrated source-capture, funding, feed discovery, replay, lifecycle, readiness, and reset fixes remain included. Independent isolated validation passes 271/271 full executor subtests, 28/28 focused funding, 79/79 focused integrated regressions, 17/17 reset/deploy/health pytest tests, AI-team validator, 61/61 contract tests, git diff check, and deploy shell syntax. Production remains fd63de5 and real trading is OFF. Remaining gate: GitHub CI and BOTH independent exact-SHA reviews must PASS the final RC head before shadow-only deployment and prospective source/event-recall proof.
+**Blocker:** Integrated Lane 3 RC implementation 054dc958189239ae6e5edd0f93f05a44fef3839a is frozen after closing the latest exact-SHA Codex blockers. Runtime health must be a strictly typed operationally-ready /health envelope; null/string counts and unhealthy/live/not-ready health cannot certify profitability. Runtime and audit exposure still reconcile exactly and orphan closes stay explicit. Primary candidate state missing, unparseable, malformed, stale, future, or selector-version-incompatible is transient/retryable and cannot consume NEW/ADD; valid non-elite/not-admitted evidence remains terminal. All prior integrated source-capture, funding, feed-discovery, replay, lifecycle, readiness, and reset fixes remain included. Independent clean validation passes 273/273 full executor subtests, 28/28 focused funding, 81/81 focused integrated regressions, 17/17 reset/deploy/health pytest tests, AI-team validator, 61/61 contract tests, git diff check, and deploy shell syntax. Production remains fd63de5 and real trading is OFF. Remaining gate: GitHub CI and BOTH independent exact-SHA reviews must PASS the final RC head before shadow-only deployment and prospective source/event-recall proof.
 **Next:** Issue #400.
 
 ## Infrastructure
