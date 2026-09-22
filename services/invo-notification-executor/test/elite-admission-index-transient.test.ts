@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, truncateSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, truncateSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -119,4 +119,57 @@ test('present corrupt admission row is transient but absent healthy row is termi
   assert.equal(absent.disposition, 'TERMINAL');
   assert.equal(absent.retryable, false);
   assert.equal(shouldPersistAdmissionDenial(absent), true);
+});
+
+
+test('primary candidate-state missing or corruption is transient and cannot consume NEW/ADD', () => {
+  {
+    const { statePath, admissionPath } = setup();
+    unlinkSync(statePath);
+    assertTransient(
+      eliteAdmissionFromState(statePath, portfolioId, now, 20 * 60_000, undefined, admissionPath),
+      'candidate_state_missing',
+    );
+  }
+  for (const [body, reason] of [
+    ['{broken', 'candidate_state_unparseable'],
+    [JSON.stringify([]), 'candidate_state_invalid_envelope'],
+    [JSON.stringify({ selectorVersion: ELITE_SELECTOR_VERSION, lastObservedAtMs: now, portfolios: [] }),
+      'candidate_state_invalid_envelope'],
+    [JSON.stringify({ selectorVersion: ELITE_SELECTOR_VERSION, lastObservedAtMs: now, portfolios: {}, firstEliteAtMs: [] }),
+      'candidate_state_invalid_envelope'],
+  ] as const) {
+    const { statePath, admissionPath } = setup();
+    writeFileSync(statePath, body);
+    assertTransient(
+      eliteAdmissionFromState(statePath, portfolioId, now, 20 * 60_000, undefined, admissionPath),
+      reason,
+    );
+  }
+});
+
+test('stale/version-incompatible selector state is transient but valid non-elite evidence is terminal', () => {
+  const cases: Array<[any, string]> = [
+    [{ selectorVersion: 'old-selector' }, 'candidate_selector_version_mismatch'],
+    [{ selectorVersion: null }, 'candidate_selector_version_missing'],
+    [{ lastObservedAtMs: now - 21 * 60_000 }, 'candidate_state_stale'],
+  ];
+  for (const [patch, reason] of cases) {
+    const { statePath, admissionPath } = setup();
+    const state = JSON.parse(readFileSync(statePath, 'utf8'));
+    writeFileSync(statePath, JSON.stringify({ ...state, ...patch }));
+    assertTransient(
+      eliteAdmissionFromState(statePath, portfolioId, now, 20 * 60_000, undefined, admissionPath),
+      reason,
+    );
+  }
+
+  const { statePath, admissionPath } = setup();
+  const state = JSON.parse(readFileSync(statePath, 'utf8'));
+  state.portfolios[portfolioId].bucket = 'RESEARCH_WIDE';
+  writeFileSync(statePath, JSON.stringify(state));
+  const terminal = eliteAdmissionFromState(statePath, portfolioId, now, 20 * 60_000, undefined, admissionPath);
+  assert.equal(terminal.reason, 'portfolio_not_elite');
+  assert.equal(terminal.disposition, 'TERMINAL');
+  assert.equal(shouldPersistAdmissionDenial(terminal), true);
 });

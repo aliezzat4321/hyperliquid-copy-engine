@@ -192,13 +192,19 @@ export function eliteAdmissionFromState(
         reason: 'direct_watch_admission_index_invalid' };
     }
   }
-  if (!existsSync(statePath)) return { ...denied, reason: 'candidate_state_missing' };
+  if (!existsSync(statePath)) return { ...denied, disposition: 'TRANSIENT', retryable: true,
+    reason: 'candidate_state_missing' };
 
   let state: any;
   try {
     state = JSON.parse(readFileSync(statePath, 'utf8'));
   } catch {
-    return { ...denied, reason: 'candidate_state_unparseable' };
+    return { ...denied, disposition: 'TRANSIENT', retryable: true,
+      reason: 'candidate_state_unparseable' };
+  }
+  if (!isPlainObject(state) || !isPlainObject(state.portfolios) || !isPlainObject(state.firstEliteAtMs)) {
+    return { ...denied, disposition: 'TRANSIENT', retryable: true,
+      reason: 'candidate_state_invalid_envelope' };
   }
 
   const selectorVersion = typeof state?.selectorVersion === 'string' ? state.selectorVersion : null;
@@ -209,15 +215,15 @@ export function eliteAdmissionFromState(
     candidateStateLastObservedAtMs: stateObservedAtMs,
   };
 
-  if (!selectorVersion) return { ...common, reason: 'candidate_selector_version_missing' };
+  if (!selectorVersion) return { ...common, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_selector_version_missing' };
   if (selectorVersion !== ELITE_SELECTOR_VERSION) {
-    return { ...common, reason: 'candidate_selector_version_mismatch' };
+    return { ...common, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_selector_version_mismatch' };
   }
   if (stateObservedAtMs == null || stateObservedAtMs <= 0) {
-    return { ...common, reason: 'candidate_state_timestamp_missing' };
+    return { ...common, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_state_timestamp_missing' };
   }
   if (stateObservedAtMs <= decisionAtMs && decisionAtMs - stateObservedAtMs > maxStateAgeMs) {
-    return { ...common, reason: 'candidate_state_stale' };
+    return { ...common, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_state_stale' };
   }
 
   const historicalResult = latestHistoricalSnapshot(snapshotsPath, portfolioId, decisionAtMs);
@@ -230,7 +236,7 @@ export function eliteAdmissionFromState(
     };
   }
   const historical = historicalResult.row;
-  const current = state?.portfolios?.[portfolioId];
+  const current: any = (state.portfolios as Record<string, any>)[portfolioId];
   const candidate = historical ?? (
     current && finite(current?.observedAtMs) != null && Number(current.observedAtMs) <= decisionAtMs
       ? current
@@ -238,9 +244,12 @@ export function eliteAdmissionFromState(
   );
 
   if (!candidate || typeof candidate !== 'object') {
-    if (stateObservedAtMs > decisionAtMs) return { ...common, reason: 'candidate_state_from_future' };
+    if (stateObservedAtMs > decisionAtMs) return { ...common, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_state_from_future' };
+    if (Object.prototype.hasOwnProperty.call(state.portfolios, portfolioId) && !isPlainObject(current)) {
+      return { ...common, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_state_invalid_candidate' };
+    }
     if (current && finite(current?.observedAtMs) != null && Number(current.observedAtMs) > decisionAtMs) {
-      return { ...common, reason: 'candidate_observation_from_future' };
+      return { ...common, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_observation_from_future' };
     }
     return { ...common, reason: 'portfolio_not_in_candidate_state' };
   }
@@ -249,7 +258,7 @@ export function eliteAdmissionFromState(
     ? candidate.selectorVersion
     : selectorVersion;
   if (candidateSelectorVersion !== ELITE_SELECTOR_VERSION) {
-    return { ...common, reason: 'candidate_selector_version_mismatch' };
+    return { ...common, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_selector_version_mismatch' };
   }
 
   const candidateObservedAtMs = finite(candidate.observedAtMs);
@@ -275,13 +284,16 @@ export function eliteAdmissionFromState(
   };
 
   if (candidateObservedAtMs == null || candidateObservedAtMs <= 0) {
-    return { ...enriched, reason: 'candidate_observation_missing' };
+    return { ...enriched, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_observation_missing' };
   }
   if (candidateObservedAtMs > decisionAtMs) {
-    return { ...enriched, reason: 'candidate_observation_from_future' };
+    return { ...enriched, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_observation_from_future' };
   }
   if (decisionAtMs - candidateObservedAtMs > maxStateAgeMs) {
-    return { ...enriched, reason: 'candidate_observation_stale' };
+    return { ...enriched, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_observation_stale' };
+  }
+  if (typeof candidate.bucket !== 'string' || !PORTFOLIO_BUCKETS.has(candidate.bucket)) {
+    return { ...enriched, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_bucket_invalid' };
   }
   if (candidate.bucket !== 'ELITE_CANDIDATE') {
     return { ...enriched, reason: 'portfolio_not_elite' };

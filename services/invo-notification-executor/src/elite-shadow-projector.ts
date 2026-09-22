@@ -83,16 +83,26 @@ export function projectEliteShadow(snapshots: PortfolioSnapshot[], audit: Row[],
   }
 
   const healthAvailable = health != null && typeof health === 'object' && !Array.isArray(health);
-  const healthOpenExposureCount = Number(health?.shadowOpenExposureCount);
-  const healthUnresolvedCount = Number(health?.unresolvedSourceCloseExposureCount);
+  const healthOperational = healthAvailable
+    && health.ok === true
+    && health.live === false
+    && health.shadowOperationalReady === true
+    && Array.isArray(health.shadowOperationalFailures)
+    && health.shadowOperationalFailures.length === 0;
+  const healthOpenExposureCount = typeof health?.shadowOpenExposureCount === 'number'
+    && Number.isInteger(health.shadowOpenExposureCount) && health.shadowOpenExposureCount >= 0
+      ? health.shadowOpenExposureCount : null;
+  const healthUnresolvedCount = typeof health?.unresolvedSourceCloseExposureCount === 'number'
+    && Number.isInteger(health.unresolvedSourceCloseExposureCount) && health.unresolvedSourceCloseExposureCount >= 0
+      ? health.unresolvedSourceCloseExposureCount : null;
   const managedRows = healthAvailable && health?.managed != null && typeof health.managed === 'object'
     && !Array.isArray(health.managed) ? Object.values(health.managed) as any[] : null;
   const runtimePaperIds = managedRows == null ? null : new Set(managedRows
     .filter((position: any) => position?.paper === true && typeof position?.sourceBaseId === 'string')
     .map((position: any) => String(position.sourceBaseId)));
-  const runtimeHealthValid = healthAvailable
-    && Number.isInteger(healthOpenExposureCount) && healthOpenExposureCount >= 0
-    && Number.isInteger(healthUnresolvedCount) && healthUnresolvedCount >= 0
+  const runtimeHealthValid = healthOperational
+    && healthOpenExposureCount != null
+    && healthUnresolvedCount != null
     && runtimePaperIds != null && runtimePaperIds.size === healthOpenExposureCount
     && Array.isArray(health?.shadowMarks);
 
@@ -102,7 +112,7 @@ export function projectEliteShadow(snapshots: PortfolioSnapshot[], audit: Row[],
   const auditOnlyOpenExposureIds = runtimePaperIds == null ? [...ids].sort() :
     [...ids].filter(id => !runtimePaperIds.has(id)).sort();
   const runtimeExposureCountMismatch = runtimeHealthValid
-    ? Math.abs(healthOpenExposureCount - active.size) : null;
+    ? Math.abs((healthOpenExposureCount ?? -1) - active.size) : null;
   const runtimeExposureReconciliationComplete = runtimeHealthValid
     && runtimeOnlyOpenExposureIds.length === 0
     && auditOnlyOpenExposureIds.length === 0
@@ -113,7 +123,7 @@ export function projectEliteShadow(snapshots: PortfolioSnapshot[], audit: Row[],
   const projectedUnresolvedSourceCloseExposureCount =
     [...active.values()].filter(m => m.unresolvedAfterSourceClose).length;
   const unresolvedSourceCloseExposureCount = runtimeHealthValid
-    ? Math.max(projectedUnresolvedSourceCloseExposureCount, healthUnresolvedCount)
+    ? Math.max(projectedUnresolvedSourceCloseExposureCount, healthUnresolvedCount ?? 0)
     : projectedUnresolvedSourceCloseExposureCount;
   let markedElitePositions = 0, openMarkIncompletePositions = 0, openNet = 0;
   for (const membership of active.values()) { const mark: any = marks.get(membership.sourceBaseId);

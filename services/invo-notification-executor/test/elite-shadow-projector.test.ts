@@ -11,6 +11,7 @@ const snap = (portfolioId: string, observedAtMs: number) => ({ portfolioId, obse
 const opened = (id: string, portfolioId: string, decisionAtMs: number) => ({ type: 'shadow_opened',
   sourceBaseId: id, portfolioId, decisionAtMs });
 const health = (managed: Record<string, any> = {}, marks: any[] = [], unresolved = 0) => ({
+  ok: true, live: false, shadowOperationalReady: true, shadowOperationalFailures: [],
   shadowMarks: marks,
   shadowOpenExposureCount: Object.values(managed).filter((p: any) => p?.paper === true).length,
   unresolvedSourceCloseExposureCount: unresolved,
@@ -88,7 +89,12 @@ test('runtime unresolved exposure count conservatively invalidates profitability
 
 test('missing or malformed runtime health is fatal to profitability completeness', () => {
   for (const runtime of [null, {}, { shadowMarks: [] },
-    { shadowMarks: [], shadowOpenExposureCount: 0, unresolvedSourceCloseExposureCount: 0 }]) {
+    { shadowMarks: [], shadowOpenExposureCount: 0, unresolvedSourceCloseExposureCount: 0 },
+    { ...health(), shadowOpenExposureCount: null },
+    { ...health(), unresolvedSourceCloseExposureCount: '' },
+    { ...health(), ok: false },
+    { ...health(), live: true },
+    { ...health(), shadowOperationalReady: false, shadowOperationalFailures: ['unhealthy'] }]) {
     const report = projectEliteShadow([snap('p', 100)], [], runtime as any);
     assert.equal(report.profitabilityComplete, false);
     assert.equal(report.openNetPnlUsd, null);
