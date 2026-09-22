@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "snapshot_at": "2026-09-21T19:49:53Z",
+  "snapshot_at": "2026-09-22T07:51:53Z",
   "updated_by": "CODEX_CHATGPT",
   "head_observed": "fd63de5c60fc9d19ec643a2c491d5a815581765a",
   "mission": "Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.",
@@ -141,6 +141,60 @@
       "status": "SHADOW_EVIDENCE_MEASUREMENT_INCOMPLETE",
       "facts": [
         {
+          "key": "integrated_lane3_rc_safety",
+          "label": "integrated RC live authorization / real trading",
+          "value": "authorization NONE / REAL_TRADING_ENABLED=NO",
+          "unit": "text",
+          "observed_at": "2026-09-22T07:51:53Z",
+          "source_type": "COMMIT",
+          "source_ref": "29b1a577c9d9233a483d8bce843ac861b463485a; docs/ai-team/LIVE_TRADING_GATE.md"
+        },
+        {
+          "key": "integrated_lane3_rc_reset_contract_tests",
+          "label": "integrated RC reset and deploy-contract pytest tests passing",
+          "value": 13,
+          "unit": "count",
+          "observed_at": "2026-09-22T07:51:53Z",
+          "source_type": "COMMIT",
+          "source_ref": "29b1a577c9d9233a483d8bce843ac861b463485a; test_lane3_shadow_epoch_reset.py + deploy_contract.py"
+        },
+        {
+          "key": "integrated_lane3_rc_discovery_tests",
+          "label": "integrated RC focused discovery/admission/durability subtests passing",
+          "value": 61,
+          "unit": "count",
+          "observed_at": "2026-09-22T07:51:53Z",
+          "source_type": "COMMIT",
+          "source_ref": "29b1a577c9d9233a483d8bce843ac861b463485a; feed evidence + selector + scan capture + admission"
+        },
+        {
+          "key": "integrated_lane3_rc_funding_tests",
+          "label": "integrated RC focused funding subtests passing",
+          "value": 28,
+          "unit": "count",
+          "observed_at": "2026-09-22T07:51:53Z",
+          "source_type": "COMMIT",
+          "source_ref": "29b1a577c9d9233a483d8bce843ac861b463485a; funding-oracle + alignment + completeness"
+        },
+        {
+          "key": "integrated_lane3_rc_executor_tests",
+          "label": "integrated RC full executor subtests passing",
+          "value": 254,
+          "unit": "count",
+          "observed_at": "2026-09-22T07:51:53Z",
+          "source_type": "COMMIT",
+          "source_ref": "29b1a577c9d9233a483d8bce843ac861b463485a; npm run check"
+        },
+        {
+          "key": "integrated_lane3_rc_implementation",
+          "label": "integrated Lane 3 release-candidate implementation commit",
+          "value": "29b1a577c9d9233a483d8bce843ac861b463485a",
+          "unit": "text",
+          "observed_at": "2026-09-22T07:51:53Z",
+          "source_type": "COMMIT",
+          "source_ref": "29b1a577c9d9233a483d8bce843ac861b463485a"
+        },
+        {
           "key": "source_capture_pr_head",
           "label": "Lane 3 final source-capture implementation commit",
           "value": "bbc574f",
@@ -204,7 +258,7 @@
           "source_ref": "VM runtime env 2026-09-17T23:10Z"
         }
       ],
-      "blocker": "PR #404 repair commit bbc574f is locally validated (211 executor subtests, 9 reset tests, contract/diff/deploy syntax pass) but still requires independent exact-SHA Codex and Opus review plus post-deploy prospective source/event-recall proof; production is unchanged. #403 and #397 remain separate gates.",
+      "blocker": "Integrated Lane 3 RC implementation 29b1a577c9d9233a483d8bce843ac861b463485a combines the latest source-capture/admission, funding-boundary, and feed-candidate durability repairs on one frozen code line. Local integrated validation passes 254/254 executor subtests, 28/28 focused funding, 61/61 focused discovery/admission/durability, and 13/13 reset+deploy-contract tests plus AI-team contract, git diff check, and deploy shell syntax. Production remains unchanged at fd63de5 and real trading is OFF. Remaining gate: both independent reviewers and GitHub CI must PASS this exact integrated RC head before shadow-only deployment and prospective source/event-recall proof.",
       "next": "Issue #400"
     }
   },
