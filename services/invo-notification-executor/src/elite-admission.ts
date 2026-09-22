@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, statSync } from 'fs';
-import { ELITE_SELECTOR_VERSION, isCanonicalPortfolioSnapshot } from './portfolio-candidates.js';
+import { ELITE_SELECTOR_VERSION, isCanonicalLedgerDiskState, isCanonicalPortfolioSnapshot } from './portfolio-candidates.js';
 
 export const ELITE_ADMISSION_VERSION = 'lane3-elite-admission-v1-20260916';
 
@@ -91,8 +91,7 @@ export function shouldPersistAdmissionDenial(decision: EliteAdmissionDecision): 
 }
 
 function finite(value: unknown): number | null {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 function base(portfolioId: string): EliteAdmissionDecision {
@@ -233,12 +232,8 @@ export function eliteAdmissionFromState(
   if (stateObservedAtMs > decisionAtMs) {
     return { ...common, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_state_from_future' };
   }
-  const allCandidateRowsValid = Object.entries(state.portfolios).every(([key, value]) =>
-    isCanonicalPortfolioSnapshot(value) && value.portfolioId === key);
-  const allFirstEliteRowsValid = Object.entries(state.firstEliteAtMs).every(([key, value]) =>
-    key.trim().length > 0 && typeof value === 'number' && Number.isFinite(value) && value > 0);
-  if (!allCandidateRowsValid || !allFirstEliteRowsValid) {
-    return { ...common, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_state_invalid_candidate' };
+  if (!isCanonicalLedgerDiskState(state)) {
+    return { ...common, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_state_invalid_envelope' };
   }
   if (stateObservedAtMs <= decisionAtMs && decisionAtMs - stateObservedAtMs > maxStateAgeMs) {
     return { ...common, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_state_stale' };
@@ -260,13 +255,13 @@ export function eliteAdmissionFromState(
     return { ...common, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_state_invalid_candidate' };
   }
   const candidate = historical ?? (
-    current && finite(current?.observedAtMs) != null && Number(current.observedAtMs) <= decisionAtMs
+    current && finite(current?.observedAtMs) != null && current.observedAtMs <= decisionAtMs
       ? current
       : null
   );
 
   if (!candidate || typeof candidate !== 'object') {
-    if (current && finite(current?.observedAtMs) != null && Number(current.observedAtMs) > decisionAtMs) {
+    if (current && finite(current?.observedAtMs) != null && current.observedAtMs > decisionAtMs) {
       return { ...common, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_observation_from_future' };
     }
     return { ...common, reason: 'portfolio_not_in_candidate_state' };

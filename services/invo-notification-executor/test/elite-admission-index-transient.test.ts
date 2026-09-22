@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { eliteAdmissionFromState, shouldPersistAdmissionDenial } from '../src/elite-admission.js';
-import { ELITE_SELECTOR_VERSION } from '../src/portfolio-candidates.js';
+import { DEFAULT_PORTFOLIO_SELECTOR, ELITE_SELECTOR_VERSION } from '../src/portfolio-candidates.js';
+import { FEED_EVIDENCE_EPOCH } from '../src/feed-portfolio-evidence.js';
 
 const now = Date.UTC(2026, 8, 22, 9, 45, 0);
 const portfolioId = 'elite-transient-index';
@@ -18,6 +19,10 @@ function setup() {
   writeFileSync(statePath, JSON.stringify({
     version: 1,
     selectorVersion: ELITE_SELECTOR_VERSION,
+    policy: DEFAULT_PORTFOLIO_SELECTOR,
+    feedEvidence: { version: 4, epoch: FEED_EVIDENCE_EPOCH, eligibilityNotBeforeMs: observedAtMs,
+      records: {}, lifetime: { discovered: 0, feedOnly: 0, newlyQualified: 0, rejectedUnverified: 0,
+        rejectedMalformed: 0, rejectedIdentityConflicts: 0, dedupedReplayCount: 0 } },
     lastObservedAtMs: observedAtMs,
     firstEliteAtMs: { [portfolioId]: observedAtMs },
     portfolios: {

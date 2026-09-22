@@ -51,7 +51,8 @@ candidate="$STATE/portfolio-candidates.json"
 leaderboards="$STATE/invo-leaderboards.json"
 leaderboard_snapshots="$STATE/invo-leaderboard-snapshots.jsonl"
 elite="$STATE/elite-shadow-report.json"
-for required in "$candidate" "$leaderboards" "$leaderboard_snapshots" "$elite"; do
+elite_manifest="$elite.manifest.json"
+for required in "$candidate" "$leaderboards" "$leaderboard_snapshots" "$elite_manifest"; do
   if [[ ! -s "$required" ]]; then
     echo "required portfolio research artifact missing: $required" >&2
     journalctl -u "$SERVICE_UNIT" -n 160 --no-pager || true
@@ -59,12 +60,15 @@ for required in "$candidate" "$leaderboards" "$leaderboard_snapshots" "$elite"; 
   fi
 done
 
-node - "$candidate" "$leaderboards" "$elite" "$SERVICE_DIR/src/portfolio-candidates.ts" <<'NODE'
+node - "$candidate" "$leaderboards" "$elite_manifest" "$SERVICE_DIR/src/portfolio-candidates.ts" <<'NODE'
 const fs = require('fs');
-const [candidatePath, leaderboardPath, elitePath, selectorSourcePath] = process.argv.slice(2);
+const [candidatePath, leaderboardPath, eliteManifestPath, selectorSourcePath] = process.argv.slice(2);
 const candidate = JSON.parse(fs.readFileSync(candidatePath, 'utf8'));
 const leaderboards = JSON.parse(fs.readFileSync(leaderboardPath, 'utf8'));
-const elite = JSON.parse(fs.readFileSync(elitePath, 'utf8'));
+const eliteManifest = JSON.parse(fs.readFileSync(eliteManifestPath, 'utf8'));
+if (eliteManifest.version !== 1 || !eliteManifest.reportPath || !eliteManifest.ledgerPath) throw new Error('invalid elite shadow publication manifest');
+const elite = JSON.parse(fs.readFileSync(eliteManifest.reportPath, 'utf8'));
+fs.accessSync(eliteManifest.ledgerPath, fs.constants.R_OK);
 const selectorSource = fs.readFileSync(selectorSourcePath, 'utf8');
 const selectorMatch = selectorSource.match(
   /ELITE_SELECTOR_VERSION\s*=\s*['"]([^'"]+)['"]/,

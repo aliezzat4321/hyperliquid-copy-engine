@@ -84,7 +84,7 @@ export interface PortfolioSnapshot {
   rawShapeKeys: string[];
 }
 
-interface LedgerDiskState {
+export interface LedgerDiskState {
   version: 1;
   selectorVersion: string;
   policy: PortfolioSelectorPolicy;
@@ -117,6 +117,50 @@ const PORTFOLIO_BUCKETS = new Set<PortfolioBucket>([
 ]);
 
 export const ALLOWED_PORTFOLIO_BUCKETS: ReadonlySet<PortfolioBucket> = PORTFOLIO_BUCKETS;
+
+function plainRecord(value: unknown): value is Record<string, unknown> {
+  return value != null && typeof value === 'object' && !Array.isArray(value)
+    && [Object.prototype, null].includes(Object.getPrototypeOf(value));
+}
+function finiteNumber(value: unknown, positive = false): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && (!positive || value > 0);
+}
+const POLICY_KEYS = Object.keys(DEFAULT_PORTFOLIO_SELECTOR).sort();
+
+/** Exact persisted candidate-state envelope used at admission boundaries. */
+export function isCanonicalLedgerDiskState(value: unknown): value is LedgerDiskState {
+  if (!plainRecord(value) || value.version !== 1 || value.selectorVersion !== ELITE_SELECTOR_VERSION
+    || !plainRecord(value.policy) || !plainRecord(value.portfolios) || !plainRecord(value.firstEliteAtMs)
+    || !finiteNumber(value.lastObservedAtMs, true) || !plainRecord(value.feedEvidence)) return false;
+  if (Object.keys(value).some(key => !['version', 'selectorVersion', 'policy', 'portfolios', 'firstEliteAtMs',
+    'lastObservedAtMs', 'feedEvidence'].includes(key))) return false;
+  const policy = value.policy;
+  if (Object.keys(policy).sort().join('\0') !== POLICY_KEYS.join('\0')
+    || POLICY_KEYS.some(key => !finiteNumber(policy[key]))) return false;
+  if (!Object.entries(value.portfolios).every(([key, row]) => isCanonicalPortfolioSnapshot(row)
+    && row.portfolioId === key)) return false;
+  if (!Object.entries(value.firstEliteAtMs).every(([key, at]) => key.trim().length > 0 && finiteNumber(at, true))) return false;
+  const feed = value.feedEvidence;
+  if (feed.version !== 4 || feed.epoch !== FEED_EVIDENCE_EPOCH || !finiteNumber(feed.eligibilityNotBeforeMs)
+    || !plainRecord(feed.records) || !plainRecord(feed.lifetime)) return false;
+  const lifetime = feed.lifetime;
+  const lifetimeKeys = ['discovered', 'feedOnly', 'newlyQualified', 'rejectedUnverified', 'rejectedMalformed',
+    'rejectedIdentityConflicts', 'dedupedReplayCount'];
+  if (Object.keys(lifetime).sort().join('\0') !== [...lifetimeKeys].sort().join('\0')
+    || lifetimeKeys.some(key => !finiteNumber(lifetime[key]) || !Number.isInteger(lifetime[key])
+      || (lifetime[key] as number) < 0)) return false;
+  return Object.entries(feed.records).every(([key, raw]) => {
+    if (!key.trim() || !plainRecord(raw)) return false;
+    const keys = ['firstProcessedAtMs', 'lastProcessedAtMs', 'sourceFirstSeenAtMs', 'sourceLastSeenAtMs',
+      'surfaces', 'processedEvidenceIds', 'feedOnlyAtFirstIngestion', 'newlySelectorQualified'];
+    return !Object.keys(raw).some(field => !keys.includes(field))
+      && ['firstProcessedAtMs', 'lastProcessedAtMs', 'sourceFirstSeenAtMs', 'sourceLastSeenAtMs']
+        .every(field => finiteNumber(raw[field], true))
+      && Array.isArray(raw.surfaces) && raw.surfaces.every(item => typeof item === 'string' && item.length > 0)
+      && Array.isArray(raw.processedEvidenceIds) && raw.processedEvidenceIds.every(item => typeof item === 'string' && item.length > 0)
+      && typeof raw.feedOnlyAtFirstIngestion === 'boolean' && typeof raw.newlySelectorQualified === 'boolean';
+  });
+}
 
 function nullableFinite(value: unknown): boolean {
   return value === null || (typeof value === 'number' && Number.isFinite(value));

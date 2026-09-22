@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { eliteAdmissionFromState, shouldPersistAdmissionDenial } from '../src/elite-admission.js';
-import { ELITE_SELECTOR_VERSION } from '../src/portfolio-candidates.js';
+import { DEFAULT_PORTFOLIO_SELECTOR, ELITE_SELECTOR_VERSION } from '../src/portfolio-candidates.js';
+import { FEED_EVIDENCE_EPOCH } from '../src/feed-portfolio-evidence.js';
 
 function stateFile(state: unknown) {
   const dir = mkdtempSync(join(tmpdir(), 'lane3-elite-admission-'));
@@ -30,6 +31,10 @@ function validState(overrides: Record<string, unknown> = {}) {
   return {
     version: 1,
     selectorVersion: ELITE_SELECTOR_VERSION,
+    policy: DEFAULT_PORTFOLIO_SELECTOR,
+    feedEvidence: { version: 4, epoch: FEED_EVIDENCE_EPOCH, eligibilityNotBeforeMs: candidateObservedAtMs,
+      records: {}, lifetime: { discovered: 0, feedOnly: 0, newlyQualified: 0, rejectedUnverified: 0,
+        rejectedMalformed: 0, rejectedIdentityConflicts: 0, dedupedReplayCount: 0 } },
     lastObservedAtMs: candidateObservedAtMs,
     firstEliteAtMs: { [portfolioId]: candidateObservedAtMs - 1_000 },
     portfolios: {
@@ -95,6 +100,22 @@ test('unknown selector state cannot authorize NEW/ADD exposure', () => {
   const decision = eliteAdmissionFromState(stateFile(state), portfolioId, decisionAtMs, 20 * 60_000);
   assert.equal(decision.allowed, false);
   assert.equal(decision.reason, 'candidate_selector_version_mismatch');
+});
+
+test('full candidate envelope corruption is transient and non-consumable', () => {
+  const cases: any[] = [];
+  const missingPolicy = validState(); delete (missingPolicy as any).policy; cases.push(missingPolicy);
+  cases.push(validState({ policy: { ...DEFAULT_PORTFOLIO_SELECTOR, minClosedPositions: '20' } }));
+  cases.push(validState({ lastObservedAtMs: String(candidateObservedAtMs) }));
+  cases.push(validState({ version: 2 }));
+  cases.push(validState({ feedEvidence: { version: 3 } }));
+  cases.push(validState({ feedEvidence: { ...(validState() as any).feedEvidence, records: [] } }));
+  cases.push({ ...validState(), unexpectedRequiredStructure: {} });
+  for (const state of cases) {
+    const decision = eliteAdmissionFromState(stateFile(state), portfolioId, decisionAtMs, 20 * 60_000);
+    assert.equal(decision.allowed, false); assert.equal(decision.disposition, 'TRANSIENT');
+    assert.equal(decision.retryable, true); assert.equal(shouldPersistAdmissionDenial(decision), false);
+  }
 });
 
 test('leaderboard/discovery presence without elite bucket is rejected', () => {

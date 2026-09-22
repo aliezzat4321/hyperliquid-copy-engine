@@ -157,14 +157,15 @@ function validatePendingSourceClose(value: unknown, path: string): asserts value
   if (signal.sourceTimeField !== null) requireString(signal.sourceTimeField, `${path}.sourceTimeField`, true);
 }
 
-function validateManagedPosition(value: unknown, path: string): ManagedPosition {
+export function validateManagedPosition(value: unknown, path = 'managed position'): ManagedPosition {
   const position = requireRecord(value, path);
   for (const key of ['coin', 'sourceBaseId', 'sourcePostId'] as const) {
     requireString(position[key], `${path}.${key}`);
   }
-  requireString(position.sourceBaseShortId, `${path}.sourceBaseShortId`, true);
-  if (!['long', 'short'].includes(String(position.side))) throw new Error(`${path}.side is invalid`);
+  requireString(position.sourceBaseShortId, `${path}.sourceBaseShortId`);
+  if (position.side !== 'long' && position.side !== 'short') throw new Error(`${path}.side is invalid`);
   requireFiniteNumber(position.openedAtMs, `${path}.openedAtMs`);
+  if (position.openedAtMs <= 0) throw new Error(`${path}.openedAtMs must be positive`);
   for (const key of ['username', 'ownerId', 'portfolioId', 'localBaseShortId', 'sourceCloseLastReason',
     'fundingIncompleteReason', 'executionEvidenceVersion', 'costModelVersion'] as const) requireOptionalString(position, key, path);
   for (const key of ['entryMid', 'entryPrice', 'entryBookMid', 'entryBookTimeMs', 'entryBookReceivedAtMs',
@@ -180,6 +181,7 @@ function validateManagedPosition(value: unknown, path: string): ManagedPosition 
       const item = requireRecord(checkpoint, `${path}.exposureCheckpoints[${index}]`);
       requireFiniteNumber(item.atMs, `${path}.exposureCheckpoints[${index}].atMs`);
       requireFiniteNumber(item.size, `${path}.exposureCheckpoints[${index}].size`);
+      if (item.atMs <= 0) throw new Error(`${path}.exposureCheckpoints[${index}].atMs must be positive`);
     });
   }
   if (position.fundingOracleCheckpoints !== undefined) {
@@ -189,6 +191,7 @@ function validateManagedPosition(value: unknown, path: string): ManagedPosition 
       requireFiniteNumber(item.fundingTimeMs, `${path}.fundingOracleCheckpoints[${index}].fundingTimeMs`);
       requireFiniteNumber(item.observedAtMs, `${path}.fundingOracleCheckpoints[${index}].observedAtMs`);
       requireFiniteNumber(item.oraclePx, `${path}.fundingOracleCheckpoints[${index}].oraclePx`);
+      if (item.fundingTimeMs <= 0 || item.observedAtMs <= 0) throw new Error(`${path}.fundingOracleCheckpoints[${index}] timestamps must be positive`);
     });
   }
   return position as unknown as ManagedPosition;

@@ -1,7 +1,11 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'fs';
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync,
+  statSync, unlinkSync, writeFileSync } from 'fs';
+import { randomUUID } from 'crypto';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { ALLOWED_PORTFOLIO_BUCKETS, ELITE_SELECTOR_VERSION, type PortfolioSnapshot } from './portfolio-candidates.js';
+import { validateManagedPosition } from './notification-state.js';
+import { validateShadowMark } from './shadow-market.js';
 type Row = Record<string, any>;
 type Membership = { sourceBaseId: string; portfolioId: string; selectedAtMs: number;
   selectorVersion: string; unresolvedAfterSourceClose: boolean };
@@ -55,9 +59,22 @@ function validateAuditRow(row: unknown, location = 'audit row'): asserts row is 
     throw new Error(`corrupt audit evidence ${location}: unrecognized lifecycle type`);
   }
   if (LIFECYCLE_TYPES.has(type)) {
+    for (const field of ['decisionAtMs', 'bookReceivedAtMs', 'observedAtMs', 'time', 'ts']) {
+      if (row[field] !== undefined && (typeof row[field] !== 'number' || !Number.isFinite(row[field]) || row[field] <= 0))
+        throw new Error(`corrupt audit evidence ${location}: ${field} missing or invalid`);
+    }
     if (at(row) == null) throw new Error(`corrupt audit evidence ${location}: lifecycle time missing or invalid`);
-    if (!baseId(row).trim() || !portfolio(row).trim()) {
+    if (baseId(row) == null || portfolio(row) == null) {
       throw new Error(`corrupt audit evidence ${location}: lifecycle identity missing`);
+    }
+    if (close(type)) {
+      const allowed = new Set(['COMPLETE_EXECUTION_REALISTIC', 'INCOMPLETE_FUNDING', 'INCOMPLETE_LEGACY_ENTRY',
+        'INCOMPLETE_DUST_RECONCILIATION', 'UNRESOLVED_EXPOSURE']);
+      if (typeof row.economicsCompleteness !== 'string' || !allowed.has(row.economicsCompleteness))
+        throw new Error(`corrupt audit evidence ${location}: economicsCompleteness missing or invalid`);
+      if (row.economicsCompleteness === 'COMPLETE_EXECUTION_REALISTIC'
+        && (typeof row.netPnlUsd !== 'number' || !Number.isFinite(row.netPnlUsd)))
+        throw new Error(`corrupt audit evidence ${location}: complete economics requires finite numeric netPnlUsd`);
     }
   }
 }
@@ -86,9 +103,12 @@ export function candidateSnapshotStorage(hot: string) {
     selectorArchiveRetentionPolicy: 'retain_all_causal_evidence_external_storage_guard_required' };
 }
 function at(row: Row): number | null { for (const value of [row.decisionAtMs, row.bookReceivedAtMs,
-  row.observedAtMs, Date.parse(String(row.ts ?? ''))]) { const n = Number(value); if (Number.isFinite(n) && n > 0) return n; } return null; }
-const baseId = (r: Row) => String(r.sourceBaseId ?? r.signal?.sourceBaseId ?? '');
-const portfolio = (r: Row) => String(r.portfolioId ?? r.signal?.portfolioId ?? '');
+  row.observedAtMs, row.time, row.ts]) { if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value; } return null; }
+function actualIdentity(value: unknown): string | null {
+  return typeof value === 'string' && value.trim().length > 0 ? value : null;
+}
+const baseId = (r: Row) => actualIdentity(r.sourceBaseId) ?? (plain(r.signal) ? actualIdentity(r.signal.sourceBaseId) : null);
+const portfolio = (r: Row) => actualIdentity(r.portfolioId) ?? (plain(r.signal) ? actualIdentity(r.signal.portfolioId) : null);
 const open = (t: string) => t === 'shadow_opened' || t === 'shadow_opened_from_increase';
 const close = (t: string) => ['shadow_closed', 'shadow_partially_closed', 'shadow_close_dust_reconciled',
   'shadow_close_incomplete', 'shadow_close_rejected'].includes(t);
@@ -113,7 +133,7 @@ export function projectEliteShadow(snapshots: PortfolioSnapshot[], audit: Row[],
   const rejects: Row[] = []; const orphanEliteCloses: Row[] = []; let selectorSnapshotUnresolvedOpenEvents = 0;
   for (const [index, row] of audit.entries()) { validateAuditRow(row, `projection row ${index + 1}`);
     const when = at(row); if (when == null) continue;
-    const id = baseId(row), pid = portfolio(row), type = String(row.type ?? ''), selected = pid ? selectedAt(all, pid, when) : null;
+    const id = baseId(row), pid = portfolio(row), type = row.type as string, selected = pid ? selectedAt(all, pid, when) : null;
     if (open(type) && id && pid) { if (!selected) selectorSnapshotUnresolvedOpenEvents += 1;
       if (selected?.bucket === 'ELITE_CANDIDATE') active.set(id, { sourceBaseId: id, portfolioId: pid,
         selectedAtMs: selected.observedAtMs, selectorVersion: selected.selectorVersion, unresolvedAfterSourceClose: false }); }
@@ -122,7 +142,7 @@ export function projectEliteShadow(snapshots: PortfolioSnapshot[], audit: Row[],
       eliteSelectedAtMs: membership.selectedAtMs, eliteSelectorVersion: membership.selectorVersion, cohort: 'elite_shadow' });
       if (['shadow_close_incomplete', 'shadow_close_rejected'].includes(type)
           || row.economicsCompleteness === 'UNRESOLVED_EXPOSURE') membership.unresolvedAfterSourceClose = true;
-      if (type === 'shadow_closed' || type === 'shadow_close_dust_reconciled') active.delete(id); continue; }
+      if (type === 'shadow_closed' || type === 'shadow_close_dust_reconciled') active.delete(membership.sourceBaseId); continue; }
     if (!membership && close(type) && pid) {
       const hadEliteBefore = (all.get(pid) ?? []).some(snapshot =>
         snapshot.observedAtMs <= when && snapshot.bucket === 'ELITE_CANDIDATE');
@@ -153,26 +173,22 @@ export function projectEliteShadow(snapshots: PortfolioSnapshot[], audit: Row[],
   const managedRows = managedObject == null ? null : Object.entries(managedObject);
   let managedRowsValid = managedRows != null;
   const runtimePaperIds = new Set<string>();
-  if (managedRows) for (const [, position] of managedRows) {
-    if (!plain(position) || position.paper !== true || typeof position.sourceBaseId !== 'string'
-      || position.sourceBaseId.trim().length === 0
-      || runtimePaperIds.has(position.sourceBaseId)) {
+  if (managedRows) for (const [key, rawPosition] of managedRows) {
+    let position;
+    try { position = validateManagedPosition(rawPosition, `health.managed.${key}`); } catch { managedRowsValid = false; continue; }
+    if (position.paper !== true || key !== position.sourceBaseId || runtimePaperIds.has(position.sourceBaseId)) {
       managedRowsValid = false;
       continue;
     }
     runtimePaperIds.add(position.sourceBaseId);
   }
   const markRows = Array.isArray(health?.shadowMarks) ? health.shadowMarks : null;
-  const recognizedMarkStatuses = new Set(['MARKED', 'FUNDING_UNAVAILABLE', 'BOOK_REJECTED', 'INCOMPLETE_LEGACY_ENTRY']);
   let markRowsValid = markRows != null;
   const markIds = new Set<string>();
-  if (markRows) for (const mark of markRows) {
-    if (!plain(mark) || typeof mark.sourceBaseId !== 'string' || mark.sourceBaseId.trim().length === 0
-      || markIds.has(mark.sourceBaseId) || !recognizedMarkStatuses.has(String(mark.status ?? ''))
-      || (mark.status === 'MARKED' && (typeof mark.netPnlUsd !== 'number' || !Number.isFinite(mark.netPnlUsd)))) {
-      markRowsValid = false;
-      continue;
-    }
+  if (markRows) for (const rawMark of markRows) {
+    let mark;
+    try { mark = validateShadowMark(rawMark, 'health.shadowMarks[]'); } catch { markRowsValid = false; continue; }
+    if (markIds.has(mark.sourceBaseId)) { markRowsValid = false; continue; }
     markIds.add(mark.sourceBaseId);
   }
   const runtimeHealthValid = healthOperational
@@ -200,16 +216,19 @@ export function projectEliteShadow(snapshots: PortfolioSnapshot[], audit: Row[],
     : projectedUnresolvedSourceCloseExposureCount;
   let markedElitePositions = 0, openMarkIncompletePositions = 0, openNet = 0;
   for (const membership of active.values()) { const mark: any = marks.get(membership.sourceBaseId);
-    if (!membership.unresolvedAfterSourceClose && mark?.status === 'MARKED' && Number.isFinite(Number(mark.netPnlUsd))) {
-      markedElitePositions += 1; openNet += Number(mark.netPnlUsd);
+    if (!membership.unresolvedAfterSourceClose && mark?.status === 'MARKED'
+      && typeof mark.netPnlUsd === 'number' && Number.isFinite(mark.netPnlUsd)) {
+      markedElitePositions += 1; openNet += mark.netPnlUsd;
     } else openMarkIncompletePositions += 1; }
   const closes = included.filter(row => close(String(row.type ?? '')));
   const orphanEliteCloseEvents = orphanEliteCloses.length;
   const realized = closes.filter(row => row.type === 'shadow_closed'
-    && row.economicsCompleteness === 'COMPLETE_EXECUTION_REALISTIC' && Number.isFinite(Number(row.netPnlUsd)));
-  const realizedNetPnlUsd = realized.reduce((sum, row) => sum + Number(row.netPnlUsd), 0);
+    && row.economicsCompleteness === 'COMPLETE_EXECUTION_REALISTIC'
+    && typeof row.netPnlUsd === 'number' && Number.isFinite(row.netPnlUsd));
+  const realizedNetPnlUsd = realized.reduce((sum, row) => sum + row.netPnlUsd, 0);
   const incomplete = closes.filter(row => row.type !== 'shadow_closed'
-    || row.economicsCompleteness !== 'COMPLETE_EXECUTION_REALISTIC' || !Number.isFinite(Number(row.netPnlUsd)));
+    || row.economicsCompleteness !== 'COMPLETE_EXECUTION_REALISTIC'
+    || typeof row.netPnlUsd !== 'number' || !Number.isFinite(row.netPnlUsd));
   const partialCloseEvents = closes.filter(r => r.type === 'shadow_partially_closed').length;
   const dustReconciledCloseEvents = closes.filter(r => r.type === 'shadow_close_dust_reconciled').length;
   const incompleteFundingCloses = closes.filter(r => r.economicsCompleteness === 'INCOMPLETE_FUNDING').length;
@@ -248,13 +267,51 @@ export function projectEliteShadow(snapshots: PortfolioSnapshot[], audit: Row[],
 }
 async function fetchHealth(url: string) { try { const r = await fetch(url, { signal: AbortSignal.timeout(70_000) });
   return r.ok ? await r.json() : null; } catch { return null; } }
+export interface ElitePublicationIo {
+  write(path: string, data: string): void; fsyncFile(path: string): void; rename(from: string, to: string): void;
+  fsyncDirectory(path: string): void; remove(path: string): void;
+}
+const publicationIo: ElitePublicationIo = {
+  write: (path, data) => writeFileSync(path, data),
+  fsyncFile: path => { const fd = openSync(path, 'r'); try { fsyncSync(fd); } finally { closeSync(fd); } },
+  rename: (from, to) => renameSync(from, to),
+  fsyncDirectory: path => { const fd = openSync(path, 'r'); try { fsyncSync(fd); } finally { closeSync(fd); } },
+  remove: path => { try { unlinkSync(path); } catch { /* best-effort orphan cleanup */ } },
+};
+export function eliteShadowManifestPath(output: string) { return `${output}.manifest.json`; }
+export function readEliteShadowPublication(output: string) {
+  const manifest = JSON.parse(readFileSync(eliteShadowManifestPath(output), 'utf8'));
+  if (!plain(manifest) || manifest.version !== 1 || typeof manifest.reportPath !== 'string'
+    || typeof manifest.ledgerPath !== 'string' || typeof manifest.generationId !== 'string')
+    throw new Error('invalid elite shadow publication manifest');
+  return { manifest, report: JSON.parse(readFileSync(manifest.reportPath, 'utf8')),
+    ledger: readFileSync(manifest.ledgerPath, 'utf8') };
+}
 export function writeEliteShadowReport(snapshotPath: string, auditPath: string, output: string,
-  ledger: string, health: any | null) {
+  ledger: string, health: any | null, io: ElitePublicationIo = publicationIo) {
   const report = projectEliteShadow(loadCandidateSnapshots(snapshotPath), jsonl(auditPath, 'audit'), health);
   const { included, ...summary } = report;
   const rendered = { generatedAtMs: Date.now(), ...summary, ...candidateSnapshotStorage(snapshotPath) };
+  const reportData = JSON.stringify(rendered, null, 2);
+  const ledgerData = included.map(row => JSON.stringify(row)).join('\n') + (included.length ? '\n' : '');
+  const generationId = `${Date.now()}-${randomUUID()}`;
+  const reportFinal = `${output}.generation-${generationId}`;
+  const ledgerFinal = `${ledger}.generation-${generationId}`;
+  const reportTemp = `${reportFinal}.tmp`; const ledgerTemp = `${ledgerFinal}.tmp`;
+  const manifestPath = eliteShadowManifestPath(output); const manifestTemp = `${manifestPath}.${generationId}.tmp`;
   mkdirSync(dirname(output), { recursive: true }); mkdirSync(dirname(ledger), { recursive: true });
-  writeFileSync(output, JSON.stringify(rendered, null, 2)); writeFileSync(ledger, included.map(row => JSON.stringify(row)).join('\n') + (included.length ? '\n' : ''));
+  try {
+    io.write(reportTemp, reportData); io.fsyncFile(reportTemp);
+    io.write(ledgerTemp, ledgerData); io.fsyncFile(ledgerTemp);
+    io.rename(reportTemp, reportFinal); io.rename(ledgerTemp, ledgerFinal);
+    io.fsyncDirectory(dirname(output));
+    io.write(manifestTemp, JSON.stringify({ version: 1, generationId, reportPath: reportFinal,
+      ledgerPath: ledgerFinal, generatedAtMs: rendered.generatedAtMs }, null, 2));
+    io.fsyncFile(manifestTemp); io.rename(manifestTemp, manifestPath); io.fsyncDirectory(dirname(output));
+  } catch (error) {
+    for (const path of [reportTemp, ledgerTemp, manifestTemp]) io.remove(path);
+    throw error;
+  }
   return rendered;
 }
 async function main() { const snapshotPath = resolve(process.env.INVO_PORTFOLIO_CANDIDATE_SNAPSHOTS_PATH ?? 'data/portfolio-candidate-snapshots.jsonl');

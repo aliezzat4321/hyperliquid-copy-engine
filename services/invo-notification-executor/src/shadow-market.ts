@@ -170,6 +170,56 @@ export interface ShadowMark {
   costModelVersion?: string;
 }
 
+function markRecord(value: unknown, path: string): Record<string, unknown> {
+  if (value == null || typeof value !== 'object' || Array.isArray(value)
+    || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) {
+    throw new Error(`${path} must be a plain object`);
+  }
+  return value as Record<string, unknown>;
+}
+function markString(value: unknown, path: string) {
+  if (typeof value !== 'string' || value.length === 0) throw new Error(`${path} must be a non-empty string`);
+}
+function markNumber(value: unknown, path: string, nullable = false) {
+  if (nullable && value === null) return;
+  if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error(`${path} must be a finite number`);
+}
+
+/** Canonical validation for the exact status variants emitted by markShadowPosition. */
+export function validateShadowMark(value: unknown, path = 'shadow mark'): ShadowMark {
+  const mark = markRecord(value, path);
+  markString(mark.sourceBaseId, `${path}.sourceBaseId`);
+  markString(mark.coin, `${path}.coin`);
+  if (mark.side !== 'long' && mark.side !== 'short') throw new Error(`${path}.side is invalid`);
+  markNumber(mark.size, `${path}.size`, true);
+  markNumber(mark.markedAtMs, `${path}.markedAtMs`);
+  if ((mark.markedAtMs as number) <= 0) throw new Error(`${path}.markedAtMs must be positive`);
+  const status = mark.status;
+  const statuses = ['MARKED', 'PARTIAL_DEPTH', 'INCOMPLETE_LEGACY_ENTRY', 'BOOK_REJECTED', 'FUNDING_UNAVAILABLE'];
+  if (typeof status !== 'string' || !statuses.includes(status)) throw new Error(`${path}.status is invalid`);
+  for (const key of ['reason', 'executionEvidenceVersion', 'costModelVersion']) {
+    if (mark[key] !== undefined) markString(mark[key], `${path}.${key}`);
+  }
+  if (status !== 'INCOMPLETE_LEGACY_ENTRY') {
+    if (typeof mark.size !== 'number' || !Number.isFinite(mark.size) || mark.size <= 0) throw new Error(`${path}.size is invalid`);
+    markString(mark.executionEvidenceVersion, `${path}.executionEvidenceVersion`);
+    markString(mark.costModelVersion, `${path}.costModelVersion`);
+  }
+  if (status === 'INCOMPLETE_LEGACY_ENTRY' || status === 'BOOK_REJECTED' || status === 'FUNDING_UNAVAILABLE') {
+    markString(mark.reason, `${path}.reason`);
+  }
+  if (status === 'FUNDING_UNAVAILABLE') {
+    for (const key of ['entryPrice', 'markExitPrice', 'markedSize', 'unfilledSize', 'spreadBps', 'slippageBps',
+      'bookAgeMs', 'bookTimeMs']) markNumber(mark[key], `${path}.${key}`);
+  }
+  if (status === 'MARKED' || status === 'PARTIAL_DEPTH') {
+    for (const key of ['entryPrice', 'markExitPrice', 'markedSize', 'unfilledSize', 'grossPnlUsd', 'netPnlUsd',
+      'grossReturnBps', 'netReturnBps', 'fundingUsd', 'entryFeeUsd', 'exitFeeUsd', 'spreadBps', 'slippageBps',
+      'bookAgeMs', 'bookTimeMs']) markNumber(mark[key], `${path}.${key}`);
+  }
+  return mark as unknown as ShadowMark;
+}
+
 export async function markShadowPosition(
   position: ManagedPosition,
   policy: ShadowExecutionPolicy,
