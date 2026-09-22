@@ -357,6 +357,9 @@ test('malformed compact snapshot index fails closed instead of throwing through 
   const decision = eliteAdmissionFromState(statePath, portfolioId, decisionAtMs, 20 * 60_000, snapshotsPath);
   assert.equal(decision.allowed, false);
   assert.equal(decision.reason, 'candidate_snapshot_index_unparseable');
+  assert.equal(decision.disposition, 'TRANSIENT');
+  assert.equal(decision.retryable, true);
+  assert.equal(shouldPersistAdmissionDenial(decision), false);
 });
 
 test('invalid compact index rows fail closed without falling back to current elite state', () => {
@@ -387,6 +390,9 @@ test('invalid compact index rows fail closed without falling back to current eli
     );
     assert.equal(decision.allowed, false, `case ${index} must fail closed`);
     assert.equal(decision.reason, 'candidate_snapshot_index_invalid_row');
+    assert.equal(decision.disposition, 'TRANSIENT');
+    assert.equal(decision.retryable, true);
+    assert.equal(shouldPersistAdmissionDenial(decision), false);
   }
 });
 
@@ -402,5 +408,26 @@ test('invalid compact index wrapper fails closed without current-state fallback'
     );
     assert.equal(decision.allowed, false);
     assert.equal(decision.reason, 'candidate_snapshot_index_invalid_wrapper');
+    assert.equal(decision.disposition, 'TRANSIENT');
+    assert.equal(decision.retryable, true);
+    assert.equal(shouldPersistAdmissionDenial(decision), false);
   }
+});
+
+test('malformed existing admission row is transient corruption and cannot consume NEW/ADD', () => {
+  const path = stateFile(validState());
+  const index = admissionIndex(path);
+  writeFileSync(index, JSON.stringify({
+    version: 1, generatedAtMs: decisionAtMs, healthy: true, suspensionReason: null,
+    rows: { [portfolioId]: { portfolioId, admittedAtMs: candidateObservedAtMs - 1_000,
+      selectorVersion: 'wrong-selector' } },
+  }));
+  const decision = eliteAdmissionFromState(
+    path, portfolioId, decisionAtMs, 20 * 60_000, undefined, index,
+  );
+  assert.equal(decision.allowed, false);
+  assert.equal(decision.reason, 'direct_watch_admission_index_invalid');
+  assert.equal(decision.disposition, 'TRANSIENT');
+  assert.equal(decision.retryable, true);
+  assert.equal(shouldPersistAdmissionDenial(decision), false);
 });
