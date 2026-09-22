@@ -6,8 +6,16 @@ type Row = Record<string, any>;
 type Membership = { sourceBaseId: string; portfolioId: string; selectedAtMs: number;
   selectorVersion: string; unresolvedAfterSourceClose: boolean };
 
-function jsonl(path: string): any[] { if (!existsSync(path)) return []; return readFileSync(path, 'utf8')
-  .split(/\r?\n/).filter(Boolean).map(line => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean); }
+function jsonl(path: string): any[] {
+  if (!existsSync(path)) return [];
+  return readFileSync(path, 'utf8').split(/\r?\n/).flatMap((line, index) => {
+    if (!line.trim()) return [];
+    try { return [JSON.parse(line)]; }
+    catch (error) {
+      throw new Error(`corrupt JSONL evidence ${path}:${index + 1}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  });
+}
 
 /** Merge immutable archive, previous, and hot segments; exact duplicates count once. */
 export function loadCandidateSnapshots(hot: string): PortfolioSnapshot[] {

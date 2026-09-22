@@ -128,3 +128,10 @@ test('orphan elite close is explicit in denominator and invalidates profitabilit
   assert.equal(report.realizedNetPnlUsd, 0);
   assert.equal(report.profitabilityComplete, false);
 });
+
+test('malformed selector JSONL fails closed instead of preserving stale elite membership', () => {
+  const root = mkdtempSync(join(tmpdir(), 'elite-shadow-corrupt-selector-'));
+  const hot = join(root, 'snapshots.jsonl');
+  writeFileSync(hot, JSON.stringify({ portfolioId: 'p1', observedAtMs: 1000, selectorVersion: ELITE_SELECTOR_VERSION, bucket: 'ELITE_CANDIDATE' }) + String.fromCharCode(10) + '{"portfolioId":"p1","observedAtMs":2000,');
+  assert.throws(() => loadCandidateSnapshots(hot), /corrupt JSONL evidence/);
+});
