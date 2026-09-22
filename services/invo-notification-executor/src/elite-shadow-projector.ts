@@ -281,8 +281,10 @@ const publicationIo: ElitePublicationIo = {
 export function eliteShadowManifestPath(output: string) { return `${output}.manifest.json`; }
 export function readEliteShadowPublication(output: string, expectedLedgerBase?: string) {
   const manifest = JSON.parse(readFileSync(eliteShadowManifestPath(output), 'utf8'));
+  const generationIdValid = typeof manifest?.generationId === 'string'
+    && /^\d{13}-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(manifest.generationId);
   if (!plain(manifest) || manifest.version !== 1
-    || typeof manifest.generationId !== 'string' || manifest.generationId.length === 0
+    || !generationIdValid
     || typeof manifest.reportPath !== 'string' || manifest.reportPath !== `${output}.generation-${manifest.generationId}`
     || typeof manifest.ledgerPath !== 'string'
     || (expectedLedgerBase != null && manifest.ledgerPath !== `${expectedLedgerBase}.generation-${manifest.generationId}`)

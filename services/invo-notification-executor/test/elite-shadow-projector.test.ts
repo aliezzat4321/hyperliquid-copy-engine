@@ -300,3 +300,19 @@ test('atomic generation manifest preserves the previous coherent pair on every p
     assert.deepEqual(current.report, prior.report); assert.equal(current.ledger, prior.ledger);
   }
 });
+
+
+test('publication reader rejects generation-id path traversal before reading generation files', () => {
+  const root = mkdtempSync(join(tmpdir(), 'elite-shadow-traversal-'));
+  const snapshots = join(root, 'snapshots.jsonl'); const audit = join(root, 'audit.jsonl');
+  const report = join(root, 'report.json'); const ledger = join(root, 'ledger.jsonl');
+  writeFileSync(snapshots, `${JSON.stringify(snap('p', 1))}\n`); writeFileSync(audit, '');
+  writeEliteShadowReport(snapshots, audit, report, ledger, health());
+  const manifestPath = `${report}.manifest.json`;
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  manifest.generationId = '/../outside/report';
+  manifest.reportPath = `${report}.generation-${manifest.generationId}`;
+  manifest.ledgerPath = `${ledger}.generation-${manifest.generationId}`;
+  writeFileSync(manifestPath, JSON.stringify(manifest));
+  assert.throws(() => readEliteShadowPublication(report, ledger), /invalid elite shadow publication manifest/);
+});
