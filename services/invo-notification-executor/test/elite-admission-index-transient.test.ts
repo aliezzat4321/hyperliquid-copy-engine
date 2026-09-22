@@ -26,16 +26,24 @@ function setup() {
         selectorVersion: ELITE_SELECTOR_VERSION,
         observedAtMs,
         bucket: 'ELITE_CANDIDATE',
+        portfolioName: 'Elite', ownerId: 'owner', username: 'elite', verified: true,
+        createdAtMs: observedAtMs - 10 * 86_400_000, lastActivityAtMs: observedAtMs,
+        openPositions: 1, wonPositions: 20, lostPositions: 5,
         closedPositions: 25,
         closedPositionsPerDay: 2,
         winRatePct: 80,
         percentChange: 200,
+        hybridRequiredReturnPct: 100, hybridRequiredClosedPositions: 20,
         winLossRatio: 4,
+        currentWinStreak: 2, followerCount: 10,
         daysActive: 10,
         recentActivityDaysAgo: 0,
         liquidated: false,
         sourceFilter: 'test',
         score: 90,
+        scoreBreakdown: { winRate: 20, historicalReturn: 20, sampleSize: 10,
+          activeDays: 5, dailyFrequency: 5, recentActivity: 5, availableWeight: 100 },
+        reasons: ['qualified'], rawShapeKeys: ['id'],
       },
     },
   }));
@@ -49,6 +57,7 @@ function setup() {
         portfolioId,
         selectorVersion: ELITE_SELECTOR_VERSION,
         admittedAtMs: observedAtMs,
+        score: 90,
       },
     },
   }));
@@ -67,7 +76,8 @@ test('compact selector-index corruption is transient and cannot consume NEW/ADD'
   for (const [name, body, reason] of [
     ['unparseable', '{broken', 'candidate_snapshot_index_unparseable'],
     ['wrapper', JSON.stringify({ version: 2, rows: [] }), 'candidate_snapshot_index_invalid_wrapper'],
-    ['row', JSON.stringify({ version: 1, rows: [{}] }), 'candidate_snapshot_index_invalid_row'],
+    ['row', JSON.stringify({ version: 1, selectorVersion: ELITE_SELECTOR_VERSION, rows: [{}] }),
+      'candidate_snapshot_index_invalid_row'],
   ] as const) {
     const { statePath, snapshotsPath, admissionPath } = setup();
     writeFileSync(`${snapshotsPath}.recent.json`, body);

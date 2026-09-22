@@ -116,6 +116,64 @@ const PORTFOLIO_BUCKETS = new Set<PortfolioBucket>([
   'ELITE_CANDIDATE', 'SPARSE_HIGH_RETURN', 'RESEARCH_WIDE', 'REJECTED_DEMOTED',
 ]);
 
+export const ALLOWED_PORTFOLIO_BUCKETS: ReadonlySet<PortfolioBucket> = PORTFOLIO_BUCKETS;
+
+function nullableFinite(value: unknown): boolean {
+  return value === null || (typeof value === 'number' && Number.isFinite(value));
+}
+
+/** Exact structural contract emitted by classifyPortfolio and consumed by any
+ * authorization/terminal-denial boundary. Keep this stricter than the compact
+ * projector snapshot contract: a partial imitation must never authorize or consume. */
+export function isCanonicalPortfolioSnapshot(row: unknown): row is PortfolioSnapshot {
+  if (row == null || typeof row !== 'object' || Array.isArray(row)) return false;
+  const candidate = row as Record<string, unknown>;
+  const breakdown = candidate.scoreBreakdown;
+  if (breakdown == null || typeof breakdown !== 'object' || Array.isArray(breakdown)) return false;
+  const scoreBreakdown = breakdown as Record<string, unknown>;
+  return typeof candidate.portfolioId === 'string' && candidate.portfolioId.trim().length > 0
+    && typeof candidate.observedAtMs === 'number' && Number.isFinite(candidate.observedAtMs) && candidate.observedAtMs > 0
+    && candidate.selectorVersion === ELITE_SELECTOR_VERSION
+    && PORTFOLIO_BUCKETS.has(candidate.bucket as PortfolioBucket)
+    && typeof candidate.sourceFilter === 'string' && candidate.sourceFilter.trim().length > 0
+    && (candidate.portfolioName === null || typeof candidate.portfolioName === 'string')
+    && (candidate.ownerId === null || typeof candidate.ownerId === 'string')
+    && (candidate.username === null || typeof candidate.username === 'string')
+    && (candidate.verified === null || typeof candidate.verified === 'boolean')
+    && nullableFinite(candidate.createdAtMs)
+    && nullableFinite(candidate.daysActive)
+    && nullableFinite(candidate.lastActivityAtMs)
+    && nullableFinite(candidate.recentActivityDaysAgo)
+    && (candidate.openPositions === null || (typeof candidate.openPositions === 'number'
+      && Number.isInteger(candidate.openPositions) && candidate.openPositions >= 0))
+    && typeof candidate.closedPositions === 'number' && Number.isInteger(candidate.closedPositions)
+      && candidate.closedPositions >= 0
+    && nullableFinite(candidate.closedPositionsPerDay)
+    && typeof candidate.wonPositions === 'number' && Number.isInteger(candidate.wonPositions) && candidate.wonPositions >= 0
+    && typeof candidate.lostPositions === 'number' && Number.isInteger(candidate.lostPositions) && candidate.lostPositions >= 0
+    && (candidate.winRatePct === null || (typeof candidate.winRatePct === 'number'
+      && Number.isFinite(candidate.winRatePct) && candidate.winRatePct >= 0 && candidate.winRatePct <= 100))
+    && nullableFinite(candidate.percentChange)
+    && nullableFinite(candidate.hybridRequiredReturnPct)
+    && (candidate.hybridRequiredClosedPositions === null
+      || (typeof candidate.hybridRequiredClosedPositions === 'number'
+        && Number.isInteger(candidate.hybridRequiredClosedPositions) && candidate.hybridRequiredClosedPositions >= 0))
+    && nullableFinite(candidate.winLossRatio)
+    && nullableFinite(candidate.currentWinStreak)
+    && nullableFinite(candidate.followerCount)
+    && (candidate.liquidated === null || typeof candidate.liquidated === 'boolean')
+    && typeof candidate.score === 'number' && Number.isFinite(candidate.score)
+    && typeof scoreBreakdown.winRate === 'number' && Number.isFinite(scoreBreakdown.winRate)
+    && typeof scoreBreakdown.historicalReturn === 'number' && Number.isFinite(scoreBreakdown.historicalReturn)
+    && typeof scoreBreakdown.sampleSize === 'number' && Number.isFinite(scoreBreakdown.sampleSize)
+    && nullableFinite(scoreBreakdown.activeDays)
+    && nullableFinite(scoreBreakdown.dailyFrequency)
+    && nullableFinite(scoreBreakdown.recentActivity)
+    && typeof scoreBreakdown.availableWeight === 'number' && Number.isFinite(scoreBreakdown.availableWeight)
+    && Array.isArray(candidate.reasons) && candidate.reasons.every(value => typeof value === 'string')
+    && Array.isArray(candidate.rawShapeKeys) && candidate.rawShapeKeys.every(value => typeof value === 'string');
+}
+
 function validRecentSnapshot(row: unknown): row is PortfolioSnapshot {
   if (row == null || typeof row !== 'object' || Array.isArray(row)) return false;
   const candidate = row as Partial<PortfolioSnapshot>;

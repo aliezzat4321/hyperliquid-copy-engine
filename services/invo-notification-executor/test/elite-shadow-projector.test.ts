@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { loadCandidateSnapshots, projectEliteShadow } from '../src/elite-shadow-projector.js';
+import { loadCandidateSnapshots, projectEliteShadow, writeEliteShadowReport } from '../src/elite-shadow-projector.js';
 import { ELITE_SELECTOR_VERSION } from '../src/portfolio-candidates.js';
 
 const snap = (portfolioId: string, observedAtMs: number) => ({ portfolioId, observedAtMs,
@@ -134,4 +134,71 @@ test('malformed selector JSONL fails closed instead of preserving stale elite me
   const hot = join(root, 'snapshots.jsonl');
   writeFileSync(hot, JSON.stringify({ portfolioId: 'p1', observedAtMs: 1000, selectorVersion: ELITE_SELECTOR_VERSION, bucket: 'ELITE_CANDIDATE' }) + String.fromCharCode(10) + '{"portfolioId":"p1","observedAtMs":2000,');
   assert.throws(() => loadCandidateSnapshots(hot), /corrupt JSONL evidence/);
+});
+
+test('parseable malformed selector rows fail closed with explicit path and line', () => {
+  const invalid = [
+    {}, [], null, 7,
+    { observedAtMs: 1, selectorVersion: ELITE_SELECTOR_VERSION, bucket: 'ELITE_CANDIDATE' },
+    { portfolioId: 'p', selectorVersion: ELITE_SELECTOR_VERSION, bucket: 'ELITE_CANDIDATE' },
+    { portfolioId: 'p', observedAtMs: 1, bucket: 'ELITE_CANDIDATE' },
+    { portfolioId: 'p', observedAtMs: 1, selectorVersion: 'old', bucket: 'ELITE_CANDIDATE' },
+    { portfolioId: 'p', observedAtMs: 1, selectorVersion: ELITE_SELECTOR_VERSION, bucket: 'UNKNOWN' },
+  ];
+  for (const [index, row] of invalid.entries()) {
+    const root = mkdtempSync(join(tmpdir(), `elite-shadow-selector-schema-${index}-`));
+    const path = join(root, 'snapshots.jsonl');
+    writeFileSync(path, `${JSON.stringify(snap('valid', 1))}\n${JSON.stringify(row)}\n`);
+    assert.throws(() => loadCandidateSnapshots(path), new RegExp(`corrupt JSONL evidence .*snapshots.jsonl:2`));
+  }
+});
+
+test('lifecycle audit rows require recognized type, identity, and causal time', () => {
+  const malformed = [
+    {}, [], null, 1,
+    { type: 'shadow_opened', sourceBaseId: 'x', portfolioId: 'p' },
+    { type: 'shadow_closed', sourceBaseId: 'x', portfolioId: 'p' },
+    { type: 'shadow_close_incomplete', sourceBaseId: 'x', portfolioId: 'p', decisionAtMs: Number.NaN },
+    { type: 'shadow_close_unknown', sourceBaseId: 'x', portfolioId: 'p', decisionAtMs: 2 },
+    { type: 'shadow_close_rejected', sourceBaseId: '', portfolioId: 'p', decisionAtMs: 2 },
+  ];
+  for (const row of malformed) {
+    assert.throws(() => projectEliteShadow([snap('p', 1)], [row as any], health()), /corrupt audit evidence/);
+  }
+});
+
+test('corrupt runtime managed and mark rows invalidate all headline profitability', () => {
+  const corruptHealth = [
+    health({ corrupt: {} }),
+    health({}, [{}]),
+    { ...health({ a: { paper: true, sourceBaseId: 'dup' }, b: { paper: true, sourceBaseId: 'dup' } }),
+      shadowOpenExposureCount: 2 },
+    { ...health(), shadowMarks: [
+      { sourceBaseId: 'dup', status: 'BOOK_REJECTED' }, { sourceBaseId: 'dup', status: 'FUNDING_UNAVAILABLE' },
+    ] },
+    health({}, [{ sourceBaseId: 'x', status: 'MARKED', netPnlUsd: '4' }]),
+    health({}, [{ sourceBaseId: 'x', status: 'UNKNOWN' }]),
+    { ...health({ x: { paper: false, sourceBaseId: 'x' } }), shadowOpenExposureCount: 0 },
+  ];
+  for (const runtime of corruptHealth) {
+    const report = projectEliteShadow([snap('p', 1)], [], runtime as any);
+    assert.equal(report.runtimeHealthValid, false);
+    assert.equal(report.profitabilityComplete, false);
+    assert.equal(report.openNetPnlUsd, null);
+    assert.equal(report.totalObservedNetPnlUsd, null);
+  }
+});
+
+test('report generation corruption failure preserves the previous report', () => {
+  const root = mkdtempSync(join(tmpdir(), 'elite-shadow-cli-fail-'));
+  const snapshots = join(root, 'snapshots.jsonl');
+  const audit = join(root, 'audit.jsonl');
+  const report = join(root, 'report.json');
+  const ledger = join(root, 'ledger.jsonl');
+  writeFileSync(snapshots, `${JSON.stringify(snap('p', 1))}\n`);
+  writeFileSync(audit, `${JSON.stringify({ type: 'shadow_opened', sourceBaseId: 'x', portfolioId: 'p' })}\n`);
+  writeFileSync(report, 'prior-report');
+  assert.throws(() => writeEliteShadowReport(snapshots, audit, report, ledger, health()),
+    /corrupt JSONL evidence .*audit.jsonl:1/);
+  assert.equal(readFileSync(report, 'utf8'), 'prior-report');
 });

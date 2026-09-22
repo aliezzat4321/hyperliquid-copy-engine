@@ -28,6 +28,7 @@ const portfolioId = 'elite-portfolio';
 
 function validState(overrides: Record<string, unknown> = {}) {
   return {
+    version: 1,
     selectorVersion: ELITE_SELECTOR_VERSION,
     lastObservedAtMs: candidateObservedAtMs,
     firstEliteAtMs: { [portfolioId]: candidateObservedAtMs - 1_000 },
@@ -35,17 +36,35 @@ function validState(overrides: Record<string, unknown> = {}) {
       [portfolioId]: {
         portfolioId,
         observedAtMs: candidateObservedAtMs,
+        portfolioName: 'Elite portfolio',
+        ownerId: 'owner-1',
+        username: 'elite-owner',
+        verified: true,
+        createdAtMs: candidateObservedAtMs - 8 * 86_400_000,
+        lastActivityAtMs: candidateObservedAtMs - 1_000,
+        openPositions: 1,
         bucket: 'ELITE_CANDIDATE',
         closedPositions: 24,
         closedPositionsPerDay: 3,
         winRatePct: 83.3,
         percentChange: 120,
+        hybridRequiredReturnPct: 80,
+        hybridRequiredClosedPositions: 20,
         winLossRatio: 4.99,
+        wonPositions: 20,
+        lostPositions: 4,
+        currentWinStreak: 3,
+        followerCount: 10,
         daysActive: 8,
         recentActivityDaysAgo: 0.25,
         liquidated: false,
         sourceFilter: '1W',
         score: 63.4,
+        scoreBreakdown: { winRate: 20, historicalReturn: 20, sampleSize: 10,
+          activeDays: 5, dailyFrequency: 5, recentActivity: 3, availableWeight: 100 },
+        selectorVersion: ELITE_SELECTOR_VERSION,
+        reasons: ['meets_hybrid_win_rate_return_gate_v3'],
+        rawShapeKeys: ['id'],
       },
     },
     ...overrides,
@@ -267,7 +286,7 @@ test('structural non-elite admission remains terminal', () => {
   assert.equal(shouldPersistAdmissionDenial(decision), true);
 });
 
-test('historical snapshot authorizes a trade when latest aggregate state is newer than the trade', () => {
+test('future aggregate state stays transient even when a historical row is pre-trade', () => {
   const dir = mkdtempSync(join(tmpdir(), 'lane3-elite-history-'));
   const statePath = join(dir, 'portfolio-candidates.json');
   const snapshotsPath = join(dir, 'portfolio-candidate-snapshots.jsonl');
@@ -284,7 +303,8 @@ test('historical snapshot authorizes a trade when latest aggregate state is newe
       },
     },
   })));
-  writeFileSync(`${snapshotsPath}.recent.json`, JSON.stringify({ version: 1, rows: [{
+  writeFileSync(`${snapshotsPath}.recent.json`, JSON.stringify({ version: 1,
+    selectorVersion: ELITE_SELECTOR_VERSION, rows: [{
     ...(validState().portfolios as any)[portfolioId],
     selectorVersion: ELITE_SELECTOR_VERSION,
     observedAtMs: historicalAt,
@@ -293,9 +313,10 @@ test('historical snapshot authorizes a trade when latest aggregate state is newe
   const decision = eliteAdmissionFromState(
     statePath, portfolioId, decisionAtMs, 20 * 60_000, snapshotsPath, admissionIndex(statePath),
   );
-  assert.equal(decision.allowed, true);
-  assert.equal(decision.reason, 'elite_candidate_pretrade_snapshot_qualified');
-  assert.equal(decision.candidateObservedAtMs, historicalAt);
+  assert.equal(decision.allowed, false);
+  assert.equal(decision.reason, 'candidate_state_from_future');
+  assert.equal(decision.disposition, 'TRANSIENT');
+  assert.equal(shouldPersistAdmissionDenial(decision), false);
 });
 
 test('latest pre-trade snapshot preserves demotion and prevents look-ahead re-promotion', () => {
@@ -306,7 +327,7 @@ test('latest pre-trade snapshot preserves demotion and prevents look-ahead re-pr
   const demotedAt = decisionAtMs - 60_000;
   const futureAt = decisionAtMs + 60_000;
   writeFileSync(statePath, JSON.stringify(validState({
-    lastObservedAtMs: futureAt,
+    lastObservedAtMs: decisionAtMs,
     firstEliteAtMs: { [portfolioId]: eliteAt },
     portfolios: {
       [portfolioId]: {
@@ -317,7 +338,8 @@ test('latest pre-trade snapshot preserves demotion and prevents look-ahead re-pr
     },
   })));
   const baseCandidate = (validState().portfolios as any)[portfolioId];
-  writeFileSync(`${snapshotsPath}.recent.json`, JSON.stringify({ version: 1, rows: [
+  writeFileSync(`${snapshotsPath}.recent.json`, JSON.stringify({ version: 1,
+    selectorVersion: ELITE_SELECTOR_VERSION, rows: [
     { ...baseCandidate, selectorVersion: ELITE_SELECTOR_VERSION, observedAtMs: eliteAt, bucket: 'ELITE_CANDIDATE' },
     { ...baseCandidate, selectorVersion: ELITE_SELECTOR_VERSION, observedAtMs: demotedAt, bucket: 'RESEARCH_WIDE' },
   ] }));
@@ -337,7 +359,8 @@ test('admission latency and memory are independent of a sparse 1GB append-only h
   writeFileSync(snapshotsPath, '');
   truncateSync(snapshotsPath, 1024 * 1024 * 1024);
   const candidate = (validState().portfolios as any)[portfolioId];
-  writeFileSync(`${snapshotsPath}.recent.json`, JSON.stringify({ version: 1, rows: [
+  writeFileSync(`${snapshotsPath}.recent.json`, JSON.stringify({ version: 1,
+    selectorVersion: ELITE_SELECTOR_VERSION, rows: [
     { ...candidate, selectorVersion: ELITE_SELECTOR_VERSION },
   ] }));
   const before = process.memoryUsage().heapUsed;
@@ -351,8 +374,7 @@ test('malformed compact snapshot index fails closed instead of throwing through 
   const dir = mkdtempSync(join(tmpdir(), 'lane3-elite-malformed-index-'));
   const statePath = join(dir, 'portfolio-candidates.json');
   const snapshotsPath = join(dir, 'portfolio-candidate-snapshots.jsonl');
-  const futureState = validState({ lastObservedAtMs: decisionAtMs + 1 });
-  writeFileSync(statePath, JSON.stringify(futureState));
+  writeFileSync(statePath, JSON.stringify(validState()));
   writeFileSync(`${snapshotsPath}.recent.json`, '{"version":1,"rows":[');
   const decision = eliteAdmissionFromState(statePath, portfolioId, decisionAtMs, 20 * 60_000, snapshotsPath);
   assert.equal(decision.allowed, false);
@@ -384,7 +406,8 @@ test('invalid compact index rows fail closed without falling back to current eli
     const statePath = join(dir, 'portfolio-candidates.json');
     const snapshotsPath = join(dir, 'portfolio-candidate-snapshots.jsonl');
     writeFileSync(statePath, JSON.stringify(validState()));
-    writeFileSync(`${snapshotsPath}.recent.json`, JSON.stringify({ version: 1, rows }));
+    writeFileSync(`${snapshotsPath}.recent.json`, JSON.stringify({ version: 1,
+      selectorVersion: ELITE_SELECTOR_VERSION, rows }));
     const decision = eliteAdmissionFromState(
       statePath, portfolioId, decisionAtMs, 20 * 60_000, snapshotsPath,
     );
@@ -430,4 +453,66 @@ test('malformed existing admission row is transient corruption and cannot consum
   assert.equal(decision.disposition, 'TRANSIENT');
   assert.equal(decision.retryable, true);
   assert.equal(shouldPersistAdmissionDenial(decision), false);
+});
+
+test('every canonical candidate field is required before elite allow or non-elite terminal denial', () => {
+  const canonical = (validState().portfolios as any)[portfolioId];
+  for (const field of Object.keys(canonical)) {
+    const corrupted = { ...canonical };
+    delete corrupted[field];
+    const state = validState({ portfolios: { [portfolioId]: corrupted } });
+    const path = stateFile(state);
+    const decision = eliteAdmissionFromState(
+      path, portfolioId, decisionAtMs, 20 * 60_000, undefined, admissionIndex(path),
+    );
+    assert.equal(decision.disposition, 'TRANSIENT', field);
+    assert.equal(decision.retryable, true, field);
+    assert.equal(shouldPersistAdmissionDenial(decision), false, field);
+  }
+  for (const bucket of ['ELITE_CANDIDATE', 'RESEARCH_WIDE'] as const) {
+    const minimal = { portfolioId, observedAtMs: candidateObservedAtMs,
+      selectorVersion: ELITE_SELECTOR_VERSION, bucket };
+    const path = stateFile(validState({ portfolios: { [portfolioId]: minimal } }));
+    const decision = eliteAdmissionFromState(
+      path, portfolioId, decisionAtMs, 20 * 60_000, undefined, admissionIndex(path),
+    );
+    assert.equal(decision.disposition, 'TRANSIENT');
+    assert.equal(shouldPersistAdmissionDenial(decision), false);
+  }
+});
+
+test('candidate envelope version and future envelope fail transient before row selection', () => {
+  for (const state of [
+    { ...validState(), version: 2 },
+    { ...validState(), version: undefined },
+    { ...validState(), lastObservedAtMs: decisionAtMs + 1 },
+  ]) {
+    const path = stateFile(state);
+    const decision = eliteAdmissionFromState(
+      path, portfolioId, decisionAtMs, 20 * 60_000, undefined, admissionIndex(path),
+    );
+    assert.equal(decision.disposition, 'TRANSIENT');
+    assert.equal(decision.retryable, true);
+    assert.equal(shouldPersistAdmissionDenial(decision), false);
+  }
+});
+
+test('admission index requires exact complete writer row schema', () => {
+  const valid = { portfolioId, admittedAtMs: candidateObservedAtMs - 1_000,
+    score: 63.4, selectorVersion: ELITE_SELECTOR_VERSION };
+  const corrupt = [
+    { ...valid, score: undefined }, { ...valid, score: '63.4' }, { ...valid, score: null },
+    { ...valid, admittedAtMs: -1 }, { ...valid, admittedAtMs: '1' },
+    { ...valid, selectorVersion: 'old' }, { ...valid, unexpectedCritical: {} },
+  ];
+  for (const row of corrupt) {
+    const path = stateFile(validState());
+    const index = join(path, '..', 'elite-direct-watch-admissions.json');
+    writeFileSync(index, JSON.stringify({ version: 1, generatedAtMs: decisionAtMs,
+      healthy: true, suspensionReason: null, rows: { [portfolioId]: row } }));
+    const decision = eliteAdmissionFromState(path, portfolioId, decisionAtMs, 20 * 60_000, undefined, index);
+    assert.equal(decision.reason, 'direct_watch_admission_index_invalid');
+    assert.equal(decision.disposition, 'TRANSIENT');
+    assert.equal(shouldPersistAdmissionDenial(decision), false);
+  }
 });

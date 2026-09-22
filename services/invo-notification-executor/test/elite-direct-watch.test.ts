@@ -34,6 +34,23 @@ const target: EliteDirectTarget = {
   portfolioId: 'p1', ownerId: 'o1', username: 'elite', sourceFilter: 'trending', score: 100,
 };
 
+function candidateSnapshot(portfolioId: string, bucket: 'ELITE_CANDIDATE' | 'RESEARCH_WIDE',
+  observedAtMs: number, overrides: Record<string, unknown> = {}) {
+  return {
+    portfolioId, observedAtMs, selectorVersion: ELITE_SELECTOR_VERSION, bucket,
+    sourceFilter: 'all', portfolioName: portfolioId, ownerId: `owner-${portfolioId}`,
+    username: `user-${portfolioId}`, verified: true, createdAtMs: observedAtMs - 10 * 86_400_000,
+    daysActive: 10, lastActivityAtMs: observedAtMs, recentActivityDaysAgo: 0,
+    openPositions: 1, closedPositions: 25, closedPositionsPerDay: 2.5,
+    wonPositions: 20, lostPositions: 5, winRatePct: 80, percentChange: 200,
+    hybridRequiredReturnPct: 100, hybridRequiredClosedPositions: 20, winLossRatio: 4,
+    currentWinStreak: 2, followerCount: 10, liquidated: false, score: 90,
+    scoreBreakdown: { winRate: 20, historicalReturn: 20, sampleSize: 10,
+      activeDays: 5, dailyFrequency: 5, recentActivity: 5, availableWeight: 100 },
+    reasons: ['qualified'], rawShapeKeys: ['id'], ...overrides,
+  };
+}
+
 function openRow(overrides: Record<string, unknown> = {}) {
   return {
     id: 'inv1', baseId: 'base1', baseShortId: 'short1', ticker: 'SUI',
@@ -129,8 +146,9 @@ test('candidate loader tracks only fresh elite portfolios', () => {
     selectorVersion: ELITE_SELECTOR_VERSION,
     lastObservedAtMs: BASE,
     portfolios: {
-      p1: { ...target, selectorVersion: ELITE_SELECTOR_VERSION, observedAtMs: BASE, bucket: 'ELITE_CANDIDATE' },
-      p2: { portfolioId: 'p2', selectorVersion: ELITE_SELECTOR_VERSION, ownerId: 'o2', username: 'wide', sourceFilter: 'all', observedAtMs: BASE, bucket: 'RESEARCH_WIDE' },
+      p1: candidateSnapshot('p1', 'ELITE_CANDIDATE', BASE,
+        { ownerId: target.ownerId, username: target.username, sourceFilter: target.sourceFilter, score: target.score }),
+      p2: candidateSnapshot('p2', 'RESEARCH_WIDE', BASE),
     },
   }));
   const fresh = loadEliteDirectTargets(path, BASE + 10, 20_000);
@@ -148,8 +166,9 @@ test('canonical rows remain visible across cycle clocks; only fresh non-elite is
     selectorVersion: ELITE_SELECTOR_VERSION,
     lastObservedAtMs: BASE + 10,
     portfolios: {
-      p1: { ...target, selectorVersion: ELITE_SELECTOR_VERSION, observedAtMs: BASE, bucket: 'ELITE_CANDIDATE' },
-      p2: { ...target, selectorVersion: ELITE_SELECTOR_VERSION, portfolioId: 'p2', observedAtMs: BASE + 10, bucket: 'RESEARCH_WIDE' },
+      p1: candidateSnapshot('p1', 'ELITE_CANDIDATE', BASE,
+        { ownerId: target.ownerId, username: target.username, sourceFilter: target.sourceFilter, score: target.score }),
+      p2: candidateSnapshot('p2', 'RESEARCH_WIDE', BASE + 10),
     },
   }));
   const fresh = loadEliteDirectTargets(path, BASE + 11, 20_000);

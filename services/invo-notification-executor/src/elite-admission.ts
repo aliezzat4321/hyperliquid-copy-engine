@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, statSync } from 'fs';
-import { ELITE_SELECTOR_VERSION } from './portfolio-candidates.js';
+import { ELITE_SELECTOR_VERSION, isCanonicalPortfolioSnapshot } from './portfolio-candidates.js';
 
 export const ELITE_ADMISSION_VERSION = 'lane3-elite-admission-v1-20260916';
 
@@ -22,14 +22,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return prototype === Object.prototype || prototype === null;
 }
 
-function validRecentRow(row: unknown): boolean {
-  if (!isPlainObject(row)) return false;
-  const observedAtMs = row.observedAtMs;
-  return typeof row.portfolioId === 'string' && row.portfolioId.trim().length > 0
-    && row.selectorVersion === ELITE_SELECTOR_VERSION
-    && typeof observedAtMs === 'number' && Number.isFinite(observedAtMs) && observedAtMs > 0
-    && PORTFOLIO_BUCKETS.has(row.bucket as string);
-}
+function validRecentRow(row: unknown): boolean { return isCanonicalPortfolioSnapshot(row); }
 
 function latestHistoricalSnapshot(
   snapshotsPath: string | undefined,
@@ -46,7 +39,8 @@ function latestHistoricalSnapshot(
   if (!cached || cached.mtimeMs !== stat.mtimeMs || cached.size !== stat.size) {
     try {
       const parsed = JSON.parse(readFileSync(indexPath, 'utf8'));
-      if (!isPlainObject(parsed) || parsed.version !== 1 || !Array.isArray(parsed.rows)) {
+      if (!isPlainObject(parsed) || parsed.version !== 1
+        || parsed.selectorVersion !== ELITE_SELECTOR_VERSION || !Array.isArray(parsed.rows)) {
         return { row: null, error: 'candidate_snapshot_index_invalid_wrapper' };
       }
       if (!parsed.rows.every(validRecentRow)) {
@@ -155,7 +149,8 @@ export function eliteAdmissionFromState(
     try { admissionIndex = JSON.parse(readFileSync(admissionIndexPath, 'utf8')); }
     catch { return { ...denied, disposition: 'TRANSIENT', retryable: true,
       reason: 'direct_watch_admission_index_unparseable' }; }
-    const indexGeneratedAtMs = finite(admissionIndex?.generatedAtMs);
+    const indexGeneratedAtMs = typeof admissionIndex?.generatedAtMs === 'number'
+      && Number.isFinite(admissionIndex.generatedAtMs) ? admissionIndex.generatedAtMs : null;
     const indexRows = admissionIndex?.rows;
     const indexEnvelopeValid = admissionIndex != null
       && typeof admissionIndex === 'object'
@@ -170,6 +165,18 @@ export function eliteAdmissionFromState(
       && (admissionIndex.suspensionReason === null
         || typeof admissionIndex.suspensionReason === 'string');
     if (!indexEnvelopeValid) {
+      return { ...denied, disposition: 'TRANSIENT', retryable: true,
+        reason: 'direct_watch_admission_index_invalid' };
+    }
+    const admissionKeys = new Set(['portfolioId', 'admittedAtMs', 'score', 'selectorVersion']);
+    const indexRowsValid = Object.entries(indexRows as Record<string, unknown>).every(([key, value]) => {
+      if (!isPlainObject(value) || Object.keys(value).some(field => !admissionKeys.has(field))) return false;
+      return value.portfolioId === key && value.selectorVersion === ELITE_SELECTOR_VERSION
+        && typeof value.admittedAtMs === 'number' && Number.isFinite(value.admittedAtMs)
+        && value.admittedAtMs > 0 && value.admittedAtMs <= indexGeneratedAtMs!
+        && typeof value.score === 'number' && Number.isFinite(value.score);
+    });
+    if (!indexRowsValid) {
       return { ...denied, disposition: 'TRANSIENT', retryable: true,
         reason: 'direct_watch_admission_index_invalid' };
     }
@@ -202,7 +209,8 @@ export function eliteAdmissionFromState(
     return { ...denied, disposition: 'TRANSIENT', retryable: true,
       reason: 'candidate_state_unparseable' };
   }
-  if (!isPlainObject(state) || !isPlainObject(state.portfolios) || !isPlainObject(state.firstEliteAtMs)) {
+  if (!isPlainObject(state) || state.version !== 1 || !isPlainObject(state.portfolios)
+    || !isPlainObject(state.firstEliteAtMs)) {
     return { ...denied, disposition: 'TRANSIENT', retryable: true,
       reason: 'candidate_state_invalid_envelope' };
   }
@@ -222,6 +230,16 @@ export function eliteAdmissionFromState(
   if (stateObservedAtMs == null || stateObservedAtMs <= 0) {
     return { ...common, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_state_timestamp_missing' };
   }
+  if (stateObservedAtMs > decisionAtMs) {
+    return { ...common, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_state_from_future' };
+  }
+  const allCandidateRowsValid = Object.entries(state.portfolios).every(([key, value]) =>
+    isCanonicalPortfolioSnapshot(value) && value.portfolioId === key);
+  const allFirstEliteRowsValid = Object.entries(state.firstEliteAtMs).every(([key, value]) =>
+    key.trim().length > 0 && typeof value === 'number' && Number.isFinite(value) && value > 0);
+  if (!allCandidateRowsValid || !allFirstEliteRowsValid) {
+    return { ...common, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_state_invalid_candidate' };
+  }
   if (stateObservedAtMs <= decisionAtMs && decisionAtMs - stateObservedAtMs > maxStateAgeMs) {
     return { ...common, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_state_stale' };
   }
@@ -237,6 +255,10 @@ export function eliteAdmissionFromState(
   }
   const historical = historicalResult.row;
   const current: any = (state.portfolios as Record<string, any>)[portfolioId];
+  const hasCurrent = Object.prototype.hasOwnProperty.call(state.portfolios, portfolioId);
+  if (historical == null && hasCurrent && !isCanonicalPortfolioSnapshot(current)) {
+    return { ...common, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_state_invalid_candidate' };
+  }
   const candidate = historical ?? (
     current && finite(current?.observedAtMs) != null && Number(current.observedAtMs) <= decisionAtMs
       ? current
@@ -244,25 +266,23 @@ export function eliteAdmissionFromState(
   );
 
   if (!candidate || typeof candidate !== 'object') {
-    if (stateObservedAtMs > decisionAtMs) return { ...common, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_state_from_future' };
-    if (Object.prototype.hasOwnProperty.call(state.portfolios, portfolioId) && !isPlainObject(current)) {
-      return { ...common, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_state_invalid_candidate' };
-    }
     if (current && finite(current?.observedAtMs) != null && Number(current.observedAtMs) > decisionAtMs) {
       return { ...common, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_observation_from_future' };
     }
     return { ...common, reason: 'portfolio_not_in_candidate_state' };
   }
 
-  const candidateSelectorVersion = typeof candidate?.selectorVersion === 'string'
-    ? candidate.selectorVersion
-    : selectorVersion;
-  if (candidateSelectorVersion !== ELITE_SELECTOR_VERSION) {
-    return { ...common, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_selector_version_mismatch' };
+  if (!isCanonicalPortfolioSnapshot(candidate)) {
+    return { ...common, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_state_invalid_candidate' };
   }
 
   const candidateObservedAtMs = finite(candidate.observedAtMs);
-  const storedFirstEliteAtMs = finite(state?.firstEliteAtMs?.[portfolioId]);
+  const rawFirstEliteAtMs = state.firstEliteAtMs[portfolioId];
+  if (rawFirstEliteAtMs !== undefined && (typeof rawFirstEliteAtMs !== 'number'
+    || !Number.isFinite(rawFirstEliteAtMs) || rawFirstEliteAtMs <= 0)) {
+    return { ...common, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_state_invalid_candidate' };
+  }
+  const storedFirstEliteAtMs = rawFirstEliteAtMs ?? null;
   const firstEliteAtMs = storedFirstEliteAtMs ?? (
     candidate.bucket === 'ELITE_CANDIDATE' ? candidateObservedAtMs : null
   );
@@ -311,15 +331,17 @@ export function eliteAdmissionFromState(
     return { ...enriched, reason: 'direct_watch_not_admitted' };
   }
   const admission = admissionIndex.rows[portfolioId];
-  const admittedAtMs = finite(admission?.admittedAtMs);
-  const indexGeneratedAtMs = finite(admissionIndex.generatedAtMs);
+  const admittedAtMs = typeof admission?.admittedAtMs === 'number' ? admission.admittedAtMs : null;
+  const indexGeneratedAtMs = typeof admissionIndex.generatedAtMs === 'number' ? admissionIndex.generatedAtMs : null;
   const admissionRowValid = isPlainObject(admission)
     && admission.portfolioId === portfolioId
     && admission.selectorVersion === ELITE_SELECTOR_VERSION
     && admittedAtMs != null
     && admittedAtMs > 0
     && indexGeneratedAtMs != null
-    && admittedAtMs <= indexGeneratedAtMs;
+    && admittedAtMs <= indexGeneratedAtMs
+    && typeof admission.score === 'number'
+    && Number.isFinite(admission.score);
   if (!admissionRowValid) {
     return {
       ...enriched,

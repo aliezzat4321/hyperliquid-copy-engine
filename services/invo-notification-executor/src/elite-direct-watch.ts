@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, truncateSync, writeFileSync } from 'fs';
 import { dirname } from 'path';
 import type { InvoSignal } from './notification-signal.js';
-import { ELITE_SELECTOR_VERSION, type PortfolioBucket } from './portfolio-candidates.js';
+import { ELITE_SELECTOR_VERSION, isCanonicalPortfolioSnapshot, type PortfolioBucket } from './portfolio-candidates.js';
 import { signalWasSeen } from './source-event-dedupe.js';
 
 export const ELITE_DIRECT_WATCH_VERSION = 'lane3-elite-direct-watch-v7-20260920';
@@ -658,8 +658,7 @@ export function loadEliteDirectTargets(
       return rejectedTargets(observedAtMs, 'candidate_row_invalid');
     }
     if (rowObservedAtMs > observedAtMs || nowMs - rowObservedAtMs > maxAgeMs) continue;
-    if (row.selectorVersion !== ELITE_SELECTOR_VERSION
-      || !PORTFOLIO_BUCKETS.has(row.bucket as PortfolioBucket)) {
+    if (!isCanonicalPortfolioSnapshot(row)) {
       return rejectedTargets(observedAtMs, 'candidate_fresh_row_invalid');
     }
     if (row?.bucket !== 'ELITE_CANDIDATE') { demotedPortfolioIds.push(portfolioId); continue; }
