@@ -147,7 +147,7 @@
           "unit": "text",
           "observed_at": "2026-09-22T07:51:53Z",
           "source_type": "COMMIT",
-          "source_ref": "29b1a577c9d9233a483d8bce843ac861b463485a; docs/ai-team/LIVE_TRADING_GATE.md"
+          "source_ref": "29b1a577c9d9233a483d8bce843ac861b463485a"
         },
         {
           "key": "integrated_lane3_rc_reset_contract_tests",
@@ -156,7 +156,7 @@
           "unit": "count",
           "observed_at": "2026-09-22T07:51:53Z",
           "source_type": "COMMIT",
-          "source_ref": "29b1a577c9d9233a483d8bce843ac861b463485a; test_lane3_shadow_epoch_reset.py + deploy_contract.py"
+          "source_ref": "29b1a577c9d9233a483d8bce843ac861b463485a"
         },
         {
           "key": "integrated_lane3_rc_discovery_tests",
@@ -165,7 +165,7 @@
           "unit": "count",
           "observed_at": "2026-09-22T07:51:53Z",
           "source_type": "COMMIT",
-          "source_ref": "29b1a577c9d9233a483d8bce843ac861b463485a; feed evidence + selector + scan capture + admission"
+          "source_ref": "29b1a577c9d9233a483d8bce843ac861b463485a"
         },
         {
           "key": "integrated_lane3_rc_funding_tests",
@@ -174,7 +174,7 @@
           "unit": "count",
           "observed_at": "2026-09-22T07:51:53Z",
           "source_type": "COMMIT",
-          "source_ref": "29b1a577c9d9233a483d8bce843ac861b463485a; funding-oracle + alignment + completeness"
+          "source_ref": "29b1a577c9d9233a483d8bce843ac861b463485a"
         },
         {
           "key": "integrated_lane3_rc_executor_tests",
@@ -183,7 +183,7 @@
           "unit": "count",
           "observed_at": "2026-09-22T07:51:53Z",
           "source_type": "COMMIT",
-          "source_ref": "29b1a577c9d9233a483d8bce843ac861b463485a; npm run check"
+          "source_ref": "29b1a577c9d9233a483d8bce843ac861b463485a"
         },
         {
           "key": "integrated_lane3_rc_implementation",

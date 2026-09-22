@@ -49,11 +49,11 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
 | Fact | Value | Observed | Source |
 |---|---:|---|---|
-| integrated RC live authorization / real trading | authorization NONE / REAL_TRADING_ENABLED=NO | `2026-09-22T07:51:53Z` | commit `29b1a577c9d9233a483d8bce843ac861b463485a; docs/ai-team/LIVE_TRADING_GATE.md` |
-| integrated RC reset and deploy-contract pytest tests passing | 13 | `2026-09-22T07:51:53Z` | commit `29b1a577c9d9233a483d8bce843ac861b463485a; test_lane3_shadow_epoch_reset.py + deploy_contract.py` |
-| integrated RC focused discovery/admission/durability subtests passing | 61 | `2026-09-22T07:51:53Z` | commit `29b1a577c9d9233a483d8bce843ac861b463485a; feed evidence + selector + scan capture + admission` |
-| integrated RC focused funding subtests passing | 28 | `2026-09-22T07:51:53Z` | commit `29b1a577c9d9233a483d8bce843ac861b463485a; funding-oracle + alignment + completeness` |
-| integrated RC full executor subtests passing | 254 | `2026-09-22T07:51:53Z` | commit `29b1a577c9d9233a483d8bce843ac861b463485a; npm run check` |
+| integrated RC live authorization / real trading | authorization NONE / REAL_TRADING_ENABLED=NO | `2026-09-22T07:51:53Z` | commit `29b1a577c9d9233a483d8bce843ac861b463485a` |
+| integrated RC reset and deploy-contract pytest tests passing | 13 | `2026-09-22T07:51:53Z` | commit `29b1a577c9d9233a483d8bce843ac861b463485a` |
+| integrated RC focused discovery/admission/durability subtests passing | 61 | `2026-09-22T07:51:53Z` | commit `29b1a577c9d9233a483d8bce843ac861b463485a` |
+| integrated RC focused funding subtests passing | 28 | `2026-09-22T07:51:53Z` | commit `29b1a577c9d9233a483d8bce843ac861b463485a` |
+| integrated RC full executor subtests passing | 254 | `2026-09-22T07:51:53Z` | commit `29b1a577c9d9233a483d8bce843ac861b463485a` |
 | integrated Lane 3 release-candidate implementation commit | 29b1a577c9d9233a483d8bce843ac861b463485a | `2026-09-22T07:51:53Z` | commit `29b1a577c9d9233a483d8bce843ac861b463485a` |
 | Lane 3 final source-capture implementation commit | bbc574f | `2026-09-21T19:49:53Z` | commit `bbc574feb7ff31bcc1026e1c3522f4d9887a17aa` |
 | builder-validated executor subtests passing | 211 | `2026-09-21T19:49:53Z` | commit `bbc574feb7ff31bcc1026e1c3522f4d9887a17aa` |
