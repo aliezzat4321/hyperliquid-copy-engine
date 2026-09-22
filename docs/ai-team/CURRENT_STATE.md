@@ -2,7 +2,7 @@
 
 Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
-**Snapshot:** 2026-09-22T12:47:10Z
+**Snapshot:** 2026-09-22T13:21:29Z
 **Updated by:** CODEX_CHATGPT
 **Observed main head:** `fd63de5c60fc9d19ec643a2c491d5a815581765a`
 **Mission:** Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.
@@ -49,12 +49,12 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
 | Fact | Value | Observed | Source |
 |---|---:|---|---|
-| integrated RC live authorization / real trading | authorization NONE / REAL_TRADING_ENABLED=NO | `2026-09-22T12:47:10Z` | commit `e98ff94f0605d96a3618a8ab60bf3d8f22073924` |
-| integrated RC reset, deploy-contract, and shadow-health pytest tests passing | 17 | `2026-09-22T12:47:10Z` | commit `e98ff94f0605d96a3618a8ab60bf3d8f22073924` |
-| integrated RC focused projector/admission/index/direct-watch/funding/feed/health executor suites passing | 12 | `2026-09-22T12:47:10Z` | commit `e98ff94f0605d96a3618a8ab60bf3d8f22073924` |
-| integrated RC AI-team contract pytest tests passing | 61 | `2026-09-22T12:47:10Z` | commit `e98ff94f0605d96a3618a8ab60bf3d8f22073924` |
-| integrated RC full executor compiled test suites passing | 32 | `2026-09-22T12:47:10Z` | commit `e98ff94f0605d96a3618a8ab60bf3d8f22073924` |
-| integrated Lane 3 release-candidate implementation commit | e98ff94f0605d96a3618a8ab60bf3d8f22073924 | `2026-09-22T12:47:10Z` | commit `e98ff94f0605d96a3618a8ab60bf3d8f22073924` |
+| integrated RC live authorization / real trading | authorization NONE / REAL_TRADING_ENABLED=NO | `2026-09-22T13:21:29Z` | commit `b107f86b62476ea4b340e198060dbd9130427ee6` |
+| reset/deploy/health pytest tests passing | 17 | `2026-09-22T13:21:29Z` | commit `b107f86b62476ea4b340e198060dbd9130427ee6` |
+| focused strict-schema projector/admission/index subtests passing | 45 | `2026-09-22T13:21:29Z` | commit `b107f86b62476ea4b340e198060dbd9130427ee6` |
+| AI-team contract pytest tests passing | 61 | `2026-09-22T13:21:29Z` | commit `b107f86b62476ea4b340e198060dbd9130427ee6` |
+| integrated RC full executor subtests passing | 286 | `2026-09-22T13:21:29Z` | commit `b107f86b62476ea4b340e198060dbd9130427ee6` |
+| integrated Lane 3 RC implementation commit | b107f86b62476ea4b340e198060dbd9130427ee6 | `2026-09-22T13:21:29Z` | commit `b107f86b62476ea4b340e198060dbd9130427ee6` |
 | Lane 3 final source-capture implementation commit | bbc574f | `2026-09-21T19:49:53Z` | commit `bbc574feb7ff31bcc1026e1c3522f4d9887a17aa` |
 | builder-validated executor subtests passing | 211 | `2026-09-21T19:49:53Z` | commit `bbc574feb7ff31bcc1026e1c3522f4d9887a17aa` |
 | default direct-watch resident capacity proven by timeout/page/deadline budget | 16 | `2026-09-20T15:33:55Z` | commit `67efba6` |
@@ -63,7 +63,7 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 | exploratory missing portfolios meeting frozen selector on visible evidence | 53 | `2026-09-17T23:46:12Z` | issue `#403` |
 | real trading enabled | False | `2026-09-17T23:10:50Z` | manual `VM runtime env 2026-09-17T23:10Z` |
 
-**Blocker:** Integrated Lane 3 RC implementation e98ff94f0605d96a3618a8ab60bf3d8f22073924 closes the exact-SHA Codex structural-corruption blockers: selector and lifecycle JSONL, candidate/admission authorization state, and profitability runtime health now validate strictly and fail closed; incomplete profitability nulls headline total PnL. Prior source capture, funding, replay, lifecycle, readiness, reset, capacity, and live-off invariants remain included. Builder validation passes 32/32 full executor compiled suites (including 12/12 focused projector/admission/index/direct-watch/funding/feed/health suites), 17/17 reset/deploy/health pytest tests, AI-team validator, 61/61 contract tests, git diff check, and deploy shell syntax. This is not profitability evidence. Production remains fd63de5 and real trading is OFF. Remaining gate: GitHub CI and BOTH independent exact-SHA reviews must PASS the final RC head before shadow-only deployment.
+**Blocker:** Integrated Lane 3 RC implementation b107f86b62476ea4b340e198060dbd9130427ee6 closes the remaining exact-SHA Codex structural fail-open blockers. Selector/audit JSONL now rejects parseable malformed rows with explicit path/line; candidate-state admission uses the canonical LedgerDiskState/PortfolioSnapshot schema; admission rows require the complete writer schema; runtime profitability reuses canonical ManagedPosition and ShadowMark validators with non-coercive lifecycle identities/times/PnL; and elite report+ledger publication is generation-based with an atomic manifest so readers never accept a mixed pair. Independent validation on this exact implementation passes 286/286 full executor subtests, 45/45 focused strict-schema projector/admission/index subtests, 17/17 reset/deploy/health pytest tests, AI-team validator, 61/61 contract tests, git diff check, and both deploy shell syntax checks. This is not profitability evidence. Production remains fd63de5 and real trading is OFF. Remaining gate: GitHub CI and BOTH independent exact-SHA reviews must PASS the final RC head before shadow-only deployment.
 **Next:** Issue #400.
 
 ## Infrastructure
