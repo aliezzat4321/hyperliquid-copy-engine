@@ -2,7 +2,7 @@
 
 Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
-**Snapshot:** 2026-09-22T07:51:53Z
+**Snapshot:** 2026-09-22T08:11:30Z
 **Updated by:** CODEX_CHATGPT
 **Observed main head:** `fd63de5c60fc9d19ec643a2c491d5a815581765a`
 **Mission:** Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.
@@ -49,12 +49,12 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
 | Fact | Value | Observed | Source |
 |---|---:|---|---|
-| integrated RC live authorization / real trading | authorization NONE / REAL_TRADING_ENABLED=NO | `2026-09-22T07:51:53Z` | commit `29b1a577c9d9233a483d8bce843ac861b463485a` |
-| integrated RC reset and deploy-contract pytest tests passing | 13 | `2026-09-22T07:51:53Z` | commit `29b1a577c9d9233a483d8bce843ac861b463485a` |
-| integrated RC focused discovery/admission/durability subtests passing | 61 | `2026-09-22T07:51:53Z` | commit `29b1a577c9d9233a483d8bce843ac861b463485a` |
-| integrated RC focused funding subtests passing | 28 | `2026-09-22T07:51:53Z` | commit `29b1a577c9d9233a483d8bce843ac861b463485a` |
-| integrated RC full executor subtests passing | 254 | `2026-09-22T07:51:53Z` | commit `29b1a577c9d9233a483d8bce843ac861b463485a` |
-| integrated Lane 3 release-candidate implementation commit | 29b1a577c9d9233a483d8bce843ac861b463485a | `2026-09-22T07:51:53Z` | commit `29b1a577c9d9233a483d8bce843ac861b463485a` |
+| integrated RC live authorization / real trading | authorization NONE / REAL_TRADING_ENABLED=NO | `2026-09-22T08:11:30Z` | commit `31e098e3df3ad040ae4f7c6cba5c124a1576e7c7` |
+| integrated RC reset and deploy-contract pytest tests passing | 13 | `2026-09-22T08:11:30Z` | commit `31e098e3df3ad040ae4f7c6cba5c124a1576e7c7` |
+| integrated RC focused discovery/admission/durability subtests passing | 66 | `2026-09-22T08:11:30Z` | commit `31e098e3df3ad040ae4f7c6cba5c124a1576e7c7` |
+| integrated RC focused funding subtests passing | 28 | `2026-09-22T08:11:30Z` | commit `31e098e3df3ad040ae4f7c6cba5c124a1576e7c7` |
+| integrated RC full executor subtests passing | 256 | `2026-09-22T08:11:30Z` | commit `31e098e3df3ad040ae4f7c6cba5c124a1576e7c7` |
+| integrated Lane 3 release-candidate implementation commit | 31e098e3df3ad040ae4f7c6cba5c124a1576e7c7 | `2026-09-22T08:11:30Z` | commit `31e098e3df3ad040ae4f7c6cba5c124a1576e7c7` |
 | Lane 3 final source-capture implementation commit | bbc574f | `2026-09-21T19:49:53Z` | commit `bbc574feb7ff31bcc1026e1c3522f4d9887a17aa` |
 | builder-validated executor subtests passing | 211 | `2026-09-21T19:49:53Z` | commit `bbc574feb7ff31bcc1026e1c3522f4d9887a17aa` |
 | default direct-watch resident capacity proven by timeout/page/deadline budget | 16 | `2026-09-20T15:33:55Z` | commit `67efba6` |
@@ -63,7 +63,7 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 | exploratory missing portfolios meeting frozen selector on visible evidence | 53 | `2026-09-17T23:46:12Z` | issue `#403` |
 | real trading enabled | False | `2026-09-17T23:10:50Z` | manual `VM runtime env 2026-09-17T23:10Z` |
 
-**Blocker:** Integrated Lane 3 RC implementation 29b1a577c9d9233a483d8bce843ac861b463485a combines the latest source-capture/admission, funding-boundary, and feed-candidate durability repairs on one frozen code line. Local integrated validation passes 254/254 executor subtests, 28/28 focused funding, 61/61 focused discovery/admission/durability, and 13/13 reset+deploy-contract tests plus AI-team contract, git diff check, and deploy shell syntax. Production remains unchanged at fd63de5 and real trading is OFF. Remaining gate: both independent reviewers and GitHub CI must PASS this exact integrated RC head before shadow-only deployment and prospective source/event-recall proof.
+**Blocker:** Integrated Lane 3 RC implementation 31e098e3df3ad040ae4f7c6cba5c124a1576e7c7 combines source capture/admission, funding-boundary, and feed-candidate durability on one frozen code line. Full integrated validation passes 256/256 executor subtests, 28/28 focused funding, 66/66 focused discovery/admission/durability, 13/13 reset+deploy-contract, AI-team validator, 61/61 contract tests, git diff check, and deploy shell syntax. The latest repair also requires a structurally valid healthy fresh direct-watch admission index and makes cross-surface canonical dedupe persist each ingress key so feed cursors cannot wedge. Production remains unchanged at fd63de5 and real trading is OFF. Remaining gate: GitHub CI and both independent exact-SHA reviewers must PASS the final RC head before shadow-only deployment and prospective source/event-recall proof.
 **Next:** Issue #400.
 
 ## Infrastructure
