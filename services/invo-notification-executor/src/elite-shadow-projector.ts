@@ -57,7 +57,7 @@ function selectedAt(all: Map<string, PortfolioSnapshot[]>, id: string, when: num
 
 export function projectEliteShadow(snapshots: PortfolioSnapshot[], audit: Row[], health: any | null) {
   const all = histories(snapshots); const active = new Map<string, Membership>(); const included: Row[] = [];
-  const rejects: Row[] = []; let selectorSnapshotUnresolvedOpenEvents = 0;
+  const rejects: Row[] = []; const orphanEliteCloses: Row[] = []; let selectorSnapshotUnresolvedOpenEvents = 0;
   for (const row of audit) { const when = at(row); if (when == null) continue;
     const id = baseId(row), pid = portfolio(row), type = String(row.type ?? ''), selected = pid ? selectedAt(all, pid, when) : null;
     if (open(type) && id && pid) { if (!selected) selectorSnapshotUnresolvedOpenEvents += 1;
@@ -69,29 +69,59 @@ export function projectEliteShadow(snapshots: PortfolioSnapshot[], audit: Row[],
       if (['shadow_close_incomplete', 'shadow_close_rejected'].includes(type)
           || row.economicsCompleteness === 'UNRESOLVED_EXPOSURE') membership.unresolvedAfterSourceClose = true;
       if (type === 'shadow_closed' || type === 'shadow_close_dust_reconciled') active.delete(id); continue; }
+    if (!membership && close(type) && pid) {
+      const hadEliteBefore = (all.get(pid) ?? []).some(snapshot =>
+        snapshot.observedAtMs <= when && snapshot.bucket === 'ELITE_CANDIDATE');
+      if (hadEliteBefore) {
+        orphanEliteCloses.push({ ...row, cohort: 'elite_shadow_unresolved_close',
+          selectorMembershipResolved: false });
+      }
+    }
     if (['skip', 'close_ownership_gap', 'execution_error'].includes(type) && pid && selected?.bucket === 'ELITE_CANDIDATE')
       rejects.push({ ts: row.ts, type, reason: row.reason ?? null, sourceBaseId: id || null, portfolioId: pid,
         selectorSnapshotAtMs: selected.observedAtMs });
   }
-  const ids = new Set(active.keys()), marks = new Map((Array.isArray(health?.shadowMarks) ? health.shadowMarks : [])
+
+  const healthAvailable = health != null && typeof health === 'object' && !Array.isArray(health);
+  const healthOpenExposureCount = Number(health?.shadowOpenExposureCount);
+  const healthUnresolvedCount = Number(health?.unresolvedSourceCloseExposureCount);
+  const managedRows = healthAvailable && health?.managed != null && typeof health.managed === 'object'
+    && !Array.isArray(health.managed) ? Object.values(health.managed) as any[] : null;
+  const runtimePaperIds = managedRows == null ? null : new Set(managedRows
+    .filter((position: any) => position?.paper === true && typeof position?.sourceBaseId === 'string')
+    .map((position: any) => String(position.sourceBaseId)));
+  const runtimeHealthValid = healthAvailable
+    && Number.isInteger(healthOpenExposureCount) && healthOpenExposureCount >= 0
+    && Number.isInteger(healthUnresolvedCount) && healthUnresolvedCount >= 0
+    && runtimePaperIds != null && runtimePaperIds.size === healthOpenExposureCount
+    && Array.isArray(health?.shadowMarks);
+
+  const ids = new Set(active.keys());
+  const runtimeOnlyOpenExposureIds = runtimePaperIds == null ? [] :
+    [...runtimePaperIds].filter(id => !ids.has(id)).sort();
+  const auditOnlyOpenExposureIds = runtimePaperIds == null ? [...ids].sort() :
+    [...ids].filter(id => !runtimePaperIds.has(id)).sort();
+  const runtimeExposureCountMismatch = runtimeHealthValid
+    ? Math.abs(healthOpenExposureCount - active.size) : null;
+  const runtimeExposureReconciliationComplete = runtimeHealthValid
+    && runtimeOnlyOpenExposureIds.length === 0
+    && auditOnlyOpenExposureIds.length === 0
+    && runtimeExposureCountMismatch === 0;
+
+  const marks = new Map((Array.isArray(health?.shadowMarks) ? health.shadowMarks : [])
     .filter((m: any) => ids.has(String(m?.sourceBaseId ?? ''))).map((m: any) => [String(m.sourceBaseId), m]));
   const projectedUnresolvedSourceCloseExposureCount =
     [...active.values()].filter(m => m.unresolvedAfterSourceClose).length;
-  const healthUnresolvedSourceCloseExposureCount = Number.isFinite(Number(health?.unresolvedSourceCloseExposureCount))
-    ? Math.max(0, Number(health.unresolvedSourceCloseExposureCount)) : 0;
-  // Runtime state is allowed to be more conservative than audit projection. If it
-  // knows about unresolved paper exposure that the audit cannot reconstruct, never
-  // let the headline profitability artifact silently treat that exposure as complete.
-  const unresolvedSourceCloseExposureCount = Math.max(
-    projectedUnresolvedSourceCloseExposureCount,
-    healthUnresolvedSourceCloseExposureCount,
-  );
+  const unresolvedSourceCloseExposureCount = runtimeHealthValid
+    ? Math.max(projectedUnresolvedSourceCloseExposureCount, healthUnresolvedCount)
+    : projectedUnresolvedSourceCloseExposureCount;
   let markedElitePositions = 0, openMarkIncompletePositions = 0, openNet = 0;
   for (const membership of active.values()) { const mark: any = marks.get(membership.sourceBaseId);
     if (!membership.unresolvedAfterSourceClose && mark?.status === 'MARKED' && Number.isFinite(Number(mark.netPnlUsd))) {
       markedElitePositions += 1; openNet += Number(mark.netPnlUsd);
     } else openMarkIncompletePositions += 1; }
   const closes = included.filter(row => close(String(row.type ?? '')));
+  const orphanEliteCloseEvents = orphanEliteCloses.length;
   const realized = closes.filter(row => row.type === 'shadow_closed'
     && row.economicsCompleteness === 'COMPLETE_EXECUTION_REALISTIC' && Number.isFinite(Number(row.netPnlUsd)));
   const realizedNetPnlUsd = realized.reduce((sum, row) => sum + Number(row.netPnlUsd), 0);
@@ -105,20 +135,32 @@ export function projectEliteShadow(snapshots: PortfolioSnapshot[], audit: Row[],
   const otherIncompleteCloses = incomplete.filter(r => r.type !== 'shadow_partially_closed'
     && r.type !== 'shadow_close_dust_reconciled' && !['INCOMPLETE_FUNDING', 'INCOMPLETE_LEGACY_ENTRY', 'UNRESOLVED_EXPOSURE']
       .includes(String(r.economicsCompleteness))).length;
-  const openNetPnlUsd = openMarkIncompletePositions === 0 && unresolvedSourceCloseExposureCount === 0 ? openNet : null;
-  const profitabilityComplete = selectorSnapshotUnresolvedOpenEvents === 0 && openMarkIncompletePositions === 0
-    && unresolvedSourceCloseExposureCount === 0 && incomplete.length === 0;
+  const openEconomicsComplete = runtimeExposureReconciliationComplete
+    && openMarkIncompletePositions === 0 && unresolvedSourceCloseExposureCount === 0;
+  const openNetPnlUsd = openEconomicsComplete ? openNet : null;
+  const profitabilityComplete = healthAvailable && runtimeHealthValid && runtimeExposureReconciliationComplete
+    && selectorSnapshotUnresolvedOpenEvents === 0 && orphanEliteCloseEvents === 0
+    && openMarkIncompletePositions === 0 && unresolvedSourceCloseExposureCount === 0 && incomplete.length === 0;
   const openByPortfolio: Record<string, number> = {}; for (const m of active.values())
     openByPortfolio[m.portfolioId] = (openByPortfolio[m.portfolioId] ?? 0) + 1;
   return { selectorVersion: ELITE_SELECTOR_VERSION, methodology: 'causal_execution_realistic_elite_shadow',
     retroactiveSelectionForbidden: true, candidateSnapshotCount: snapshots.length, auditedResearchEvents: audit.length,
     eliteLifecycleEvents: included.length, eliteCandidateRejects: rejects.length, selectorSnapshotUnresolvedOpenEvents,
     openElitePositions: active.size, openEliteByPortfolio: openByPortfolio, markedElitePositions,
-    openMarkIncompletePositions, unresolvedSourceCloseExposureCount, totalCloseEvents: closes.length,
+    openMarkIncompletePositions, unresolvedSourceCloseExposureCount,
+    runtimeHealthValid, runtimeExposureReconciliationComplete,
+    runtimeOnlyOpenExposureCount: runtimeOnlyOpenExposureIds.length,
+    auditOnlyOpenExposureCount: auditOnlyOpenExposureIds.length,
+    runtimeExposureCountMismatch,
+    runtimeOnlyOpenExposureIds: runtimeOnlyOpenExposureIds.slice(0, 50),
+    auditOnlyOpenExposureIds: auditOnlyOpenExposureIds.slice(0, 50),
+    totalCloseEvents: closes.length + orphanEliteCloseEvents, orphanEliteCloseEvents,
     realizedCompleteCloses: realized.length, partialCloseEvents, dustReconciledCloseEvents, incompleteFundingCloses,
-    incompleteLegacyCloses, unresolvedExposureCloses, otherIncompleteCloses, excludedIncompleteCloses: incomplete.length,
+    incompleteLegacyCloses, unresolvedExposureCloses, otherIncompleteCloses,
+    excludedIncompleteCloses: incomplete.length + orphanEliteCloseEvents,
     realizedNetPnlUsd, openNetPnlUsd, totalObservedNetPnlUsd: openNetPnlUsd == null ? null : realizedNetPnlUsd + openNetPnlUsd,
-    profitabilityComplete, healthAvailable: Boolean(health), liveTrading: false, candidateRejectSamples: rejects.slice(-50), included };
+    profitabilityComplete, healthAvailable, liveTrading: false, candidateRejectSamples: rejects.slice(-50),
+    unresolvedLifecycleSamples: orphanEliteCloses.slice(-50), included };
 }
 async function fetchHealth(url: string) { try { const r = await fetch(url, { signal: AbortSignal.timeout(70_000) });
   return r.ok ? await r.json() : null; } catch { return null; } }
