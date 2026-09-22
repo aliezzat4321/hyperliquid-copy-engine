@@ -147,7 +147,7 @@
           "unit": "text",
           "observed_at": "2026-09-22T10:37:06Z",
           "source_type": "COMMIT",
-          "source_ref": "054dc958189239ae6e5edd0f93f05a44fef3839a"
+          "source_ref": "2e6d65dc15afe058e52282b8eed2f2bb49de61ea"
         },
         {
           "key": "integrated_lane3_rc_reset_contract_tests",
@@ -156,7 +156,7 @@
           "unit": "count",
           "observed_at": "2026-09-22T10:37:06Z",
           "source_type": "COMMIT",
-          "source_ref": "054dc958189239ae6e5edd0f93f05a44fef3839a"
+          "source_ref": "2e6d65dc15afe058e52282b8eed2f2bb49de61ea"
         },
         {
           "key": "integrated_lane3_rc_discovery_tests",
@@ -165,7 +165,7 @@
           "unit": "count",
           "observed_at": "2026-09-22T10:37:06Z",
           "source_type": "COMMIT",
-          "source_ref": "054dc958189239ae6e5edd0f93f05a44fef3839a"
+          "source_ref": "2e6d65dc15afe058e52282b8eed2f2bb49de61ea"
         },
         {
           "key": "integrated_lane3_rc_funding_tests",
@@ -174,25 +174,25 @@
           "unit": "count",
           "observed_at": "2026-09-22T10:37:06Z",
           "source_type": "COMMIT",
-          "source_ref": "054dc958189239ae6e5edd0f93f05a44fef3839a"
+          "source_ref": "2e6d65dc15afe058e52282b8eed2f2bb49de61ea"
         },
         {
           "key": "integrated_lane3_rc_executor_tests",
           "label": "integrated RC full executor subtests passing",
-          "value": 273,
+          "value": 274,
           "unit": "count",
           "observed_at": "2026-09-22T10:37:06Z",
           "source_type": "COMMIT",
-          "source_ref": "054dc958189239ae6e5edd0f93f05a44fef3839a"
+          "source_ref": "2e6d65dc15afe058e52282b8eed2f2bb49de61ea"
         },
         {
           "key": "integrated_lane3_rc_implementation",
           "label": "integrated Lane 3 release-candidate implementation commit",
-          "value": "054dc958189239ae6e5edd0f93f05a44fef3839a",
+          "value": "2e6d65dc15afe058e52282b8eed2f2bb49de61ea",
           "unit": "text",
           "observed_at": "2026-09-22T10:37:06Z",
           "source_type": "COMMIT",
-          "source_ref": "054dc958189239ae6e5edd0f93f05a44fef3839a"
+          "source_ref": "2e6d65dc15afe058e52282b8eed2f2bb49de61ea"
         },
         {
           "key": "source_capture_pr_head",
@@ -258,7 +258,7 @@
           "source_ref": "VM runtime env 2026-09-17T23:10Z"
         }
       ],
-      "blocker": "Integrated Lane 3 RC implementation 054dc958189239ae6e5edd0f93f05a44fef3839a is frozen after closing the latest exact-SHA Codex blockers. Runtime health must be a strictly typed operationally-ready /health envelope; null/string counts and unhealthy/live/not-ready health cannot certify profitability. Runtime and audit exposure still reconcile exactly and orphan closes stay explicit. Primary candidate state missing, unparseable, malformed, stale, future, or selector-version-incompatible is transient/retryable and cannot consume NEW/ADD; valid non-elite/not-admitted evidence remains terminal. All prior integrated source-capture, funding, feed-discovery, replay, lifecycle, readiness, and reset fixes remain included. Independent clean validation passes 273/273 full executor subtests, 28/28 focused funding, 81/81 focused integrated regressions, 17/17 reset/deploy/health pytest tests, AI-team validator, 61/61 contract tests, git diff check, and deploy shell syntax. Production remains fd63de5 and real trading is OFF. Remaining gate: GitHub CI and BOTH independent exact-SHA reviews must PASS the final RC head before shadow-only deployment and prospective source/event-recall proof.",
+      "blocker": "Integrated Lane 3 RC implementation 2e6d65dc15afe058e52282b8eed2f2bb49de61ea is frozen after closing the latest exact-SHA Codex blocker: malformed/torn selector or audit JSONL now fails closed instead of silently dropping causal evidence. Prior strict operational health, runtime/audit exposure reconciliation, orphan-close, admission retryability, source capture, funding, replay, lifecycle, readiness, and reset fixes remain included. Independent clean validation passes 274/274 full executor subtests, 17/17 reset/deploy/health pytest tests, AI-team validator, 61/61 contract tests, git diff check, and deploy shell syntax. Production remains fd63de5 and real trading is OFF. Remaining gate: GitHub CI and BOTH independent exact-SHA reviews must PASS the final RC head before shadow-only deployment.",
       "next": "Issue #400"
     }
   },

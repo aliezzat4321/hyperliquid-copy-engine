@@ -49,12 +49,12 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
 | Fact | Value | Observed | Source |
 |---|---:|---|---|
-| integrated RC live authorization / real trading | authorization NONE / REAL_TRADING_ENABLED=NO | `2026-09-22T10:37:06Z` | commit `054dc958189239ae6e5edd0f93f05a44fef3839a` |
-| integrated RC reset, deploy-contract, and shadow-health pytest tests passing | 17 | `2026-09-22T10:37:06Z` | commit `054dc958189239ae6e5edd0f93f05a44fef3839a` |
-| integrated RC focused non-funding admission/discovery/durability/projector/readiness subtests passing | 81 | `2026-09-22T10:37:06Z` | commit `054dc958189239ae6e5edd0f93f05a44fef3839a` |
-| integrated RC focused funding subtests passing | 28 | `2026-09-22T10:37:06Z` | commit `054dc958189239ae6e5edd0f93f05a44fef3839a` |
-| integrated RC full executor subtests passing | 273 | `2026-09-22T10:37:06Z` | commit `054dc958189239ae6e5edd0f93f05a44fef3839a` |
-| integrated Lane 3 release-candidate implementation commit | 054dc958189239ae6e5edd0f93f05a44fef3839a | `2026-09-22T10:37:06Z` | commit `054dc958189239ae6e5edd0f93f05a44fef3839a` |
+| integrated RC live authorization / real trading | authorization NONE / REAL_TRADING_ENABLED=NO | `2026-09-22T10:37:06Z` | commit `2e6d65dc15afe058e52282b8eed2f2bb49de61ea` |
+| integrated RC reset, deploy-contract, and shadow-health pytest tests passing | 17 | `2026-09-22T10:37:06Z` | commit `2e6d65dc15afe058e52282b8eed2f2bb49de61ea` |
+| integrated RC focused non-funding admission/discovery/durability/projector/readiness subtests passing | 81 | `2026-09-22T10:37:06Z` | commit `2e6d65dc15afe058e52282b8eed2f2bb49de61ea` |
+| integrated RC focused funding subtests passing | 28 | `2026-09-22T10:37:06Z` | commit `2e6d65dc15afe058e52282b8eed2f2bb49de61ea` |
+| integrated RC full executor subtests passing | 274 | `2026-09-22T10:37:06Z` | commit `2e6d65dc15afe058e52282b8eed2f2bb49de61ea` |
+| integrated Lane 3 release-candidate implementation commit | 2e6d65dc15afe058e52282b8eed2f2bb49de61ea | `2026-09-22T10:37:06Z` | commit `2e6d65dc15afe058e52282b8eed2f2bb49de61ea` |
 | Lane 3 final source-capture implementation commit | bbc574f | `2026-09-21T19:49:53Z` | commit `bbc574feb7ff31bcc1026e1c3522f4d9887a17aa` |
 | builder-validated executor subtests passing | 211 | `2026-09-21T19:49:53Z` | commit `bbc574feb7ff31bcc1026e1c3522f4d9887a17aa` |
 | default direct-watch resident capacity proven by timeout/page/deadline budget | 16 | `2026-09-20T15:33:55Z` | commit `67efba6` |
@@ -63,7 +63,7 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 | exploratory missing portfolios meeting frozen selector on visible evidence | 53 | `2026-09-17T23:46:12Z` | issue `#403` |
 | real trading enabled | False | `2026-09-17T23:10:50Z` | manual `VM runtime env 2026-09-17T23:10Z` |
 
-**Blocker:** Integrated Lane 3 RC implementation 054dc958189239ae6e5edd0f93f05a44fef3839a is frozen after closing the latest exact-SHA Codex blockers. Runtime health must be a strictly typed operationally-ready /health envelope; null/string counts and unhealthy/live/not-ready health cannot certify profitability. Runtime and audit exposure still reconcile exactly and orphan closes stay explicit. Primary candidate state missing, unparseable, malformed, stale, future, or selector-version-incompatible is transient/retryable and cannot consume NEW/ADD; valid non-elite/not-admitted evidence remains terminal. All prior integrated source-capture, funding, feed-discovery, replay, lifecycle, readiness, and reset fixes remain included. Independent clean validation passes 273/273 full executor subtests, 28/28 focused funding, 81/81 focused integrated regressions, 17/17 reset/deploy/health pytest tests, AI-team validator, 61/61 contract tests, git diff check, and deploy shell syntax. Production remains fd63de5 and real trading is OFF. Remaining gate: GitHub CI and BOTH independent exact-SHA reviews must PASS the final RC head before shadow-only deployment and prospective source/event-recall proof.
+**Blocker:** Integrated Lane 3 RC implementation 2e6d65dc15afe058e52282b8eed2f2bb49de61ea is frozen after closing the latest exact-SHA Codex blocker: malformed/torn selector or audit JSONL now fails closed instead of silently dropping causal evidence. Prior strict operational health, runtime/audit exposure reconciliation, orphan-close, admission retryability, source capture, funding, replay, lifecycle, readiness, and reset fixes remain included. Independent clean validation passes 274/274 full executor subtests, 17/17 reset/deploy/health pytest tests, AI-team validator, 61/61 contract tests, git diff check, and deploy shell syntax. Production remains fd63de5 and real trading is OFF. Remaining gate: GitHub CI and BOTH independent exact-SHA reviews must PASS the final RC head before shadow-only deployment.
 **Next:** Issue #400.
 
 ## Infrastructure
