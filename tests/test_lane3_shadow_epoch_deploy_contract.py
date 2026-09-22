@@ -64,3 +64,13 @@ def test_lane3_deploy_retries_transient_integrated_health_but_is_bounded() -> No
     assert "while (( SECONDS < health_deadline ))" in deploy
     assert 'health_valid=1' in deploy
     assert '[[ "$health_valid" -ne 1 ]]' in deploy
+
+
+def test_portfolio_research_deploy_uses_strict_atomic_elite_publication_reader() -> None:
+    deploy = Path("scripts/deploy_invo_portfolio_research_self_hosted.sh").read_text()
+
+    assert "readEliteShadowPublication" in deploy
+    assert "eliteLedgerBasePath" in deploy
+    assert 'dist/src/elite-shadow-projector.js' in deploy
+    assert "eliteManifest.reportPath" not in deploy
+    assert "eliteManifest.ledgerPath" not in deploy
