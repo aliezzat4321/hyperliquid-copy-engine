@@ -97,6 +97,7 @@ set_env NOTIFICATION_TRADER_STATE_PATH /var/lib/hyperliquid-copy-engine/invo-not
 set_env NOTIFICATION_TRADER_AUDIT_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/audit.jsonl
 set_env NOTIFICATION_TRADER_FUNDING_BOUNDARY_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/funding-boundaries
 set_env NOTIFICATION_TRADER_TRACKER_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/trader-population.json
+set_env NOTIFICATION_TRADER_FEED_PORTFOLIO_EVIDENCE_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/feed-portfolio-evidence.json
 set_env NOTIFICATION_TRADER_CANDIDATE_STATE_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/portfolio-candidates.json
 set_env NOTIFICATION_TRADER_DIRECT_WATCH_STATE_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/elite-direct-watch.json
 set_env NOTIFICATION_TRADER_DIRECT_WATCH_ADMISSION_INDEX_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/elite-direct-watch-admissions.json
@@ -133,7 +134,7 @@ cd "$SERVICE_DIR"
 npm install --ignore-scripts --no-audit --no-fund
 npm run check
 
-# Reset only when crossing into the repaired v3 measurement epoch. Never reset on
+# Reset only when crossing into the repaired v4 measurement epoch. Never reset on
 # ordinary redeploys. The reset preserves source discovery plus seen/feed cursors,
 # clears simulated managed exposure, and deletes superseded derived economics.
 reset_evidence=0
@@ -148,9 +149,9 @@ if grep -Fq "$EXPECTED_SELECTOR" "$SERVICE_DIR/src/portfolio-candidates.ts"; the
 fi
 
 # A rollback after the clean epoch has started must never silently resume an old
-# selector against v3 evidence.
+# selector against v4 evidence.
 if [[ "$current_epoch" == "$EVIDENCE_EPOCH" && "$selector_ready" -ne 1 ]]; then
-  echo "refusing Lane 3 selector rollback after clean v3 epoch started" >&2
+  echo "refusing Lane 3 selector rollback after clean v4 epoch started" >&2
   exit 3
 fi
 
@@ -178,7 +179,7 @@ if [[ "$current_epoch" != "$EVIDENCE_EPOCH" ]]; then
       --epoch "$EVIDENCE_EPOCH"
     reset_evidence=1
 
-    # Seed selector-v3 eligibility before the executor can accept a NEW/ADD event.
+    # Seed selector-v4 eligibility before the executor can accept a NEW/ADD event.
     # Match the research systemd unit's runtime environment so the direct CLI writes
     # the production candidate/leaderboard paths rather than repository-local defaults.
     # Both files are root-owned deployment inputs; a malformed file fails closed under
@@ -237,8 +238,24 @@ if [[ -z "$readiness" ]]; then
 fi
 
 health=""
-if ! health="$(curl -fsS --max-time 60 http://127.0.0.1:8787/health)"; then
-  echo "Lane 3 service is ready, but full portfolio health/MTM proof did not complete within 60s" >&2
+health_valid=0
+health_deadline=$((SECONDS + 90))
+while (( SECONDS < health_deadline )); do
+  if [[ "$(systemctl is-active "$UNIT")" != "active" ]]; then
+    echo "Lane 3 service became inactive during integrated health proof" >&2
+    systemctl --no-pager --full status "$UNIT" || true
+    journalctl -u "$UNIT" -n 100 --no-pager || true
+    exit 1
+  fi
+  if health="$(curl -fsS --max-time 10 http://127.0.0.1:8787/health 2>/dev/null)"     && printf '%s' "$health" | python3 "$REPO/scripts/validate_lane3_shadow_health.py" >/dev/null 2>&1; then
+    health_valid=1
+    break
+  fi
+  sleep 1
+done
+if [[ "$health_valid" -ne 1 ]]; then
+  echo "Lane 3 never proved integrated shadow operational readiness inside the 90s health window" >&2
+  [[ -n "$health" ]] && printf '%s' "$health" | python3 "$REPO/scripts/validate_lane3_shadow_health.py" || true
   systemctl --no-pager --full status "$UNIT" || true
   journalctl -u "$UNIT" -n 100 --no-pager || true
   exit 1
@@ -255,8 +272,8 @@ if [[ "$reset_evidence" -eq 1 ]]; then
   fi
 fi
 
-# Mark the evidence epoch only after a real v3 reset plus successful service
-# health. A pre-v3 deployment deliberately leaves the previous marker untouched.
+# Mark the evidence epoch only after a real v4 reset plus successful service
+# health. A pre-v4 deployment deliberately leaves the previous marker untouched.
 if [[ "$reset_deferred" -eq 0 ]]; then
   printf '%s\n' "$EVIDENCE_EPOCH" > "$EVIDENCE_MARKER"
 fi

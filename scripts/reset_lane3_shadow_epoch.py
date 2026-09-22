@@ -46,6 +46,7 @@ DELETE_FILES = (
     "portfolio-candidates.json",
     "portfolio-candidate-snapshots.jsonl",
     "portfolio-candidate-snapshots.jsonl.previous",
+    "portfolio-candidate-snapshots.jsonl.recent.json",
     "elite-shadow-report.json",
     "elite-shadow-ledger.jsonl",
     "elite-direct-watch.json",

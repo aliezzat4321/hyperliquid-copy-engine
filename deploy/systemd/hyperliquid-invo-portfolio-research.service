@@ -20,6 +20,7 @@ Environment=INVO_PORTFOLIO_CANDIDATE_STATE_PATH=/var/lib/hyperliquid-copy-engine
 Environment=INVO_PORTFOLIO_CANDIDATE_SNAPSHOTS_PATH=/var/lib/hyperliquid-copy-engine/invo-notification-executor/portfolio-candidate-snapshots.jsonl
 Environment=INVO_PORTFOLIO_LEADERBOARD_STATE_PATH=/var/lib/hyperliquid-copy-engine/invo-notification-executor/invo-leaderboards.json
 Environment=INVO_PORTFOLIO_LEADERBOARD_SNAPSHOTS_PATH=/var/lib/hyperliquid-copy-engine/invo-notification-executor/invo-leaderboard-snapshots.jsonl
+Environment=NOTIFICATION_TRADER_FEED_PORTFOLIO_EVIDENCE_PATH=/var/lib/hyperliquid-copy-engine/invo-notification-executor/feed-portfolio-evidence.json
 Environment=INVO_ELITE_SHADOW_REPORT_PATH=/var/lib/hyperliquid-copy-engine/invo-notification-executor/elite-shadow-report.json
 Environment=INVO_ELITE_SHADOW_LEDGER_PATH=/var/lib/hyperliquid-copy-engine/invo-notification-executor/elite-shadow-ledger.jsonl
 Environment=INVO_ELITE_SHADOW_HEALTH_URL=http://127.0.0.1:8787/health

@@ -210,6 +210,21 @@ test('qualified candidate is waitlisted until direct-watch admission and cannot 
   assert.equal(prospective.directWatchAdmittedAtMs, decisionAtMs + 10);
 });
 
+test('admission timestamp after index generation is transient corruption and never consumable', () => {
+  const path = stateFile(validState());
+  const index = join(path, '..', 'elite-direct-watch-admissions.json');
+  writeFileSync(index, JSON.stringify({ version: 1, generatedAtMs: decisionAtMs,
+    healthy: true, suspensionReason: null, rows: {
+      [portfolioId]: { portfolioId, admittedAtMs: decisionAtMs + 1,
+        score: 63.4, selectorVersion: ELITE_SELECTOR_VERSION },
+    } }));
+  const decision = eliteAdmissionFromState(path, portfolioId, decisionAtMs, 20 * 60_000, undefined, index);
+  assert.equal(decision.reason, 'direct_watch_admission_index_invalid');
+  assert.equal(decision.disposition, 'TRANSIENT');
+  assert.equal(decision.retryable, true);
+  assert.equal(shouldPersistAdmissionDenial(decision), false);
+});
+
 test('feed NEW during scan suspension remains unseen and cursor-safe, then executes once after health returns', () => {
   const path = stateFile(validState());
   const index = admissionIndex(path);

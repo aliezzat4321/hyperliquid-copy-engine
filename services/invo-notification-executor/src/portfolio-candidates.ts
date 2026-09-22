@@ -474,6 +474,8 @@ export class PortfolioCandidateLedger {
       portfolios: {},
       firstEliteAtMs: {},
       lastObservedAtMs: 0,
+      // Missing state has no selector eligibility until the first research assimilation,
+      // which atomically sets eligibilityNotBeforeMs to that cycle's processedAtMs.
       feedEvidence: emptyFeedEvidence(),
     };
     if (existsSync(statePath)) {
@@ -527,6 +529,11 @@ export class PortfolioCandidateLedger {
    */
   assimilateFeedEvidence(records: FeedPortfolioRecord[], processedAtMs = Date.now()) {
     const meta = this.state.feedEvidence ?? emptyFeedEvidence();
+    // Missing candidate state starts one durable causal selector boundary. Retained
+    // evidence before this processing instant is rejected, but the boundary must not
+    // move forward again on the next research cycle or fresh evidence could starve.
+    const initializedEligibilityBoundary = !(meta.eligibilityNotBeforeMs > 0);
+    if (initializedEligibilityBoundary) meta.eligibilityNotBeforeMs = processedAtMs;
     let observationsProcessed = 0;
     for (const record of records.sort((a, b) => a.firstSeenAtMs - b.firstSeenAtMs || a.portfolioId.localeCompare(b.portfolioId))) {
       const wasKnown = this.state.portfolios[record.portfolioId] != null;
@@ -593,7 +600,7 @@ export class PortfolioCandidateLedger {
     const retained = Object.entries(meta.records).sort((a, b) => b[1].lastProcessedAtMs - a[1].lastProcessedAtMs || a[0].localeCompare(b[0])).slice(0, FEED_SELECTOR_TRACKING_MAX_PORTFOLIOS);
     meta.records = Object.fromEntries(retained);
     this.state.feedEvidence = meta;
-    if (observationsProcessed) this.saveState();
+    if (observationsProcessed || initializedEligibilityBoundary) this.saveState();
     return { observationsProcessed, ...this.feedExpansionReport(processedAtMs) };
   }
 

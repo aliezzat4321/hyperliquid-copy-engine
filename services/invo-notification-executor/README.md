@@ -2,6 +2,10 @@
 
 Standalone low-latency execution lane for `hyperliquid-copy-engine`.
 
+Selector snapshot archive segments are immutable causal audit evidence. The elite-shadow
+report exposes archive segment and byte totals; segments are never silently truncated.
+Operators must use the external storage guard for capacity alerts and preserve the archive.
+
 It consumes **verified Invo trade signals directly from Invo's authenticated API** and mirrors eligible opens/closes into Hyperliquid shadow. It does **not** identify, resolve, or require the source trader's Hyperliquid wallet.
 
 This stays independent from the two existing tracks:

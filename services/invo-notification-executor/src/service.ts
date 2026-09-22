@@ -54,6 +54,7 @@ import { eliteAdmissionFromState, ELITE_ADMISSION_VERSION, shouldPersistAdmissio
 import { shouldTerminallyDustReconcile } from './close-rejection.js';
 import { FeedPortfolioEvidenceStore } from './feed-portfolio-evidence.js';
 import { scheduleDeferredPersistence } from './deferred-persistence.js';
+import { evaluateShadowOperationalHealth } from './shadow-operational-health.js';
 import {
   COST_MODEL_VERSION,
   EXECUTION_EVIDENCE_VERSION,
@@ -820,9 +821,19 @@ async function executeUnlocked(signal: InvoSignal, wakeSource: string, receivedA
         }
 
         const fill = result.fill;
-        const stagedFunding = await syncStagedFundingForClose(
-          managed, fill.receivedAtMs, fundingBoundaryStore, cfg.shadowFundingOracleMaxDelayMs,
-        );
+        let stagedFunding;
+        try {
+          stagedFunding = await syncStagedFundingForClose(
+            managed, fill.receivedAtMs, fundingBoundaryStore, cfg.shadowFundingOracleMaxDelayMs,
+          );
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          managed = { ...managed, fundingIncompleteReason: `corrupt durable funding evidence: ${reason}` };
+          stagedFunding = { position: managed, appliedBoundaries: [], waited: false };
+          state.setManaged(managed);
+          log({ type: 'funding_boundary_close_sync_corrupt', sourceBaseId: managed.sourceBaseId,
+            economicsCompleteness: 'INCOMPLETE_FUNDING', fundingIncompleteReason: managed.fundingIncompleteReason });
+        }
         managed = stagedFunding.position;
         if (stagedFunding.appliedBoundaries.length || stagedFunding.waited || managed.fundingIncompleteReason) {
           state.setManaged(managed);
@@ -1969,6 +1980,16 @@ function startServer() {
         && (oldestOpenPollAgeMs == null || oldestOpenPollAgeMs <= cfg.directWatchFallbackPollMs)
         && (oldestClosedPollAgeMs == null || oldestClosedPollAgeMs <= cfg.directWatchClosedPollMs)
         && healthNowMs >= directWatchBackoffUntilMs && directStatus.admissionsHealthy;
+      const initialized = cfg.discoverySurfaces.every(surface => state.hasFeedBaseline(surface));
+      const fundingHealthy = fundingOracleWorker?.health().healthy ?? false;
+      const operational = evaluateShadowOperationalHealth({
+        live: cfg.live, initialized, fundingHealthy, directWatchCapacityHealthy,
+        admissionsHealthy: directStatus.admissionsHealthy, admissionSuspensionReason: directStatus.admissionSuspensionReason,
+        lastDirectWatchSuccessAtMs: directWatchMetrics.lastSuccessAtMs,
+        directWatchFreshnessLimitMs: Math.max(10_000, cfg.directWatchScanMs * 4),
+        lastFeedSuccessAtMs: lastSuccessPollMs, feedFreshnessLimitMs: Math.max(10_000, cfg.pollMs * 4),
+        feedEvidenceHealthy: !feedEvidenceAssimilationSuspended && feedEvidencePersistenceErrors === 0, nowMs: healthNowMs,
+      });
       const paperPositions = Object.values(snapshot.managed).filter(position => position.paper);
       const unresolvedPaperPositions = paperPositions.filter(position => position.unresolvedAfterSourceClose);
       const markablePaperPositions = paperPositions.filter(position => !position.unresolvedAfterSourceClose);
@@ -1988,8 +2009,9 @@ function startServer() {
         }
       });
       return json(res, 200, {
-        ok: cfg.live ? true : (fundingOracleWorker?.health().healthy ?? false),
-        initialized: cfg.discoverySurfaces.every(surface => state.hasFeedBaseline(surface)),
+        ok: operational.shadowOperationalReady,
+        ...operational,
+        initialized,
         initializedSurfaces: cfg.discoverySurfaces.filter(surface => state.hasFeedBaseline(surface)),
         live: cfg.live,
         researchWide: !cfg.live,
@@ -2002,6 +2024,9 @@ function startServer() {
         feedFilter: cfg.feedFilter,
         feedMaxPages: cfg.feedMaxPages,
         feedCursors: state.snapshot().feedCursors,
+        feedCursorPinned: !operational.feedPollHealthy || directStatus.admissionSuspensionReason != null,
+        feedBackfillGapRisk: !operational.feedPollHealthy || directStatus.admissionSuspensionReason != null,
+        feedCursorPolicy: 'no_rebase_while_owned_exposure_or_admission_is_unhealthy',
         directWatch: {
           enabled: !cfg.live,
           ...directStatus,
@@ -2051,7 +2076,7 @@ function startServer() {
           backoffMs: directWatchBackoffMs,
           backoffUntilMs: directWatchBackoffUntilMs,
         },
-        fundingEconomicsReady: !cfg.live && (fundingOracleWorker?.health().healthy ?? false),
+        fundingEconomicsReady: !cfg.live && fundingHealthy,
         liveFundingGate: cfg.live ? {
           ready: false,
           reason: 'live funding capture is not implemented; production live economics gate remains blocked',

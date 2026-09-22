@@ -291,9 +291,12 @@ export function eliteAdmissionFromState(
   const admittedAtMs = finite(admission?.admittedAtMs);
   const indexGeneratedAtMs = finite(admissionIndex.generatedAtMs);
   if (admission?.portfolioId !== portfolioId || admission?.selectorVersion !== ELITE_SELECTOR_VERSION
-    || admittedAtMs == null || admittedAtMs <= 0 || indexGeneratedAtMs == null
-    || admittedAtMs > indexGeneratedAtMs) {
+    || admittedAtMs == null || admittedAtMs <= 0 || indexGeneratedAtMs == null) {
     return { ...enriched, reason: 'direct_watch_not_admitted' };
+  }
+  if (admittedAtMs > indexGeneratedAtMs) {
+    return { ...enriched, disposition: 'TRANSIENT', retryable: true,
+      reason: 'direct_watch_admission_index_invalid' };
   }
   if (admittedAtMs > decisionAtMs) {
     return { ...enriched, directWatchAdmittedAtMs: admittedAtMs, reason: 'direct_watch_not_admitted_at_signal_time' };

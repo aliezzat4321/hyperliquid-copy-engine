@@ -44,7 +44,8 @@ async function main() {
   const snapshotsPath = resolve(process.env.INVO_PORTFOLIO_CANDIDATE_SNAPSHOTS_PATH ?? 'data/portfolio-candidate-snapshots.jsonl');
   const leaderboardStatePath = resolve(process.env.INVO_PORTFOLIO_LEADERBOARD_STATE_PATH ?? 'data/invo-leaderboards.json');
   const leaderboardSnapshotsPath = resolve(process.env.INVO_PORTFOLIO_LEADERBOARD_SNAPSHOTS_PATH ?? 'data/invo-leaderboard-snapshots.jsonl');
-  const feedEvidencePath = resolve(process.env.INVO_FEED_PORTFOLIO_EVIDENCE_PATH
+  const feedEvidencePath = resolve(process.env.NOTIFICATION_TRADER_FEED_PORTFOLIO_EVIDENCE_PATH
+    ?? process.env.INVO_FEED_PORTFOLIO_EVIDENCE_PATH
     ?? '/var/lib/hyperliquid-copy-engine/invo-notification-executor/feed-portfolio-evidence.json');
   const pages = Math.max(1, Math.min(20, Math.trunc(n('INVO_PORTFOLIO_DISCOVERY_PAGES', 4))));
   const pageSize = Math.max(1, Math.min(100, Math.trunc(n('INVO_PORTFOLIO_DISCOVERY_PAGE_SIZE', 50))));

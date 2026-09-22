@@ -48,3 +48,19 @@ def test_lane3_deploy_pins_durable_funding_boundary_path() -> None:
         "/var/lib/hyperliquid-copy-engine/invo-notification-executor/funding-boundaries"
     )
     assert expected in deploy
+
+
+def test_lane3_deploy_validates_integrated_health_before_resume_or_epoch_marker() -> None:
+    deploy = Path("scripts/deploy_invo_notification_executor_self_hosted.sh").read_text()
+    validation = deploy.index("validate_lane3_shadow_health.py")
+    assert validation < deploy.index('systemctl start "$RESEARCH_SERVICE"')
+    assert validation < deploy.index('> "$EVIDENCE_MARKER"')
+    assert "clean v3" not in deploy
+
+
+def test_lane3_deploy_retries_transient_integrated_health_but_is_bounded() -> None:
+    deploy = Path("scripts/deploy_invo_notification_executor_self_hosted.sh").read_text()
+    assert "health_deadline=$((SECONDS + 90))" in deploy
+    assert "while (( SECONDS < health_deadline ))" in deploy
+    assert 'health_valid=1' in deploy
+    assert '[[ "$health_valid" -ne 1 ]]' in deploy

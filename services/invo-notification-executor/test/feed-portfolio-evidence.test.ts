@@ -122,7 +122,7 @@ test('feed-only profile without verified proof remains discovery evidence only',
   const evidencePath = join(dir, 'feed.json');
   const statePath = join(dir, 'portfolio-candidates.json');
   const snapshotsPath = join(dir, 'candidate-snapshots.jsonl');
-  new FeedPortfolioEvidenceStore(evidencePath).observe([fixture.most_recent], 'most_recent', capturedAtMs);
+  new FeedPortfolioEvidenceStore(evidencePath).observe([fixture.most_recent], 'most_recent', processedAtMs);
   const ledger = new PortfolioCandidateLedger(statePath, snapshotsPath);
   assert.equal(ledger.get('portfolio-normiee'), null);
   const result = ledger.assimilateFeedEvidence(
@@ -190,7 +190,7 @@ test('malformed metric consistency cannot qualify', () => {
   malformed.update.owner.verified = true;
   malformed.update.portfolio.wonPositionsCount = 30;
   const path = join(mkdtempSync(join(tmpdir(), 'feed-malformed-')), 'feed.json');
-  new FeedPortfolioEvidenceStore(path).observe([malformed], 'most_recent', capturedAtMs);
+  new FeedPortfolioEvidenceStore(path).observe([malformed], 'most_recent', processedAtMs);
   const dir = mkdtempSync(join(tmpdir(), 'feed-malformed-ledger-'));
   const ledger = new PortfolioCandidateLedger(join(dir, 'state.json'), join(dir, 'snapshots.jsonl'));
   const result = ledger.assimilateFeedEvidence(Object.values(loadFeedPortfolioEvidence(path).portfolios), processedAtMs);
@@ -299,4 +299,23 @@ test('selector-version mismatch quarantines retained evidence instead of re-stam
   const result = ledger.assimilateFeedEvidence(Object.values(loadFeedPortfolioEvidence(evidencePath).portfolios), processedAtMs);
   assert.equal(result.observationsProcessed, 0);
   assert.equal(ledger.get('portfolio-normiee'), null);
+});
+
+
+test('missing candidate state cannot restamp retained older feed evidence as fresh', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'feed-state-loss-boundary-'));
+  const evidencePath = join(dir, 'feed.json');
+  const statePath = join(dir, 'portfolio-candidates.json');
+  const snapshotsPath = join(dir, 'snapshots.jsonl');
+  const oldProcessedAtMs = Date.UTC(2026, 8, 20, 12, 0, 0);
+  const newResearchAtMs = oldProcessedAtMs + 60_000;
+  new FeedPortfolioEvidenceStore(evidencePath).observe([fixture.most_recent], 'most_recent', oldProcessedAtMs);
+  const ledger = new PortfolioCandidateLedger(statePath, snapshotsPath);
+  const result = ledger.assimilateFeedEvidence(
+    Object.values(loadFeedPortfolioEvidence(evidencePath).portfolios), newResearchAtMs,
+  );
+  assert.equal(result.observationsProcessed, 0);
+  assert.equal(ledger.get('portfolio-normiee'), null);
+  const persisted = JSON.parse(readFileSync(statePath, 'utf8'));
+  assert.equal(persisted.feedEvidence.eligibilityNotBeforeMs, newResearchAtMs);
 });
