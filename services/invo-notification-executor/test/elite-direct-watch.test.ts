@@ -1231,13 +1231,44 @@ test('two-phase enrollment absorbs a pre-admission round trip and admits only af
   assert.equal(admitted.openHistoryInitialized, true);
   assert.equal(admitted.admittedAtMs, BASE + 4);
   state.setAdmissionHealth(true);
-  assert.equal(JSON.parse(readFileSync(join(dir, 'admissions.json'), 'utf8')).rows.p1.admittedAtMs, BASE + 4);
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'admissions.json'), 'utf8')).rows.p1.intervals,
+    [{ admittedAtMs: BASE + 4, admittedUntilMs: null }]);
   assert.deepEqual(signalsFromDirectInvestments([], [preAdmissionClose], admitted,
     Math.max(admitted.closedProcessedThroughMs, admitted.admittedAtMs ?? 0), BASE + 5), []);
 
   const postAdmissionOpen = openRow({ id: 'post', baseId: 'post', createdAt: BASE + 5, updatedAt: BASE + 5 });
   assert.equal(signalsFromDirectInvestments([postAdmissionOpen], [], admitted,
     Math.max(admitted.processedThroughMs, admitted.admittedAtMs ?? 0), BASE + 6)[0]?.sourceBaseId, 'post');
+});
+
+test('demotion, tombstone restart, and re-enrollment retain bounded admission intervals', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elite-interval-restart-'));
+  const watchPath = join(dir, 'watch.json');
+  const admissionPath = join(dir, 'admissions.json');
+  const first = new EliteDirectWatchState(watchPath, admissionPath);
+  first.syncTargets([target], new Set(), BASE, true, 1, new Set(), 1);
+  first.commitClosedHydration('p1', [], BASE + 1);
+  first.commitOpenBaseline('p1', [], BASE + 2);
+  first.setAdmissionHealth(true);
+  first.syncTargets([], new Set(), BASE + 10, true, 1, new Set(['p1']), 1, 1, 0, BASE + 10);
+  first.commitRetirementOpenPoll('p1', [], BASE + 12);
+  first.commitClosedHydration('p1', [], BASE + 12);
+  first.commitRetirementOpenPoll('p1', [], BASE + 13);
+  first.commitClosedHydration('p1', [], BASE + 13);
+  first.syncTargets([], new Set(), BASE + 14, true, 1, new Set(['p1']), 1);
+  assert.deepEqual(first.tombstones()[0].admissionIntervals,
+    [{ admittedAtMs: BASE + 2, admittedUntilMs: BASE + 10 }]);
+
+  const restarted = new EliteDirectWatchState(watchPath, admissionPath, 1);
+  restarted.syncTargets([target], new Set(), BASE + 20, true, 1, new Set(), 1);
+  restarted.commitOpenBaseline('p1', [], BASE + 21);
+  restarted.setAdmissionHealth(true);
+  const row = JSON.parse(readFileSync(admissionPath, 'utf8')).rows.p1;
+  assert.equal(row.intervals.length, 2);
+  assert.deepEqual(row.intervals, [
+    { admittedAtMs: BASE + 2, admittedUntilMs: BASE + 10 },
+    { admittedAtMs: BASE + 21, admittedUntilMs: null },
+  ]);
 });
 
 test('higher-score candidate displaces by safe retirement and remains waitlisted until capacity frees', () => {

@@ -12,6 +12,7 @@ interface SnapshotCacheEntry {
 const snapshotCache = new Map<string, SnapshotCacheEntry>();
 
 const MAX_RECENT_INDEX_BYTES = 8 * 1024 * 1024;
+const MAX_ADMISSION_INTERVALS = 16;
 const PORTFOLIO_BUCKETS = new Set([
   'ELITE_CANDIDATE', 'SPARSE_HIGH_RETURN', 'RESEARCH_WIDE', 'REJECTED_DEMOTED',
 ]);
@@ -156,7 +157,7 @@ export function eliteAdmissionFromState(
     const indexEnvelopeValid = admissionIndex != null
       && typeof admissionIndex === 'object'
       && !Array.isArray(admissionIndex)
-      && admissionIndex.version === 1
+      && admissionIndex.version === 2
       && typeof admissionIndex.healthy === 'boolean'
       && indexGeneratedAtMs != null
       && indexGeneratedAtMs > 0
@@ -169,16 +170,27 @@ export function eliteAdmissionFromState(
       return { ...denied, disposition: 'TRANSIENT', retryable: true,
         reason: 'direct_watch_admission_index_invalid' };
     }
-    const admissionKeys = new Set(['portfolioId', 'admittedAtMs', 'admittedUntilMs', 'score', 'selectorVersion']);
+    const admissionKeys = new Set(['portfolioId', 'intervals', 'score', 'selectorVersion']);
     const indexRowsValid = Object.entries(indexRows as Record<string, unknown>).every(([key, value]) => {
       if (!isPlainObject(value) || Object.keys(value).some(field => !admissionKeys.has(field))
-        || !Object.prototype.hasOwnProperty.call(value, 'admittedUntilMs')) return false;
-      return value.portfolioId === key && value.selectorVersion === ELITE_SELECTOR_VERSION
-        && typeof value.admittedAtMs === 'number' && Number.isFinite(value.admittedAtMs)
-        && value.admittedAtMs > 0 && value.admittedAtMs <= indexGeneratedAtMs!
-        && (value.admittedUntilMs === null || (typeof value.admittedUntilMs === 'number'
-          && Number.isFinite(value.admittedUntilMs) && value.admittedUntilMs >= value.admittedAtMs
-          && value.admittedUntilMs <= indexGeneratedAtMs!))
+        || !Array.isArray(value.intervals) || value.intervals.length < 1
+        || value.intervals.length > MAX_ADMISSION_INTERVALS) return false;
+      const intervals = value.intervals as unknown[];
+      let priorUntil = -Infinity;
+      const intervalsValid = intervals.every((interval, index) => {
+        if (!isPlainObject(interval)
+          || Object.keys(interval).some(field => !['admittedAtMs', 'admittedUntilMs'].includes(field))
+          || typeof interval.admittedAtMs !== 'number' || !Number.isFinite(interval.admittedAtMs)
+          || interval.admittedAtMs <= 0 || interval.admittedAtMs > indexGeneratedAtMs!
+          || !(interval.admittedUntilMs === null || (typeof interval.admittedUntilMs === 'number'
+            && Number.isFinite(interval.admittedUntilMs) && interval.admittedUntilMs >= interval.admittedAtMs
+            && interval.admittedUntilMs <= indexGeneratedAtMs!))
+          || interval.admittedAtMs < priorUntil
+          || (index < intervals.length - 1 && interval.admittedUntilMs === null)) return false;
+        priorUntil = interval.admittedUntilMs ?? Infinity;
+        return true;
+      });
+      return intervalsValid && value.portfolioId === key && value.selectorVersion === ELITE_SELECTOR_VERSION
         && typeof value.score === 'number' && Number.isFinite(value.score);
     });
     if (!indexRowsValid) {
@@ -334,35 +346,10 @@ export function eliteAdmissionFromState(
     return { ...enriched, reason: 'direct_watch_not_admitted' };
   }
   const admission = admissionIndex.rows[portfolioId];
-  const admittedAtMs = typeof admission?.admittedAtMs === 'number' ? admission.admittedAtMs : null;
-  const admittedUntilMs = admission?.admittedUntilMs === null ? null
-    : (typeof admission?.admittedUntilMs === 'number' ? admission.admittedUntilMs : undefined);
-  const indexGeneratedAtMs = typeof admissionIndex.generatedAtMs === 'number' ? admissionIndex.generatedAtMs : null;
-  const admissionRowValid = isPlainObject(admission)
-    && admission.portfolioId === portfolioId
-    && admission.selectorVersion === ELITE_SELECTOR_VERSION
-    && admittedAtMs != null
-    && admittedAtMs > 0
-    && (admittedUntilMs === null || (Number.isFinite(admittedUntilMs)
-      && admittedUntilMs >= admittedAtMs))
-    && indexGeneratedAtMs != null
-    && admittedAtMs <= indexGeneratedAtMs
-    && typeof admission.score === 'number'
-    && Number.isFinite(admission.score);
-  if (!admissionRowValid) {
-    return {
-      ...enriched,
-      disposition: 'TRANSIENT',
-      retryable: true,
-      reason: 'direct_watch_admission_index_invalid',
-    };
-  }
-  if (admittedAtMs > decisionAtMs) {
-    return { ...enriched, directWatchAdmittedAtMs: admittedAtMs, reason: 'direct_watch_not_admitted_at_signal_time' };
-  }
-  if (admittedUntilMs != null && decisionAtMs >= admittedUntilMs) {
-    return { ...enriched, directWatchAdmittedAtMs: admittedAtMs, reason: 'direct_watch_not_admitted_at_signal_time' };
-  }
+  const interval = admission.intervals.find((candidate: any) => candidate.admittedAtMs <= decisionAtMs
+    && (candidate.admittedUntilMs === null || decisionAtMs < candidate.admittedUntilMs));
+  if (!interval) return { ...enriched, reason: 'direct_watch_not_admitted_at_signal_time' };
+  const admittedAtMs = interval.admittedAtMs;
 
   return {
     ...enriched,

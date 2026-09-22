@@ -4,7 +4,8 @@ import type { InvoSignal } from './notification-signal.js';
 import { ELITE_SELECTOR_VERSION, isCanonicalPortfolioSnapshot, type PortfolioBucket } from './portfolio-candidates.js';
 import { signalWasSeen } from './source-event-dedupe.js';
 
-export const ELITE_DIRECT_WATCH_VERSION = 'lane3-elite-direct-watch-v7-20260920';
+export const ELITE_DIRECT_WATCH_VERSION = 'lane3-elite-direct-watch-v8-20260922';
+const LEGACY_VERSION_7 = 'lane3-elite-direct-watch-v7-20260920';
 const LEGACY_VERSION_6 = 'lane3-elite-direct-watch-v6-20260920';
 const LEGACY_VERSION_5 = 'lane3-elite-direct-watch-v5-20260920';
 const LEGACY_VERSION_4 = 'lane3-elite-direct-watch-v4-20260918';
@@ -23,6 +24,7 @@ export interface EliteDirectTarget {
 export interface StoredTarget extends EliteDirectTarget {
   lifecycle?: 'ENROLLING' | 'ACTIVE' | 'MISSING_GRACE' | 'RETIRING';
   admittedAtMs?: number | null;
+  admissionIntervals?: AdmissionInterval[];
   openHistoryInitialized?: boolean;
   firstNegativeAtMs?: number | null;
   lastNegativeAtMs?: number | null;
@@ -53,6 +55,7 @@ export interface Tombstone extends EliteDirectTarget {
   tombstonedAtMs: number;
   admittedAtMs: number | null;
   retiredAtMs: number | null;
+  admissionIntervals: AdmissionInterval[];
   baselineAtMs: number;
   processedThroughMs: number;
   closedHistoryInitialized: boolean;
@@ -64,6 +67,8 @@ export interface Tombstone extends EliteDirectTarget {
   negativeSelectorVersion: string | null;
   negativeEvidenceReason: string | null;
 }
+
+export interface AdmissionInterval { admittedAtMs: number; admittedUntilMs: number | null }
 
 export interface DeferredAdmission {
   portfolioId: string;
@@ -448,14 +453,13 @@ interface DirectWatchDiskState {
 
 interface AdmissionIndexRow {
   portfolioId: string;
-  admittedAtMs: number;
-  admittedUntilMs: number | null;
+  intervals: AdmissionInterval[];
   score: number;
   selectorVersion: string;
 }
 
 interface AdmissionIndexDiskState {
-  version: 1;
+  version: 2;
   generatedAtMs: number;
   healthy: boolean;
   suspensionReason: string | null;
@@ -687,6 +691,7 @@ export class EliteDirectWatchState {
   private readonly journalPath: string;
   readonly admissionIndexPath: string;
   private readonly maxRetainedTombstones = 256;
+  private readonly maxAdmissionIntervals = 16;
   private readonly maxDeferredAdmissions = 256;
   private readonly maxJournalBytes = 1024 * 1024;
   private enforcedResidentCap: number;
@@ -715,7 +720,7 @@ export class EliteDirectWatchState {
     }
     try {
       const parsed = JSON.parse(readFileSync(this.path, 'utf8')) as DirectWatchDiskState;
-      if (![ELITE_DIRECT_WATCH_VERSION, LEGACY_VERSION_6, LEGACY_VERSION_5, LEGACY_VERSION_4, LEGACY_VERSION_3, LEGACY_VERSION_2, LEGACY_VERSION].includes(parsed?.version)) {
+      if (![ELITE_DIRECT_WATCH_VERSION, LEGACY_VERSION_7, LEGACY_VERSION_6, LEGACY_VERSION_5, LEGACY_VERSION_4, LEGACY_VERSION_3, LEGACY_VERSION_2, LEGACY_VERSION].includes(parsed?.version)) {
         throw new Error(`unsupported direct-watch state version: ${String(parsed?.version)}`);
       }
       if (!isPlainObject(parsed?.targets) || (parsed.tombstones != null && !isPlainObject(parsed.tombstones))
@@ -736,6 +741,8 @@ export class EliteDirectWatchState {
           raw.score = Number.isFinite(raw.score) ? Number(raw.score) : 0;
           raw.admittedAtMs = Number.isFinite(raw.admittedAtMs) ? Number(raw.admittedAtMs) : null;
           raw.retiredAtMs = Number.isFinite(raw.retiredAtMs) ? Number(raw.retiredAtMs) : null;
+          raw.admissionIntervals = this.normalizedAdmissionIntervals(raw.admissionIntervals,
+            raw.admittedAtMs, raw.retiredAtMs, parsed.version === ELITE_DIRECT_WATCH_VERSION);
         }
         for (const [portfolioId, raw] of Object.entries(this.state.deferredAdmissions)) {
           if (!isPlainObject(raw) || raw.portfolioId !== portfolioId || !Number.isFinite(raw.deferredAtMs)) {
@@ -758,6 +765,9 @@ export class EliteDirectWatchState {
             score: Number.isFinite(target.score) ? Number(target.score) : 0,
             lifecycle: migratedReady ? target.lifecycle ?? 'ACTIVE' : 'ENROLLING',
             admittedAtMs: migratedReady ? target.admittedAtMs ?? null : null,
+            admissionIntervals: this.normalizedAdmissionIntervals(target.admissionIntervals,
+              migratedReady ? target.admittedAtMs ?? null : null, target.retiredAtMs ?? null,
+              parsed.version === ELITE_DIRECT_WATCH_VERSION),
             openHistoryInitialized: migratedReady,
             firstNegativeAtMs: target.firstNegativeAtMs ?? null,
             lastNegativeAtMs: target.lastNegativeAtMs ?? null,
@@ -787,6 +797,32 @@ export class EliteDirectWatchState {
     }
   }
 
+  private normalizedAdmissionIntervals(raw: unknown, admittedAtMs: number | null,
+    admittedUntilMs: number | null, strict: boolean): AdmissionInterval[] {
+    if (raw == null && !strict) return admittedAtMs == null ? [] : [{ admittedAtMs, admittedUntilMs }];
+    if (!Array.isArray(raw) || raw.length > this.maxAdmissionIntervals) {
+      throw new Error('invalid direct-watch admission interval history');
+    }
+    let priorUntil = -Infinity;
+    return raw.map((interval, index) => {
+      if (!isPlainObject(interval) || Object.keys(interval).some(key => !['admittedAtMs', 'admittedUntilMs'].includes(key))
+        || typeof interval.admittedAtMs !== 'number' || !Number.isFinite(interval.admittedAtMs)
+        || interval.admittedAtMs <= 0
+        || !(interval.admittedUntilMs === null || (typeof interval.admittedUntilMs === 'number'
+          && Number.isFinite(interval.admittedUntilMs) && interval.admittedUntilMs >= interval.admittedAtMs))
+        || interval.admittedAtMs < priorUntil || (index < raw.length - 1 && interval.admittedUntilMs === null)) {
+        throw new Error('invalid direct-watch admission interval history');
+      }
+      priorUntil = interval.admittedUntilMs ?? Infinity;
+      return { admittedAtMs: interval.admittedAtMs, admittedUntilMs: interval.admittedUntilMs };
+    });
+  }
+
+  private closeCurrentAdmission(target: StoredTarget, atMs: number) {
+    const last = target.admissionIntervals?.[target.admissionIntervals.length - 1];
+    if (last?.admittedUntilMs === null) last.admittedUntilMs = atMs;
+  }
+
   private replayJournal() {
     if (!existsSync(this.journalPath)) return;
     const text = readFileSync(this.journalPath, 'utf8');
@@ -801,6 +837,12 @@ export class EliteDirectWatchState {
       if (seq != null && seq <= (this.state.snapshotAppliedJournalSeq ?? 0)) continue;
       if (this.state.targets[entry.portfolioId]) {
         const replayed = entry.target as unknown as StoredTarget;
+        replayed.admissionIntervals = this.normalizedAdmissionIntervals(
+          replayed.admissionIntervals,
+          Number.isFinite(replayed.admittedAtMs) ? Number(replayed.admittedAtMs) : null,
+          Number.isFinite(replayed.retiredAtMs) ? Number(replayed.retiredAtMs) : null,
+          true,
+        );
         replayed.lastOpenSuccessAtMs ??= replayed.lastFallbackPollAtMs ?? 0;
         replayed.lastClosedSuccessAtMs ??= replayed.lastClosedPollAtMs ?? 0;
         this.state.targets[entry.portfolioId] = replayed;
@@ -837,21 +879,23 @@ export class EliteDirectWatchState {
       if (!['ACTIVE', 'MISSING_GRACE', 'RETIRING'].includes(target.lifecycle ?? '')
         || !target.openHistoryInitialized || !target.closedHistoryInitialized
         || !Number.isFinite(target.admittedAtMs)) continue;
-      rows[target.portfolioId] = { portfolioId: target.portfolioId,
-        admittedAtMs: target.admittedAtMs as number,
-        admittedUntilMs: target.lifecycle === 'RETIRING' ? target.retiredAtMs ?? null : null,
+      const intervals = [...(target.admissionIntervals ?? [])];
+      if (target.lifecycle === 'RETIRING' && intervals.length > 0) {
+        intervals[intervals.length - 1] = { ...intervals[intervals.length - 1], admittedUntilMs: target.retiredAtMs ?? null };
+      }
+      rows[target.portfolioId] = { portfolioId: target.portfolioId, intervals,
         score: target.score,
         selectorVersion: ELITE_SELECTOR_VERSION };
     }
     for (const tombstone of capacityHealthy && this.admissionsEnabled ? Object.values(this.state.tombstones) : []) {
       if (!Number.isFinite(tombstone.admittedAtMs) || !Number.isFinite(tombstone.retiredAtMs)) continue;
       rows[tombstone.portfolioId] = { portfolioId: tombstone.portfolioId,
-        admittedAtMs: tombstone.admittedAtMs as number, admittedUntilMs: tombstone.retiredAtMs,
+        intervals: tombstone.admissionIntervals,
         score: tombstone.score, selectorVersion: ELITE_SELECTOR_VERSION };
     }
     mkdirSync(dirname(this.admissionIndexPath), { recursive: true });
     const temp = `${this.admissionIndexPath}.tmp`;
-    const index: AdmissionIndexDiskState = { version: 1, generatedAtMs: Date.now(),
+    const index: AdmissionIndexDiskState = { version: 2, generatedAtMs: Date.now(),
       healthy: capacityHealthy && this.admissionsEnabled,
       suspensionReason: capacityHealthy ? this.admissionSuspensionReason : 'resident_capacity_unhealthy', rows };
     writeFileSync(temp, JSON.stringify(index));
@@ -910,6 +954,7 @@ export class EliteDirectWatchState {
         .sort((a, b) => a.score - b.score || b.portfolioId.localeCompare(a.portfolioId))
         .slice(0, overflowCount);
       for (const victim of overflowVictims) {
+        this.closeCurrentAdmission(victim, baselineAtMs);
         Object.assign(victim, { lifecycle: 'RETIRING',
           retiredAtMs: baselineAtMs, retireAfterMs: baselineAtMs + retirementGraceMs,
           lastRetirementOpenPollAtMs: 0, retirementRelevantOpenCount: null,
@@ -932,6 +977,7 @@ export class EliteDirectWatchState {
         && (bestWaiting.score > worstDisplaceable.score
           || (bestWaiting.score === worstDisplaceable.score
             && bestWaiting.portfolioId.localeCompare(worstDisplaceable.portfolioId) < 0))) {
+        this.closeCurrentAdmission(worstDisplaceable, baselineAtMs);
         Object.assign(worstDisplaceable, {
           lifecycle: 'RETIRING', retiredAtMs: baselineAtMs,
           retireAfterMs: baselineAtMs + retirementGraceMs, lastRetirementOpenPollAtMs: 0,
@@ -968,6 +1014,7 @@ export class EliteDirectWatchState {
         canonical = this.state.targets[target.portfolioId] = {
           ...target,
           lifecycle: 'ENROLLING', admittedAtMs: null, openHistoryInitialized: false,
+          admissionIntervals: tombstone?.admissionIntervals ?? [],
           retiredAtMs: null, retireAfterMs: null,
           firstNegativeAtMs: null, lastNegativeAtMs: null, negativeEvidenceCount: 0,
           negativeSelectorVersion: null, negativeEvidenceReason: null,
@@ -1001,6 +1048,7 @@ export class EliteDirectWatchState {
         .includes(canonical?.negativeEvidenceReason ?? '')
         && !qualityAdmitIds.has(target.portfolioId);
       if (canonical && canonical.lifecycle !== 'ACTIVE' && canonical.lifecycle !== 'ENROLLING' && !qualityDisplaced) {
+        this.closeCurrentAdmission(canonical, baselineAtMs);
         Object.assign(canonical, { lifecycle: 'ENROLLING', admittedAtMs: null,
           openHistoryInitialized: false, retiredAtMs: null, retireAfterMs: null,
           firstNegativeAtMs: null, lastNegativeAtMs: null, negativeEvidenceCount: 0,
@@ -1023,6 +1071,7 @@ export class EliteDirectWatchState {
           && negativeObservedAtMs - (existing.firstNegativeAtMs ?? negativeObservedAtMs) >= negativeGraceMs) {
           existing.lifecycle = 'RETIRING';
           existing.retiredAtMs = baselineAtMs;
+          this.closeCurrentAdmission(existing, baselineAtMs);
           existing.retireAfterMs = baselineAtMs + retirementGraceMs;
           existing.lastRetirementOpenPollAtMs = 0;
           existing.retirementRelevantOpenCount = null;
@@ -1043,6 +1092,7 @@ export class EliteDirectWatchState {
           portfolioId, ownerId: existing.ownerId, username: existing.username, score: existing.score,
           sourceFilter: existing.sourceFilter, lifecycle: 'TOMBSTONE', tombstonedAtMs: baselineAtMs,
           admittedAtMs: existing.admittedAtMs ?? null, retiredAtMs: existing.retiredAtMs ?? null,
+          admissionIntervals: existing.admissionIntervals ?? [],
           baselineAtMs: existing.baselineAtMs, processedThroughMs: existing.processedThroughMs,
           closedHistoryInitialized: existing.closedHistoryInitialized,
           closedProcessedThroughMs: existing.closedProcessedThroughMs,
@@ -1168,6 +1218,9 @@ export class EliteDirectWatchState {
     target.processedThroughMs = Math.max(newest, polledAtMs);
     target.openHistoryInitialized = true;
     target.admittedAtMs = polledAtMs;
+    target.admissionIntervals ??= [];
+    target.admissionIntervals.push({ admittedAtMs: polledAtMs, admittedUntilMs: null });
+    if (target.admissionIntervals.length > this.maxAdmissionIntervals) target.admissionIntervals.shift();
     target.lifecycle = 'ACTIVE';
     target.lastFallbackPollAtMs = polledAtMs;
     target.lastOpenSuccessAtMs = polledAtMs;

@@ -53,7 +53,7 @@ function setup() {
     },
   }));
   writeFileSync(admissionPath, JSON.stringify({
-    version: 1,
+    version: 2,
     generatedAtMs: now,
     healthy: true,
     suspensionReason: null,
@@ -61,7 +61,7 @@ function setup() {
       [portfolioId]: {
         portfolioId,
         selectorVersion: ELITE_SELECTOR_VERSION,
-        admittedAtMs: observedAtMs, admittedUntilMs: null,
+        intervals: [{ admittedAtMs: observedAtMs, admittedUntilMs: null }],
         score: 90,
       },
     },
@@ -106,15 +106,19 @@ test('present corrupt admission row is transient but absent healthy row is termi
   const corruptRows: unknown[] = [
     null,
     {},
-    { portfolioId: 'wrong', selectorVersion: ELITE_SELECTOR_VERSION, admittedAtMs: now - 1, admittedUntilMs: null },
-    { portfolioId, selectorVersion: 'wrong-selector', admittedAtMs: now - 1, admittedUntilMs: null },
-    { portfolioId, selectorVersion: ELITE_SELECTOR_VERSION, admittedAtMs: 'bad', admittedUntilMs: null },
-    { portfolioId, selectorVersion: ELITE_SELECTOR_VERSION, admittedAtMs: now + 1, admittedUntilMs: null },
+    { portfolioId: 'wrong', selectorVersion: ELITE_SELECTOR_VERSION,
+      intervals: [{ admittedAtMs: now - 1, admittedUntilMs: null }], score: 90 },
+    { portfolioId, selectorVersion: 'wrong-selector',
+      intervals: [{ admittedAtMs: now - 1, admittedUntilMs: null }], score: 90 },
+    { portfolioId, selectorVersion: ELITE_SELECTOR_VERSION,
+      intervals: [{ admittedAtMs: 'bad', admittedUntilMs: null }], score: 90 },
+    { portfolioId, selectorVersion: ELITE_SELECTOR_VERSION,
+      intervals: [{ admittedAtMs: now + 1, admittedUntilMs: null }], score: 90 },
   ];
   for (const row of corruptRows) {
     const { statePath, admissionPath } = setup();
     writeFileSync(admissionPath, JSON.stringify({
-      version: 1, generatedAtMs: now, healthy: true, suspensionReason: null,
+      version: 2, generatedAtMs: now, healthy: true, suspensionReason: null,
       rows: { [portfolioId]: row },
     }));
     assertTransient(
@@ -125,7 +129,7 @@ test('present corrupt admission row is transient but absent healthy row is termi
 
   const { statePath, admissionPath } = setup();
   writeFileSync(admissionPath, JSON.stringify({
-    version: 1, generatedAtMs: now, healthy: true, suspensionReason: null, rows: {},
+    version: 2, generatedAtMs: now, healthy: true, suspensionReason: null, rows: {},
   }));
   const absent = eliteAdmissionFromState(
     statePath, portfolioId, now, 20 * 60_000, undefined, admissionPath,
