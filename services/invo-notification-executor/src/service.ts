@@ -665,7 +665,20 @@ async function executeUnlocked(signal: InvoSignal, wakeSource: string, receivedA
     // Lane 3 shadow exposure is portfolio-level elite-only. Closes bypass this gate so
     // previously owned broad-research exposure can always unwind after a demotion.
     if (!cfg.live && signal.action !== 'close') {
-      const eligibilityCutoffMs = decisionAtMs;
+      const eligibilityCutoffMs = signal.sourceTimeMs;
+      if (eligibilityCutoffMs == null || !Number.isFinite(eligibilityCutoffMs)
+        || eligibilityCutoffMs <= 0 || eligibilityCutoffMs > decisionAtMs) {
+        state.markSeen(signal.key);
+        log({
+          type: 'skip',
+          reason: 'shadow_invalid_source_eligibility_time',
+          shadowAdmissionMode: 'ELITE_ONLY',
+          eligibilityCutoffMs,
+          signal,
+          wakeSource,
+        });
+        return;
+      }
       const candidateAdmission = eliteAdmissionFromState(
         cfg.candidateStatePath,
         signal.portfolioId,
@@ -674,6 +687,7 @@ async function executeUnlocked(signal: InvoSignal, wakeSource: string, receivedA
         cfg.candidateSnapshotsPath,
         cfg.directWatchAdmissionIndexPath,
         Math.max(10_000, Math.min(60_000, cfg.directWatchScanMs * 2)),
+        decisionAtMs,
       );
       if (!candidateAdmission.allowed) {
         if (shouldPersistAdmissionDenial(candidateAdmission)) state.markSeen(signal.key);

@@ -18,7 +18,7 @@ function admissionIndex(statePath: string, admittedAtMs = candidateObservedAtMs 
   const path = join(statePath, '..', 'elite-direct-watch-admissions.json');
   writeFileSync(path, JSON.stringify({ version: 1, generatedAtMs: decisionAtMs,
     healthy: true, suspensionReason: null, rows: {
-    [portfolioId]: { portfolioId, admittedAtMs, score: 63.4, selectorVersion: ELITE_SELECTOR_VERSION },
+    [portfolioId]: { portfolioId, admittedAtMs, admittedUntilMs: null, score: 63.4, selectorVersion: ELITE_SELECTOR_VERSION },
   } }));
   return path;
 }
@@ -179,7 +179,7 @@ test('admission index requires a structurally valid healthy fresh envelope', () 
   const maxIndexAgeMs = 10_000;
 
   writeFileSync(index, JSON.stringify({ version: 1, generatedAtMs: decisionAtMs, rows: {
-    [portfolioId]: { portfolioId, admittedAtMs: candidateObservedAtMs - 1_000,
+    [portfolioId]: { portfolioId, admittedAtMs: candidateObservedAtMs - 1_000, admittedUntilMs: null,
       score: 63.4, selectorVersion: ELITE_SELECTOR_VERSION },
   } }));
   const missingHealthy = eliteAdmissionFromState(
@@ -192,7 +192,7 @@ test('admission index requires a structurally valid healthy fresh envelope', () 
 
   writeFileSync(index, JSON.stringify({ version: 1, generatedAtMs: decisionAtMs - maxIndexAgeMs - 1,
     healthy: true, suspensionReason: null, rows: {
-      [portfolioId]: { portfolioId, admittedAtMs: candidateObservedAtMs - 1_000,
+      [portfolioId]: { portfolioId, admittedAtMs: candidateObservedAtMs - 1_000, admittedUntilMs: null,
         score: 63.4, selectorVersion: ELITE_SELECTOR_VERSION },
     } }));
   const stale = eliteAdmissionFromState(
@@ -204,7 +204,7 @@ test('admission index requires a structurally valid healthy fresh envelope', () 
 
   writeFileSync(index, JSON.stringify({ version: 1, generatedAtMs: decisionAtMs + 1,
     healthy: true, suspensionReason: null, rows: {
-      [portfolioId]: { portfolioId, admittedAtMs: candidateObservedAtMs - 1_000,
+      [portfolioId]: { portfolioId, admittedAtMs: candidateObservedAtMs - 1_000, admittedUntilMs: null,
         score: 63.4, selectorVersion: ELITE_SELECTOR_VERSION },
     } }));
   const future = eliteAdmissionFromState(
@@ -216,7 +216,7 @@ test('admission index requires a structurally valid healthy fresh envelope', () 
 
   writeFileSync(index, JSON.stringify({ version: 1, generatedAtMs: decisionAtMs,
     healthy: true, suspensionReason: 'contradictory', rows: {
-      [portfolioId]: { portfolioId, admittedAtMs: candidateObservedAtMs - 1_000,
+      [portfolioId]: { portfolioId, admittedAtMs: candidateObservedAtMs - 1_000, admittedUntilMs: null,
         score: 63.4, selectorVersion: ELITE_SELECTOR_VERSION },
     } }));
   const contradictory = eliteAdmissionFromState(
@@ -242,7 +242,7 @@ test('qualified candidate is waitlisted until direct-watch admission and cannot 
 
   writeFileSync(index, JSON.stringify({ version: 1, generatedAtMs: decisionAtMs + 10,
     healthy: true, suspensionReason: null, rows: {
-      [portfolioId]: { portfolioId, admittedAtMs: decisionAtMs + 10,
+      [portfolioId]: { portfolioId, admittedAtMs: decisionAtMs + 10, admittedUntilMs: null,
         score: 63.4, selectorVersion: ELITE_SELECTOR_VERSION },
     } }));
   const prospective = eliteAdmissionFromState(path, portfolioId, decisionAtMs + 11, 20 * 60_000, undefined, index);
@@ -250,12 +250,83 @@ test('qualified candidate is waitlisted until direct-watch admission and cannot 
   assert.equal(prospective.directWatchAdmittedAtMs, decisionAtMs + 10);
 });
 
+test('delayed pre-promotion trade stays rejected at its source-time boundary', () => {
+  const path = stateFile(validState({
+    lastObservedAtMs: decisionAtMs + 20_000,
+    firstEliteAtMs: { [portfolioId]: decisionAtMs + 10_000 },
+    portfolios: { [portfolioId]: {
+      ...(validState().portfolios as any)[portfolioId], observedAtMs: decisionAtMs + 20_000,
+    } },
+  }));
+  const index = admissionIndex(path, decisionAtMs + 15_000);
+  writeFileSync(index, JSON.stringify({ version: 1, generatedAtMs: decisionAtMs + 30_000,
+    healthy: true, suspensionReason: null, rows: {
+      [portfolioId]: { portfolioId, admittedAtMs: decisionAtMs + 15_000, admittedUntilMs: null,
+        score: 63.4, selectorVersion: ELITE_SELECTOR_VERSION },
+    } }));
+  const result = eliteAdmissionFromState(path, portfolioId, decisionAtMs, 20 * 60_000,
+    undefined, index, 60_000, decisionAtMs + 30_000);
+  assert.equal(result.allowed, false);
+  assert.equal(result.reason, 'candidate_observation_from_future');
+});
+
+test('trade whose own later outcome causes promotion cannot gain admission', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lane3-own-outcome-'));
+  const path = join(dir, 'portfolio-candidates.json');
+  const snapshots = join(dir, 'portfolio-candidate-snapshots.jsonl');
+  writeFileSync(path, JSON.stringify(validState({ lastObservedAtMs: decisionAtMs + 20_000,
+    firstEliteAtMs: { [portfolioId]: decisionAtMs + 20_000 } })));
+  writeFileSync(`${snapshots}.recent.json`, JSON.stringify({ version: 1,
+    selectorVersion: ELITE_SELECTOR_VERSION, rows: [{
+      ...(validState().portfolios as any)[portfolioId], observedAtMs: decisionAtMs - 1_000,
+      bucket: 'RESEARCH_WIDE',
+    }] }));
+  const index = join(dir, 'elite-direct-watch-admissions.json');
+  writeFileSync(index, JSON.stringify({ version: 1, generatedAtMs: decisionAtMs + 30_000,
+    healthy: true, suspensionReason: null, rows: {
+      [portfolioId]: { portfolioId, admittedAtMs: decisionAtMs + 20_000,
+        admittedUntilMs: null, score: 63.4, selectorVersion: ELITE_SELECTOR_VERSION },
+    } }));
+  const result = eliteAdmissionFromState(path, portfolioId, decisionAtMs, 20 * 60_000,
+    snapshots, index, 60_000, decisionAtMs + 30_000);
+  assert.equal(result.allowed, false);
+  assert.equal(result.reason, 'portfolio_not_elite');
+});
+
+test('selected at source then demoted before processing uses historical selector and admission interval', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lane3-source-selected-'));
+  const path = join(dir, 'portfolio-candidates.json');
+  const snapshots = join(dir, 'portfolio-candidate-snapshots.jsonl');
+  writeFileSync(path, JSON.stringify(validState({ lastObservedAtMs: decisionAtMs + 20_000,
+    portfolios: { [portfolioId]: {
+      ...(validState().portfolios as any)[portfolioId], observedAtMs: decisionAtMs + 20_000,
+      bucket: 'REJECTED_DEMOTED',
+    } } })));
+  writeFileSync(`${snapshots}.recent.json`, JSON.stringify({ version: 1,
+    selectorVersion: ELITE_SELECTOR_VERSION, rows: [{
+      ...(validState().portfolios as any)[portfolioId], observedAtMs: decisionAtMs - 1_000,
+    }] }));
+  const index = join(dir, 'elite-direct-watch-admissions.json');
+  writeFileSync(index, JSON.stringify({ version: 1, generatedAtMs: decisionAtMs + 30_000,
+    healthy: true, suspensionReason: null, rows: {
+      [portfolioId]: { portfolioId, admittedAtMs: decisionAtMs - 5_000,
+        admittedUntilMs: decisionAtMs + 10_000, score: 63.4, selectorVersion: ELITE_SELECTOR_VERSION },
+    } }));
+  const first = eliteAdmissionFromState(path, portfolioId, decisionAtMs, 20 * 60_000,
+    snapshots, index, 60_000, decisionAtMs + 30_000);
+  const retry = eliteAdmissionFromState(path, portfolioId, decisionAtMs, 20 * 60_000,
+    snapshots, index, 60_000, decisionAtMs + 35_000);
+  assert.equal(first.allowed, true);
+  assert.equal(retry.allowed, true);
+  assert.equal(retry.reason, first.reason);
+});
+
 test('admission timestamp after index generation is transient corruption and never consumable', () => {
   const path = stateFile(validState());
   const index = join(path, '..', 'elite-direct-watch-admissions.json');
   writeFileSync(index, JSON.stringify({ version: 1, generatedAtMs: decisionAtMs,
     healthy: true, suspensionReason: null, rows: {
-      [portfolioId]: { portfolioId, admittedAtMs: decisionAtMs + 1,
+      [portfolioId]: { portfolioId, admittedAtMs: decisionAtMs + 1, admittedUntilMs: null,
         score: 63.4, selectorVersion: ELITE_SELECTOR_VERSION },
     } }));
   const decision = eliteAdmissionFromState(path, portfolioId, decisionAtMs, 20 * 60_000, undefined, index);
@@ -283,7 +354,7 @@ test('feed NEW during scan suspension remains unseen and cursor-safe, then execu
 
   writeFileSync(index, JSON.stringify({ version: 1, generatedAtMs: decisionAtMs + 1,
     healthy: true, suspensionReason: null, rows: {
-      [portfolioId]: { portfolioId, admittedAtMs: candidateObservedAtMs - 1_000,
+      [portfolioId]: { portfolioId, admittedAtMs: candidateObservedAtMs - 1_000, admittedUntilMs: null,
         score: 63.4, selectorVersion: ELITE_SELECTOR_VERSION },
     } }));
   const recovered = eliteAdmissionFromState(
@@ -463,7 +534,7 @@ test('malformed existing admission row is transient corruption and cannot consum
   const index = admissionIndex(path);
   writeFileSync(index, JSON.stringify({
     version: 1, generatedAtMs: decisionAtMs, healthy: true, suspensionReason: null,
-    rows: { [portfolioId]: { portfolioId, admittedAtMs: candidateObservedAtMs - 1_000,
+    rows: { [portfolioId]: { portfolioId, admittedAtMs: candidateObservedAtMs - 1_000, admittedUntilMs: null,
       selectorVersion: 'wrong-selector' } },
   }));
   const decision = eliteAdmissionFromState(
@@ -520,8 +591,10 @@ test('candidate envelope version and future envelope fail transient before row s
 
 test('admission index requires exact complete writer row schema', () => {
   const valid = { portfolioId, admittedAtMs: candidateObservedAtMs - 1_000,
-    score: 63.4, selectorVersion: ELITE_SELECTOR_VERSION };
+    admittedUntilMs: null, score: 63.4, selectorVersion: ELITE_SELECTOR_VERSION };
+  const { admittedUntilMs: _missingAdmittedUntilMs, ...missingAdmittedUntilMs } = valid;
   const corrupt = [
+    missingAdmittedUntilMs,
     { ...valid, score: undefined }, { ...valid, score: '63.4' }, { ...valid, score: null },
     { ...valid, admittedAtMs: -1 }, { ...valid, admittedAtMs: '1' },
     { ...valid, selectorVersion: 'old' }, { ...valid, unexpectedCritical: {} },

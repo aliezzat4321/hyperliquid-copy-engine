@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, statSync } from 'fs';
 import { ELITE_SELECTOR_VERSION, isCanonicalLedgerDiskState, isCanonicalPortfolioSnapshot } from './portfolio-candidates.js';
 
-export const ELITE_ADMISSION_VERSION = 'lane3-elite-admission-v1-20260916';
+export const ELITE_ADMISSION_VERSION = 'lane3-elite-admission-v2-20260922';
 
 interface SnapshotCacheEntry {
   mtimeMs: number;
@@ -122,10 +122,11 @@ function base(portfolioId: string): EliteAdmissionDecision {
 }
 
 /**
- * Fail-closed, decision-time portfolio admission for Lane 3 shadow opens/adds.
+ * Fail-closed, source-time portfolio admission for Lane 3 shadow opens/adds.
  * The portfolio research collector writes this state independently every 10 minutes.
  * No future observation, retroactive elite membership, or stale selector policy can
- * authorize an earlier signal.
+ * authorize an earlier signal. evaluatedAtMs is used only for current publication
+ * freshness/health; it never moves the membership boundary past decisionAtMs.
  */
 export function eliteAdmissionFromState(
   statePath: string,
@@ -135,6 +136,7 @@ export function eliteAdmissionFromState(
   snapshotsPath?: string,
   admissionIndexPath?: string,
   maxAdmissionIndexAgeMs = Math.min(maxStateAgeMs, 60_000),
+  evaluatedAtMs = decisionAtMs,
 ): EliteAdmissionDecision {
   const denied = base(portfolioId);
   if (!portfolioId) return { ...denied, reason: 'portfolio_id_missing' };
@@ -167,23 +169,27 @@ export function eliteAdmissionFromState(
       return { ...denied, disposition: 'TRANSIENT', retryable: true,
         reason: 'direct_watch_admission_index_invalid' };
     }
-    const admissionKeys = new Set(['portfolioId', 'admittedAtMs', 'score', 'selectorVersion']);
+    const admissionKeys = new Set(['portfolioId', 'admittedAtMs', 'admittedUntilMs', 'score', 'selectorVersion']);
     const indexRowsValid = Object.entries(indexRows as Record<string, unknown>).every(([key, value]) => {
-      if (!isPlainObject(value) || Object.keys(value).some(field => !admissionKeys.has(field))) return false;
+      if (!isPlainObject(value) || Object.keys(value).some(field => !admissionKeys.has(field))
+        || !Object.prototype.hasOwnProperty.call(value, 'admittedUntilMs')) return false;
       return value.portfolioId === key && value.selectorVersion === ELITE_SELECTOR_VERSION
         && typeof value.admittedAtMs === 'number' && Number.isFinite(value.admittedAtMs)
         && value.admittedAtMs > 0 && value.admittedAtMs <= indexGeneratedAtMs!
+        && (value.admittedUntilMs === null || (typeof value.admittedUntilMs === 'number'
+          && Number.isFinite(value.admittedUntilMs) && value.admittedUntilMs >= value.admittedAtMs
+          && value.admittedUntilMs <= indexGeneratedAtMs!))
         && typeof value.score === 'number' && Number.isFinite(value.score);
     });
     if (!indexRowsValid) {
       return { ...denied, disposition: 'TRANSIENT', retryable: true,
         reason: 'direct_watch_admission_index_invalid' };
     }
-    if (indexGeneratedAtMs > decisionAtMs) {
+    if (indexGeneratedAtMs > evaluatedAtMs) {
       return { ...denied, disposition: 'TRANSIENT', retryable: true,
         reason: 'direct_watch_admission_index_from_future' };
     }
-    if (decisionAtMs - indexGeneratedAtMs > maxAdmissionIndexAgeMs) {
+    if (evaluatedAtMs - indexGeneratedAtMs > maxAdmissionIndexAgeMs) {
       return { ...denied, disposition: 'TRANSIENT', retryable: true,
         reason: 'direct_watch_admission_index_stale' };
     }
@@ -229,13 +235,13 @@ export function eliteAdmissionFromState(
   if (stateObservedAtMs == null || stateObservedAtMs <= 0) {
     return { ...common, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_state_timestamp_missing' };
   }
-  if (stateObservedAtMs > decisionAtMs) {
-    return { ...common, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_state_from_future' };
-  }
   if (!isCanonicalLedgerDiskState(state)) {
     return { ...common, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_state_invalid_envelope' };
   }
-  if (stateObservedAtMs <= decisionAtMs && decisionAtMs - stateObservedAtMs > maxStateAgeMs) {
+  if (stateObservedAtMs > evaluatedAtMs) {
+    return { ...common, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_state_from_future' };
+  }
+  if (evaluatedAtMs - stateObservedAtMs > maxStateAgeMs) {
     return { ...common, disposition: 'TRANSIENT', retryable: true, reason: 'candidate_state_stale' };
   }
 
@@ -249,6 +255,8 @@ export function eliteAdmissionFromState(
     };
   }
   const historical = historicalResult.row;
+  // A later aggregate state is valid runtime-health evidence but cannot supply
+  // source-time membership. Only the immutable historical row may do that.
   const current: any = (state.portfolios as Record<string, any>)[portfolioId];
   const hasCurrent = Object.prototype.hasOwnProperty.call(state.portfolios, portfolioId);
   if (historical == null && hasCurrent && !isCanonicalPortfolioSnapshot(current)) {
@@ -327,12 +335,16 @@ export function eliteAdmissionFromState(
   }
   const admission = admissionIndex.rows[portfolioId];
   const admittedAtMs = typeof admission?.admittedAtMs === 'number' ? admission.admittedAtMs : null;
+  const admittedUntilMs = admission?.admittedUntilMs === null ? null
+    : (typeof admission?.admittedUntilMs === 'number' ? admission.admittedUntilMs : undefined);
   const indexGeneratedAtMs = typeof admissionIndex.generatedAtMs === 'number' ? admissionIndex.generatedAtMs : null;
   const admissionRowValid = isPlainObject(admission)
     && admission.portfolioId === portfolioId
     && admission.selectorVersion === ELITE_SELECTOR_VERSION
     && admittedAtMs != null
     && admittedAtMs > 0
+    && (admittedUntilMs === null || (Number.isFinite(admittedUntilMs)
+      && admittedUntilMs >= admittedAtMs))
     && indexGeneratedAtMs != null
     && admittedAtMs <= indexGeneratedAtMs
     && typeof admission.score === 'number'
@@ -346,6 +358,9 @@ export function eliteAdmissionFromState(
     };
   }
   if (admittedAtMs > decisionAtMs) {
+    return { ...enriched, directWatchAdmittedAtMs: admittedAtMs, reason: 'direct_watch_not_admitted_at_signal_time' };
+  }
+  if (admittedUntilMs != null && decisionAtMs >= admittedUntilMs) {
     return { ...enriched, directWatchAdmittedAtMs: admittedAtMs, reason: 'direct_watch_not_admitted_at_signal_time' };
   }
 

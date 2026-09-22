@@ -47,6 +47,13 @@ candidate ledger using evidence available before the source trade. Candidate sta
 is missing, malformed, stale, future-dated, absent for that portfolio, or non-elite fails
 closed with an explicit skip reason.
 
+The authoritative signal source timestamp is the immutable NEW/ADD eligibility cutoff;
+processing or retry time never substitutes for it. Both selector membership and the
+direct-watch admission interval must cover that cutoff. Current publications still have
+to be healthy and fresh at processing time, while retained demotion intervals make a
+retry/restart deterministic across later selector changes. CLOSE continues to bypass
+admission so managed shadow exposure can always unwind.
+
 Portfolio identity is the qualification unit. Multiple portfolios belonging to the same
 owner may all enter shadow research if **each portfolio independently qualifies**. A strong
 portfolio does not automatically transfer eligibility to a weaker sibling portfolio.
@@ -187,7 +194,7 @@ mechanism authorizes live trading (`REAL_TRADING_ENABLED=NO`).
 
 The current execution evidence contract is `lane3-causal-l2-v2`; the cost model is
 `hl-taker-l2-oracle-funding-v2`; the shadow admission contract is
-`lane3-elite-admission-v1-20260916`. These assumptions are evidence inputs for research;
+`lane3-elite-admission-v2-20260922`. These assumptions are evidence inputs for research;
 they do not change or authorize the live order route.
 
 Every decision writes JSONL with signal provenance, admission provenance,

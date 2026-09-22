@@ -61,7 +61,7 @@ function setup() {
       [portfolioId]: {
         portfolioId,
         selectorVersion: ELITE_SELECTOR_VERSION,
-        admittedAtMs: observedAtMs,
+        admittedAtMs: observedAtMs, admittedUntilMs: null,
         score: 90,
       },
     },
@@ -106,10 +106,10 @@ test('present corrupt admission row is transient but absent healthy row is termi
   const corruptRows: unknown[] = [
     null,
     {},
-    { portfolioId: 'wrong', selectorVersion: ELITE_SELECTOR_VERSION, admittedAtMs: now - 1 },
-    { portfolioId, selectorVersion: 'wrong-selector', admittedAtMs: now - 1 },
-    { portfolioId, selectorVersion: ELITE_SELECTOR_VERSION, admittedAtMs: 'bad' },
-    { portfolioId, selectorVersion: ELITE_SELECTOR_VERSION, admittedAtMs: now + 1 },
+    { portfolioId: 'wrong', selectorVersion: ELITE_SELECTOR_VERSION, admittedAtMs: now - 1, admittedUntilMs: null },
+    { portfolioId, selectorVersion: 'wrong-selector', admittedAtMs: now - 1, admittedUntilMs: null },
+    { portfolioId, selectorVersion: ELITE_SELECTOR_VERSION, admittedAtMs: 'bad', admittedUntilMs: null },
+    { portfolioId, selectorVersion: ELITE_SELECTOR_VERSION, admittedAtMs: now + 1, admittedUntilMs: null },
   ];
   for (const row of corruptRows) {
     const { statePath, admissionPath } = setup();

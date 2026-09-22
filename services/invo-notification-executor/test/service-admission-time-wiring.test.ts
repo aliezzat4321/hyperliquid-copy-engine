@@ -5,11 +5,13 @@ import { resolve } from 'node:path';
 
 const serviceSource = readFileSync(resolve(process.cwd(), 'src/service.ts'), 'utf8');
 
-test('prospective elite admission uses processing decision time, not source trade time', () => {
+test('prospective elite admission uses authoritative source trade time and separately passes processing time', () => {
   assert.match(
     serviceSource,
-    /const eligibilityCutoffMs = decisionAtMs;/,
-    'source trade time is provenance only and must not recreate candidate_state_from_future rejects',
+    /const eligibilityCutoffMs = signal\.sourceTimeMs;/,
+    'NEW/ADD eligibility must be fixed at the source event boundary',
   );
-  assert.doesNotMatch(serviceSource, /const eligibilityCutoffMs = signal\.sourceTimeMs \?\? receivedAtMs;/);
+  assert.doesNotMatch(serviceSource, /const eligibilityCutoffMs = decisionAtMs;/);
+  assert.match(serviceSource, /eligibilityCutoffMs == null[\s\S]*eligibilityCutoffMs > decisionAtMs/);
+  assert.match(serviceSource, /Math\.max\(10_000,[\s\S]*decisionAtMs,/);
 });

@@ -15,8 +15,8 @@ test('dry new exposure is gated by exact portfolio elite admission before open/r
   assert.ok(open > admission, 'open path must come after admission gate');
   assert.match(serviceSource, /reason: `shadow_\$\{candidateAdmission\.reason\}`/);
   assert.match(serviceSource, /shadowAdmissionMode: 'ELITE_ONLY'/);
-  assert.match(serviceSource, /const eligibilityCutoffMs = decisionAtMs;/,
-    'receipt/processing time, never source trade time, must control prospective admission');
+  assert.match(serviceSource, /const eligibilityCutoffMs = signal\.sourceTimeMs;/,
+    'authoritative source time must control prospective admission');
 });
 
 test('owned closes bypass elite admission so demotion cannot orphan exposure', () => {

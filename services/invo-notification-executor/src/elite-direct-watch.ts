@@ -51,6 +51,8 @@ export interface StoredTarget extends EliteDirectTarget {
 export interface Tombstone extends EliteDirectTarget {
   lifecycle: 'TOMBSTONE';
   tombstonedAtMs: number;
+  admittedAtMs: number | null;
+  retiredAtMs: number | null;
   baselineAtMs: number;
   processedThroughMs: number;
   closedHistoryInitialized: boolean;
@@ -447,6 +449,7 @@ interface DirectWatchDiskState {
 interface AdmissionIndexRow {
   portfolioId: string;
   admittedAtMs: number;
+  admittedUntilMs: number | null;
   score: number;
   selectorVersion: string;
 }
@@ -731,6 +734,8 @@ export class EliteDirectWatchState {
             throw new Error(`invalid direct-watch tombstone: ${portfolioId}`);
           }
           raw.score = Number.isFinite(raw.score) ? Number(raw.score) : 0;
+          raw.admittedAtMs = Number.isFinite(raw.admittedAtMs) ? Number(raw.admittedAtMs) : null;
+          raw.retiredAtMs = Number.isFinite(raw.retiredAtMs) ? Number(raw.retiredAtMs) : null;
         }
         for (const [portfolioId, raw] of Object.entries(this.state.deferredAdmissions)) {
           if (!isPlainObject(raw) || raw.portfolioId !== portfolioId || !Number.isFinite(raw.deferredAtMs)) {
@@ -829,11 +834,20 @@ export class EliteDirectWatchState {
     const rows: Record<string, AdmissionIndexRow> = {};
     const capacityHealthy = Object.keys(this.state.targets).length <= this.enforcedResidentCap;
     for (const target of capacityHealthy && this.admissionsEnabled ? Object.values(this.state.targets) : []) {
-      if (target.lifecycle !== 'ACTIVE' || !target.openHistoryInitialized || !target.closedHistoryInitialized
+      if (!['ACTIVE', 'MISSING_GRACE', 'RETIRING'].includes(target.lifecycle ?? '')
+        || !target.openHistoryInitialized || !target.closedHistoryInitialized
         || !Number.isFinite(target.admittedAtMs)) continue;
       rows[target.portfolioId] = { portfolioId: target.portfolioId,
-        admittedAtMs: target.admittedAtMs as number, score: target.score,
+        admittedAtMs: target.admittedAtMs as number,
+        admittedUntilMs: target.lifecycle === 'RETIRING' ? target.retiredAtMs ?? null : null,
+        score: target.score,
         selectorVersion: ELITE_SELECTOR_VERSION };
+    }
+    for (const tombstone of capacityHealthy && this.admissionsEnabled ? Object.values(this.state.tombstones) : []) {
+      if (!Number.isFinite(tombstone.admittedAtMs) || !Number.isFinite(tombstone.retiredAtMs)) continue;
+      rows[tombstone.portfolioId] = { portfolioId: tombstone.portfolioId,
+        admittedAtMs: tombstone.admittedAtMs as number, admittedUntilMs: tombstone.retiredAtMs,
+        score: tombstone.score, selectorVersion: ELITE_SELECTOR_VERSION };
     }
     mkdirSync(dirname(this.admissionIndexPath), { recursive: true });
     const temp = `${this.admissionIndexPath}.tmp`;
@@ -1028,6 +1042,7 @@ export class EliteDirectWatchState {
         this.state.tombstones[portfolioId] = {
           portfolioId, ownerId: existing.ownerId, username: existing.username, score: existing.score,
           sourceFilter: existing.sourceFilter, lifecycle: 'TOMBSTONE', tombstonedAtMs: baselineAtMs,
+          admittedAtMs: existing.admittedAtMs ?? null, retiredAtMs: existing.retiredAtMs ?? null,
           baselineAtMs: existing.baselineAtMs, processedThroughMs: existing.processedThroughMs,
           closedHistoryInitialized: existing.closedHistoryInitialized,
           closedProcessedThroughMs: existing.closedProcessedThroughMs,
