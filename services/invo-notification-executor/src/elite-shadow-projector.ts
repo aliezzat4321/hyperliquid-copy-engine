@@ -54,7 +54,7 @@ function validateAuditRow(row: unknown, location = 'audit row'): asserts row is 
   const type = typeof row.type === 'string' ? row.type : '';
   if (!type.trim()) throw new Error(`corrupt audit evidence ${location}: type missing or invalid`);
   const looksLifecycle = type.startsWith('shadow_open') || type.startsWith('shadow_close')
-    || type === 'shadow_reupped';
+    || type.startsWith('shadow_partial') || type.startsWith('shadow_reup');
   if (looksLifecycle && !LIFECYCLE_TYPES.has(type)) {
     throw new Error(`corrupt audit evidence ${location}: unrecognized lifecycle type`);
   }
@@ -279,11 +279,16 @@ const publicationIo: ElitePublicationIo = {
   remove: path => { try { unlinkSync(path); } catch { /* best-effort orphan cleanup */ } },
 };
 export function eliteShadowManifestPath(output: string) { return `${output}.manifest.json`; }
-export function readEliteShadowPublication(output: string) {
+export function readEliteShadowPublication(output: string, expectedLedgerBase?: string) {
   const manifest = JSON.parse(readFileSync(eliteShadowManifestPath(output), 'utf8'));
-  if (!plain(manifest) || manifest.version !== 1 || typeof manifest.reportPath !== 'string'
-    || typeof manifest.ledgerPath !== 'string' || typeof manifest.generationId !== 'string')
+  if (!plain(manifest) || manifest.version !== 1
+    || typeof manifest.generationId !== 'string' || manifest.generationId.length === 0
+    || typeof manifest.reportPath !== 'string' || manifest.reportPath !== `${output}.generation-${manifest.generationId}`
+    || typeof manifest.ledgerPath !== 'string'
+    || (expectedLedgerBase != null && manifest.ledgerPath !== `${expectedLedgerBase}.generation-${manifest.generationId}`)
+    || typeof manifest.generatedAtMs !== 'number' || !Number.isFinite(manifest.generatedAtMs) || manifest.generatedAtMs <= 0) {
     throw new Error('invalid elite shadow publication manifest');
+  }
   return { manifest, report: JSON.parse(readFileSync(manifest.reportPath, 'utf8')),
     ledger: readFileSync(manifest.ledgerPath, 'utf8') };
 }
@@ -301,13 +306,15 @@ export function writeEliteShadowReport(snapshotPath: string, auditPath: string, 
   const manifestPath = eliteShadowManifestPath(output); const manifestTemp = `${manifestPath}.${generationId}.tmp`;
   mkdirSync(dirname(output), { recursive: true }); mkdirSync(dirname(ledger), { recursive: true });
   try {
+    const manifestData = JSON.stringify({ version: 1, generationId, reportPath: reportFinal,
+      ledgerPath: ledgerFinal, generatedAtMs: rendered.generatedAtMs }, null, 2);
     io.write(reportTemp, reportData); io.fsyncFile(reportTemp);
     io.write(ledgerTemp, ledgerData); io.fsyncFile(ledgerTemp);
+    io.write(manifestTemp, manifestData); io.fsyncFile(manifestTemp);
     io.rename(reportTemp, reportFinal); io.rename(ledgerTemp, ledgerFinal);
     io.fsyncDirectory(dirname(output));
-    io.write(manifestTemp, JSON.stringify({ version: 1, generationId, reportPath: reportFinal,
-      ledgerPath: ledgerFinal, generatedAtMs: rendered.generatedAtMs }, null, 2));
-    io.fsyncFile(manifestTemp); io.rename(manifestTemp, manifestPath); io.fsyncDirectory(dirname(output));
+    if (dirname(ledger) !== dirname(output)) io.fsyncDirectory(dirname(ledger));
+    io.rename(manifestTemp, manifestPath); io.fsyncDirectory(dirname(output));
   } catch (error) {
     for (const path of [reportTemp, ledgerTemp, manifestTemp]) io.remove(path);
     throw error;

@@ -177,6 +177,11 @@ test('lifecycle audit rows require recognized type, identity, and causal time', 
     { type: 'shadow_closed', sourceBaseId: 'x', portfolioId: 'p' },
     { type: 'shadow_close_incomplete', sourceBaseId: 'x', portfolioId: 'p', decisionAtMs: Number.NaN },
     { type: 'shadow_close_unknown', sourceBaseId: 'x', portfolioId: 'p', decisionAtMs: 2 },
+    { type: 'shadow_partially_closed ', sourceBaseId: 'x', portfolioId: 'p', decisionAtMs: 2,
+      economicsCompleteness: 'INCOMPLETE_FUNDING' },
+    { type: 'shadow_partial_closed', sourceBaseId: 'x', portfolioId: 'p', decisionAtMs: 2,
+      economicsCompleteness: 'INCOMPLETE_FUNDING' },
+    { type: 'shadow_reupped ', sourceBaseId: 'x', portfolioId: 'p', decisionAtMs: 2 },
     { type: 'shadow_close_rejected', sourceBaseId: '', portfolioId: 'p', decisionAtMs: 2 },
   ];
   for (const row of malformed) {
@@ -270,7 +275,7 @@ test('atomic generation manifest preserves the previous coherent pair on every p
   const report = join(root, 'report.json'); const ledger = join(root, 'ledger.jsonl');
   writeFileSync(snapshots, `${JSON.stringify(snap('p', 1))}\n`); writeFileSync(audit, '');
   writeEliteShadowReport(snapshots, audit, report, ledger, health());
-  const prior = readEliteShadowPublication(report);
+  const prior = readEliteShadowPublication(report, ledger);
   const baseIo: ElitePublicationIo = {
     write: (path, data) => writeFileSync(path, data),
     fsyncFile: path => { const fd = openSync(path, 'r'); try { fsyncSync(fd); } finally { closeSync(fd); } },
@@ -278,14 +283,19 @@ test('atomic generation manifest preserves the previous coherent pair on every p
     fsyncDirectory: path => { const fd = openSync(path, 'r'); try { fsyncSync(fd); } finally { closeSync(fd); } },
     remove: path => { try { unlinkSync(path); } catch {} },
   };
-  for (const [method, failAt] of [['write', 1], ['write', 2], ['fsyncFile', 1], ['rename', 1], ['rename', 2], ['rename', 3]] as const) {
+  for (const [method, failAt] of [
+    ['write', 1], ['write', 2], ['write', 3],
+    ['fsyncFile', 1], ['fsyncFile', 2], ['fsyncFile', 3],
+    ['rename', 1], ['rename', 2], ['rename', 3],
+    ['fsyncDirectory', 1],
+  ] as const) {
     let calls = 0;
     const failing = { ...baseIo, [method]: (...args: any[]) => {
       calls += 1; if (calls === failAt) throw new Error(`injected ${method} failure`);
       return (baseIo[method] as any)(...args);
     } } as ElitePublicationIo;
     assert.throws(() => writeEliteShadowReport(snapshots, audit, report, ledger, health(), failing), /injected/);
-    const current = readEliteShadowPublication(report);
+    const current = readEliteShadowPublication(report, ledger);
     assert.equal(current.manifest.generationId, prior.manifest.generationId);
     assert.deepEqual(current.report, prior.report); assert.equal(current.ledger, prior.ledger);
   }
