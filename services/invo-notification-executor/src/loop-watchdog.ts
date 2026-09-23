@@ -9,6 +9,32 @@ export interface LoopWatchdogStatus {
   stalled: boolean;
 }
 
+export function feedWatchdogLimitMs(input: {
+  maxBackoffMs: number; pollMs: number; requestTimeoutMs: number; processingMarginMs: number;
+}): number {
+  return input.maxBackoffMs + input.pollMs + input.requestTimeoutMs + input.processingMarginMs;
+}
+
+export function directWatchdogLimitMs(input: {
+  openHydrates: number; closedHydrates: number;
+  openMaxPages: number; closedMaxPages: number; maxAttemptsPerPage: number;
+  concurrency: number; requestTimeoutMs: number;
+  requestBudgetPerSecond: number; requestBudgetBurst: number; fixedReserveRequestsPerSecond: number;
+  fixedOverheadMs: number; processingMarginMs: number;
+}): number {
+  const openRequests = input.openHydrates * input.openMaxPages * input.maxAttemptsPerPage;
+  const closedRequests = input.closedHydrates * input.closedMaxPages * input.maxAttemptsPerPage;
+  const openWallMs = Math.ceil(input.openHydrates / input.concurrency)
+    * input.openMaxPages * input.maxAttemptsPerPage * input.requestTimeoutMs;
+  const closedWallMs = Math.ceil(input.closedHydrates / input.concurrency)
+    * input.closedMaxPages * input.maxAttemptsPerPage * input.requestTimeoutMs;
+  const usableRate = input.requestBudgetPerSecond - input.fixedReserveRequestsPerSecond;
+  if (usableRate <= 0) throw new Error('direct-watch watchdog requires positive request budget');
+  const budgetWaitMs = Math.ceil(Math.max(0,
+    openRequests + closedRequests - input.requestBudgetBurst) / usableRate * 1000);
+  return input.fixedOverheadMs + openWallMs + closedWallMs + budgetWaitMs + input.processingMarginMs;
+}
+
 /**
  * Process-local liveness guard for loops whose awaited work can otherwise leave the
  * service alive but inert. The caller owns the timer and fail-fast action so tests can

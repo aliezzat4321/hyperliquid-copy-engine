@@ -84,7 +84,7 @@ import {
   isPositionExposedAcrossBoundary,
   syncStagedFundingForClose,
 } from './funding-boundary-accounting.js';
-import { LoopProgressWatchdog } from './loop-watchdog.js';
+import { directWatchdogLimitMs, feedWatchdogLimitMs, LoopProgressWatchdog } from './loop-watchdog.js';
 
 if (INVO_TOKEN) invo.setToken(INVO_TOKEN);
 if (INVO_REFRESH_TOKEN) invo.setRefreshToken(INVO_REFRESH_TOKEN);
@@ -283,8 +283,19 @@ const directWatchMetrics = {
   lastScanAtMs: 0, lastSuccessAtMs: 0,
 };
 const loopWatchdog = new LoopProgressWatchdog({
-  feed: Math.max(30_000, cfg.pollMs * 30),
-  direct_watch: Math.max(30_000, cfg.directWatchScanMs * 10),
+  feed: feedWatchdogLimitMs({ maxBackoffMs: 30_000, pollMs: cfg.pollMs,
+    requestTimeoutMs: invo.INVO_HTTP_REQUEST_TIMEOUT_MS, processingMarginMs: 15_000 }),
+  direct_watch: directWatchdogLimitMs({
+    openHydrates: cfg.directWatchMaxHydratesPerScan,
+    closedHydrates: cfg.directWatchMaxClosedHydratesPerScan,
+    openMaxPages: cfg.directWatchOpenMaxPages, closedMaxPages: cfg.directWatchClosedMaxPages,
+    maxAttemptsPerPage: 2, concurrency: cfg.directWatchConcurrency,
+    requestTimeoutMs: cfg.directWatchRequestTimeoutMs,
+    requestBudgetPerSecond: cfg.directWatchRequestBudgetPerSecond,
+    requestBudgetBurst: cfg.directWatchRequestBudgetBurst,
+    fixedReserveRequestsPerSecond: cfg.directWatchFixedReservePerSecond,
+    fixedOverheadMs: cfg.directWatchFixedOverheadMs, processingMarginMs: 15_000,
+  }),
 }, Date.now());
 let loopWatchdogTimer: NodeJS.Timeout | null = null;
 const SOURCE_CLOSE_RETRY_BASE_MS = 250;

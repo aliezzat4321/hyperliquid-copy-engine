@@ -12,6 +12,7 @@ interface SnapshotCacheEntry {
 const snapshotCache = new Map<string, SnapshotCacheEntry>();
 
 const MAX_RECENT_INDEX_BYTES = 8 * 1024 * 1024;
+export const MAX_ADMISSION_INDEX_BYTES = 8 * 1024 * 1024;
 const PORTFOLIO_BUCKETS = new Set([
   'ELITE_CANDIDATE', 'SPARSE_HIGH_RETURN', 'RESEARCH_WIDE', 'REJECTED_DEMOTED',
 ]);
@@ -147,6 +148,13 @@ export function eliteAdmissionFromState(
   if (admissionIndexPath) {
     if (!existsSync(admissionIndexPath)) return { ...denied, disposition: 'TRANSIENT', retryable: true,
       reason: 'direct_watch_admission_index_missing' };
+    try {
+      if (statSync(admissionIndexPath).size > MAX_ADMISSION_INDEX_BYTES) {
+        return { ...denied, disposition: 'TRANSIENT', retryable: true,
+          reason: 'direct_watch_admission_index_oversize' };
+      }
+    } catch { return { ...denied, disposition: 'TRANSIENT', retryable: true,
+      reason: 'direct_watch_admission_index_io_error' }; }
     try { admissionIndex = JSON.parse(readFileSync(admissionIndexPath, 'utf8')); }
     catch { return { ...denied, disposition: 'TRANSIENT', retryable: true,
       reason: 'direct_watch_admission_index_unparseable' }; }
