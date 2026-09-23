@@ -376,3 +376,25 @@ test('failed publication removes unmatched final generation artifacts', () => {
   assert.equal(files.filter(name => name.startsWith('ledger.jsonl.generation-')).length, 1);
   assert.doesNotThrow(() => readEliteShadowPublication(report, ledger));
 });
+
+
+test('next publication reclaims crash-left temp and unmatched final artifacts', () => {
+  const root = mkdtempSync(join(tmpdir(), 'elite-shadow-crash-recovery-'));
+  const snapshot = join(root, 'snapshots.jsonl'); const audit = join(root, 'audit.jsonl');
+  const report = join(root, 'report.json'); const ledger = join(root, 'ledger.jsonl');
+  writeFileSync(snapshot, ''); writeFileSync(audit, '');
+  writeEliteShadowReport(snapshot, audit, report, ledger, null);
+  const before = readEliteShadowPublication(report, ledger);
+  const staleIds = ['1700000000000-11111111-1111-4111-8111-111111111111', '1700000000001-22222222-2222-4222-8222-222222222222', '1700000000002-33333333-3333-4333-8333-333333333333'];
+  for (const id of staleIds) {
+    writeFileSync(report + '.generation-' + id + '.tmp', 'partial-report');
+    writeFileSync(ledger + '.generation-' + id + '.tmp', 'partial-ledger');
+    writeFileSync(report + '.manifest.json.' + id + '.tmp', 'partial-manifest');
+    writeFileSync(report + '.generation-' + id, 'unmatched-report');
+  }
+  writeEliteShadowReport(snapshot, audit, report, ledger, null);
+  const after = readEliteShadowPublication(report, ledger);
+  assert.notEqual(after.manifest.generationId, before.manifest.generationId);
+  const files = readdirSync(root);
+  for (const id of staleIds) assert.equal(files.some(name => name.includes(id)), false);
+});

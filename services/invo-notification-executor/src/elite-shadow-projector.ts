@@ -287,6 +287,32 @@ function generationIds(base: string) {
     const match = pattern.exec(name); return match == null ? [] : [match[1]];
   }));
 }
+function reclaimInterruptedPublicationArtifacts(output: string, ledger: string, io: ElitePublicationIo) {
+  try {
+    let protectedGeneration: string | null = null;
+    try {
+      const manifest = JSON.parse(readFileSync(eliteShadowManifestPath(output), "utf8"));
+      if (typeof manifest?.generationId === "string"
+        && new RegExp(`^${GENERATION_ID_PATTERN}$`, "i").test(manifest.generationId)
+        && manifest.reportPath === `${output}.generation-${manifest.generationId}`
+        && manifest.ledgerPath === `${ledger}.generation-${manifest.generationId}`) protectedGeneration = manifest.generationId;
+    } catch {}
+    const reportPattern = new RegExp(`^${escapeRegExp(basename(output))}\\.generation-(${GENERATION_ID_PATTERN})(?:\\.tmp)?$`, "i");
+    const ledgerPattern = new RegExp(`^${escapeRegExp(basename(ledger))}\\.generation-(${GENERATION_ID_PATTERN})(?:\\.tmp)?$`, "i");
+    const manifestTempPattern = new RegExp(`^${escapeRegExp(basename(eliteShadowManifestPath(output)))}\\.(${GENERATION_ID_PATTERN})\\.tmp$`, "i");
+    const reportsForRecovery = generationIds(output);
+    const ledgersForRecovery = generationIds(ledger);
+    for (const directory of new Set([dirname(output), dirname(ledger)])) {
+      for (const name of readdirSync(directory)) {
+        const match = (directory === dirname(output) ? reportPattern.exec(name) : null)
+          ?? (directory === dirname(ledger) ? ledgerPattern.exec(name) : null)
+          ?? (directory === dirname(output) ? manifestTempPattern.exec(name) : null);
+        if (match == null || match[1] === protectedGeneration || (!name.endsWith('.tmp') && reportsForRecovery.has(match[1]) && ledgersForRecovery.has(match[1]))) continue;
+        io.remove(`${directory}/${name}`);
+      }
+    }
+  } catch { /* best-effort crash recovery; readers still fail closed */ }
+}
 function reclaimSupersededPublications(output: string, ledger: string, currentGenerationId: string,
   io: ElitePublicationIo) {
   try {
@@ -332,6 +358,7 @@ export function writeEliteShadowReport(snapshotPath: string, auditPath: string, 
   const reportTemp = `${reportFinal}.tmp`; const ledgerTemp = `${ledgerFinal}.tmp`;
   const manifestPath = eliteShadowManifestPath(output); const manifestTemp = `${manifestPath}.${generationId}.tmp`;
   mkdirSync(dirname(output), { recursive: true }); mkdirSync(dirname(ledger), { recursive: true });
+  reclaimInterruptedPublicationArtifacts(output, ledger, io);
   try {
     const manifestData = JSON.stringify({ version: 1, generationId, reportPath: reportFinal,
       ledgerPath: ledgerFinal, generatedAtMs: rendered.generatedAtMs }, null, 2);
