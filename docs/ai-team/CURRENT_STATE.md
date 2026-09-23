@@ -51,7 +51,7 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 |---|---:|---|---|
 | integrated RC live authorization / real trading | authorization NONE / REAL_TRADING_ENABLED=NO | `2026-09-22T14:46:17Z` | commit `39d53c57f65a4dfae4eac52f60de5ed15d20e30a` |
 | reset/deploy/health pytest tests passing | 18 | `2026-09-22T14:46:17Z` | commit `39d53c57f65a4dfae4eac52f60de5ed15d20e30a` |
-| focused strict lifecycle/projector subtests passing | 18 | `2026-09-22T14:46:17Z` | commit `39d53c57f65a4dfae4eac52f60de5ed15d20e30a` |
+| focused strict lifecycle/projector subtests passing | 22 | `2026-09-22T14:46:17Z` | commit `39d53c57f65a4dfae4eac52f60de5ed15d20e30a` |
 | AI-team contract pytest tests passing | 61 | `2026-09-22T14:46:17Z` | commit `39d53c57f65a4dfae4eac52f60de5ed15d20e30a` |
 | integrated RC full executor subtests passing | 298 | `2026-09-22T14:46:17Z` | commit `39d53c57f65a4dfae4eac52f60de5ed15d20e30a` |
 | integrated Lane 3 RC implementation commit | 39d53c57f65a4dfae4eac52f60de5ed15d20e30a | `2026-09-22T14:46:17Z` | commit `39d53c57f65a4dfae4eac52f60de5ed15d20e30a` |

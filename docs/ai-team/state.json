@@ -161,7 +161,7 @@
         {
           "key": "integrated_lane3_rc_discovery_tests",
           "label": "focused strict lifecycle/projector subtests passing",
-          "value": 18,
+          "value": 22,
           "unit": "count",
           "observed_at": "2026-09-22T14:46:17Z",
           "source_type": "COMMIT",
