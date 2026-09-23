@@ -1,7 +1,7 @@
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync,
   statSync, unlinkSync, writeFileSync } from 'fs';
 import { randomUUID } from 'crypto';
-import { dirname, resolve } from 'path';
+import { basename, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { ALLOWED_PORTFOLIO_BUCKETS, ELITE_SELECTOR_VERSION, type PortfolioSnapshot } from './portfolio-candidates.js';
 import { validateManagedPosition } from './notification-state.js';
@@ -278,6 +278,31 @@ const publicationIo: ElitePublicationIo = {
   fsyncDirectory: path => { const fd = openSync(path, 'r'); try { fsyncSync(fd); } finally { closeSync(fd); } },
   remove: path => { try { unlinkSync(path); } catch { /* best-effort orphan cleanup */ } },
 };
+const PRIOR_PUBLICATION_GENERATIONS_TO_RETAIN = 2;
+const GENERATION_ID_PATTERN = '\\d{13}-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
+function escapeRegExp(value: string) { return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+function generationIds(base: string) {
+  const pattern = new RegExp(`^${escapeRegExp(basename(base))}\\.generation-(${GENERATION_ID_PATTERN})$`, 'i');
+  return new Set(readdirSync(dirname(base)).flatMap(name => {
+    const match = pattern.exec(name); return match == null ? [] : [match[1]];
+  }));
+}
+function reclaimSupersededPublications(output: string, ledger: string, currentGenerationId: string,
+  io: ElitePublicationIo) {
+  try {
+    const reports = generationIds(output); const ledgers = generationIds(ledger);
+    const coherent = [...reports].filter(id => ledgers.has(id)).sort().reverse();
+    const retained = new Set([currentGenerationId,
+      ...coherent.filter(id => id !== currentGenerationId).slice(0, PRIOR_PUBLICATION_GENERATIONS_TO_RETAIN)]);
+    for (const generationId of coherent) {
+      if (retained.has(generationId)) continue;
+      // The manifest is already durable. Cleanup is deliberately best-effort so a
+      // filesystem race cannot turn a committed publication into a reported failure.
+      try { io.remove(`${output}.generation-${generationId}`); } catch {}
+      try { io.remove(`${ledger}.generation-${generationId}`); } catch {}
+    }
+  } catch { /* publication remains valid even when best-effort retention cannot run */ }
+}
 export function eliteShadowManifestPath(output: string) { return `${output}.manifest.json`; }
 export function readEliteShadowPublication(output: string, expectedLedgerBase?: string) {
   const manifest = JSON.parse(readFileSync(eliteShadowManifestPath(output), 'utf8'));
@@ -321,6 +346,7 @@ export function writeEliteShadowReport(snapshotPath: string, auditPath: string, 
     for (const path of [reportTemp, ledgerTemp, manifestTemp]) io.remove(path);
     throw error;
   }
+  reclaimSupersededPublications(output, ledger, generationId, io);
   return rendered;
 }
 async function main() { const snapshotPath = resolve(process.env.INVO_PORTFOLIO_CANDIDATE_SNAPSHOTS_PATH ?? 'data/portfolio-candidate-snapshots.jsonl');

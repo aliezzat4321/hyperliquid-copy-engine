@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { closeSync, fsyncSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, fsyncSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { loadCandidateSnapshots, projectEliteShadow, readEliteShadowPublication, writeEliteShadowReport,
@@ -299,6 +299,27 @@ test('atomic generation manifest preserves the previous coherent pair on every p
     assert.equal(current.manifest.generationId, prior.manifest.generationId);
     assert.deepEqual(current.report, prior.report); assert.equal(current.ledger, prior.ledger);
   }
+});
+
+test('successful publications reclaim old generation pairs while preserving the newest coherent publication', () => {
+  const root = mkdtempSync(join(tmpdir(), 'elite-shadow-retention-'));
+  const snapshots = join(root, 'snapshots.jsonl'); const audit = join(root, 'audit.jsonl');
+  const report = join(root, 'report.json'); const ledger = join(root, 'ledger.jsonl');
+  writeFileSync(snapshots, `${JSON.stringify(snap('p', 1))}\n`); writeFileSync(audit, '');
+  for (let publication = 0; publication < 8; publication += 1) {
+    writeEliteShadowReport(snapshots, audit, report, ledger, health());
+  }
+
+  const publication = readEliteShadowPublication(report, ledger);
+  const files = readdirSync(root);
+  const reportGenerations = files.filter(name => name.startsWith('report.json.generation-'));
+  const ledgerGenerations = files.filter(name => name.startsWith('ledger.jsonl.generation-'));
+  assert.equal(reportGenerations.length, 3);
+  assert.equal(ledgerGenerations.length, 3);
+  assert.ok(reportGenerations.includes(`report.json.generation-${publication.manifest.generationId}`));
+  assert.ok(ledgerGenerations.includes(`ledger.jsonl.generation-${publication.manifest.generationId}`));
+  assert.equal(publication.report.generatedAtMs, publication.manifest.generatedAtMs);
+  assert.equal(publication.ledger, '');
 });
 
 
