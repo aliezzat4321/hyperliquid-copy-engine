@@ -449,6 +449,20 @@ test('clean startup enrolls up to proven cap while publication is suspended, the
   assert.equal(watch.status().admissionPublished, false);
 });
 
+test('more than 41 qualified elites are all resident without resident_capacity_full deferral', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elite-no-count-cap-'));
+  const admissionPath = join(dir, 'admissions.json');
+  const watch = new EliteDirectWatchState(join(dir, 'state.json'), admissionPath, Number.MAX_SAFE_INTEGER);
+  const candidates = Array.from({ length: 42 }, (_, index) => ({
+    ...target, portfolioId: `qualified-${String(index).padStart(2, '0')}`, score: 100 - index,
+  }));
+  watch.syncTargets(candidates, new Set(), BASE, true, 120_000, new Set(), Number.MAX_SAFE_INTEGER,
+    2, 600_000, BASE, ELITE_SELECTOR_VERSION, true);
+  assert.equal(watch.status().residentCount, 42);
+  assert.equal(watch.status().enrollingTargetCount, 42);
+  assert.equal(watch.deferredAdmissions().some(row => row.reason === 'resident_capacity_full'), false);
+});
+
 test('attempt rotation cannot refresh admission health; suspension and successful recovery are atomic', () => {
   const dir = mkdtempSync(join(tmpdir(), 'elite-success-freshness-'));
   const admissionPath = join(dir, 'admissions.json');
@@ -1071,8 +1085,8 @@ test('tombstone restores causal watermarks without consuming resident capacity',
   assert.deepEqual(restored.closedBoundaryIds, []);
 });
 
-test('default capacity proof sustains hard floor 16 at timeout/page/concurrency/rate bounds', () => {
-  const defaults = validateDirectWatchCapacity({ residentCap: 48, scanMs: 3_000,
+test('default transport capacity reports freshness throughput at timeout/page/concurrency/rate bounds', () => {
+  const defaults = validateDirectWatchCapacity({ scanMs: 3_000,
     maxOpenHydratesPerScan: 24, openPollMs: 18_000,
     maxClosedHydratesPerScan: 24, closedPollMs: 60_000,
     requestTimeoutMs: 2_000, maxAttemptsPerPage: 2,
@@ -1081,9 +1095,8 @@ test('default capacity proof sustains hard floor 16 at timeout/page/concurrency/
     fixedReserveRequestsPerSecond: 4 });
   assert.equal(defaults.sustainableOpenTargetCeiling, 16);
   assert.ok(defaults.sustainableClosedTargetCeiling >= 16);
-  assert.equal(defaults.hardProvenResidentCap, 16);
   assert.equal(defaults.worstCaseOpenSweepMsAtCap, 14_000);
-  assert.throws(() => validateDirectWatchCapacity({ residentCap: 48, scanMs: 3_000,
+  assert.throws(() => validateDirectWatchCapacity({ scanMs: 3_000,
     maxOpenHydratesPerScan: 8, openPollMs: 18_000,
     maxClosedHydratesPerScan: 3, closedPollMs: 60_000,
     requestTimeoutMs: 2_000, maxAttemptsPerPage: 2,

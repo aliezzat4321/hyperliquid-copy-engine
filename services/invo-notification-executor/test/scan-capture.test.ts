@@ -54,3 +54,28 @@ test('CLOSE executes promptly during suspension and is not part of delayed NEW f
   assert.deepEqual(order, ['execute:close-now', 'publish', 'execute:new-buffered', 'commit']);
   assert.equal([...seen].filter(key => key === 'close-now').length, 1);
 });
+
+test('nonterminal signal retries without preventing a peer portfolio from committing', async () => {
+  const retry = signal('retry-me');
+  const peer = { ...signal('peer'), portfolioId: 'p2' };
+  const seen = new Set<string>();
+  const commits: string[] = [];
+  let retryAttempts = 0;
+  const batches = [
+    { portfolioId: 'p1', signals: [retry], highWaterMs: 101, commit: () => commits.push('p1') },
+    { portfolioId: 'p2', signals: [peer], highWaterMs: 102, commit: () => commits.push('p2') },
+  ];
+  const first = await publishThenFlushCapturedSignals(batches, () => {}, async current => {
+    if (current.key === retry.key) { retryAttempts += 1; return; }
+    seen.add(current.key);
+  }, current => seen.has(current.key));
+  assert.deepEqual(first, { committed: ['p2'], pending: ['p1'] });
+  assert.deepEqual(commits, ['p2']);
+
+  const second = await publishThenFlushCapturedSignals([batches[0]], () => {}, async current => {
+    retryAttempts += 1; seen.add(current.key);
+  }, current => seen.has(current.key));
+  assert.deepEqual(second, { committed: ['p1'], pending: [] });
+  assert.equal(retryAttempts, 2);
+  assert.deepEqual(commits, ['p2', 'p1']);
+});

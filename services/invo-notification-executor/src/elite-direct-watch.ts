@@ -501,7 +501,6 @@ export interface DirectWatchCapacity {
   worstCaseOpenSweepMsAtCap: number;
   worstCaseClosedSweepMsAtCap: number;
   provenResidentCap: number;
-  hardProvenResidentCap: number;
   worstCaseRequestBudget: number;
   fixedOverheadMs: number;
   concurrency: number;
@@ -512,7 +511,6 @@ export interface DirectWatchCapacity {
 }
 
 export function directWatchCapacity(input: {
-  residentCap: number;
   scanMs: number;
   maxOpenHydratesPerScan: number;
   openPollMs: number;
@@ -549,10 +547,10 @@ export function directWatchCapacity(input: {
   const sustainableOpenTargetCeiling = Math.min(input.maxOpenHydratesPerScan, wallOpen, openBurstCapacity);
   const sustainableClosedTargetCeiling = Math.min(input.maxClosedHydratesPerScan, wallClosed, closedBurstCapacity);
   const provenResidentCap = Math.max(0, Math.min(
-    input.residentCap, sustainableOpenTargetCeiling, sustainableClosedTargetCeiling, rateCapacity,
+    sustainableOpenTargetCeiling, sustainableClosedTargetCeiling, rateCapacity,
   ));
   const limitingReasons = [
-    ['configured_resident_cap', input.residentCap], ['open_deadline', sustainableOpenTargetCeiling],
+    ['open_deadline', sustainableOpenTargetCeiling],
     ['closed_deadline', sustainableClosedTargetCeiling], ['steady_state_request_budget', rateCapacity],
   ].filter(([, value]) => value === provenResidentCap).map(([reason]) => String(reason));
   return {
@@ -563,7 +561,6 @@ export function directWatchCapacity(input: {
     worstCaseClosedSweepMsAtCap: input.fixedOverheadMs
       + Math.ceil(provenResidentCap / input.concurrency) * (openTargetCostMs + closedTargetCostMs),
     provenResidentCap,
-    hardProvenResidentCap: provenResidentCap,
     worstCaseRequestBudget: provenResidentCap * (openRequestsPerTarget + closedRequestsPerTarget),
     fixedOverheadMs: input.fixedOverheadMs,
     concurrency: input.concurrency, requestBudgetPerSecond: input.requestBudgetPerSecond,

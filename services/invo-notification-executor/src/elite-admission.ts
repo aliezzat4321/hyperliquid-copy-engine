@@ -12,7 +12,6 @@ interface SnapshotCacheEntry {
 const snapshotCache = new Map<string, SnapshotCacheEntry>();
 
 const MAX_RECENT_INDEX_BYTES = 8 * 1024 * 1024;
-const MAX_ADMISSION_INTERVALS = 16;
 const PORTFOLIO_BUCKETS = new Set([
   'ELITE_CANDIDATE', 'SPARSE_HIGH_RETURN', 'RESEARCH_WIDE', 'REJECTED_DEMOTED',
 ]);
@@ -173,8 +172,7 @@ export function eliteAdmissionFromState(
     const admissionKeys = new Set(['portfolioId', 'intervals', 'score', 'selectorVersion']);
     const indexRowsValid = Object.entries(indexRows as Record<string, unknown>).every(([key, value]) => {
       if (!isPlainObject(value) || Object.keys(value).some(field => !admissionKeys.has(field))
-        || !Array.isArray(value.intervals) || value.intervals.length < 1
-        || value.intervals.length > MAX_ADMISSION_INTERVALS) return false;
+        || !Array.isArray(value.intervals) || value.intervals.length < 1) return false;
       const intervals = value.intervals as unknown[];
       let priorUntil = -Infinity;
       const intervalsValid = intervals.every((interval, index) => {

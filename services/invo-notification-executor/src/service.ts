@@ -84,6 +84,7 @@ import {
   isPositionExposedAcrossBoundary,
   syncStagedFundingForClose,
 } from './funding-boundary-accounting.js';
+import { LoopProgressWatchdog } from './loop-watchdog.js';
 
 if (INVO_TOKEN) invo.setToken(INVO_TOKEN);
 if (INVO_REFRESH_TOKEN) invo.setRefreshToken(INVO_REFRESH_TOKEN);
@@ -161,7 +162,6 @@ function loadConfig() {
     directWatchClosedPollMs: Math.max(30_000, n('NOTIFICATION_TRADER_DIRECT_WATCH_CLOSED_POLL_MS', 60_000)),
     directWatchMaxClosedHydratesPerScan: Math.max(1, Math.min(64, Math.trunc(n('NOTIFICATION_TRADER_DIRECT_WATCH_MAX_CLOSED_HYDRATES_PER_SCAN', 24)))),
     directWatchClosedMaxPages: Math.max(1, Math.min(3, Math.trunc(n('NOTIFICATION_TRADER_DIRECT_WATCH_CLOSED_MAX_PAGES', 2)))),
-    directWatchResidentCap: Math.max(1, Math.trunc(n('MAX_DIRECT_WATCH_RESIDENT_TARGETS', 48))),
     directWatchRequestTimeoutMs: invo.INVO_HTTP_REQUEST_TIMEOUT_MS,
     directWatchFixedOverheadMs: Math.max(0, n('DIRECT_WATCH_FIXED_OVERHEAD_MS', 2_000)),
     directWatchConcurrency: Math.max(1, Math.min(32, Math.trunc(n('DIRECT_WATCH_CONCURRENCY', 16)))),
@@ -179,7 +179,6 @@ function loadConfig() {
 
 const cfg = loadConfig();
 const directWatchConfiguredCapacity = validateDirectWatchCapacity({
-  residentCap: cfg.directWatchResidentCap,
   scanMs: cfg.directWatchScanMs,
   maxOpenHydratesPerScan: cfg.directWatchMaxHydratesPerScan,
   openPollMs: cfg.directWatchFallbackPollMs,
@@ -254,9 +253,8 @@ function scheduleFeedEvidencePersistence(posts: any[], feedFilter: InvoFeedSurfa
 }
 const directWatch = new EliteDirectWatchState(
   cfg.directWatchStatePath, cfg.directWatchAdmissionIndexPath,
-  directWatchConfiguredCapacity.hardProvenResidentCap,
+  Number.MAX_SAFE_INTEGER,
 );
-directWatch.assertResidentCap(directWatchConfiguredCapacity.hardProvenResidentCap);
 const inFlight = new Set<string>();
 const inFlightSourceEvents = new Set<string>();
 const sourceLifecycleQueue = new SourceLifecycleQueue();
@@ -284,6 +282,11 @@ const directWatchMetrics = {
   queueDepth: 0,
   lastScanAtMs: 0, lastSuccessAtMs: 0,
 };
+const loopWatchdog = new LoopProgressWatchdog({
+  feed: Math.max(30_000, cfg.pollMs * 30),
+  direct_watch: Math.max(30_000, cfg.directWatchScanMs * 10),
+}, Date.now());
+let loopWatchdogTimer: NodeJS.Timeout | null = null;
 const SOURCE_CLOSE_RETRY_BASE_MS = 250;
 const SOURCE_CLOSE_RETRY_MAX_MS = 30_000;
 const HEALTH_MTM_CONCURRENCY = 4;
@@ -1840,7 +1843,7 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
       && directWatchConfiguredCapacity.provenResidentCap > 0;
     const deferredBefore = new Set(directWatch.deferredAdmissions().map(row => row.portfolioId));
     directWatch.syncTargets(candidate.targets, ownedDirectPortfolioIds(), nowMs, !candidate.stale,
-      120_000, new Set(candidate.demotedPortfolioIds), directWatchConfiguredCapacity.provenResidentCap,
+      120_000, new Set(candidate.demotedPortfolioIds), Number.MAX_SAFE_INTEGER,
       cfg.directWatchNegativeMinObservations, cfg.directWatchNegativeGraceMs,
       candidate.observedAtMs ?? nowMs, undefined, enrollmentPreconditionsHealthy);
     for (const deferred of directWatch.deferredAdmissions()) {
@@ -1920,10 +1923,9 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
       || proofAtMs - postScan.oldestOpenPollAtMs <= cfg.directWatchFallbackPollMs;
     const closedHealthy = postScan.oldestClosedPollAtMs == null
       || proofAtMs - postScan.oldestClosedPollAtMs <= cfg.directWatchClosedPollMs;
-    if (candidate.stale || postScan.targetCount > directWatchConfiguredCapacity.hardProvenResidentCap
-      || !openHealthy || !closedHealthy) {
+    if (candidate.stale || !openHealthy || !closedHealthy) {
       directWatch.setAdmissionHealth(false, candidate.stale ? 'candidate_state_not_authoritative'
-        : !openHealthy || !closedHealthy ? 'successful_observation_overdue' : 'resident_capacity_unhealthy');
+        : 'successful_observation_overdue');
       return;
     }
     const flush = await publishThenFlushCapturedSignals(
@@ -1990,7 +1992,6 @@ function startServer() {
       const oldestClosedPollAgeMs = directStatus.oldestClosedPollAtMs == null
         ? null : Math.max(0, healthNowMs - directStatus.oldestClosedPollAtMs);
       const directWatchCapacityHealthy = directWatchConfiguredCapacity.provenResidentCap > 0
-        && directStatus.targetCount <= directWatchConfiguredCapacity.provenResidentCap
         && (oldestOpenPollAgeMs == null || oldestOpenPollAgeMs <= cfg.directWatchFallbackPollMs)
         && (oldestClosedPollAgeMs == null || oldestClosedPollAgeMs <= cfg.directWatchClosedPollMs)
         && healthNowMs >= directWatchBackoffUntilMs && directStatus.admissionsHealthy;
@@ -2052,11 +2053,11 @@ function startServer() {
           closedPollMs: cfg.directWatchClosedPollMs,
           maxClosedHydratesPerScan: cfg.directWatchMaxClosedHydratesPerScan,
           closedMaxPages: cfg.directWatchClosedMaxPages,
-          residentCap: cfg.directWatchResidentCap,
           provenResidentCap: directWatchConfiguredCapacity.provenResidentCap,
-          hardProvenResidentCap: directWatchConfiguredCapacity.hardProvenResidentCap,
-          hardCapLimitingReasons: directWatchConfiguredCapacity.limitingReasons,
-          residentBudgetHeadroom: directWatchConfiguredCapacity.provenResidentCap - directStatus.targetCount,
+          transportTargetCeiling: directWatchConfiguredCapacity.provenResidentCap,
+          transportLimitingReasons: directWatchConfiguredCapacity.limitingReasons,
+          transportTargetHeadroom: directWatchConfiguredCapacity.provenResidentCap - directStatus.targetCount,
+          throughputSufficientForResidentCount: directStatus.targetCount <= directWatchConfiguredCapacity.provenResidentCap,
           negativeMinObservations: cfg.directWatchNegativeMinObservations,
           negativeGraceMs: cfg.directWatchNegativeGraceMs,
           sustainableOpenTargetCeiling: directWatchConfiguredCapacity.sustainableOpenTargetCeiling,
@@ -2079,11 +2080,9 @@ function startServer() {
           oldestClosedPollOverdueMs: oldestClosedPollAgeMs == null ? null : Math.max(0, oldestClosedPollAgeMs - cfg.directWatchClosedPollMs),
           openFreshnessGuarantee: directWatchCapacityHealthy,
           openFreshnessLimitReason: directWatchCapacityHealthy ? null
-            : 'observed deadline/cooldown state invalidates the configured hard-cap proof; new admissions fail closed',
+            : 'observed deadline/cooldown state invalidates transport freshness; new admissions fail closed',
           capacityHealthy: directWatchCapacityHealthy,
-          unhealthyReason: directStatus.targetCount > directWatchConfiguredCapacity.provenResidentCap
-            ? 'resident_count_exceeds_proven_capacity'
-            : healthNowMs < directWatchBackoffUntilMs ? 'rate_limit_cooldown'
+          unhealthyReason: healthNowMs < directWatchBackoffUntilMs ? 'rate_limit_cooldown'
               : (oldestOpenPollAgeMs != null && oldestOpenPollAgeMs > cfg.directWatchFallbackPollMs)
                   || (oldestClosedPollAgeMs != null && oldestClosedPollAgeMs > cfg.directWatchClosedPollMs)
                 ? 'sweep_overdue' : directStatus.admissionSuspensionReason,
@@ -2167,6 +2166,7 @@ async function pollLoop() {
     const surface = cfg.discoverySurfaces[discoverySurfaceIndex % cfg.discoverySurfaces.length];
     discoverySurfaceIndex += 1;
     await wake(`api_poll:${surface}`, undefined, Date.now(), surface);
+    loopWatchdog.beat('feed', Date.now());
   }
 }
 
@@ -2174,6 +2174,7 @@ async function directWatchLoop() {
   while (true) {
     const startedAtMs = Date.now();
     await scanEliteDirectWatch(startedAtMs);
+    loopWatchdog.beat('direct_watch', Date.now());
     const elapsedMs = Date.now() - startedAtMs;
     await new Promise(resolveSleep => setTimeout(resolveSleep,
       Math.max(0, cfg.directWatchScanMs - elapsedMs)));
@@ -2209,6 +2210,18 @@ async function main() {
   }
   if (!cfg.live) await scanEliteDirectWatch(Date.now());
   startServer();
+  const watchdogArmedAtMs = Date.now();
+  loopWatchdog.beat('feed', watchdogArmedAtMs);
+  loopWatchdog.beat('direct_watch', watchdogArmedAtMs);
+  loopWatchdogTimer = setInterval(() => {
+    const nowMs = Date.now();
+    const stalled = loopWatchdog.firstStall(nowMs);
+    if (!stalled) return;
+    const event = { type: 'executor_loop_watchdog_stall', ...stalled, action: 'exit_for_systemd_recovery', live: cfg.live };
+    try { log(event); } catch { console.error(JSON.stringify({ ts: new Date(nowMs).toISOString(), ...event })); }
+    process.exit(1);
+  }, 1_000);
+  loopWatchdogTimer.unref();
   log({
     type: 'service_started',
     live: cfg.live,
@@ -2234,7 +2247,7 @@ async function main() {
       maxClosedHydratesPerScan: cfg.directWatchMaxClosedHydratesPerScan,
       closedMaxPages: cfg.directWatchClosedMaxPages,
       concurrency: cfg.directWatchConcurrency,
-      hardProvenResidentCap: directWatchConfiguredCapacity.hardProvenResidentCap,
+      transportTargetCeiling: directWatchConfiguredCapacity.provenResidentCap,
       requestBudgetPerSecond: cfg.directWatchRequestBudgetPerSecond,
       requestBudgetBurst: cfg.directWatchRequestBudgetBurst,
       fixedFeedSelectorReserveRequestsPerSecond: cfg.directWatchFixedReservePerSecond,

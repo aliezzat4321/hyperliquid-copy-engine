@@ -40,8 +40,9 @@ def validate(payload: object) -> list[str]:
             failures.append("direct_watch_admissions_unhealthy")
         if direct.get("admissionSuspensionReason") is not None:
             failures.append("direct_watch_admission_suspended")
-        if direct.get("hardProvenResidentCap") != 16:
-            failures.append("direct_watch_hard_cap_not_16")
+        ceiling = direct.get("transportTargetCeiling")
+        if not isinstance(ceiling, int) or isinstance(ceiling, bool) or ceiling < 1:
+            failures.append("direct_watch_transport_ceiling_invalid")
     evidence = payload.get("feedPortfolioEvidence")
     if not isinstance(evidence, dict) or evidence.get("assimilationSuspended") is not False:
         failures.append("feed_evidence_persistence_suspended")
