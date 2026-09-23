@@ -15,6 +15,8 @@ test('dry new exposure is gated by exact portfolio elite admission before open/r
   assert.ok(open > admission, 'open path must come after admission gate');
   assert.match(serviceSource, /reason: `shadow_\$\{candidateAdmission\.reason\}`/);
   assert.match(serviceSource, /shadowAdmissionMode: 'ELITE_ONLY'/);
+  assert.match(serviceSource, /const eligibilityCutoffMs = signal\.sourceTimeMs;/,
+    'authoritative source time must control prospective admission');
 });
 
 test('owned closes bypass elite admission so demotion cannot orphan exposure', () => {
@@ -29,4 +31,10 @@ test('source close rejection uses requested-residual dust classifier instead of 
   assert.doesNotMatch(serviceSource, /const dustRejected = result\.reason === 'below_min_notional' \|\| result\.reason === 'lot_rounded_to_zero'/);
   assert.match(serviceSource, /economicsCompleteness: 'UNRESOLVED_EXPOSURE'/);
   assert.match(serviceSource, /sourceCloseNextRetryAtMs:/);
+});
+
+
+test('cross-surface canonical completion persists ingress key and feed completion uses canonical dedupe', () => {
+  assert.match(serviceSource, /if \(alreadySeen\) \{[\s\S]*state\.markSeen\(signal\.key\);[\s\S]*return;[\s\S]*\}/);
+  assert.match(serviceSource, /const allHandled = ordered\.every\(signal => signalWasSeen\(signal, key => state\.hasSeen\(key\)\)\);/);
 });

@@ -13,9 +13,9 @@ EXEC_ENV=/etc/hyperliquid-copy-engine/invo-notification-executor.env
 RESET_SCRIPT="$REPO/scripts/reset_lane3_shadow_epoch.py"
 # Start the repaired selector/execution model from one clean prospective epoch.
 # Subsequent deploys inside this same epoch must preserve the observation window.
-EVIDENCE_EPOCH=lane3-hybrid-v3-clean-20260916
+EVIDENCE_EPOCH=lane3-hybrid-v4-clean-20260921
 EVIDENCE_MARKER="$STATE/evidence-epoch"
-EXPECTED_SELECTOR=invo-portfolio-hybrid-v3-20260916
+EXPECTED_SELECTOR=invo-portfolio-hybrid-v4-20260921
 
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "invo notification executor deployment requires root" >&2
@@ -95,21 +95,37 @@ set_env NOTIFICATION_TRADER_HOST 127.0.0.1
 set_env NOTIFICATION_TRADER_PORT 8787
 set_env NOTIFICATION_TRADER_STATE_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/state.json
 set_env NOTIFICATION_TRADER_AUDIT_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/audit.jsonl
+set_env NOTIFICATION_TRADER_FUNDING_BOUNDARY_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/funding-boundaries
 set_env NOTIFICATION_TRADER_TRACKER_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/trader-population.json
+set_env NOTIFICATION_TRADER_FEED_PORTFOLIO_EVIDENCE_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/feed-portfolio-evidence.json
 set_env NOTIFICATION_TRADER_CANDIDATE_STATE_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/portfolio-candidates.json
 set_env NOTIFICATION_TRADER_DIRECT_WATCH_STATE_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/elite-direct-watch.json
-set_env NOTIFICATION_TRADER_DIRECT_WATCH_SCAN_MS 5000
-set_env NOTIFICATION_TRADER_DIRECT_WATCH_MAX_HYDRATES_PER_SCAN 2
-set_env NOTIFICATION_TRADER_DIRECT_WATCH_FALLBACK_POLL_MS 20000
+set_env NOTIFICATION_TRADER_DIRECT_WATCH_ADMISSION_INDEX_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/elite-direct-watch-admissions.json
+set_env INVO_HTTP_REQUEST_TIMEOUT_MS 2000
+set_env DIRECT_WATCH_FIXED_OVERHEAD_MS 2000
+set_env DIRECT_WATCH_CONCURRENCY 16
+set_env DIRECT_WATCH_MAX_REQUESTS_PER_SECOND 12
+set_env DIRECT_WATCH_REQUEST_BURST 32
+set_env DIRECT_WATCH_FIXED_RESERVE_REQUESTS_PER_SECOND 4
+set_env NOTIFICATION_TRADER_DIRECT_WATCH_SCAN_MS 3000
+set_env NOTIFICATION_TRADER_DIRECT_WATCH_MAX_HYDRATES_PER_SCAN 24
+set_env NOTIFICATION_TRADER_DIRECT_WATCH_OPEN_MAX_PAGES 3
+set_env NOTIFICATION_TRADER_DIRECT_WATCH_FALLBACK_POLL_MS 18000
+set_env NOTIFICATION_TRADER_DIRECT_WATCH_CLOSED_POLL_MS 60000
+set_env NOTIFICATION_TRADER_DIRECT_WATCH_MAX_CLOSED_HYDRATES_PER_SCAN 24
+set_env NOTIFICATION_TRADER_DIRECT_WATCH_CLOSED_MAX_PAGES 2
+set_env MAX_DIRECT_WATCH_RESIDENT_TARGETS 48
+set_env DIRECT_WATCH_NEGATIVE_MIN_OBSERVATIONS 2
+set_env DIRECT_WATCH_NEGATIVE_GRACE_MS 600000
 # The clean-epoch seed runs the portfolio CLI directly rather than through its
 # systemd unit, so persist the CLI's own path variables in the sourced env file.
 set_env INVO_PORTFOLIO_CANDIDATE_STATE_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/portfolio-candidates.json
 set_env INVO_PORTFOLIO_CANDIDATE_SNAPSHOTS_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/portfolio-candidate-snapshots.jsonl
 set_env INVO_PORTFOLIO_LEADERBOARD_STATE_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/invo-leaderboards.json
 set_env INVO_PORTFOLIO_LEADERBOARD_SNAPSHOTS_PATH /var/lib/hyperliquid-copy-engine/invo-notification-executor/invo-leaderboard-snapshots.jsonl
-# Current Invo feed API accepts following/trending; `all` returns HTTP 500 Invalid feed type.
-# Keep discovery broad across valid surfaces without flooding the executor with known-bad requests.
-set_env NOTIFICATION_TRADER_DISCOVERY_SURFACES following,trending
+# Exact current web-app enum values, live-probed read-only on /v1_0/posts/get_feed.
+# Each surface receives its own durable prospective baseline before OPEN/ADD processing.
+set_env NOTIFICATION_TRADER_DISCOVERY_SURFACES following,trending,fire_moves,most_recent
 
 # Remove the obsolete artificial leverage cap; source leverage is used directly.
 sed -i '/^NOTIFICATION_TRADER_MAX_LEVERAGE=/d' "$EXEC_ENV"
@@ -118,7 +134,7 @@ cd "$SERVICE_DIR"
 npm install --ignore-scripts --no-audit --no-fund
 npm run check
 
-# Reset only when crossing into the repaired v3 measurement epoch. Never reset on
+# Reset only when crossing into the repaired v4 measurement epoch. Never reset on
 # ordinary redeploys. The reset preserves source discovery plus seen/feed cursors,
 # clears simulated managed exposure, and deletes superseded derived economics.
 reset_evidence=0
@@ -133,9 +149,9 @@ if grep -Fq "$EXPECTED_SELECTOR" "$SERVICE_DIR/src/portfolio-candidates.ts"; the
 fi
 
 # A rollback after the clean epoch has started must never silently resume an old
-# selector against v3 evidence.
+# selector against v4 evidence.
 if [[ "$current_epoch" == "$EVIDENCE_EPOCH" && "$selector_ready" -ne 1 ]]; then
-  echo "refusing Lane 3 selector rollback after clean v3 epoch started" >&2
+  echo "refusing Lane 3 selector rollback after clean v4 epoch started" >&2
   exit 3
 fi
 
@@ -144,7 +160,7 @@ if [[ "$current_epoch" != "$EVIDENCE_EPOCH" ]]; then
     # It is safe to merge/deploy this guard before PR #373: keep the current
     # epoch untouched until the repaired selector arrives on canonical main.
     reset_deferred=1
-    echo "INVO_NOTIFICATION_EXECUTOR_EVIDENCE_RESET_DEFERRED=selector_v3_not_deployed"
+    echo "INVO_NOTIFICATION_EXECUTOR_EVIDENCE_RESET_DEFERRED=selector_v4_not_deployed"
   else
     if [[ ! -f "$RESET_SCRIPT" ]]; then
       echo "missing Lane 3 reset helper: $RESET_SCRIPT" >&2
@@ -163,7 +179,7 @@ if [[ "$current_epoch" != "$EVIDENCE_EPOCH" ]]; then
       --epoch "$EVIDENCE_EPOCH"
     reset_evidence=1
 
-    # Seed selector-v3 eligibility before the executor can accept a NEW/ADD event.
+    # Seed selector-v4 eligibility before the executor can accept a NEW/ADD event.
     # Match the research systemd unit's runtime environment so the direct CLI writes
     # the production candidate/leaderboard paths rather than repository-local defaults.
     # Both files are root-owned deployment inputs; a malformed file fails closed under
@@ -222,8 +238,24 @@ if [[ -z "$readiness" ]]; then
 fi
 
 health=""
-if ! health="$(curl -fsS --max-time 60 http://127.0.0.1:8787/health)"; then
-  echo "Lane 3 service is ready, but full portfolio health/MTM proof did not complete within 60s" >&2
+health_valid=0
+health_deadline=$((SECONDS + 90))
+while (( SECONDS < health_deadline )); do
+  if [[ "$(systemctl is-active "$UNIT")" != "active" ]]; then
+    echo "Lane 3 service became inactive during integrated health proof" >&2
+    systemctl --no-pager --full status "$UNIT" || true
+    journalctl -u "$UNIT" -n 100 --no-pager || true
+    exit 1
+  fi
+  if health="$(curl -fsS --max-time 10 http://127.0.0.1:8787/health 2>/dev/null)"     && printf '%s' "$health" | python3 "$REPO/scripts/validate_lane3_shadow_health.py" >/dev/null 2>&1; then
+    health_valid=1
+    break
+  fi
+  sleep 1
+done
+if [[ "$health_valid" -ne 1 ]]; then
+  echo "Lane 3 never proved integrated shadow operational readiness inside the 90s health window" >&2
+  [[ -n "$health" ]] && printf '%s' "$health" | python3 "$REPO/scripts/validate_lane3_shadow_health.py" || true
   systemctl --no-pager --full status "$UNIT" || true
   journalctl -u "$UNIT" -n 100 --no-pager || true
   exit 1
@@ -240,8 +272,8 @@ if [[ "$reset_evidence" -eq 1 ]]; then
   fi
 fi
 
-# Mark the evidence epoch only after a real v3 reset plus successful service
-# health. A pre-v3 deployment deliberately leaves the previous marker untouched.
+# Mark the evidence epoch only after a real v4 reset plus successful service
+# health. A pre-v4 deployment deliberately leaves the previous marker untouched.
 if [[ "$reset_deferred" -eq 0 ]]; then
   printf '%s\n' "$EVIDENCE_EPOCH" > "$EVIDENCE_MARKER"
 fi

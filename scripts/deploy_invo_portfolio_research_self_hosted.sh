@@ -51,7 +51,8 @@ candidate="$STATE/portfolio-candidates.json"
 leaderboards="$STATE/invo-leaderboards.json"
 leaderboard_snapshots="$STATE/invo-leaderboard-snapshots.jsonl"
 elite="$STATE/elite-shadow-report.json"
-for required in "$candidate" "$leaderboards" "$leaderboard_snapshots" "$elite"; do
+elite_manifest="$elite.manifest.json"
+for required in "$candidate" "$leaderboards" "$leaderboard_snapshots" "$elite_manifest"; do
   if [[ ! -s "$required" ]]; then
     echo "required portfolio research artifact missing: $required" >&2
     journalctl -u "$SERVICE_UNIT" -n 160 --no-pager || true
@@ -59,12 +60,15 @@ for required in "$candidate" "$leaderboards" "$leaderboard_snapshots" "$elite"; 
   fi
 done
 
-node - "$candidate" "$leaderboards" "$elite" "$SERVICE_DIR/src/portfolio-candidates.ts" <<'NODE'
-const fs = require('fs');
-const [candidatePath, leaderboardPath, elitePath, selectorSourcePath] = process.argv.slice(2);
+elite_ledger="$STATE/elite-shadow-ledger.jsonl"
+node --input-type=module - "$candidate" "$leaderboards" "$elite" "$elite_ledger" "$SERVICE_DIR/src/portfolio-candidates.ts" "$SERVICE_DIR/dist/src/elite-shadow-projector.js" <<'NODE'
+import fs from 'node:fs';
+import { pathToFileURL } from 'node:url';
+const [candidatePath, leaderboardPath, eliteBasePath, eliteLedgerBasePath, selectorSourcePath, projectorModulePath] = process.argv.slice(2);
 const candidate = JSON.parse(fs.readFileSync(candidatePath, 'utf8'));
 const leaderboards = JSON.parse(fs.readFileSync(leaderboardPath, 'utf8'));
-const elite = JSON.parse(fs.readFileSync(elitePath, 'utf8'));
+const { readEliteShadowPublication } = await import(pathToFileURL(projectorModulePath).href);
+const { report: elite } = readEliteShadowPublication(eliteBasePath, eliteLedgerBasePath);
 const selectorSource = fs.readFileSync(selectorSourcePath, 'utf8');
 const selectorMatch = selectorSource.match(
   /ELITE_SELECTOR_VERSION\s*=\s*['"]([^'"]+)['"]/,

@@ -13,6 +13,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,7 @@ CANONICAL_STATE_ROOT = Path(
 DEFAULT_ENV_FILE = Path(
     "/etc/hyperliquid-copy-engine/invo-notification-executor.env"
 )
-SELECTOR_VERSION = "invo-portfolio-hybrid-v3-20260916"
+SELECTOR_VERSION = "invo-portfolio-hybrid-v4-20260921"
 TOMBSTONE_NAME = "dataset-resets.jsonl"
 
 # Raw/source discovery is intentionally retained. These hashes prove this reset
@@ -34,21 +35,35 @@ PRESERVE_FILES = (
     "trader-population.json",
     "invo-leaderboards.json",
     "invo-leaderboard-snapshots.jsonl",
+    # Cross-epoch replay memory prevents retained historical feed posts from becoming fresh.
+    "feed-portfolio-evidence.json.replay.bloom",
 )
 
 # These are derived from the flawed/superseded shadow measurement epoch and
-# must not be mixed into the prospective v3 run.
+# must not be mixed into the prospective v4 run.
 DELETE_FILES = (
     "audit.jsonl",
     "portfolio-candidates.json",
     "portfolio-candidate-snapshots.jsonl",
+    "portfolio-candidate-snapshots.jsonl.previous",
+    "portfolio-candidate-snapshots.jsonl.recent.json",
     "elite-shadow-report.json",
+    "elite-shadow-report.json.manifest.json",
     "elite-shadow-ledger.jsonl",
+    "elite-direct-watch.json",
+    "elite-direct-watch.json.journal.jsonl",
+    "elite-direct-watch-admissions.json",
+    # Feed selector material is epoch-scoped, but the replay Bloom is deliberately
+    # preserved across epochs so historical posts can never be re-stamped as fresh.
+    "feed-portfolio-evidence.json",
+    "feed-portfolio-evidence.json.journal.jsonl",
+    "feed-portfolio-evidence.json.assimilation-suspended.json",
 )
 
 # Earlier deployment logic archived contaminated runtime state instead of
 # deleting it. Remove only derived/shadow archives. Historical trader-population
 # archives remain source discovery evidence and are deliberately preserved.
+
 DELETE_ARCHIVE_PATTERNS = (
     "state.pre-*.json",
     "audit.pre-*.jsonl",
@@ -56,6 +71,12 @@ DELETE_ARCHIVE_PATTERNS = (
     "portfolio-candidate-snapshots.pre-*.jsonl",
     "elite-shadow-report.pre-*.json",
     "elite-shadow-ledger.pre-*.jsonl",
+    "elite-shadow-report.json.generation-*",
+    "elite-shadow-ledger.jsonl.generation-*",
+    "elite-direct-watch.pre-*.json",
+    "elite-direct-watch-admissions.pre-*.json",
+    "feed-portfolio-evidence.pre-*.json",
+    "feed-portfolio-evidence.pre-*.json.journal.jsonl",
 )
 
 
@@ -105,9 +126,16 @@ def assert_shadow_only_env(path: Path) -> None:
         raise RuntimeError("NOTIFICATION_TRADER_LIVE must be false before Lane 3 reset")
 
 
-def _validated_state(state_path: Path) -> tuple[dict[str, Any], int, int, int]:
+def _validated_state(
+    state_path: Path,
+) -> tuple[dict[str, Any], int, int, int, int]:
     if not state_path.exists():
-        return {"seen": [], "managed": {}, "feedCursors": {}}, 0, 0, 0
+        return {
+            "seen": [],
+            "managed": {},
+            "feedCursors": {},
+            "feedBaselines": {},
+        }, 0, 0, 0, 0
     if state_path.is_symlink():
         raise RuntimeError(f"refusing symlinked state file: {state_path}")
     parsed = json.loads(state_path.read_text(encoding="utf-8"))
@@ -116,13 +144,27 @@ def _validated_state(state_path: Path) -> tuple[dict[str, Any], int, int, int]:
     seen = parsed.get("seen", [])
     managed = parsed.get("managed", {})
     cursors = parsed.get("feedCursors", {})
+    baselines = parsed.get("feedBaselines", {})
     if not isinstance(seen, list):
         raise RuntimeError("Lane 3 state.json seen must be an array")
     if not isinstance(managed, dict):
         raise RuntimeError("Lane 3 state.json managed must be an object")
     if not isinstance(cursors, dict):
         raise RuntimeError("Lane 3 state.json feedCursors must be an object")
-    return parsed, len(seen), len(cursors), len(managed)
+    if not isinstance(baselines, dict):
+        raise RuntimeError("Lane 3 state.json feedBaselines must be an object")
+    for feed, observed_at_ms in baselines.items():
+        if (
+            isinstance(observed_at_ms, bool)
+            or not isinstance(observed_at_ms, (int, float))
+            or not math.isfinite(observed_at_ms)
+            or observed_at_ms <= 0
+        ):
+            raise RuntimeError(
+                "Lane 3 state.json feedBaselines values must be positive numbers "
+                f"(invalid feed: {feed})"
+            )
+    return parsed, len(seen), len(cursors), len(baselines), len(managed)
 
 
 def _atomic_json_write(path: Path, value: dict[str, Any]) -> None:
@@ -158,7 +200,13 @@ def reset_state_root(
 
     # Validate every mutable structure before deleting anything.
     state_path = state_root / "state.json"
-    state, seen_count, cursor_count, managed_count = _validated_state(state_path)
+    (
+        state,
+        seen_count,
+        cursor_count,
+        baseline_count,
+        managed_count,
+    ) = _validated_state(state_path)
     preserve_before = {
         name: sha256_file(state_root / name) for name in PRESERVE_FILES
     }
@@ -202,6 +250,7 @@ def reset_state_root(
         "managedPositionsRemoved": managed_count,
         "seenKeysPreserved": seen_count,
         "feedCursorsPreserved": cursor_count,
+        "feedBaselinesPreserved": baseline_count,
         "derivedFilesDeleted": deleted,
         "obsoleteArchivesDeleted": archived,
         "preservedSourceHashes": preserve_after,

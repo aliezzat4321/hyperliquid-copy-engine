@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
-  "snapshot_at": "2026-09-14T23:13:00Z",
+  "snapshot_at": "2026-09-22T14:46:17Z",
   "updated_by": "CODEX_CHATGPT",
-  "head_observed": "4653f0d86650d42fea6062ddfd1fcce0ced0f746",
+  "head_observed": "fd63de5c60fc9d19ec643a2c491d5a815581765a",
   "mission": "Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.",
   "live_trading": {
     "authorized": false,
@@ -10,63 +10,318 @@
     "authorization": null
   },
   "priorities": [
-    {"priority":"P0","issue":330,"title":"Complete Lane 3 causal L2 execution and net-cost repair","owner":"CODEX_CHATGPT","reviewer":"CLAUDE","status":"IN_REVIEW","profitability_critical":true},
-    {"priority":"P0","issue":328,"title":"Run integrated Lane 3 pre-Opus challenge after #330 + #320","owner":"CODEX_CHATGPT","reviewer":"CLAUDE","status":"OPEN","profitability_critical":true},
-    {"priority":"P0","issue":327,"title":"Challenge Lane 2 repair #318 vs every Opus finding","owner":"CODEX_CHATGPT","reviewer":"CLAUDE","status":"OPEN","profitability_critical":true},
-    {"priority":"P0","issue":334,"title":"Restore truthful repository-wide CI baseline","owner":"CODEX_CHATGPT","reviewer":"CLAUDE","status":"IN_PROGRESS","profitability_critical":false}
+    {
+      "priority": "P0",
+      "issue": 400,
+      "title": "Complete Lane 3 selected-elite Invo trade-source capture",
+      "owner": "CODEX_CHATGPT",
+      "reviewer": "CLAUDE",
+      "status": "IN_REVIEW",
+      "profitability_critical": true
+    },
+    {
+      "priority": "P0",
+      "issue": 403,
+      "title": "Assimilate Moves/Recent discovered portfolios into selector prospectively",
+      "owner": "CODEX_CHATGPT",
+      "reviewer": "CLAUDE",
+      "status": "OPEN",
+      "profitability_critical": true
+    },
+    {
+      "priority": "P0",
+      "issue": 397,
+      "title": "Arbitrate shared Invo API quota without starving Lane 3",
+      "owner": "CODEX_CHATGPT",
+      "reviewer": "CLAUDE",
+      "status": "OPEN",
+      "profitability_critical": true
+    },
+    {
+      "priority": "P0",
+      "issue": 401,
+      "title": "Enforce Lane 3 source-completeness and event-recall merge gate",
+      "owner": "CODEX_CHATGPT",
+      "reviewer": "CLAUDE",
+      "status": "IN_PROGRESS",
+      "profitability_critical": true
+    }
   ],
   "lanes": {
     "lane_1": {
-      "name":"Hyperliquid native discovery and prospective copying research",
-      "status":"SHADOW_EVIDENCE_MEASUREMENT_INCOMPLETE",
-      "facts":[
-        {"key":"repair_pr_open","label":"Lane 1 Opus-repair PR open","value":true,"unit":"bool","observed_at":"2026-09-14T23:02:08Z","source_type":"PULL_REQUEST","source_ref":"#317"},
-        {"key":"repair_head","label":"Lane 1 repair head","value":"c47bc6854534dd41c620bca69054d4ed9b764940","unit":"text","observed_at":"2026-09-14T23:02:08Z","source_type":"PULL_REQUEST","source_ref":"#317"},
-        {"key":"approved_candidates_last_measured","label":"last measured approved prospective candidates","value":0,"unit":"count","observed_at":"2026-09-11T16:55:17Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"},
-        {"key":"real_trading","label":"real trading enabled","value":false,"unit":"bool","observed_at":"2026-09-14T22:39:38Z","source_type":"ISSUE","source_ref":"#130"}
+      "name": "Hyperliquid native discovery and prospective copying research",
+      "status": "SHADOW_EVIDENCE_MEASUREMENT_INCOMPLETE",
+      "facts": [
+        {
+          "key": "repair_pr_open",
+          "label": "Lane 1 Opus-repair PR open",
+          "value": true,
+          "unit": "bool",
+          "observed_at": "2026-09-14T23:02:08Z",
+          "source_type": "PULL_REQUEST",
+          "source_ref": "#317"
+        },
+        {
+          "key": "repair_head",
+          "label": "Lane 1 repair head",
+          "value": "c47bc6854534dd41c620bca69054d4ed9b764940",
+          "unit": "text",
+          "observed_at": "2026-09-14T23:02:08Z",
+          "source_type": "PULL_REQUEST",
+          "source_ref": "#317"
+        },
+        {
+          "key": "approved_candidates_last_measured",
+          "label": "last measured approved prospective candidates",
+          "value": 0,
+          "unit": "count",
+          "observed_at": "2026-09-11T16:55:17Z",
+          "source_type": "WORKFLOW_RUN",
+          "source_ref": "34624217892"
+        },
+        {
+          "key": "real_trading",
+          "label": "real trading enabled",
+          "value": false,
+          "unit": "bool",
+          "observed_at": "2026-09-14T22:39:38Z",
+          "source_type": "ISSUE",
+          "source_ref": "#130"
+        }
       ],
-      "blocker":"PR #317 contains the proposed Opus repair but is still open and unaccepted; fresh prospective replay/runtime evidence and an exact-SHA lane-specific Opus PASS remain required before profitability conclusions.",
-      "next":"Issue #313"
+      "blocker": "PR #317 contains the proposed Opus repair but is still open and unaccepted; fresh prospective replay/runtime evidence and an exact-SHA lane-specific Opus PASS remain required before profitability conclusions.",
+      "next": "Issue #313"
     },
     "lane_2": {
-      "name":"Third-party identity resolution",
-      "status":"SHADOW_EVIDENCE_MEASUREMENT_INCOMPLETE",
-      "facts":[
-        {"key":"durable_verified_identities_last_measured","label":"last measured durable verified identities","value":26,"unit":"count","observed_at":"2026-09-11T16:55:20Z","source_type":"WORKFLOW_RUN","source_ref":"34624217892"},
-        {"key":"repair_pr_open","label":"Lane 2 Opus-repair PR open","value":true,"unit":"bool","observed_at":"2026-09-14T23:02:08Z","source_type":"PULL_REQUEST","source_ref":"#318"},
-        {"key":"repair_head","label":"Lane 2 repair head","value":"d30772140f20cc5a6aa9d8bc9d8f02f372517863","unit":"text","observed_at":"2026-09-14T23:02:08Z","source_type":"PULL_REQUEST","source_ref":"#318"},
-        {"key":"real_trading","label":"real trading enabled","value":false,"unit":"bool","observed_at":"2026-09-14T22:39:38Z","source_type":"ISSUE","source_ref":"#130"}
+      "name": "Third-party identity resolution",
+      "status": "SHADOW_EVIDENCE_MEASUREMENT_INCOMPLETE",
+      "facts": [
+        {
+          "key": "durable_verified_identities_last_measured",
+          "label": "last measured durable verified identities",
+          "value": 26,
+          "unit": "count",
+          "observed_at": "2026-09-11T16:55:20Z",
+          "source_type": "WORKFLOW_RUN",
+          "source_ref": "34624217892"
+        },
+        {
+          "key": "repair_pr_open",
+          "label": "Lane 2 Opus-repair PR open",
+          "value": true,
+          "unit": "bool",
+          "observed_at": "2026-09-14T23:02:08Z",
+          "source_type": "PULL_REQUEST",
+          "source_ref": "#318"
+        },
+        {
+          "key": "repair_head",
+          "label": "Lane 2 repair head",
+          "value": "d30772140f20cc5a6aa9d8bc9d8f02f372517863",
+          "unit": "text",
+          "observed_at": "2026-09-14T23:02:08Z",
+          "source_type": "PULL_REQUEST",
+          "source_ref": "#318"
+        },
+        {
+          "key": "real_trading",
+          "label": "real trading enabled",
+          "value": false,
+          "unit": "bool",
+          "observed_at": "2026-09-14T22:39:38Z",
+          "source_type": "ISSUE",
+          "source_ref": "#130"
+        }
       ],
-      "blocker":"PR #318 contains the proposed identity-safety and capacity repair but remains open; actual post-repair Lane 2 shadow throughput/runtime proof and an exact-SHA lane-specific Opus PASS are still required.",
-      "next":"Issue #312"
+      "blocker": "PR #318 contains the proposed identity-safety and capacity repair but remains open; actual post-repair Lane 2 shadow throughput/runtime proof and an exact-SHA lane-specific Opus PASS are still required.",
+      "next": "Issue #312"
     },
     "lane_3": {
-      "name":"Direct Invo notification shadow copying",
-      "status":"SHADOW_EVIDENCE_MEASUREMENT_INCOMPLETE",
-      "facts":[
-        {"key":"execution_repair_head","label":"Lane 3 execution-repair head","value":"976c5e2364f9f40b45a3b0a56b31339b3c5036bb","unit":"text","observed_at":"2026-09-14T23:02:08Z","source_type":"PULL_REQUEST","source_ref":"#332"},
-        {"key":"executor_ci","label":"exact-head Lane 3 executor CI","value":"PASS","unit":"text","observed_at":"2026-09-14T23:00:30Z","source_type":"WORKFLOW_RUN","source_ref":"34906771193"},
-        {"key":"live_sensitive_guard","label":"exact-head live-sensitive classification guard","value":"PASS","unit":"text","observed_at":"2026-09-14T23:00:30Z","source_type":"WORKFLOW_RUN","source_ref":"34906771110"},
-        {"key":"restart_repair_head","label":"reviewer-driven #320 restart repair head","value":"efbff8897c4ef27c6ef8b35270af1554b83328c4","unit":"text","observed_at":"2026-09-14T23:11:28Z","source_type":"PULL_REQUEST","source_ref":"#321"},
-        {"key":"second_codex_review_old_320","label":"second Codex verdict on superseded #320 SHA","value":"FAIL_REPAIRED_PENDING_REREVIEW","unit":"text","observed_at":"2026-09-14T23:11:28Z","source_type":"ISSUE","source_ref":"#331"},
-        {"key":"real_trading","label":"real trading enabled","value":false,"unit":"bool","observed_at":"2026-09-14T22:39:38Z","source_type":"ISSUE","source_ref":"#130"}
+      "name": "Direct Invo notification shadow copying",
+      "status": "SHADOW_EVIDENCE_MEASUREMENT_INCOMPLETE",
+      "facts": [
+        {
+          "key": "integrated_lane3_rc_safety",
+          "label": "integrated RC live authorization / real trading",
+          "value": "authorization NONE / REAL_TRADING_ENABLED=NO",
+          "unit": "text",
+          "observed_at": "2026-09-22T14:46:17Z",
+          "source_type": "COMMIT",
+          "source_ref": "39d53c57f65a4dfae4eac52f60de5ed15d20e30a"
+        },
+        {
+          "key": "integrated_lane3_rc_reset_contract_tests",
+          "label": "reset/deploy/health pytest tests passing",
+          "value": 18,
+          "unit": "count",
+          "observed_at": "2026-09-22T14:46:17Z",
+          "source_type": "COMMIT",
+          "source_ref": "39d53c57f65a4dfae4eac52f60de5ed15d20e30a"
+        },
+        {
+          "key": "integrated_lane3_rc_discovery_tests",
+          "label": "focused strict lifecycle/projector subtests passing",
+          "value": 22,
+          "unit": "count",
+          "observed_at": "2026-09-22T14:46:17Z",
+          "source_type": "COMMIT",
+          "source_ref": "39d53c57f65a4dfae4eac52f60de5ed15d20e30a"
+        },
+        {
+          "key": "integrated_lane3_rc_contract_tests",
+          "label": "AI-team contract pytest tests passing",
+          "value": 61,
+          "unit": "count",
+          "observed_at": "2026-09-22T14:46:17Z",
+          "source_type": "COMMIT",
+          "source_ref": "39d53c57f65a4dfae4eac52f60de5ed15d20e30a"
+        },
+        {
+          "key": "integrated_lane3_rc_executor_tests",
+          "label": "integrated RC full executor subtests passing",
+          "value": 298,
+          "unit": "count",
+          "observed_at": "2026-09-22T14:46:17Z",
+          "source_type": "COMMIT",
+          "source_ref": "39d53c57f65a4dfae4eac52f60de5ed15d20e30a"
+        },
+        {
+          "key": "integrated_lane3_rc_implementation",
+          "label": "integrated Lane 3 RC implementation commit",
+          "value": "39d53c57f65a4dfae4eac52f60de5ed15d20e30a",
+          "unit": "text",
+          "observed_at": "2026-09-22T14:46:17Z",
+          "source_type": "COMMIT",
+          "source_ref": "39d53c57f65a4dfae4eac52f60de5ed15d20e30a"
+        },
+        {
+          "key": "source_capture_pr_head",
+          "label": "Lane 3 final source-capture implementation commit",
+          "value": "bbc574f",
+          "unit": "text",
+          "observed_at": "2026-09-21T19:49:53Z",
+          "source_type": "COMMIT",
+          "source_ref": "bbc574feb7ff31bcc1026e1c3522f4d9887a17aa"
+        },
+        {
+          "key": "executor_builder_validation",
+          "label": "builder-validated executor subtests passing",
+          "value": 211,
+          "unit": "count",
+          "observed_at": "2026-09-21T19:49:53Z",
+          "source_type": "COMMIT",
+          "source_ref": "bbc574feb7ff31bcc1026e1c3522f4d9887a17aa"
+        },
+        {
+          "key": "proven_default_resident_cap",
+          "label": "default direct-watch resident capacity proven by timeout/page/deadline budget",
+          "value": 16,
+          "unit": "count",
+          "observed_at": "2026-09-20T15:33:55Z",
+          "source_type": "COMMIT",
+          "source_ref": "67efba6"
+        },
+        {
+          "key": "verified_feed_surfaces",
+          "label": "verified Invo trade-feed surfaces",
+          "value": 4,
+          "unit": "count",
+          "observed_at": "2026-09-17T23:46:12Z",
+          "source_type": "ISSUE",
+          "source_ref": "#400"
+        },
+        {
+          "key": "feed_exposed_missing_candidates",
+          "label": "exploratory feed-exposed portfolios missing from current selector",
+          "value": 109,
+          "unit": "count",
+          "observed_at": "2026-09-17T23:46:12Z",
+          "source_type": "ISSUE",
+          "source_ref": "#403"
+        },
+        {
+          "key": "feed_exposed_would_be_elite",
+          "label": "exploratory missing portfolios meeting frozen selector on visible evidence",
+          "value": 53,
+          "unit": "count",
+          "observed_at": "2026-09-17T23:46:12Z",
+          "source_type": "ISSUE",
+          "source_ref": "#403"
+        },
+        {
+          "key": "real_trading",
+          "label": "real trading enabled",
+          "value": false,
+          "unit": "bool",
+          "observed_at": "2026-09-17T23:10:50Z",
+          "source_type": "MANUAL_OBSERVATION",
+          "source_ref": "VM runtime env 2026-09-17T23:10Z"
+        }
       ],
-      "blocker":"Second Codex found an owned-close reconciliation defect in the original #320 SHA; reviewer-driven repair head efbff8897c4ef27c6ef8b35270af1554b83328c4 passed the full executor check and now requires exact-SHA re-review plus integration into #332 before the final #328 challenge.",
-      "next":"Issue #331"
+      "blocker": "Integrated Lane 3 RC implementation 39d53c57f65a4dfae4eac52f60de5ed15d20e30a includes causal source-time admission, admission-index v2, direct-watch state v8, the managed-position sourceBaseShortId write/read schema repair, and bounded atomic-publication generation retention while preserving the reviewed safety invariants. Malformed lifecycle variants fail closed; deployment uses the strict atomic publication reader; and the publication reader now accepts only the exact safe writer generation-id format, rejecting path-segment traversal before report/ledger reads. All prior strict selector/audit, canonical candidate/admission, runtime-health profitability, atomic publication, source capture, funding, replay, direct-watch, dedupe, readiness, reset, and live-off invariants remain intact. Exact validation passes 298/298 full executor subtests, 22/22 focused projector/atomic-publication subtests, 18/18 reset/deploy/health pytest tests, 61/61 contract tests, AI-team validator, ai_team_contract, git diff check, and deploy shell syntax checks. This is not profitability evidence. Production remains fd63de5 and real trading is OFF. Remaining gate: GitHub CI and BOTH independent exact-SHA reviews must PASS before shadow-only deployment.",
+      "next": "Issue #400"
     }
   },
   "infrastructure": {
-    "name":"Research VM, market tape, autonomy and CI",
-    "status":"DEGRADED",
-    "facts":[
-      {"key":"ci_baseline_targeted_validation_pct","label":"targeted #334 renderer + contract + Ruff checks passed","value":100.0,"unit":"pct","observed_at":"2026-09-14T23:09:49Z","source_type":"WORKFLOW_RUN","source_ref":"34907540686"},
-      {"key":"market_shadow_reset_authorized","label":"owner-authorized market-shadow reset task exists","value":true,"unit":"bool","observed_at":"2026-09-14T17:28:43Z","source_type":"ISSUE","source_ref":"#310"},
-      {"key":"old_storage_measurement_stale","label":"previous 100% storage measurement is no longer a current-state proof","value":true,"unit":"bool","observed_at":"2026-09-14T23:02:08Z","source_type":"ISSUE","source_ref":"#310"},
-      {"key":"ci_baseline_unblock_open","label":"repository CI baseline repair open","value":true,"unit":"bool","observed_at":"2026-09-14T23:10:55Z","source_type":"PULL_REQUEST","source_ref":"#335"},
-      {"key":"unrelated_work_continuing","label":"runtime reports unrelated work continuing","value":true,"unit":"bool","observed_at":"2026-09-14T22:39:38Z","source_type":"ISSUE","source_ref":"#130"},
-      {"key":"real_trading","label":"real trading enabled","value":false,"unit":"bool","observed_at":"2026-09-14T22:39:38Z","source_type":"ISSUE","source_ref":"#130"}
+    "name": "Research VM, market tape, autonomy and CI",
+    "status": "DEGRADED",
+    "facts": [
+      {
+        "key": "ci_baseline_targeted_validation_pct",
+        "label": "targeted #334 renderer + contract + Ruff checks passed",
+        "value": 100,
+        "unit": "pct",
+        "observed_at": "2026-09-14T23:09:49Z",
+        "source_type": "WORKFLOW_RUN",
+        "source_ref": "34907540686"
+      },
+      {
+        "key": "market_shadow_reset_authorized",
+        "label": "owner-authorized market-shadow reset task exists",
+        "value": true,
+        "unit": "bool",
+        "observed_at": "2026-09-14T17:28:43Z",
+        "source_type": "ISSUE",
+        "source_ref": "#310"
+      },
+      {
+        "key": "old_storage_measurement_stale",
+        "label": "previous 100% storage measurement is no longer a current-state proof",
+        "value": true,
+        "unit": "bool",
+        "observed_at": "2026-09-14T23:02:08Z",
+        "source_type": "ISSUE",
+        "source_ref": "#310"
+      },
+      {
+        "key": "ci_baseline_unblock_open",
+        "label": "repository CI baseline repair open",
+        "value": true,
+        "unit": "bool",
+        "observed_at": "2026-09-14T23:10:55Z",
+        "source_type": "PULL_REQUEST",
+        "source_ref": "#335"
+      },
+      {
+        "key": "unrelated_work_continuing",
+        "label": "runtime reports unrelated work continuing",
+        "value": true,
+        "unit": "bool",
+        "observed_at": "2026-09-14T22:39:38Z",
+        "source_type": "ISSUE",
+        "source_ref": "#130"
+      },
+      {
+        "key": "real_trading",
+        "label": "real trading enabled",
+        "value": false,
+        "unit": "bool",
+        "observed_at": "2026-09-14T22:39:38Z",
+        "source_type": "ISSUE",
+        "source_ref": "#130"
+      }
     ],
-    "blocker":"PR #335 has already cleared the obsolete Opus-script Ruff debt and stale generated-state contract failure. Its first full CI run exposed only typed-fact ordering assumptions in two contract tests; this snapshot restores the expected percentage/count ordering while keeping facts current and sourced.",
-    "next":"Issue #334"
+    "blocker": "PR #335 has already cleared the obsolete Opus-script Ruff debt and stale generated-state contract failure. Its first full CI run exposed only typed-fact ordering assumptions in two contract tests; this snapshot restores the expected percentage/count ordering while keeping facts current and sourced.",
+    "next": "Issue #334"
   }
 }

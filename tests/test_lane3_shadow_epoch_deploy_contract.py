@@ -1,13 +1,13 @@
 from pathlib import Path
 
 
-def test_lane3_deploy_defers_reset_until_v3_selector_is_present() -> None:
+def test_lane3_deploy_defers_reset_until_v4_selector_is_present() -> None:
     deploy = Path("scripts/deploy_invo_notification_executor_self_hosted.sh").read_text()
 
-    assert "EVIDENCE_EPOCH=lane3-hybrid-v3-clean-20260916" in deploy
-    assert "EXPECTED_SELECTOR=invo-portfolio-hybrid-v3-20260916" in deploy
+    assert "EVIDENCE_EPOCH=lane3-hybrid-v4-clean-20260921" in deploy
+    assert "EXPECTED_SELECTOR=invo-portfolio-hybrid-v4-20260921" in deploy
     assert "reset_deferred=1" in deploy
-    assert "selector_v3_not_deployed" in deploy
+    assert "selector_v4_not_deployed" in deploy
     assert "reset_lane3_shadow_epoch.py" in deploy
     assert "portfolio-candidate-cli.js" in deploy
     assert "refusing Lane 3 selector rollback" in deploy
@@ -39,3 +39,38 @@ def test_portfolio_research_deploy_uses_source_selector_version() -> None:
     assert "selectorMatch" in deploy
     assert "candidate.selectorVersion !== expectedSelector" in deploy
     assert "invo-portfolio-elite-v1-20260916" not in deploy
+
+
+def test_lane3_deploy_pins_durable_funding_boundary_path() -> None:
+    deploy = Path("scripts/deploy_invo_notification_executor_self_hosted.sh").read_text()
+    expected = (
+        "set_env NOTIFICATION_TRADER_FUNDING_BOUNDARY_PATH "
+        "/var/lib/hyperliquid-copy-engine/invo-notification-executor/funding-boundaries"
+    )
+    assert expected in deploy
+
+
+def test_lane3_deploy_validates_integrated_health_before_resume_or_epoch_marker() -> None:
+    deploy = Path("scripts/deploy_invo_notification_executor_self_hosted.sh").read_text()
+    validation = deploy.index("validate_lane3_shadow_health.py")
+    assert validation < deploy.index('systemctl start "$RESEARCH_SERVICE"')
+    assert validation < deploy.index('> "$EVIDENCE_MARKER"')
+    assert "clean v3" not in deploy
+
+
+def test_lane3_deploy_retries_transient_integrated_health_but_is_bounded() -> None:
+    deploy = Path("scripts/deploy_invo_notification_executor_self_hosted.sh").read_text()
+    assert "health_deadline=$((SECONDS + 90))" in deploy
+    assert "while (( SECONDS < health_deadline ))" in deploy
+    assert 'health_valid=1' in deploy
+    assert '[[ "$health_valid" -ne 1 ]]' in deploy
+
+
+def test_portfolio_research_deploy_uses_strict_atomic_elite_publication_reader() -> None:
+    deploy = Path("scripts/deploy_invo_portfolio_research_self_hosted.sh").read_text()
+
+    assert "readEliteShadowPublication" in deploy
+    assert "eliteLedgerBasePath" in deploy
+    assert 'dist/src/elite-shadow-projector.js' in deploy
+    assert "eliteManifest.reportPath" not in deploy
+    assert "eliteManifest.ledgerPath" not in deploy

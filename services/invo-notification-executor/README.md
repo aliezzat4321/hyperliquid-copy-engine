@@ -2,6 +2,10 @@
 
 Standalone low-latency execution lane for `hyperliquid-copy-engine`.
 
+Selector snapshot archive segments are immutable causal audit evidence. The elite-shadow
+report exposes archive segment and byte totals; segments are never silently truncated.
+Operators must use the external storage guard for capacity alerts and preserve the archive.
+
 It consumes **verified Invo trade signals directly from Invo's authenticated API** and mirrors eligible opens/closes into Hyperliquid shadow. It does **not** identify, resolve, or require the source trader's Hyperliquid wallet.
 
 This stays independent from the two existing tracks:
@@ -43,11 +47,18 @@ candidate ledger using evidence available before the source trade. Candidate sta
 is missing, malformed, stale, future-dated, absent for that portfolio, or non-elite fails
 closed with an explicit skip reason.
 
+The authoritative signal source timestamp is the immutable NEW/ADD eligibility cutoff;
+processing or retry time never substitutes for it. Both selector membership and the
+direct-watch admission interval must cover that cutoff. Current publications still have
+to be healthy and fresh at processing time, while retained demotion intervals make a
+retry/restart deterministic across later selector changes. CLOSE continues to bypass
+admission so managed shadow exposure can always unwind.
+
 Portfolio identity is the qualification unit. Multiple portfolios belonging to the same
 owner may all enter shadow research if **each portfolio independently qualifies**. A strong
 portfolio does not automatically transfer eligibility to a weaker sibling portfolio.
 
-The current selector version is `invo-portfolio-hybrid-v3-20260916`. It deliberately treats
+The current selector version is `invo-portfolio-hybrid-v4-20260921`. It deliberately treats
 **win rate and return as a pair** rather than making 80% win rate a universal hard boundary.
 Broad discovery remains broad, while shadow admission uses all of the following:
 
@@ -166,10 +177,24 @@ Dry mode is an execution-realistic trade-lifecycle ledger, not a mid-price entry
 Funding evidence is prospective: each hourly funding interval must have a fresh Hyperliquid
 `oraclePx` checkpoint; cost is position size × oracle price × funding rate. Missing
 checkpoints make economics incomplete rather than substituting entry/mark prices.
+An independent worker thread starts before Invo authentication or feed/direct-watch work,
+arms at each hourly boundary, and performs bounded read-only HTTP retries only inside the
+hard-clamped 10-second causal window. Before notifying the main thread it immutably stages
+the terminal success/failure record under `NOTIFICATION_TRADER_FUNDING_BOUNDARY_PATH`.
+Close accounting reads that durable record directly, so delayed main-thread delivery or a
+restart cannot erase a timely observation or double-apply it. Corrupt records fail loudly
+and cannot produce COMPLETE economics. Audit rows include every
+attempt timestamp and latency, retry count, final boundary delay, affected positions and
+failure class. Starting after a boundary deadline marks eligible open positions incomplete;
+it never reconstructs a checkpoint after the fact.
+
+This capture path is shadow-only. Live mode has no funding capture; `/health` reports
+`fundingEconomicsReady=false` and the live funding gate remains blocked. Nothing in this
+mechanism authorizes live trading (`REAL_TRADING_ENABLED=NO`).
 
 The current execution evidence contract is `lane3-causal-l2-v2`; the cost model is
 `hl-taker-l2-oracle-funding-v2`; the shadow admission contract is
-`lane3-elite-admission-v1-20260916`. These assumptions are evidence inputs for research;
+`lane3-elite-admission-v2-20260922`. These assumptions are evidence inputs for research;
 they do not change or authorize the live order route.
 
 Every decision writes JSONL with signal provenance, admission provenance,
@@ -223,3 +248,33 @@ configurations by **our** prospective execution-realistic copied results: realiz
 net PnL, fees, funding, causal L2 slippage, fill/reject rate, latency, profit factor,
 drawdown and concentration. No real-trading promotion is implied or authorized by this
 service.
+
+## Feed-discovered candidate evidence
+
+The executor is the single writer of `feed-portfolio-evidence.json` and its compacted,
+bounded journal. It captures portfolio evidence exposed by Following, Trending, Moves
+(`fire_moves`), and Recent (`most_recent`) without writing `portfolio-candidates.json`.
+The separate portfolio-research process reads that evidence through the unchanged
+`invo-portfolio-hybrid-v4-20260921` selector. Each record carries immutable
+`firstObservedAtMs`, `processedAtMs`, and `epoch`; the first processing timestamp is the
+causal selector timestamp and source trade/update timestamps are provenance only.
+
+Captured count aliases include `closedPositionsCount`, `openPositionsCount`,
+`wonPositionsCount`, and `lostPositionsCount`. `plSnapshot` is not retained or treated as
+`percentChange`, because this branch contains no captured proof that those fields are
+canonically equivalent. Captured feed fixtures contain no `verified`/`isVerified` field,
+so they remain discovery-only and are explicitly reported in the hydration queue for the
+proven broad/profile cycle. There is no runtime claim that the exploratory 109/53 can be
+assimilated without that independent verification. Feed discovery never replays a historical feed trade,
+and a newly selected portfolio remains ineligible for NEW/ADD until the #404 direct-watch
+admission index marks it ACTIVE. Health and the research report expose retained unique
+portfolios, surface contribution, first/last seen, processing lag, new-vs-broad discovery,
+and newly selector-qualified counts.
+
+Evidence is bounded to 1,000 portfolios, two observations each, a 3,000,000-byte snapshot,
+and a 512,000-byte journal. The canonical selector hot state is capped at 5,000 portfolios
+and 8 MiB. Its current + previous causal snapshot segments are capped at 8 MiB total; older
+segments are moved intact to the separate `portfolio-candidate-snapshots.jsonl.archive/`
+audit archive instead of being silently dropped. Selector eligibility expires after seven days. The hot poll
+appends small records and compacts at most once per five-minute interval or before the
+journal cap; evidence persistence runs after core CLOSE/gap/cursor-safe reconciliation.

@@ -1,7 +1,8 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'fs';
 import { dirname } from 'path';
+import { FEED_EVIDENCE_EPOCH, FEED_EVIDENCE_SELECTOR_TTL_MS, type FeedPortfolioRecord } from './feed-portfolio-evidence.js';
 
-export const ELITE_SELECTOR_VERSION = 'invo-portfolio-hybrid-v3-20260916';
+export const ELITE_SELECTOR_VERSION = 'invo-portfolio-hybrid-v4-20260921';
 
 export type PortfolioBucket =
   | 'ELITE_CANDIDATE'
@@ -83,13 +84,148 @@ export interface PortfolioSnapshot {
   rawShapeKeys: string[];
 }
 
-interface LedgerDiskState {
+export interface LedgerDiskState {
   version: 1;
   selectorVersion: string;
   policy: PortfolioSelectorPolicy;
   portfolios: Record<string, PortfolioSnapshot>;
   firstEliteAtMs: Record<string, number>;
   lastObservedAtMs: number;
+  feedEvidence?: {
+    version: 4;
+    epoch: typeof FEED_EVIDENCE_EPOCH;
+    eligibilityNotBeforeMs: number;
+    records: Record<string, { firstProcessedAtMs: number; lastProcessedAtMs: number; sourceFirstSeenAtMs: number; sourceLastSeenAtMs: number; surfaces: string[]; processedEvidenceIds: string[]; feedOnlyAtFirstIngestion: boolean; newlySelectorQualified: boolean }>;
+    lifetime: { discovered: number; feedOnly: number; newlyQualified: number; rejectedUnverified: number; rejectedMalformed: number; rejectedIdentityConflicts: number; dedupedReplayCount: number };
+  };
+}
+
+export const FEED_SELECTOR_TRACKING_MAX_PORTFOLIOS = 5_000;
+export const CANDIDATE_STATE_MAX_PORTFOLIOS = 5_000;
+export const CANDIDATE_STATE_MAX_BYTES = 8 * 1024 * 1024;
+export const CANDIDATE_SNAPSHOT_SEGMENT_MAX_BYTES = 4 * 1024 * 1024;
+export const CANDIDATE_SNAPSHOT_TOTAL_MAX_BYTES = 8 * 1024 * 1024;
+const emptyFeedEvidence = (eligibilityNotBeforeMs = 0) => ({
+  version: 4 as const, epoch: FEED_EVIDENCE_EPOCH as typeof FEED_EVIDENCE_EPOCH,
+  eligibilityNotBeforeMs,
+  records: {} as Record<string, { firstProcessedAtMs: number; lastProcessedAtMs: number; sourceFirstSeenAtMs: number; sourceLastSeenAtMs: number; surfaces: string[]; processedEvidenceIds: string[]; feedOnlyAtFirstIngestion: boolean; newlySelectorQualified: boolean }>,
+  lifetime: { discovered: 0, feedOnly: 0, newlyQualified: 0, rejectedUnverified: 0, rejectedMalformed: 0, rejectedIdentityConflicts: 0, dedupedReplayCount: 0 },
+});
+
+const PORTFOLIO_BUCKETS = new Set<PortfolioBucket>([
+  'ELITE_CANDIDATE', 'SPARSE_HIGH_RETURN', 'RESEARCH_WIDE', 'REJECTED_DEMOTED',
+]);
+
+export const ALLOWED_PORTFOLIO_BUCKETS: ReadonlySet<PortfolioBucket> = PORTFOLIO_BUCKETS;
+
+function plainRecord(value: unknown): value is Record<string, unknown> {
+  return value != null && typeof value === 'object' && !Array.isArray(value)
+    && [Object.prototype, null].includes(Object.getPrototypeOf(value));
+}
+function finiteNumber(value: unknown, positive = false): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && (!positive || value > 0);
+}
+const POLICY_KEYS = Object.keys(DEFAULT_PORTFOLIO_SELECTOR).sort();
+
+/** Exact persisted candidate-state envelope used at admission boundaries. */
+export function isCanonicalLedgerDiskState(value: unknown): value is LedgerDiskState {
+  if (!plainRecord(value) || value.version !== 1 || value.selectorVersion !== ELITE_SELECTOR_VERSION
+    || !plainRecord(value.policy) || !plainRecord(value.portfolios) || !plainRecord(value.firstEliteAtMs)
+    || !finiteNumber(value.lastObservedAtMs, true) || !plainRecord(value.feedEvidence)) return false;
+  if (Object.keys(value).some(key => !['version', 'selectorVersion', 'policy', 'portfolios', 'firstEliteAtMs',
+    'lastObservedAtMs', 'feedEvidence'].includes(key))) return false;
+  const policy = value.policy;
+  if (Object.keys(policy).sort().join('\0') !== POLICY_KEYS.join('\0')
+    || POLICY_KEYS.some(key => !finiteNumber(policy[key]))) return false;
+  if (!Object.entries(value.portfolios).every(([key, row]) => isCanonicalPortfolioSnapshot(row)
+    && row.portfolioId === key)) return false;
+  if (!Object.entries(value.firstEliteAtMs).every(([key, at]) => key.trim().length > 0 && finiteNumber(at, true))) return false;
+  const feed = value.feedEvidence;
+  if (feed.version !== 4 || feed.epoch !== FEED_EVIDENCE_EPOCH || !finiteNumber(feed.eligibilityNotBeforeMs)
+    || !plainRecord(feed.records) || !plainRecord(feed.lifetime)) return false;
+  const lifetime = feed.lifetime;
+  const lifetimeKeys = ['discovered', 'feedOnly', 'newlyQualified', 'rejectedUnverified', 'rejectedMalformed',
+    'rejectedIdentityConflicts', 'dedupedReplayCount'];
+  if (Object.keys(lifetime).sort().join('\0') !== [...lifetimeKeys].sort().join('\0')
+    || lifetimeKeys.some(key => !finiteNumber(lifetime[key]) || !Number.isInteger(lifetime[key])
+      || (lifetime[key] as number) < 0)) return false;
+  return Object.entries(feed.records).every(([key, raw]) => {
+    if (!key.trim() || !plainRecord(raw)) return false;
+    const keys = ['firstProcessedAtMs', 'lastProcessedAtMs', 'sourceFirstSeenAtMs', 'sourceLastSeenAtMs',
+      'surfaces', 'processedEvidenceIds', 'feedOnlyAtFirstIngestion', 'newlySelectorQualified'];
+    return !Object.keys(raw).some(field => !keys.includes(field))
+      && ['firstProcessedAtMs', 'lastProcessedAtMs', 'sourceFirstSeenAtMs', 'sourceLastSeenAtMs']
+        .every(field => finiteNumber(raw[field], true))
+      && Array.isArray(raw.surfaces) && raw.surfaces.every(item => typeof item === 'string' && item.length > 0)
+      && Array.isArray(raw.processedEvidenceIds) && raw.processedEvidenceIds.every(item => typeof item === 'string' && item.length > 0)
+      && typeof raw.feedOnlyAtFirstIngestion === 'boolean' && typeof raw.newlySelectorQualified === 'boolean';
+  });
+}
+
+function nullableFinite(value: unknown): boolean {
+  return value === null || (typeof value === 'number' && Number.isFinite(value));
+}
+
+/** Exact structural contract emitted by classifyPortfolio and consumed by any
+ * authorization/terminal-denial boundary. Keep this stricter than the compact
+ * projector snapshot contract: a partial imitation must never authorize or consume. */
+export function isCanonicalPortfolioSnapshot(row: unknown): row is PortfolioSnapshot {
+  if (row == null || typeof row !== 'object' || Array.isArray(row)) return false;
+  const candidate = row as Record<string, unknown>;
+  const breakdown = candidate.scoreBreakdown;
+  if (breakdown == null || typeof breakdown !== 'object' || Array.isArray(breakdown)) return false;
+  const scoreBreakdown = breakdown as Record<string, unknown>;
+  return typeof candidate.portfolioId === 'string' && candidate.portfolioId.trim().length > 0
+    && typeof candidate.observedAtMs === 'number' && Number.isFinite(candidate.observedAtMs) && candidate.observedAtMs > 0
+    && candidate.selectorVersion === ELITE_SELECTOR_VERSION
+    && PORTFOLIO_BUCKETS.has(candidate.bucket as PortfolioBucket)
+    && typeof candidate.sourceFilter === 'string' && candidate.sourceFilter.trim().length > 0
+    && (candidate.portfolioName === null || typeof candidate.portfolioName === 'string')
+    && (candidate.ownerId === null || typeof candidate.ownerId === 'string')
+    && (candidate.username === null || typeof candidate.username === 'string')
+    && (candidate.verified === null || typeof candidate.verified === 'boolean')
+    && nullableFinite(candidate.createdAtMs)
+    && nullableFinite(candidate.daysActive)
+    && nullableFinite(candidate.lastActivityAtMs)
+    && nullableFinite(candidate.recentActivityDaysAgo)
+    && (candidate.openPositions === null || (typeof candidate.openPositions === 'number'
+      && Number.isInteger(candidate.openPositions) && candidate.openPositions >= 0))
+    && typeof candidate.closedPositions === 'number' && Number.isInteger(candidate.closedPositions)
+      && candidate.closedPositions >= 0
+    && nullableFinite(candidate.closedPositionsPerDay)
+    && typeof candidate.wonPositions === 'number' && Number.isInteger(candidate.wonPositions) && candidate.wonPositions >= 0
+    && typeof candidate.lostPositions === 'number' && Number.isInteger(candidate.lostPositions) && candidate.lostPositions >= 0
+    && (candidate.winRatePct === null || (typeof candidate.winRatePct === 'number'
+      && Number.isFinite(candidate.winRatePct) && candidate.winRatePct >= 0 && candidate.winRatePct <= 100))
+    && nullableFinite(candidate.percentChange)
+    && nullableFinite(candidate.hybridRequiredReturnPct)
+    && (candidate.hybridRequiredClosedPositions === null
+      || (typeof candidate.hybridRequiredClosedPositions === 'number'
+        && Number.isInteger(candidate.hybridRequiredClosedPositions) && candidate.hybridRequiredClosedPositions >= 0))
+    && nullableFinite(candidate.winLossRatio)
+    && nullableFinite(candidate.currentWinStreak)
+    && nullableFinite(candidate.followerCount)
+    && (candidate.liquidated === null || typeof candidate.liquidated === 'boolean')
+    && typeof candidate.score === 'number' && Number.isFinite(candidate.score)
+    && typeof scoreBreakdown.winRate === 'number' && Number.isFinite(scoreBreakdown.winRate)
+    && typeof scoreBreakdown.historicalReturn === 'number' && Number.isFinite(scoreBreakdown.historicalReturn)
+    && typeof scoreBreakdown.sampleSize === 'number' && Number.isFinite(scoreBreakdown.sampleSize)
+    && nullableFinite(scoreBreakdown.activeDays)
+    && nullableFinite(scoreBreakdown.dailyFrequency)
+    && nullableFinite(scoreBreakdown.recentActivity)
+    && typeof scoreBreakdown.availableWeight === 'number' && Number.isFinite(scoreBreakdown.availableWeight)
+    && Array.isArray(candidate.reasons) && candidate.reasons.every(value => typeof value === 'string')
+    && Array.isArray(candidate.rawShapeKeys) && candidate.rawShapeKeys.every(value => typeof value === 'string');
+}
+
+function validRecentSnapshot(row: unknown): row is PortfolioSnapshot {
+  if (row == null || typeof row !== 'object' || Array.isArray(row)) return false;
+  const candidate = row as Partial<PortfolioSnapshot>;
+  return typeof candidate.portfolioId === 'string' && candidate.portfolioId.trim().length > 0
+    && candidate.selectorVersion === ELITE_SELECTOR_VERSION
+    && typeof candidate.observedAtMs === 'number'
+    && Number.isFinite(candidate.observedAtMs) && candidate.observedAtMs > 0
+    && PORTFOLIO_BUCKETS.has(candidate.bucket as PortfolioBucket);
 }
 
 function finite(v: unknown): number | null {
@@ -100,6 +236,15 @@ function finite(v: unknown): number | null {
 function integer(v: unknown, fallback = 0): number {
   const n = finite(v);
   return n == null ? fallback : Math.max(0, Math.trunc(n));
+}
+
+function consistentAlias(raw: any, keys: string[]): number | null | undefined {
+  const present = keys.map(key => raw?.[key]).filter(value => value !== undefined && value !== null);
+  if (!present.length) return null;
+  const values = present.map(finite);
+  if (values.some(value => value == null)) return undefined;
+  const first = values[0]!;
+  return values.every(value => Math.abs(value! - first) <= 1e-9) ? first : undefined;
 }
 
 function text(v: unknown): string | null {
@@ -283,12 +428,19 @@ export function classifyPortfolio(
   const recentActivityDaysAgo = lastActivityAtMs == null
     ? null
     : Math.max(0, (observedAtMs - lastActivityAtMs) / 86_400_000);
-  const closedPositions = integer(raw?.closedPositions ?? raw?.closedTrades ?? raw?.totalClosedPositions);
-  const openPositions = finite(raw?.openPositions ?? raw?.openTrades);
-  const wonPositions = integer(raw?.wonPositions ?? raw?.winningPositions ?? raw?.wins);
-  const lostPositions = integer(raw?.lostPositions ?? raw?.losingPositions ?? raw?.losses);
-  const winRatePct = finite(raw?.winRate ?? raw?.win_rate ?? raw?.winRatePct);
-  const percentChange = finite(raw?.percentChange ?? raw?.pnlPercent ?? raw?.profitLossPercent ?? raw?.roi);
+  const closedAlias = consistentAlias(raw, ['closedPositions','closedPositionsCount','closedTrades','totalClosedPositions']);
+  const wonAlias = consistentAlias(raw, ['wonPositions','wonPositionsCount','winningPositions','wins']);
+  const lostAlias = consistentAlias(raw, ['lostPositions','lostPositionsCount','losingPositions','losses']);
+  const winRateAlias = consistentAlias(raw, ['winRate','win_rate','winRatePct']);
+  const returnAlias = consistentAlias(raw, ['percentChange','pnlPercent','profitLossPercent','roi']);
+  const aliasesConsistent = closedAlias !== undefined && wonAlias !== undefined && lostAlias !== undefined
+    && winRateAlias !== undefined && returnAlias !== undefined;
+  const closedPositions = integer(closedAlias);
+  const openPositions = finite(raw?.openPositions ?? raw?.openPositionsCount ?? raw?.openTrades);
+  const wonPositions = integer(wonAlias);
+  const lostPositions = integer(lostAlias);
+  const winRatePct = winRateAlias ?? null;
+  const percentChange = returnAlias ?? null;
   const liquidated = bool(raw?.liquidated ?? raw?.isLiquidated);
   const verified = bool(owner?.verified ?? raw?.verified ?? raw?.isVerified);
   const currentWinStreak = finite(raw?.currentWinStreak ?? raw?.winStreak);
@@ -296,6 +448,13 @@ export function classifyPortfolio(
   // This is a count ratio, not an average-win / average-loss payout ratio. Keep it
   // for observability, but do not double-count it as independent profitability evidence.
   const winLossRatio = lostPositions > 0 ? wonPositions / lostPositions : wonPositions > 0 ? wonPositions : null;
+  const metricsComplete = createdAtMs != null && winRatePct != null && percentChange != null
+    && Number.isFinite(Number(raw?.closedPositions ?? raw?.closedPositionsCount ?? raw?.closedTrades ?? raw?.totalClosedPositions))
+    && Number.isFinite(Number(raw?.wonPositions ?? raw?.wonPositionsCount ?? raw?.winningPositions ?? raw?.wins))
+    && Number.isFinite(Number(raw?.lostPositions ?? raw?.lostPositionsCount ?? raw?.losingPositions ?? raw?.losses));
+  const metricsConsistent = metricsComplete && aliasesConsistent && wonPositions + lostPositions <= closedPositions
+    && winRatePct! >= 0 && winRatePct! <= 100
+    && (closedPositions === 0 || Math.abs((wonPositions / closedPositions) * 100 - winRatePct!) <= 1.0);
 
   const scored = scorePortfolio({
     closedPositions,
@@ -323,6 +482,9 @@ export function classifyPortfolio(
   const enoughHybridSample = hybridRequiredClosedPositions != null
     && closedPositions >= hybridRequiredClosedPositions;
   const elite = !hardReject
+    && (!sourceFilter.startsWith('feed:') || verified === true)
+    && metricsComplete
+    && metricsConsistent
     && enoughBaseSample
     && enoughAge
     && enoughWinRate
@@ -359,6 +521,9 @@ export function classifyPortfolio(
     if (enoughWinRate && hybridRequiredReturnPct != null && !enoughHybridReturn) reasons.push('return_below_win_rate_tradeoff');
     if (enoughWinRate && hybridRequiredClosedPositions != null && !enoughHybridSample) reasons.push('sample_below_win_rate_tradeoff');
     if (scored.score < policy.minQualityScore) reasons.push('weighted_quality_score_below_gate');
+    if (sourceFilter.startsWith('feed:') && verified !== true) reasons.push('verified_profile_required');
+    if (!metricsComplete) reasons.push('incomplete_profile_metrics');
+    else if (!metricsConsistent) reasons.push('inconsistent_profile_metrics');
   }
 
   return {
@@ -397,6 +562,7 @@ export function classifyPortfolio(
 
 export class PortfolioCandidateLedger {
   private state: LedgerDiskState;
+  private recentRows: PortfolioSnapshot[] = [];
 
   constructor(
     private readonly statePath: string,
@@ -410,21 +576,224 @@ export class PortfolioCandidateLedger {
       portfolios: {},
       firstEliteAtMs: {},
       lastObservedAtMs: 0,
+      // Missing state has no selector eligibility until the first research assimilation,
+      // which atomically sets eligibilityNotBeforeMs to that cycle's processedAtMs.
+      feedEvidence: emptyFeedEvidence(),
     };
     if (existsSync(statePath)) {
+      const raw = readFileSync(statePath, 'utf8');
+      if (Buffer.byteLength(raw) > CANDIDATE_STATE_MAX_BYTES) {
+        throw new Error('candidate state byte cap exceeded on load');
+      }
       try {
-        const parsed = JSON.parse(readFileSync(statePath, 'utf8')) as Partial<LedgerDiskState>;
+        const parsed = JSON.parse(raw) as Partial<LedgerDiskState>;
+        const selectorMatches = parsed.selectorVersion === ELITE_SELECTOR_VERSION;
+        const parsedPortfolios = selectorMatches ? (parsed.portfolios ?? {}) : {};
+        if (Object.keys(parsedPortfolios).length > CANDIDATE_STATE_MAX_PORTFOLIOS) {
+          throw new Error('candidate state portfolio cap exceeded on load');
+        }
         this.state = {
           version: 1,
           selectorVersion: ELITE_SELECTOR_VERSION,
           policy,
-          portfolios: parsed.portfolios ?? {},
-          firstEliteAtMs: parsed.selectorVersion === ELITE_SELECTOR_VERSION ? (parsed.firstEliteAtMs ?? {}) : {},
-          lastObservedAtMs: parsed.lastObservedAtMs ?? 0,
+          portfolios: parsedPortfolios,
+          firstEliteAtMs: selectorMatches ? (parsed.firstEliteAtMs ?? {}) : {},
+          lastObservedAtMs: selectorMatches ? (parsed.lastObservedAtMs ?? 0) : 0,
+          feedEvidence: selectorMatches && parsed.feedEvidence?.version === 4 && parsed.feedEvidence.epoch === FEED_EVIDENCE_EPOCH
+            ? parsed.feedEvidence : emptyFeedEvidence(Date.now()),
         };
-      } catch {
-        // A malformed prior candidate file must not stop broad research; start a clean candidate view.
+      } catch (error) {
+        if (error instanceof Error && error.message.includes('candidate state portfolio cap exceeded')) throw error;
+        // Malformed state cannot become selector eligibility evidence.
+        this.state = {
+          version: 1, selectorVersion: ELITE_SELECTOR_VERSION, policy, portfolios: {},
+          firstEliteAtMs: {}, lastObservedAtMs: 0, feedEvidence: emptyFeedEvidence(Date.now()),
+        };
       }
+    }
+    const recentPath = `${snapshotsPath}.recent.json`;
+    if (existsSync(recentPath)) {
+      try {
+        const parsed = JSON.parse(readFileSync(recentPath, 'utf8'));
+        if (parsed?.version === 1 && Array.isArray(parsed.rows)
+          && (parsed.selectorVersion == null || parsed.selectorVersion === ELITE_SELECTOR_VERSION)) {
+          this.recentRows = parsed.rows.filter(validRecentSnapshot);
+        }
+      } catch {
+        // Rebuilt prospectively on the next observation; admission fails closed meanwhile.
+      }
+    }
+  }
+
+  /**
+   * Assimilate executor-owned evidence at research processing time. Source timestamps
+   * remain provenance only and can never backdate selector visibility.
+   */
+  assimilateFeedEvidence(records: FeedPortfolioRecord[], processedAtMs = Date.now()) {
+    const meta = this.state.feedEvidence ?? emptyFeedEvidence();
+    // Missing candidate state starts one durable causal selector boundary. Retained
+    // evidence before this processing instant is rejected, but the boundary must not
+    // move forward again on the next research cycle or fresh evidence could starve.
+    const initializedEligibilityBoundary = !(meta.eligibilityNotBeforeMs > 0);
+    if (initializedEligibilityBoundary) meta.eligibilityNotBeforeMs = processedAtMs;
+    let observationsProcessed = 0;
+    for (const record of records.sort((a, b) => a.firstSeenAtMs - b.firstSeenAtMs || a.portfolioId.localeCompare(b.portfolioId))) {
+      const wasKnown = this.state.portfolios[record.portfolioId] != null;
+      const wasElite = this.state.portfolios[record.portfolioId]?.bucket === 'ELITE_CANDIDATE';
+      const previousMeta = meta.records[record.portfolioId];
+      const processedIds = new Set(previousMeta?.processedEvidenceIds ?? []);
+      const unseen = record.observations.filter(row => {
+        if (row.epoch !== FEED_EVIDENCE_EPOCH || row.processedAtMs < meta.eligibilityNotBeforeMs
+          || row.processedAtMs < processedAtMs - FEED_EVIDENCE_SELECTOR_TTL_MS) return false;
+        if (!processedIds.has(row.evidenceId)) return true;
+        meta.lifetime.dedupedReplayCount += 1;
+        return false;
+      })
+        .sort((a, b) => a.capturedAtMs - b.capturedAtMs || a.evidenceId.localeCompare(b.evidenceId));
+      if (!unseen.length) continue;
+      if (!previousMeta) { meta.lifetime.discovered += 1; if (!wasKnown) meta.lifetime.feedOnly += 1; }
+      meta.records[record.portfolioId] = {
+        firstProcessedAtMs: previousMeta?.firstProcessedAtMs ?? processedAtMs, lastProcessedAtMs: processedAtMs,
+        sourceFirstSeenAtMs: Math.min(previousMeta?.sourceFirstSeenAtMs ?? record.firstSeenAtMs, record.firstSeenAtMs),
+        sourceLastSeenAtMs: Math.max(previousMeta?.sourceLastSeenAtMs ?? 0, record.lastSeenAtMs),
+        surfaces: [...new Set([...(previousMeta?.surfaces ?? []), ...record.surfaces])].sort(),
+        processedEvidenceIds: [...new Set([...(previousMeta?.processedEvidenceIds ?? []), ...unseen.map(row => row.evidenceId)])].slice(-8),
+        feedOnlyAtFirstIngestion: previousMeta?.feedOnlyAtFirstIngestion ?? !wasKnown,
+        newlySelectorQualified: previousMeta?.newlySelectorQualified ?? false,
+      };
+      const latest = unseen[unseen.length - 1];
+      const existing = this.state.portfolios[record.portfolioId];
+      const consistent = !existing || ((!existing.ownerId || !latest.ownerId || existing.ownerId === latest.ownerId)
+        && (!existing.username || !latest.username || existing.username === latest.username));
+      if (!consistent) meta.lifetime.rejectedIdentityConflicts += 1;
+      // Feed evidence is additive. It must never refresh, overwrite, or demote an
+      // existing canonical verified candidate. Feed-only rows may enter the selector
+      // only when the feed itself carries internally consistent verified profile data.
+      const feedVerified = latest.verified === true && Boolean(latest.ownerId && latest.username);
+      if (consistent && existing) {
+        // Existing broad/profile state remains authoritative; retain its original
+        // observation timestamp and source so social activity cannot manufacture
+        // freshness for stale selector economics.
+      } else if (consistent && feedVerified) {
+        const raw = {
+          ...latest.profile,
+          id: record.portfolioId,
+          ownerId: latest.ownerId,
+          owner: { id: latest.ownerId, username: latest.username, verified: true },
+        };
+        const candidate = classifyPortfolio(raw, meta.records[record.portfolioId].firstProcessedAtMs, `feed:${latest.surface}`, this.policy);
+        if (candidate?.reasons.includes('incomplete_profile_metrics') || candidate?.reasons.includes('inconsistent_profile_metrics')) {
+          meta.lifetime.rejectedMalformed += 1;
+        } else {
+          if (candidate && this.storeCanonical(candidate)) {
+            this.recentRows.push(candidate);
+            this.appendBoundedSnapshot(candidate);
+          }
+        }
+      } else if (consistent) {
+        meta.lifetime.rejectedUnverified += 1;
+      }
+      observationsProcessed += unseen.length;
+      if (!wasElite && this.state.portfolios[record.portfolioId]?.bucket === 'ELITE_CANDIDATE') {
+        if (!meta.records[record.portfolioId].newlySelectorQualified) meta.lifetime.newlyQualified += 1;
+        meta.records[record.portfolioId].newlySelectorQualified = true;
+      }
+    }
+    const retained = Object.entries(meta.records).sort((a, b) => b[1].lastProcessedAtMs - a[1].lastProcessedAtMs || a[0].localeCompare(b[0])).slice(0, FEED_SELECTOR_TRACKING_MAX_PORTFOLIOS);
+    meta.records = Object.fromEntries(retained);
+    this.state.feedEvidence = meta;
+    if (observationsProcessed || initializedEligibilityBoundary) this.saveState();
+    return { observationsProcessed, ...this.feedExpansionReport(processedAtMs) };
+  }
+
+  feedExpansionReport(nowMs = Date.now()) {
+    const meta = this.state.feedEvidence ?? emptyFeedEvidence();
+    const rows = Object.entries(meta.records).map(([portfolioId, record]) => ({
+      portfolioId,
+      surfaces: record.surfaces, firstSeenAtMs: record.sourceFirstSeenAtMs, lastSeenAtMs: record.sourceLastSeenAtMs,
+      firstProcessedAtMs: record.firstProcessedAtMs, lastProcessedAtMs: record.lastProcessedAtMs,
+      ingestionLagMs: Math.max(0, record.firstProcessedAtMs - record.sourceFirstSeenAtMs),
+      feedOnlyAtFirstIngestion: record.feedOnlyAtFirstIngestion, newlySelectorQualified: record.newlySelectorQualified,
+      currentBucket: this.state.portfolios[portfolioId]?.bucket ?? null,
+    }));
+    return {
+      measuredAtMs: nowMs,
+      totalFeedDiscoveredUniquePortfolios: meta.lifetime.discovered,
+      newVsBroadDiscovery: meta.lifetime.feedOnly,
+      newlySelectorQualified: meta.lifetime.newlyQualified,
+      retainedTrackingRecords: rows.length, trackingRecordCap: FEED_SELECTOR_TRACKING_MAX_PORTFOLIOS,
+      rejectedUnverified: meta.lifetime.rejectedUnverified, rejectedMalformed: meta.lifetime.rejectedMalformed,
+      rejectedIdentityConflicts: meta.lifetime.rejectedIdentityConflicts, dedupedReplayCount: meta.lifetime.dedupedReplayCount,
+      hydrationQueuePortfolioIds: rows.filter(row => row.currentBucket == null).map(row => row.portfolioId),
+      hydrationSource: '/v1_0/trending/get_portfolios_pl broad/profile cycle',
+      portfolios: rows,
+    };
+  }
+
+  private saveState() {
+    if (Object.keys(this.state.portfolios).length > CANDIDATE_STATE_MAX_PORTFOLIOS) {
+      throw new Error('candidate state portfolio cap exceeded');
+    }
+    const serialized = JSON.stringify(this.state, null, 2);
+    if (Buffer.byteLength(serialized) > CANDIDATE_STATE_MAX_BYTES) {
+      throw new Error('candidate state byte cap exceeded');
+    }
+    const tmp = `${this.statePath}.tmp`;
+    writeFileSync(tmp, serialized);
+    renameSync(tmp, this.statePath);
+  }
+
+  private storeCanonical(snapshot: PortfolioSnapshot) {
+    const previous = this.state.portfolios[snapshot.portfolioId];
+    if (!previous && Object.keys(this.state.portfolios).length >= CANDIDATE_STATE_MAX_PORTFOLIOS) return false;
+    const tentativePortfolios = { ...this.state.portfolios, [snapshot.portfolioId]: snapshot };
+    const tentativeFirstEliteAtMs = { ...this.state.firstEliteAtMs };
+    if (snapshot.bucket === 'ELITE_CANDIDATE' && tentativeFirstEliteAtMs[snapshot.portfolioId] == null) {
+      tentativeFirstEliteAtMs[snapshot.portfolioId] = snapshot.observedAtMs;
+    }
+    const tentativeState = {
+      ...this.state,
+      portfolios: tentativePortfolios,
+      firstEliteAtMs: tentativeFirstEliteAtMs,
+    };
+    if (Buffer.byteLength(JSON.stringify(tentativeState)) > CANDIDATE_STATE_MAX_BYTES) return false;
+    this.state.portfolios = tentativePortfolios;
+    this.state.firstEliteAtMs = tentativeFirstEliteAtMs;
+    return true;
+  }
+
+  private archivePreviousSnapshot() {
+    const previous = `${this.snapshotsPath}.previous`;
+    if (!existsSync(previous)) return;
+    const archiveDir = `${this.snapshotsPath}.archive`;
+    mkdirSync(archiveDir, { recursive: true });
+    let suffix = Math.max(1, Math.trunc(statSync(previous).mtimeMs));
+    let destination = `${archiveDir}/segment-${suffix}.jsonl`;
+    while (existsSync(destination)) {
+      suffix += 1;
+      destination = `${archiveDir}/segment-${suffix}.jsonl`;
+    }
+    renameSync(previous, destination);
+  }
+
+  private appendBoundedSnapshot(snapshot: PortfolioSnapshot) {
+    const line = `${JSON.stringify(snapshot)}
+`;
+    const lineBytes = Buffer.byteLength(line);
+    if (lineBytes > CANDIDATE_SNAPSHOT_SEGMENT_MAX_BYTES) {
+      throw new Error('candidate snapshot exceeds segment byte cap');
+    }
+    const previous = `${this.snapshotsPath}.previous`;
+    const currentBytes = existsSync(this.snapshotsPath) ? statSync(this.snapshotsPath).size : 0;
+    if (currentBytes + lineBytes > CANDIDATE_SNAPSHOT_SEGMENT_MAX_BYTES) {
+      this.archivePreviousSnapshot();
+      if (existsSync(this.snapshotsPath)) renameSync(this.snapshotsPath, previous);
+    }
+    appendFileSync(this.snapshotsPath, line);
+    const hotBytes = (existsSync(this.snapshotsPath) ? statSync(this.snapshotsPath).size : 0)
+      + (existsSync(previous) ? statSync(previous).size : 0);
+    if (hotBytes > CANDIDATE_SNAPSHOT_TOTAL_MAX_BYTES) {
+      throw new Error('candidate hot snapshot journal byte cap exceeded');
     }
   }
 
@@ -437,16 +806,43 @@ export class PortfolioCandidateLedger {
       if (!snapshot) continue;
       snapshots.push(snapshot);
       const previous = this.state.portfolios[snapshot.portfolioId];
-      if (!previous || snapshot.observedAtMs >= previous.observedAtMs) this.state.portfolios[snapshot.portfolioId] = snapshot;
-      if (snapshot.bucket === 'ELITE_CANDIDATE' && this.state.firstEliteAtMs[snapshot.portfolioId] == null) {
-        this.state.firstEliteAtMs[snapshot.portfolioId] = observedAtMs;
+      if (!previous || snapshot.observedAtMs > previous.observedAtMs
+        || (snapshot.observedAtMs === previous.observedAtMs
+          && previous.bucket === 'ELITE_CANDIDATE' && snapshot.bucket !== 'ELITE_CANDIDATE')) {
+        if (!this.storeCanonical(snapshot)) continue;
       }
-      appendFileSync(this.snapshotsPath, `${JSON.stringify(snapshot)}\n`);
+      this.appendBoundedSnapshot(snapshot);
+      this.recentRows.push(snapshot);
     }
     this.state.lastObservedAtMs = Math.max(this.state.lastObservedAtMs, observedAtMs);
-    const tmp = `${this.statePath}.tmp`;
-    writeFileSync(tmp, JSON.stringify(this.state, null, 2));
-    renameSync(tmp, this.statePath);
+    this.saveState();
+    // The executor reads only this bounded causal index. Three observations cover
+    // the 25s signal window across a 10-minute collector boundary; the 30-minute
+    // time retention also bounds memory independently of append-only history age.
+    const cutoff = observedAtMs - 30 * 60_000;
+    const grouped = new Map<string, Map<number, PortfolioSnapshot>>();
+    for (const row of this.recentRows) {
+      if (!validRecentSnapshot(row) || !(row.observedAtMs >= cutoff)) continue;
+      const observations = grouped.get(row.portfolioId) ?? new Map<number, PortfolioSnapshot>();
+      const prior = observations.get(row.observedAtMs);
+      // A cycle can return the same portfolio from several bounded surfaces. One
+      // timestamp is one observation, and disagreement fails closed: non-elite wins.
+      if (!prior || (prior.bucket === 'ELITE_CANDIDATE' && row.bucket !== 'ELITE_CANDIDATE')) {
+        observations.set(row.observedAtMs, row);
+      }
+      grouped.set(row.portfolioId, observations);
+    }
+    this.recentRows = [...grouped.values()].flatMap(observations => [...observations.values()]
+      .sort((a, b) => b.observedAtMs - a.observedAtMs).slice(0, 3)).sort((a, b) => a.observedAtMs - b.observedAtMs);
+    const recentPath = `${this.snapshotsPath}.recent.json`;
+    const recentTmp = `${recentPath}.tmp`;
+    writeFileSync(recentTmp, JSON.stringify({
+      version: 1,
+      selectorVersion: ELITE_SELECTOR_VERSION,
+      generatedAtMs: observedAtMs,
+      rows: this.recentRows,
+    }));
+    renameSync(recentTmp, recentPath);
     return snapshots;
   }
 

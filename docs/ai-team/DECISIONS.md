@@ -26,6 +26,87 @@ Append-only record of accepted architecture / policy decisions. New decisions ma
   trading, capital, credentials, signing or live order routing; `REAL_TRADING_ENABLED`
   remains disabled.
 
+## 2026-09-17 — Lane 3 feed surfaces have independent prospective boundaries
+
+- The supported `/v1_0/posts/get_feed` discovery filters are the exact current web-app
+  enum values `following`, `trending`, `fire_moves`, and `most_recent`. Generic feeds are
+  discovery and latency supplements; portfolio-specific investment polling remains the
+  authoritative monitor for already selected elite portfolios.
+- Every feed surface owns a separate durable high-water cursor. A surface with no cursor
+  establishes its own prospective baseline: historical OPEN/ADD and unowned CLOSE events
+  are indexed but not executed, while CLOSE for locally managed exposure may reconcile.
+  Later posts newer than that surface's boundary enter the normal freshness, causal elite
+  admission, source-event dedupe, and execution-realism gates.
+- Adding or re-enabling one surface must not depend on process-global initialization and
+  must not advance another surface's cursor. Unrecoverable gaps retain the existing
+  owned-close-only reconciliation and fail-closed cursor semantics.
+- Feed rotation and direct hydration stay bounded and retain exponential HTTP 429 backoff.
+  This decision changes no real-trading permission, credential, capital, signing or order
+  route; `REAL_TRADING_ENABLED` remains disabled.
+
+## 2026-09-18 — Lane 3 direct watch is boundary-proven and failure-isolated
+
+- The captured portfolio-investments endpoint is treated as newest-first across pages.
+  The sanitized two-portfolio, three-page read-only observation supporting that assumption
+  is retained in `services/invo-notification-executor/test/fixtures/invo-closed-ordering-observation.json`;
+  it is runtime evidence, not a permanent API contract. Every fetched CLOSED page is
+  therefore checked for within-page and cross-page non-increasing effective close time.
+  An ordering violation emits explicit risk telemetry and advances neither baseline nor
+  watermark.
+  A closed-history timestamp boundary is proven only by a strictly older row or endpoint
+  exhaustion; stored identities cannot prove an unstable equal-timestamp ordering.
+  Unrelated equal-timestamp rows cannot advance the watermark. Bounded pagination that
+  proves none of these retains the prior watermark and emits overflow-risk telemetry.
+- Selector timestamps are prioritization hints only. Non-rate-limit selector, open, and
+  closed request failures are isolated per target. Scheduling attempts are durably noted
+  before I/O to rotate persistent failures without advancing event watermarks. HTTP 429
+  retains bounded global cooldown and records work skipped by that cooldown.
+- Cross-source event identity includes lifecycle action; INCREASE also includes resulting
+  source size. Legacy actionless keys suppress replay of old OPEN events but cannot
+  suppress an ambiguous same-time INCREASE or CLOSE; prospective feed cursors and direct
+  watermarks provide the history-replay boundary. The separate source-close lifecycle key
+  remains and is canonical completion evidence for a CLOSED lifecycle even when feed and
+  direct timestamps differ. A per-source queue serializes feed and direct lifecycle
+  execution while distinct sources retain parallelism.
+- A surface's first fetched snapshot durably establishes its prospective feed baseline
+  immediately after indexing. Retryable owned CLOSE recovery may still gate its cursor,
+  but cannot leave the surface in startup mode and swallow later fresh OPEN/ADD events;
+  the managed exposure retains its pending close for reconciliation.
+- The 45-target defaults imply nominal 18s open and 45s closed sweeps. Complete OPEN
+  pagination now permits at most three pages per each of eight bounded open/drain slots;
+  with four selector requests and two pages for each of three CLOSED slots, the explicit
+  worst case is 34 requests per 3s scan (11.33 requests/s). This is a ceiling, not an
+  expected rate: short endpoints stop early and a 429 stops the scan under bounded global
+  cooldown. Health exposes configured page bounds, the calculated ceiling, oldest poll
+  age, retirement drain counts, overflow, and ordering failures. Shared-quota arbitration
+  remains unresolved under open Issue #397; this PR does not claim that capacity proof.
+- This changes shadow source capture only. It does not authorize real trading, capital,
+  credentials, signing, order routing, deployment, or bulk mining.
+
+## 2026-09-20 — Lane 3 direct-watch residency is capped and absence is non-authoritative
+
+- The default `trending,all` bounded discovery pages are a sampler, not an authoritative
+  universe. A resident target absent from a fresh cycle remains in its current lifecycle
+  and continues identical OPEN/CLOSED polling. Only a fresh, structurally valid current-cycle
+  non-ELITE row for that exact portfolio is negative evidence. Two distinct observation
+  timestamps spanning at least the 10-minute collector interval are required before
+  `RETIRING`; one observation enters `MISSING_GRACE`, and fresh ELITE evidence immediately
+  restores `ACTIVE` without resetting causal watermarks or dedupe/selector state.
+- `MAX_DIRECT_WATCH_RESIDENT_TARGETS` defaults to 48 and covers `ACTIVE`, `MISSING_GRACE`,
+  and `RETIRING`. At the configured 3s scan, eight OPEN hydrations and 18s OPEN cadence,
+  the sustainable OPEN ceiling is 48; three CLOSED hydrations and 60s cadence yield 60.
+  Startup rejects a cap above either ceiling. A full cap never evicts an incumbent: new
+  ELITE candidates are deterministically deferred with durable state and audit telemetry.
+- A safely drained retirement becomes a compact nonresident tombstone instead of being
+  deleted. The tombstone retains prospective baseline, OPEN/CLOSED high-water and boundary
+  identity, selector metadata, source identity, and demotion provenance. Re-enrollment
+  restores those maxima while rebasing both event watermarks prospectively (and clearing
+  a superseded CLOSED equal-time boundary), preventing historical replay. Existing v1-v4
+  state migrates in place; startup fails closed if its
+  resident count already exceeds the configured cap.
+- This remains shadow-only. It changes no real-trading permission, bulk-miner setting, or
+  candidate-universe policy; Issues #397 and #403 remain separate.
+
 ## 2026-09-03 — Risk eligibility is separate from credible edge
 
 - Promotion policy v2 retains the v1 profitability floors and adds a versioned,
@@ -174,3 +255,103 @@ This supersedes the earlier task-class policy that withheld automatic merge from
   provenance, policy, safety and uncontaminated 24-observation stability conjuncts.
 - This decision changes no live-trading permission. `REAL_TRADING_ENABLED` remains
   disabled.
+
+## 2026-09-18 — Lane 3 admission history is a bounded causal index
+
+- Portfolio research remains the owner of the append-only candidate snapshot JSONL, but
+  atomically publishes a separate `*.recent.json` admission index containing at most the
+  last three observations per portfolio from the last 30 minutes.
+- Three observations cover a fresh signal (maximum age 25 seconds) across the collector's
+  10-minute refresh boundary. Admission selects only the latest observation at or before
+  source time, preserving demotion and preventing look-ahead.
+- The executor never parses the historical JSONL. The compact index has an 8 MiB read
+  ceiling; missing, malformed, oversized, or unreadable indexes fail closed. Thus hot-path
+  memory and latency do not grow with historical runtime.
+- This changes no live-trading permission. `REAL_TRADING_ENABLED` and
+  `NOTIFICATION_TRADER_LIVE` remain disabled.
+
+## 2026-09-20 — Lane 3 direct watch is deadline-scheduled and locally request-budgeted
+
+- OPEN and CLOSED target work shares one earliest-deadline queue and a fixed worker
+  pool. Pagination remains sequential within a target, while targets execute
+  concurrently with per-target failure isolation.
+- Every direct `/get_investments` HTTP attempt consumes an executor-local token before
+  dispatch. The default 12 requests/second envelope reserves 4 requests/second for
+  feed/selector ingress, leaving an 8 requests/second direct allowance with burst 32.
+  A 429 starts global cooldown, removes burst credit, pauses new work, and makes new
+  admissions fail closed until observed deadline health recovers.
+- Resident admission uses the hard minimum across configured residents, OPEN and CLOSED
+  max pages, the two-attempt request-timeout bound, concurrency, request rate/burst,
+  unchanged deadlines, per-scan work bounds, and fixed feed/selector reserve. Defaults
+  prove 16 residents; `MAX_DIRECT_WATCH_RESIDENT_TARGETS=48` is only an outer ceiling.
+- The proof is configuration evidence, not runtime/source-recall evidence. #397 remains
+  required before bulk Invo miners can be re-enabled, and #401 still requires
+  post-deploy prospective recall proof.
+- This changes no live-trading permission. `REAL_TRADING_ENABLED` and
+  `NOTIFICATION_TRADER_LIVE` remain disabled.
+
+## 2026-09-20 — Superseding Lane 3 capacity and admission-health decision
+
+- This decision explicitly supersedes the earlier same-day statements that 48 residents
+  were sustainable, that startup rejected only above 48, and that fresh evidence
+  immediately restored `ACTIVE`. The outer configured value 48 is not an executable
+  capacity claim. With the final defaults the hard-proven resident cap is **16**; fresh
+  evidence re-enters `ENROLLING`, and only complete prospective CLOSED then OPEN
+  baselines can restore `ACTIVE` lifecycle state.
+- The proof assumes OPEN at most 3 pages, CLOSED at most 2 pages, at most 2 attempts per
+  page, a 2-second request timeout, 16 target workers, an 18-second OPEN deadline, a
+  60-second CLOSED deadline, 2 seconds of fixed overhead, a 12 request/second envelope,
+  burst 32, and a fixed 4 request/second feed/selector reserve. OPEN and CLOSED share one
+  earliest-deadline queue. At cap, the conservative wall-clock bounds are 14 seconds for
+  OPEN and 22 seconds for the combined OPEN+CLOSED sweep; steady-state direct demand is
+  below the remaining 8 request/second budget. The unchanged signal-age and endpoint
+  completeness gates still apply.
+- Capacity and authorization health are pinned independently of candidate-state
+  authority. Construction uses the hard cap and publishes an empty admission index.
+  Every scan atomically suspends NEW/ADD authorization before work. Missing, stale, or
+  malformed candidate state cannot relax the cap or enable admission. Authorization is
+  republished only after an authoritative candidate read and complete successful OPEN
+  and CLOSED observations inside both deadlines. Attempt timestamps exist only for fair
+  scheduling and never count as freshness.
+- A 429/cooldown, deadline violation, capacity violation, token preflight failure,
+  unexpected 401, target error, incomplete pagination, or scan-level source failure
+  leaves the admission index empty without deleting targets or lifecycle watermarks.
+  Token freshness is preflighted for the full 22-second scan horizon plus the client's
+  30-second refresh margin and one request timeout. The preflight refresh is covered by
+  fixed overhead; direct-watch 401 retry is disabled, so an unexpected 401 makes the
+  scan unhealthy instead of silently consuming an unbudgeted retry.
+- Direct-watch journal v2 assigns monotonic sequences and snapshots record the highest
+  applied sequence. Replay ignores entries at or below that sequence, closing the crash
+  window between snapshot rename and journal truncation while retaining legacy journal
+  migration. CLOSED evidence whose source OPEN predates admission is classified
+  `pre_enrollment_close_ignored`, not a selected-elite missed short round trip.
+- This is configuration/test evidence, not prospective runtime recall proof. Issues #397
+  and #401 remain open gates. No deployment or real-trading permission changed;
+  `REAL_TRADING_ENABLED=NO`.
+
+## 2026-09-21 — Lane 3 scan suspension is replay-safe capture, not a terminal decision
+
+- Every direct-watch scan still publishes an unhealthy/empty authorization index before
+  source I/O, but the index now records explicit health and suspension reason. Admission
+  decisions distinguish `ALLOWED`, structural `TERMINAL`, and health-related
+  `TRANSIENT` outcomes. Feed NEW/ADD denied during scan, cooldown, capacity-health, or
+  pre-publication suspension remains unseen and cannot advance its surface cursor.
+- Direct OPEN/ADD hydration is capture-first. Complete endpoint observations are buffered
+  without advancing `processedThroughMs`; CLOSED signals retain their immediate unwind
+  path. Only after the whole scan proves healthy are ACTIVE admissions atomically
+  published, buffered signals decided against that index, and each target watermark
+  advanced after all of its signals reach a durable terminal disposition. A scan error,
+  429, incomplete page, or transient execution/admission outcome leaves those signals
+  replayable on the next healthy scan.
+- ACTIVE-to-RETIRING and MISSING_GRACE transitions retain the original `admittedAtMs` so
+  later unowned closes can distinguish pre-enrollment history from a selected-elite short
+  round trip.
+- The shared worker schedule is now explicitly OPEN-first, then CLOSED, with deadline
+  ordering inside each phase. This policy is part of the hard-cap proof: at 16 residents,
+  worst-case three-page/two-attempt OPEN work completes in 14 seconds including fixed
+  overhead, inside the 18-second OPEN deadline; the following CLOSED work remains inside
+  its 60-second deadline. The configured 48 remains only an outer ceiling.
+- This is implementation and deterministic-test evidence at commit
+  `367d3d8c31cad5d2a40db55d789bec8b37c840c8`, not prospective runtime recall proof.
+  Issues #397 and #401 remain open gates. Production and live-trading permissions are
+  unchanged; `REAL_TRADING_ENABLED=NO`.

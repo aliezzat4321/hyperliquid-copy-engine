@@ -1,14 +1,18 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtempSync, readFileSync } from 'fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import {
+  CANDIDATE_SNAPSHOT_SEGMENT_MAX_BYTES,
+  CANDIDATE_STATE_MAX_BYTES,
   classifyPortfolio,
+  ELITE_SELECTOR_VERSION,
   PortfolioCandidateLedger,
   requiredClosedPositionsForWinRate,
   requiredReturnPctForWinRate,
 } from '../src/portfolio-candidates.js';
+import { eliteAdmissionFromState } from '../src/elite-admission.js';
 
 const now = Date.parse('2026-09-16T00:00:00Z');
 const old = '2025-01-01T00:00:00Z';
@@ -259,4 +263,123 @@ test('candidate snapshots are immutable and persist portfolio ids separately', (
   assert.equal(lines[0].portfolioId, 'p-1');
   assert.equal(lines[0].winRatePct, 93);
   assert.equal(lines[1].winRatePct, 92);
+});
+
+test('compact causal index keeps distinct cycles and same-time demotion dominates elite', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'portfolio-recent-'));
+  const state = join(dir, 'state.json');
+  const snapshots = join(dir, 'snapshots.jsonl');
+  const ledger = new PortfolioCandidateLedger(state, snapshots);
+  ledger.observe([portfolio({ id: 'p-1' })], 'trending', now - 1000);
+  ledger.observe([
+    portfolio({ id: 'p-1' }),
+    portfolio({ id: 'p-1' }),
+    portfolio({ id: 'p-1', liquidated: true }),
+    portfolio({ id: 'p-1' }),
+  ], 'trending', now);
+  const recent = JSON.parse(readFileSync(`${snapshots}.recent.json`, 'utf8')).rows;
+  assert.deepEqual(recent.map((row: any) => row.observedAtMs), [now - 1000, now]);
+  assert.equal(recent[1].bucket, 'REJECTED_DEMOTED');
+});
+
+test('selector rotation removes old recent rows while preserving current observations', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'portfolio-selector-rotation-'));
+  const state = join(dir, 'state.json');
+  const snapshots = join(dir, 'snapshots.jsonl');
+  const oldRow = classifyPortfolio(portfolio({ id: 'p-old' }), now - 1000, 'trending');
+  const currentRow = classifyPortfolio(portfolio({ id: 'p-current' }), now - 1000, 'trending');
+  assert.ok(oldRow);
+  assert.ok(currentRow);
+  writeFileSync(`${snapshots}.recent.json`, JSON.stringify({ version: 1, rows: [
+    { ...oldRow, selectorVersion: 'old-selector' },
+    currentRow,
+  ] }));
+
+  const ledger = new PortfolioCandidateLedger(state, snapshots);
+  ledger.observe([portfolio({ id: 'p-fresh' })], 'trending', now);
+  const recent = JSON.parse(readFileSync(`${snapshots}.recent.json`, 'utf8'));
+  assert.equal(recent.selectorVersion, ELITE_SELECTOR_VERSION);
+  assert.deepEqual(recent.rows.map((row: any) => row.portfolioId), ['p-current', 'p-fresh']);
+  assert.ok(recent.rows.every((row: any) => row.selectorVersion === ELITE_SELECTOR_VERSION));
+});
+
+test('mismatched recent wrapper starts empty and rewrites on current observation', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'portfolio-wrapper-rotation-'));
+  const state = join(dir, 'state.json');
+  const snapshots = join(dir, 'snapshots.jsonl');
+  const currentRow = classifyPortfolio(portfolio({ id: 'p-wrapped-old' }), now - 1000, 'trending');
+  assert.ok(currentRow);
+  writeFileSync(`${snapshots}.recent.json`, JSON.stringify({
+    version: 1, selectorVersion: 'old-selector', rows: [currentRow],
+  }));
+
+  const ledger = new PortfolioCandidateLedger(state, snapshots);
+  ledger.observe([portfolio({ id: 'p-fresh' })], 'trending', now);
+  const recent = JSON.parse(readFileSync(`${snapshots}.recent.json`, 'utf8'));
+  assert.deepEqual(recent.rows.map((row: any) => row.portfolioId), ['p-fresh']);
+});
+
+test('old selector state cannot preserve portfolios or authorize before fresh observation', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'portfolio-state-rotation-'));
+  const state = join(dir, 'state.json');
+  const snapshots = join(dir, 'snapshots.jsonl');
+  const oldPortfolio = classifyPortfolio(portfolio({ id: 'p-old' }), now - 1000, 'trending');
+  assert.ok(oldPortfolio);
+  writeFileSync(state, JSON.stringify({
+    version: 1,
+    selectorVersion: 'old-selector',
+    policy: {},
+    portfolios: { 'p-old': oldPortfolio },
+    firstEliteAtMs: { 'p-old': now - 1000 },
+    lastObservedAtMs: now - 1000,
+  }));
+
+  const ledger = new PortfolioCandidateLedger(state, snapshots);
+  assert.equal(ledger.get('p-old'), null);
+  assert.equal(ledger.firstEliteAtMs('p-old'), null);
+  const beforeFresh = eliteAdmissionFromState(state, 'p-old', now, 20 * 60_000, snapshots);
+  assert.equal(beforeFresh.allowed, false);
+  assert.equal(beforeFresh.reason, 'candidate_selector_version_mismatch');
+
+  ledger.observe([portfolio({ id: 'p-fresh' })], 'trending', now);
+  assert.equal(ledger.get('p-old'), null);
+  const admissionIndex = join(dir, 'admissions.json');
+  writeFileSync(admissionIndex, JSON.stringify({ version: 2, generatedAtMs: now, healthy: true, suspensionReason: null, rows: {
+    'p-fresh': { portfolioId: 'p-fresh', intervals: [{ admittedAtMs: now, admittedUntilMs: null }], score: 1, selectorVersion: ELITE_SELECTOR_VERSION },
+  } }));
+  const afterFreshOld = eliteAdmissionFromState(state, 'p-old', now + 1, 20 * 60_000, snapshots);
+  assert.equal(afterFreshOld.allowed, false);
+  assert.equal(afterFreshOld.reason, 'portfolio_not_in_candidate_state');
+  const afterFreshCurrent = eliteAdmissionFromState(state, 'p-fresh', now + 1, 20 * 60_000, snapshots,
+    admissionIndex);
+  assert.equal(afterFreshCurrent.allowed, true);
+});
+
+
+test('oversized candidate state fails closed on load', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'candidate-oversize-load-'));
+  const state = join(dir, 'state.json');
+  const snapshots = join(dir, 'snapshots.jsonl');
+  writeFileSync(state, ' '.repeat(CANDIDATE_STATE_MAX_BYTES + 1));
+  assert.throws(
+    () => new PortfolioCandidateLedger(state, snapshots),
+    /candidate state byte cap exceeded on load/,
+  );
+});
+
+test('hot snapshot rotation archives prior segment instead of dropping causal audit evidence', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'candidate-audit-rotation-'));
+  const state = join(dir, 'state.json');
+  const snapshots = join(dir, 'snapshots.jsonl');
+  writeFileSync(snapshots, 'x'.repeat(CANDIDATE_SNAPSHOT_SEGMENT_MAX_BYTES));
+  writeFileSync(`${snapshots}.previous`, 'previous-audit-segment\n');
+  const ledger = new PortfolioCandidateLedger(state, snapshots);
+  ledger.observe([portfolio({ id: 'p-archive-proof' })], 'trending', now);
+  const archiveDir = `${snapshots}.archive`;
+  assert.equal(existsSync(archiveDir), true);
+  const archived = readdirSync(archiveDir);
+  assert.equal(archived.length, 1);
+  assert.equal(readFileSync(join(archiveDir, archived[0]), 'utf8'), 'previous-audit-segment\n');
+  assert.equal(statSync(`${snapshots}.previous`).size, CANDIDATE_SNAPSHOT_SEGMENT_MAX_BYTES);
+  assert.ok(statSync(snapshots).size > 0);
 });

@@ -57,3 +57,14 @@ test('transient source-close book failures remain unseen and retry with bounded 
   assert.match(closeBranch, /sourceCloseNextRetryAtMs/);
   assert.match(serviceSource, /source_close_reconciliation/);
 });
+
+test('corrupt staged funding becomes explicit incomplete economics instead of generic retry', () => {
+  const serviceSource = readFileSync(new URL('../../src/service.ts', import.meta.url), 'utf8');
+  const closeStart = serviceSource.indexOf("if (signal.action === 'close')");
+  const liveCloseStart = serviceSource.indexOf('const sameCoinManaged =', closeStart);
+  const closeBranch = serviceSource.slice(closeStart, liveCloseStart);
+  assert.match(closeBranch, /try \{[\s\S]*syncStagedFundingForClose[\s\S]*\} catch \(error\) \{/);
+  assert.match(closeBranch, /corrupt durable funding evidence/);
+  assert.match(closeBranch, /funding_boundary_close_sync_corrupt/);
+  assert.match(closeBranch, /economicsCompleteness: 'INCOMPLETE_FUNDING'/);
+});

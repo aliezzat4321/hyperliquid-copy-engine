@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync } from 'fs';
+import { appendFileSync, mkdirSync, renameSync, writeFileSync } from 'fs';
 import { createServer, IncomingMessage, ServerResponse } from 'http';
 import { dirname, resolve } from 'path';
 import { randomUUID } from 'crypto';
@@ -12,13 +12,49 @@ import { liveScopeSkipReason } from './live-scope.js';
 import { fetchFeedBackfill } from './feed-backfill.js';
 import { canProspectivelyRebaseGap, planUnrecoverableGap } from './gap-reconciliation.js';
 import {
+  INVO_FEED_SURFACES,
+  type InvoFeedSurface,
+  parseDiscoverySurfaces,
+  parseFeedSurface,
+  planSurfaceBaseline,
+  surfaceNeedsBaseline,
+} from './feed-surfaces.js';
+import {
   directSourceTimeMs,
+  directInvestmentRows,
+  fetchCompleteOpenInvestments,
+  establishClosedBaseline,
+  closedBoundaryProof,
+  closedSignalsAfterBoundary,
+  classifyClosedHydrationRows,
   EliteDirectWatchState,
   loadEliteDirectTargets,
+  isMissedPreDemotionOpen,
+  planClosedHydrations,
+  planDeadlineHydrations,
+  planDirectHydrations,
+  retiringOpenDispositions,
+  runConcurrentHydrations,
+  RetirementOpenDisposition,
+  DirectWatchRequestBudget,
   signalsFromDirectInvestments,
+  unownedCloseEvidence,
+  validateClosedPageOrdering,
+  validateDirectWatchCapacity,
 } from './elite-direct-watch.js';
-import { eliteAdmissionFromState, ELITE_ADMISSION_VERSION } from './elite-admission.js';
+import {
+  closedLifecycleWasHandled,
+  closeLifecycleKey,
+  signalWasSeen,
+  sourceEventKey,
+} from './source-event-dedupe.js';
+import { runSignalBatchBySource, SourceLifecycleQueue } from './source-lifecycle.js';
+import { CapturedSignalBatch, publishThenFlushCapturedSignals } from './scan-capture.js';
+import { eliteAdmissionFromState, ELITE_ADMISSION_VERSION, shouldPersistAdmissionDenial } from './elite-admission.js';
 import { shouldTerminallyDustReconcile } from './close-rejection.js';
+import { FeedPortfolioEvidenceStore } from './feed-portfolio-evidence.js';
+import { scheduleDeferredPersistence } from './deferred-persistence.js';
+import { evaluateShadowOperationalHealth } from './shadow-operational-health.js';
 import {
   COST_MODEL_VERSION,
   EXECUTION_EVIDENCE_VERSION,
@@ -34,6 +70,20 @@ import {
   simulateL2Fill,
   type ShadowExecutionPolicy,
 } from './shadow-execution.js';
+import {
+  clampFundingOracleMaxDelayMs,
+  startFundingOracleWorker,
+  type FundingOracleWorkerManager,
+  type FundingOracleCaptureResult,
+} from './funding-oracle-capture.js';
+import { FundingBoundaryStore, defaultFundingBoundaryPath } from './funding-boundary-store.js';
+import { startFundingBeforeInvoAuthentication } from './funding-startup.js';
+import {
+  applyFundingOracleResultToPosition,
+  firstUnappliedFundingBoundary,
+  isPositionExposedAcrossBoundary,
+  syncStagedFundingForClose,
+} from './funding-boundary-accounting.js';
 
 if (INVO_TOKEN) invo.setToken(INVO_TOKEN);
 if (INVO_REFRESH_TOKEN) invo.setRefreshToken(INVO_REFRESH_TOKEN);
@@ -54,15 +104,13 @@ function b(name: string, fallback: boolean): boolean {
 function loadConfig() {
   const allow = (process.env.NOTIFICATION_TRADER_ALLOW ?? '')
     .split(',').map(v => v.trim().replace(/^@/, '').toLowerCase()).filter(Boolean);
-  const feedFilter = (process.env.NOTIFICATION_TRADER_FEED_FILTER ?? 'following').trim().toLowerCase();
-  if (!['following', 'all', 'trending'].includes(feedFilter)) {
-    throw new Error(`Invalid NOTIFICATION_TRADER_FEED_FILTER: ${feedFilter}`);
-  }
-  const discoverySurfaces = (process.env.NOTIFICATION_TRADER_DISCOVERY_SURFACES ?? 'following,all,trending')
-    .split(',').map(v => v.trim().toLowerCase()).filter(Boolean);
-  if (!discoverySurfaces.length || discoverySurfaces.some(v => !['following', 'all', 'trending'].includes(v))) {
-    throw new Error(`Invalid NOTIFICATION_TRADER_DISCOVERY_SURFACES: ${discoverySurfaces.join(',')}`);
-  }
+  const feedFilter = parseFeedSurface(
+    process.env.NOTIFICATION_TRADER_FEED_FILTER ?? 'following',
+    'NOTIFICATION_TRADER_FEED_FILTER',
+  );
+  const discoverySurfaces = parseDiscoverySurfaces(
+    process.env.NOTIFICATION_TRADER_DISCOVERY_SURFACES ?? INVO_FEED_SURFACES.join(','),
+  );
   return {
     live: b('NOTIFICATION_TRADER_LIVE', false),
     host: process.env.NOTIFICATION_TRADER_HOST ?? '127.0.0.1',
@@ -79,7 +127,9 @@ function loadConfig() {
     shadowMaxBookAgeMs: Math.max(50, n('NOTIFICATION_TRADER_SHADOW_MAX_BOOK_AGE_MS', 1000)),
     shadowMaxSpreadBps: Math.max(0, n('NOTIFICATION_TRADER_SHADOW_MAX_SPREAD_BPS', 50)),
     shadowTakerFeeBps: Math.max(0, n('NOTIFICATION_TRADER_SHADOW_TAKER_FEE_BPS', 4.5)),
-    shadowFundingOracleMaxDelayMs: Math.max(500, n('NOTIFICATION_TRADER_SHADOW_FUNDING_ORACLE_MAX_DELAY_MS', 10_000)),
+    // This is a causal evidence ceiling, not an operator-tunable availability window.
+    shadowFundingOracleMaxDelayMs: clampFundingOracleMaxDelayMs(
+      n('NOTIFICATION_TRADER_SHADOW_FUNDING_ORACLE_MAX_DELAY_MS', 10_000)),
     shadowMinNotionalUsd: Math.max(1, n('NOTIFICATION_TRADER_SHADOW_MIN_NOTIONAL_USD', 10)),
     marginPct: Math.max(0.01, n('NOTIFICATION_TRADER_MARGIN_PCT', 1)),
     // These are live-account safety controls only. Shadow research is intentionally uncapped.
@@ -93,13 +143,33 @@ function loadConfig() {
     allow: new Set(allow),
     statePath: resolve(process.env.NOTIFICATION_TRADER_STATE_PATH ?? 'data/notification-trader-state.json'),
     auditPath: resolve(process.env.NOTIFICATION_TRADER_AUDIT_PATH ?? 'data/notification-trader-audit.jsonl'),
+    fundingBoundaryPath: resolve(process.env.NOTIFICATION_TRADER_FUNDING_BOUNDARY_PATH
+      ?? defaultFundingBoundaryPath(resolve(process.env.NOTIFICATION_TRADER_AUDIT_PATH ?? 'data/notification-trader-audit.jsonl'))),
     trackerPath: resolve(process.env.NOTIFICATION_TRADER_TRACKER_PATH ?? 'data/notification-trader-population.json'),
+    feedPortfolioEvidencePath: resolve(process.env.NOTIFICATION_TRADER_FEED_PORTFOLIO_EVIDENCE_PATH
+      ?? '/var/lib/hyperliquid-copy-engine/invo-notification-executor/feed-portfolio-evidence.json'),
     candidateStatePath: resolve(process.env.NOTIFICATION_TRADER_CANDIDATE_STATE_PATH ?? '/var/lib/hyperliquid-copy-engine/invo-notification-executor/portfolio-candidates.json'),
+    candidateSnapshotsPath: resolve(process.env.INVO_PORTFOLIO_CANDIDATE_SNAPSHOTS_PATH ?? '/var/lib/hyperliquid-copy-engine/invo-notification-executor/portfolio-candidate-snapshots.jsonl'),
     candidateStateMaxAgeMs: Math.max(60_000, n('NOTIFICATION_TRADER_CANDIDATE_MAX_AGE_MS', 20 * 60 * 1000)),
     directWatchStatePath: resolve(process.env.NOTIFICATION_TRADER_DIRECT_WATCH_STATE_PATH ?? '/var/lib/hyperliquid-copy-engine/invo-notification-executor/elite-direct-watch.json'),
-    directWatchScanMs: Math.max(2_000, n('NOTIFICATION_TRADER_DIRECT_WATCH_SCAN_MS', 5_000)),
-    directWatchMaxHydratesPerScan: Math.max(1, Math.min(5, Math.trunc(n('NOTIFICATION_TRADER_DIRECT_WATCH_MAX_HYDRATES_PER_SCAN', 2)))),
-    directWatchFallbackPollMs: Math.max(10_000, n('NOTIFICATION_TRADER_DIRECT_WATCH_FALLBACK_POLL_MS', 20_000)),
+    directWatchAdmissionIndexPath: resolve(process.env.NOTIFICATION_TRADER_DIRECT_WATCH_ADMISSION_INDEX_PATH
+      ?? '/var/lib/hyperliquid-copy-engine/invo-notification-executor/elite-direct-watch-admissions.json'),
+    directWatchScanMs: Math.max(2_000, n('NOTIFICATION_TRADER_DIRECT_WATCH_SCAN_MS', 3_000)),
+    directWatchMaxHydratesPerScan: Math.max(1, Math.min(64, Math.trunc(n('NOTIFICATION_TRADER_DIRECT_WATCH_MAX_HYDRATES_PER_SCAN', 24)))),
+    directWatchOpenMaxPages: Math.max(1, Math.min(10, Math.trunc(n('NOTIFICATION_TRADER_DIRECT_WATCH_OPEN_MAX_PAGES', 3)))),
+    directWatchFallbackPollMs: Math.max(10_000, n('NOTIFICATION_TRADER_DIRECT_WATCH_FALLBACK_POLL_MS', 18_000)),
+    directWatchClosedPollMs: Math.max(30_000, n('NOTIFICATION_TRADER_DIRECT_WATCH_CLOSED_POLL_MS', 60_000)),
+    directWatchMaxClosedHydratesPerScan: Math.max(1, Math.min(64, Math.trunc(n('NOTIFICATION_TRADER_DIRECT_WATCH_MAX_CLOSED_HYDRATES_PER_SCAN', 24)))),
+    directWatchClosedMaxPages: Math.max(1, Math.min(3, Math.trunc(n('NOTIFICATION_TRADER_DIRECT_WATCH_CLOSED_MAX_PAGES', 2)))),
+    directWatchResidentCap: Math.max(1, Math.trunc(n('MAX_DIRECT_WATCH_RESIDENT_TARGETS', 48))),
+    directWatchRequestTimeoutMs: invo.INVO_HTTP_REQUEST_TIMEOUT_MS,
+    directWatchFixedOverheadMs: Math.max(0, n('DIRECT_WATCH_FIXED_OVERHEAD_MS', 2_000)),
+    directWatchConcurrency: Math.max(1, Math.min(32, Math.trunc(n('DIRECT_WATCH_CONCURRENCY', 16)))),
+    directWatchRequestBudgetPerSecond: Math.max(1, n('DIRECT_WATCH_MAX_REQUESTS_PER_SECOND', 12)),
+    directWatchRequestBudgetBurst: Math.max(1, Math.trunc(n('DIRECT_WATCH_REQUEST_BURST', 32))),
+    directWatchFixedReservePerSecond: Math.max(0, n('DIRECT_WATCH_FIXED_RESERVE_REQUESTS_PER_SECOND', 4)),
+    directWatchNegativeMinObservations: Math.max(2, Math.trunc(n('DIRECT_WATCH_NEGATIVE_MIN_OBSERVATIONS', 2))),
+    directWatchNegativeGraceMs: Math.max(600_000, n('DIRECT_WATCH_NEGATIVE_GRACE_MS', 600_000)),
     minEvidenceEvents: Math.max(1, Math.trunc(n('NOTIFICATION_TRADER_MIN_EVIDENCE_EVENTS', 20))),
     minObservationDays: Math.max(1, Math.trunc(n('NOTIFICATION_TRADER_MIN_OBSERVATION_DAYS', 7))),
     staleAfterMs: Math.max(60_000, n('NOTIFICATION_TRADER_STALE_AFTER_MS', 3 * 24 * 60 * 60 * 1000)),
@@ -108,6 +178,23 @@ function loadConfig() {
 }
 
 const cfg = loadConfig();
+const directWatchConfiguredCapacity = validateDirectWatchCapacity({
+  residentCap: cfg.directWatchResidentCap,
+  scanMs: cfg.directWatchScanMs,
+  maxOpenHydratesPerScan: cfg.directWatchMaxHydratesPerScan,
+  openPollMs: cfg.directWatchFallbackPollMs,
+  maxClosedHydratesPerScan: cfg.directWatchMaxClosedHydratesPerScan,
+  closedPollMs: cfg.directWatchClosedPollMs,
+  requestTimeoutMs: cfg.directWatchRequestTimeoutMs,
+  maxAttemptsPerPage: 2,
+  openMaxPages: cfg.directWatchOpenMaxPages,
+  closedMaxPages: cfg.directWatchClosedMaxPages,
+  fixedOverheadMs: cfg.directWatchFixedOverheadMs,
+  concurrency: cfg.directWatchConcurrency,
+  requestBudgetPerSecond: cfg.directWatchRequestBudgetPerSecond,
+  requestBudgetBurst: cfg.directWatchRequestBudgetBurst,
+  fixedReserveRequestsPerSecond: cfg.directWatchFixedReservePerSecond,
+});
 const shadowPolicy: ShadowExecutionPolicy = {
   maxBookAgeMs: cfg.shadowMaxBookAgeMs,
   maxSpreadBps: cfg.shadowMaxSpreadBps,
@@ -124,6 +211,8 @@ if (cfg.live && cfg.allow.size === 0 && !cfg.copyAllFollowed) {
 validateEnv(cfg.live);
 const WALLET_ADDRESS = resolveWalletAddress();
 const state = new NotificationState(cfg.statePath);
+const fundingBoundaryStore = new FundingBoundaryStore(cfg.fundingBoundaryPath);
+let fundingOracleWorker: FundingOracleWorkerManager | null = null;
 if (cfg.inactiveAfterMs <= cfg.staleAfterMs) throw new Error('NOTIFICATION_TRADER_INACTIVE_AFTER_MS must exceed NOTIFICATION_TRADER_STALE_AFTER_MS');
 const tracker = new TraderTracker(cfg.trackerPath, {
   minEvents: cfg.minEvidenceEvents,
@@ -131,25 +220,70 @@ const tracker = new TraderTracker(cfg.trackerPath, {
   staleAfterMs: cfg.staleAfterMs,
   inactiveAfterMs: cfg.inactiveAfterMs,
 });
-const directWatch = new EliteDirectWatchState(cfg.directWatchStatePath);
+// Executor is the sole writer. Portfolio research consumes this store read-only and
+// remains the sole writer of portfolio-candidates.json.
+const feedPortfolioEvidence = new FeedPortfolioEvidenceStore(cfg.feedPortfolioEvidencePath);
+let feedEvidencePersistenceErrors = 0;
+let feedEvidenceAssimilationSuspended = false;
+const feedEvidenceSuspensionPath = `${cfg.feedPortfolioEvidencePath}.assimilation-suspended.json`;
+function scheduleFeedEvidencePersistence(posts: any[], feedFilter: InvoFeedSurface, processedAtMs: number) {
+  scheduleDeferredPersistence(
+    () => feedPortfolioEvidence.observe(posts, feedFilter, processedAtMs),
+    error => {
+      feedEvidencePersistenceErrors += 1;
+      feedEvidenceAssimilationSuspended = true;
+      const reason = error instanceof Error ? error.message : String(error);
+      const tmp = `${feedEvidenceSuspensionPath}.tmp`;
+      let markerPersisted = false;
+      try {
+        writeFileSync(tmp, JSON.stringify({ version: 1, suspended: true, failedAtMs: Date.now(), reason }));
+        renameSync(tmp, feedEvidenceSuspensionPath);
+        markerPersisted = true;
+      } catch {
+        // Discovery-side persistence failures must never terminate the executor.
+        // The in-memory suspension remains authoritative for this process lifetime.
+      }
+      try {
+        log({ type: 'feed_portfolio_evidence_persistence_error', feedFilter, feedEvidencePersistenceErrors,
+          assimilationSuspended: true, markerPersisted, error: reason });
+      } catch {
+        // Logging shares storage failure modes; CLOSE/gap reconciliation still wins.
+      }
+    },
+  );
+}
+const directWatch = new EliteDirectWatchState(
+  cfg.directWatchStatePath, cfg.directWatchAdmissionIndexPath,
+  directWatchConfiguredCapacity.hardProvenResidentCap,
+);
+directWatch.assertResidentCap(directWatchConfiguredCapacity.hardProvenResidentCap);
 const inFlight = new Set<string>();
 const inFlightSourceEvents = new Set<string>();
-let initialized = false;
+const sourceLifecycleQueue = new SourceLifecycleQueue();
 let hydrating = false;
-let pendingWake: { source: string; hints?: NotificationHints; receivedAtMs: number; feedFilter?: string } | null = null;
+let pendingWake: { source: string; hints?: NotificationHints; receivedAtMs: number; feedFilter?: InvoFeedSurface } | null = null;
 let lastSuccessPollMs = 0;
 let backoffMs = 0;
 let discoverySurfaceIndex = 0;
-let lastFundingOracleBoundaryMs = -1;
-let lastDirectWatchScanMs = 0;
+const finalizedFundingOracleBoundaries = new Set<number>();
 let directWatchBackoffMs = 0;
 let directWatchBackoffUntilMs = 0;
+const directWatchRequestBudget = new DirectWatchRequestBudget(
+  cfg.directWatchRequestBudgetPerSecond - cfg.directWatchFixedReservePerSecond,
+  cfg.directWatchRequestBudgetBurst,
+);
 const directWatchMetrics = {
-  selectorRequests: 0, hydrationRequests: 0, hydrationCount: 0,
+  selectorRequests: 0, hydrationRequests: 0, openPhaseRequests: 0, closedPhaseRequests: 0, hydrationCount: 0,
+  closedHydrationCount: 0, closedBaselineCount: 0, closedOverflowRiskCount: 0,
+  openOverflowRiskCount: 0, openOrderingViolationCount: 0,
   signalsObserved: 0, signalsHandled: 0, http429s: 0,
+  targetErrors: 0, selectorErrors: 0, skippedAfterRateLimit: 0,
+  candidateStateRejections: 0, candidateStateLastError: null as string | null,
+  deferredAdmissions: 0,
+  openDeadlineMisses: 0, closedDeadlineMisses: 0, maxObservedSweepAgeMs: 0,
+  queueDepth: 0,
   lastScanAtMs: 0, lastSuccessAtMs: 0,
 };
-const FUNDING_INTERVAL_MS = 60 * 60 * 1000;
 const SOURCE_CLOSE_RETRY_BASE_MS = 250;
 const SOURCE_CLOSE_RETRY_MAX_MS = 30_000;
 const HEALTH_MTM_CONCURRENCY = 4;
@@ -502,34 +636,63 @@ async function shadowReup(
   });
 }
 
-async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: number, feedFilter: string) {
-  const sourceEventKey = signal.sourceTimeMs == null ? null : `source-event:${signal.sourceBaseId}:${signal.sourceTimeMs}`;
-  if (
-    state.hasSeen(signal.key)
-    || (sourceEventKey != null && state.hasSeen(sourceEventKey))
-    || inFlight.has(signal.key)
-    || inFlightSourceEvents.has(signal.sourceBaseId)
-  ) return;
+async function executeUnlocked(signal: InvoSignal, wakeSource: string, receivedAtMs: number, feedFilter: string) {
+  const eventKey = sourceEventKey(signal);
+  const lifecycleKey = closeLifecycleKey(signal);
+  const inFlightKey = eventKey ?? signal.key;
+  const alreadySeen = signalWasSeen(signal, key => state.hasSeen(key));
+  if (alreadySeen) {
+    // The same source event can arrive through direct watch and one or more feed
+    // surfaces with different surface-specific keys. Canonical completion proves the
+    // event is terminally handled, so persist this ingress key too; otherwise the feed
+    // surface cursor can remain pinned forever replaying an event already executed.
+    state.markSeen(signal.key);
+    if (signal.action === 'close') state.markHandledClose(signal.sourceBaseId);
+    return;
+  }
+  if (inFlight.has(signal.key) || inFlightSourceEvents.has(inFlightKey)) return;
   inFlight.add(signal.key);
-  inFlightSourceEvents.add(signal.sourceBaseId);
+  inFlightSourceEvents.add(inFlightKey);
   const decisionAtMs = Date.now();
 
   try {
+    if (signal.action !== 'close' && state.hasHandledClose(signal.sourceBaseId)) {
+      state.markSeen(signal.key);
+      log({ type: 'skip', reason: 'lifecycle_already_closed', signal, wakeSource });
+      return;
+    }
     // Discovery remains broad in the separate portfolio-research collector, but NEW
     // Lane 3 shadow exposure is portfolio-level elite-only. Closes bypass this gate so
     // previously owned broad-research exposure can always unwind after a demotion.
     if (!cfg.live && signal.action !== 'close') {
-      const eligibilityCutoffMs = signal.sourceTimeMs ?? receivedAtMs;
+      const eligibilityCutoffMs = signal.sourceTimeMs;
+      if (eligibilityCutoffMs == null || !Number.isFinite(eligibilityCutoffMs)
+        || eligibilityCutoffMs <= 0 || eligibilityCutoffMs > decisionAtMs) {
+        state.markSeen(signal.key);
+        log({
+          type: 'skip',
+          reason: 'shadow_invalid_source_eligibility_time',
+          shadowAdmissionMode: 'ELITE_ONLY',
+          eligibilityCutoffMs,
+          signal,
+          wakeSource,
+        });
+        return;
+      }
       const candidateAdmission = eliteAdmissionFromState(
         cfg.candidateStatePath,
         signal.portfolioId,
         eligibilityCutoffMs,
         cfg.candidateStateMaxAgeMs,
+        cfg.candidateSnapshotsPath,
+        cfg.directWatchAdmissionIndexPath,
+        Math.max(10_000, Math.min(60_000, cfg.directWatchScanMs * 2)),
+        decisionAtMs,
       );
       if (!candidateAdmission.allowed) {
-        state.markSeen(signal.key);
+        if (shouldPersistAdmissionDenial(candidateAdmission)) state.markSeen(signal.key);
         log({
-          type: 'skip',
+          type: candidateAdmission.retryable ? 'admission_deferred' : 'skip',
           reason: `shadow_${candidateAdmission.reason}`,
           shadowAdmissionMode: 'ELITE_ONLY',
           eligibilityCutoffMs,
@@ -561,15 +724,35 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
     const ageMs = signal.sourceTimeMs == null ? null : decisionAtMs - signal.sourceTimeMs;
     if (signal.action !== 'close' && ageMs != null && ageMs > cfg.maxSignalAgeMs) {
       state.markSeen(signal.key);
-      log({ type: 'skip', reason: 'stale_signal_over_25s_window', ageMs, maxSignalAgeMs: cfg.maxSignalAgeMs, signal, wakeSource });
+      const missedPreDemotion = isMissedPreDemotionOpen(
+        signal, wakeSource, decisionAtMs, cfg.maxSignalAgeMs,
+      );
+      log({
+        type: missedPreDemotion ? 'missed_pre_demotion_open' : 'skip',
+        reason: missedPreDemotion ? 'missed_pre_demotion_open' : 'stale_signal_over_25s_window',
+        lifecycleCopyability: missedPreDemotion ? 'NON_COPYABLE_STALE_FIRST_OBSERVATION' : undefined,
+        reconstructedOpenExecuted: missedPreDemotion ? false : undefined,
+        handledNoRetry: missedPreDemotion ? true : undefined,
+        ageMs, maxSignalAgeMs: cfg.maxSignalAgeMs, signal, wakeSource,
+      });
       return;
     }
 
+    // An observed OPEN is ownership-gap evidence only after it has passed the
+    // admission/scope/freshness gates for this shadow epoch. A denied
+    // pre-enrollment OPEN must not turn its later CLOSE into an elite recall miss.
+    if (signal.action !== 'close') state.markObservedOpen(signal.sourceBaseId);
+
     if (signal.action === 'close') {
-      const managed = state.getManagedBySource(signal.sourceBaseId);
+      let managed = state.getManagedBySource(signal.sourceBaseId);
       if (!managed) {
         state.markSeen(signal.key);
-        log({ type: 'close_ownership_gap', reason: 'close_not_owned_by_service', managed: null, signal, wakeSource, ...closeFreshness(signal, receivedAtMs) });
+        const observedOpen = state.hasObservedOpen(signal.sourceBaseId);
+        const directTarget = directWatch.targets().find(row => row.portfolioId === signal.portfolioId);
+        log({
+          ...unownedCloseEvidence(signal, observedOpen, directTarget?.admittedAtMs),
+          managed: null, signal, wakeSource, ...closeFreshness(signal, receivedAtMs),
+        });
         return;
       }
 
@@ -652,6 +835,28 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
         }
 
         const fill = result.fill;
+        let stagedFunding;
+        try {
+          stagedFunding = await syncStagedFundingForClose(
+            managed, fill.receivedAtMs, fundingBoundaryStore, cfg.shadowFundingOracleMaxDelayMs,
+          );
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          managed = { ...managed, fundingIncompleteReason: `corrupt durable funding evidence: ${reason}` };
+          stagedFunding = { position: managed, appliedBoundaries: [], waited: false };
+          state.setManaged(managed);
+          log({ type: 'funding_boundary_close_sync_corrupt', sourceBaseId: managed.sourceBaseId,
+            economicsCompleteness: 'INCOMPLETE_FUNDING', fundingIncompleteReason: managed.fundingIncompleteReason });
+        }
+        managed = stagedFunding.position;
+        if (stagedFunding.appliedBoundaries.length || stagedFunding.waited || managed.fundingIncompleteReason) {
+          state.setManaged(managed);
+          log({
+            type: 'funding_boundary_close_sync', sourceBaseId: managed.sourceBaseId,
+            appliedBoundaries: stagedFunding.appliedBoundaries, waited: stagedFunding.waited,
+            fundingIncompleteReason: managed.fundingIncompleteReason ?? null,
+          });
+        }
         const legacy = managed.executionEvidenceVersion !== EXECUTION_EVIDENCE_VERSION
           || !(Number(managed.entryPrice) > 0)
           || !(Number(managed.entryNotionalExecutedUsd) > 0)
@@ -1039,90 +1244,112 @@ async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: num
       ...(signal.action === 'close' ? closeFreshness(signal, receivedAtMs) : {}),
     });
   } finally {
-    if (sourceEventKey != null && state.hasSeen(signal.key)) state.markSeen(sourceEventKey);
+    if (state.hasSeen(signal.key)) {
+      if (eventKey != null) state.markSeen(eventKey);
+      if (lifecycleKey != null) state.markSeen(lifecycleKey);
+      if (signal.action === 'close') state.markHandledClose(signal.sourceBaseId);
+    }
     inFlight.delete(signal.key);
-    inFlightSourceEvents.delete(signal.sourceBaseId);
+    inFlightSourceEvents.delete(inFlightKey);
   }
 }
 
+async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: number, feedFilter: string) {
+  return sourceLifecycleQueue.run(signal.sourceBaseId, () => executeUnlocked(signal, wakeSource, receivedAtMs, feedFilter));
+}
 
-async function captureFundingOracleCheckpoints(nowMs = Date.now()) {
-  if (cfg.live) return;
-  const fundingTimeMs = Math.floor(nowMs / FUNDING_INTERVAL_MS) * FUNDING_INTERVAL_MS;
-  if (fundingTimeMs === lastFundingOracleBoundaryMs) return;
 
+function applyFundingOracleResult(result: FundingOracleCaptureResult) {
+  const { fundingTimeMs } = result;
+  if (finalizedFundingOracleBoundaries.has(fundingTimeMs)) {
+    log({ type: 'funding_oracle_duplicate_ignored', fundingTimeMs });
+    return;
+  }
+  finalizedFundingOracleBoundaries.add(fundingTimeMs);
+  // Bound the process-local dedupe set. Position checkpoints remain the durable guard.
+  if (finalizedFundingOracleBoundaries.size > 48) {
+    const oldest = Math.min(...finalizedFundingOracleBoundaries);
+    finalizedFundingOracleBoundaries.delete(oldest);
+  }
   const snapshot = state.snapshot();
   const targets = Object.values(snapshot.managed).filter(position => (
     position.paper
     && position.executionEvidenceVersion === EXECUTION_EVIDENCE_VERSION
-    && position.openedAtMs < fundingTimeMs
+    && isPositionExposedAcrossBoundary(position, fundingTimeMs)
     && !position.fundingIncompleteReason
     && !(position.fundingOracleCheckpoints ?? []).some(point => point.fundingTimeMs === fundingTimeMs)
   ));
-  const delayAtStartMs = nowMs - fundingTimeMs;
-  if (delayAtStartMs > cfg.shadowFundingOracleMaxDelayMs) {
-    lastFundingOracleBoundaryMs = fundingTimeMs;
+  const affectedSourceBaseIds = targets.map(position => position.sourceBaseId);
+  const logBoundaryRetention = () => {
+    const boundaries = fundingBoundaryStore.boundaries();
+    const unresolved = Object.values(state.snapshot().managed).filter(position => (
+      position.paper && position.executionEvidenceVersion === EXECUTION_EVIDENCE_VERSION
+      && !position.fundingIncompleteReason
+    ));
+    const earliestNeededBoundary = unresolved.length
+      ? Math.min(...unresolved.map(position => firstUnappliedFundingBoundary(position)))
+      : null;
+    log({
+      type: 'funding_boundary_retention_status', recordCount: boundaries.length,
+      oldestBoundaryMs: boundaries[0] ?? null,
+      newestBoundaryMs: boundaries.at(-1) ?? null,
+      earliestNeededBoundary,
+      pruningEnabled: false,
+      reason: 'telemetry_only_until_restart_and_unresolved_position_retention_is_formally_proven',
+    });
+  };
+  if (result.failureClass || !result.oraclePrices || result.finalDelayMs > cfg.shadowFundingOracleMaxDelayMs) {
     for (const position of targets) {
       const latest = state.getManagedBySource(position.sourceBaseId);
-      if (!latest || latest.fundingIncompleteReason) continue;
-      state.setManaged({
-        ...latest,
-        fundingIncompleteReason: `missed oracle checkpoint for funding interval ${fundingTimeMs}`,
-      });
+      if (!latest) continue;
+      const application = applyFundingOracleResultToPosition(latest, result, cfg.shadowFundingOracleMaxDelayMs);
+      if (application.incomplete) state.setManaged(application.position);
     }
     if (targets.length) {
       log({
         type: 'funding_oracle_capture_missed',
         fundingTimeMs,
-        delayMs: delayAtStartMs,
+        attemptTimestamps: result.attempts,
+        retryCount: result.retryCount,
+        requestLatenciesMs: result.attempts.map(attempt => attempt.requestLatencyMs),
+        finalDelayMs: result.finalDelayMs,
         maxDelayMs: cfg.shadowFundingOracleMaxDelayMs,
-        affectedSourceBaseIds: targets.map(position => position.sourceBaseId),
+        affectedSourceBaseIds,
+        failureClass: result.failureClass ?? 'response_after_deadline',
+        error: result.error,
       });
     }
-    return;
-  }
-  if (!targets.length) {
-    lastFundingOracleBoundaryMs = fundingTimeMs;
+    logBoundaryRetention();
     return;
   }
 
-  const requestedAtMs = Date.now();
-  const oraclePrices = await hl.getOraclePrices();
-  const observedAtMs = Date.now();
-  const delayMs = observedAtMs - fundingTimeMs;
-  lastFundingOracleBoundaryMs = fundingTimeMs;
-
+  const missingOracleSourceBaseIds: string[] = [];
   for (const position of targets) {
     const latest = state.getManagedBySource(position.sourceBaseId);
-    if (!latest || latest.fundingIncompleteReason || latest.openedAtMs >= fundingTimeMs) continue;
-    if ((latest.fundingOracleCheckpoints ?? []).some(point => point.fundingTimeMs === fundingTimeMs)) continue;
-    const oraclePx = Number(oraclePrices[latest.coin]);
-    if (!(oraclePx > 0) || delayMs > cfg.shadowFundingOracleMaxDelayMs) {
-      state.setManaged({
-        ...latest,
-        fundingIncompleteReason: !(oraclePx > 0)
-          ? `missing oraclePx for ${latest.coin} at funding interval ${fundingTimeMs}`
-          : `oracle checkpoint too late for funding interval ${fundingTimeMs}: ${delayMs}ms`,
-      });
-      continue;
+    if (!latest) continue;
+    const application = applyFundingOracleResultToPosition(latest, result, cfg.shadowFundingOracleMaxDelayMs);
+    if (application.incomplete) {
+      missingOracleSourceBaseIds.push(position.sourceBaseId);
+      state.setManaged(application.position);
+    } else if (application.applied) {
+      state.setManaged(application.position);
     }
-    state.setManaged({
-      ...latest,
-      fundingOracleCheckpoints: [
-        ...(latest.fundingOracleCheckpoints ?? []),
-        { fundingTimeMs, observedAtMs, oraclePx },
-      ],
-    });
   }
   log({
     type: 'funding_oracle_checkpoint',
     fundingTimeMs,
-    requestedAtMs,
-    observedAtMs,
-    delayMs,
+    attemptTimestamps: result.attempts,
+    retryCount: result.retryCount,
+    requestLatenciesMs: result.attempts.map(attempt => attempt.requestLatencyMs),
+    observedAtMs: result.finalObservedAtMs,
+    finalDelayMs: result.finalDelayMs,
     maxDelayMs: cfg.shadowFundingOracleMaxDelayMs,
     targetCount: targets.length,
+    affectedSourceBaseIds,
+    failureClass: missingOracleSourceBaseIds.length ? 'missing_oracle_prices' : null,
+    missingOracleSourceBaseIds,
   });
+  logBoundaryRetention();
 }
 
 async function fetchAndProcess(source: string, hints: NotificationHints | undefined, receivedAtMs: number, feedFilter = cfg.feedFilter): Promise<number> {
@@ -1141,6 +1368,10 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
     cfg.feedMaxPages,
   );
   const posts = backfill.posts;
+  // Persistence is scheduled only after the core reconciliation path below. A disk
+  // failure suspends new feed-derived assimilation, but can never block owned closes,
+  // gap handling, or cursor-safe processing.
+  const persistFeedEvidence = () => scheduleFeedEvidencePersistence(posts as any[], feedFilter, Date.now());
   if (saved && !backfill.cursorReached) {
     const gapPlan = planUnrecoverableGap(
       posts,
@@ -1189,9 +1420,6 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
         source: 'shadow_zero_managed_gap_rebase',
       };
       state.setFeedCursor(feedFilter, rebasedCursor);
-      // Treat the explicit rebase as the startup boundary so the next newer signal is
-      // processed prospectively instead of being swallowed by startup-baseline indexing.
-      initialized = true;
       log({
         type: 'unrecoverable_feed_gap_rebased',
         feedFilter,
@@ -1203,9 +1431,11 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
         productionTrading: false,
       });
       lastSuccessPollMs = Date.now();
+      persistFeedEvidence();
       return gapPlan.ownedCloses.length;
     }
     lastSuccessPollMs = Date.now();
+    persistFeedEvidence();
     return gapPlan.ownedCloses.length;
   }
   const tracked = (posts as any[]).map((post: any) => {
@@ -1215,21 +1445,31 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
   });
   if (tracked.length) tracker.flush();
 
-  if (!initialized) {
-    const recoverableCloses: InvoSignal[] = [];
-    for (const { signal } of tracked) {
-      if (!signal) continue;
-      const managed = signal.action === 'close' ? state.getManagedBySource(signal.sourceBaseId) : null;
-      if (managed) recoverableCloses.push(signal);
-      else state.markSeen(signal.key);
-    }
-    initialized = true;
+  if (surfaceNeedsBaseline(state.hasFeedBaseline(feedFilter))) {
+    const baseline = planSurfaceBaseline(
+      tracked.map(row => row.signal),
+      sourceBaseId => Boolean(state.getManagedBySource(sourceBaseId)),
+    );
+    for (const signal of baseline.skipped) state.markSeen(signal.key);
     lastSuccessPollMs = Date.now();
-    log({ type: 'baseline_indexed', posts: posts.length, recoverableCloses: recoverableCloses.length, live: cfg.live, feedFilter, feedLimit: cfg.feedLimit, traderFunnel: tracker.report().funnel });
-    for (const signal of recoverableCloses) await execute(signal, 'startup_recovery', receivedAtMs, feedFilter);
-    const startupHandled = recoverableCloses.every(signal => state.hasSeen(signal.key));
-    if (startupHandled && backfill.newestPostId) state.setFeedCursor(feedFilter, { postId: backfill.newestPostId, observedAtMs: Date.now(), source: 'startup_baseline' });
-    return recoverableCloses.length;
+    const baselineAtMs = Date.now();
+    // The first fetched snapshot establishes the prospective surface boundary even
+    // when an owned close needs asynchronous managed-exposure reconciliation.
+    state.markFeedBaselined(feedFilter, baselineAtMs);
+    log({ type: 'surface_baseline_indexed', posts: posts.length, skippedOpenAddsAndUnownedCloses: baseline.skipped.length, recoverableCloses: baseline.recoverableCloses.length, live: cfg.live, feedFilter, feedLimit: cfg.feedLimit, traderFunnel: tracker.report().funnel });
+    for (const signal of baseline.recoverableCloses) {
+      await execute(signal, 'surface_baseline_owned_close_recovery', receivedAtMs, feedFilter);
+    }
+    const startupHandled = baseline.recoverableCloses.every(signal => closedLifecycleWasHandled(
+      signal, key => state.hasSeen(key), sourceBaseId => state.hasHandledClose(sourceBaseId),
+    ));
+    if (startupHandled) {
+      if (backfill.newestPostId) {
+        state.setFeedCursor(feedFilter, { postId: backfill.newestPostId, observedAtMs: baselineAtMs, source: 'startup_baseline' });
+      }
+    }
+    persistFeedEvidence();
+    return baseline.recoverableCloses.length;
   }
 
   const signals: InvoSignal[] = tracked
@@ -1245,11 +1485,12 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
   if (cfg.live) {
     for (const signal of ordered) await execute(signal, source, receivedAtMs, feedFilter);
   } else {
-    await Promise.all(ordered.map(signal => execute(signal, source, receivedAtMs, feedFilter)));
+    await runSignalBatchBySource(ordered, signal => execute(signal, source, receivedAtMs, feedFilter));
   }
-  const allHandled = ordered.every(signal => state.hasSeen(signal.key));
+  const allHandled = ordered.every(signal => signalWasSeen(signal, key => state.hasSeen(key)));
   if (allHandled && backfill.newestPostId) state.setFeedCursor(feedFilter, { postId: backfill.newestPostId, observedAtMs: Date.now(), source });
   lastSuccessPollMs = Date.now();
+  persistFeedEvidence();
   return ordered.length;
 }
 
@@ -1282,10 +1523,6 @@ async function wake(source: string, hints?: NotificationHints, receivedAtMs = Da
   }
 }
 
-function directInvestmentRows(payload: any): any[] {
-  return Array.isArray(payload?.investmentsTicker) ? payload.investmentsTicker : [];
-}
-
 function ownedDirectPortfolioIds(): Set<string> {
   return new Set(
     Object.values(state.snapshot().managed)
@@ -1294,46 +1531,138 @@ function ownedDirectPortfolioIds(): Set<string> {
   );
 }
 
+async function getBudgetedDirectInvestments(
+  portfolioId: string, isOpen: boolean, page: number, phase: 'OPEN' | 'CLOSED',
+) {
+  return invo.getPortfolioInvestments(portfolioId, isOpen, page, 100, async () => {
+    await directWatchRequestBudget.acquire();
+    directWatchMetrics.hydrationRequests += 1;
+    if (phase === 'OPEN') directWatchMetrics.openPhaseRequests += 1;
+    else directWatchMetrics.closedPhaseRequests += 1;
+  }, false);
+}
+
 async function hydrateDirectTarget(
   target: ReturnType<EliteDirectWatchState['targets']>[number],
   selectorUpdatedAtMs: number | null,
   reason: string,
   observedAtMs: number,
-) {
-  directWatchMetrics.hydrationRequests += 2;
-  const [openPayload, closedPayload] = await Promise.all([
-    invo.getPortfolioInvestments(target.portfolioId, true, 1, 100),
-    invo.getPortfolioInvestments(target.portfolioId, false, 1, 100),
-  ]);
-  const openRows = directInvestmentRows(openPayload);
-  const closedRows = directInvestmentRows(closedPayload);
+): Promise<CapturedSignalBatch | null> {
+  const openResult = await fetchCompleteOpenInvestments(async page => {
+    return directInvestmentRows(await getBudgetedDirectInvestments(target.portfolioId, true, page, 'OPEN'));
+  }, cfg.directWatchOpenMaxPages, 100);
+  const openRows = openResult.rows;
+  if (target.lifecycle === 'ENROLLING') {
+    if (openResult.complete) directWatch.commitOpenBaseline(target.portfolioId, openRows, observedAtMs);
+    if (!openResult.complete) directWatchMetrics.openOverflowRiskCount += 1;
+    if (openResult.orderingViolation) directWatchMetrics.openOrderingViolationCount += 1;
+    log({ type: 'elite_direct_open_baseline', portfolioId: target.portfolioId,
+      pagesFetched: openResult.pagesFetched, endpointComplete: openResult.complete,
+      overflow: openResult.overflow, orderingViolation: openResult.orderingViolation,
+      admitted: openResult.complete, admittedAtMs: openResult.complete ? observedAtMs : null,
+      replayedSignals: 0, live: false });
+    if (!openResult.complete) throw new Error(`incomplete OPEN baseline for ${target.portfolioId}`);
+    return null;
+  }
+  if (target.lifecycle === 'RETIRING') {
+    const dispositions = retiringOpenDispositions(
+      openRows, target, observedAtMs,
+      {
+        hasObservedOpen: sourceBaseId => state.hasObservedOpen(sourceBaseId),
+        isManagedSource: sourceBaseId => state.getManagedBySource(sourceBaseId) != null,
+        hasHandledClose: sourceBaseId => state.hasHandledClose(sourceBaseId),
+        hasSeen: key => state.hasSeen(key),
+      },
+    );
+    directWatchMetrics.hydrationCount += 1;
+    directWatchMetrics.signalsObserved += dispositions.length;
+    for (const disposition of dispositions) {
+      if (disposition.kind === 'invalid_lifecycle_open') {
+        if (!state.hasSeen(disposition.evidenceKey)) {
+          state.markSeen(disposition.evidenceKey);
+          log({
+            type: 'skip', reason: 'retirement_open_missing_valid_lifecycle_identity',
+            handledNoRetry: true, portfolioId: target.portfolioId,
+            sourceBaseId: disposition.sourceBaseId, createdAt: disposition.createdAt,
+            wakeSource: `elite_direct:${reason}`,
+          });
+        }
+        continue;
+      }
+      if (disposition.kind === 'execute') {
+        continue;
+      }
+      state.markSeen(disposition.signal.key);
+      log({
+        type: 'skip',
+        reason: disposition.kind === 'pre_selection_open_ignored'
+          ? 'retirement_pre_selection_open_noncopyable'
+          : disposition.kind === 'post_demotion_open_ignored'
+            ? 'retirement_post_demotion_open_ignored'
+            : 'retirement_unowned_increase_noncopyable',
+        handledNoRetry: true,
+        retiredAtMs: target.retiredAtMs,
+        signal: disposition.signal,
+        wakeSource: `elite_direct:${reason}`,
+      });
+    }
+    const buffered = dispositions.filter(
+      (disposition): disposition is Extract<RetirementOpenDisposition, { kind: 'execute' }> => (
+        disposition.kind === 'execute'
+      ),
+    ).map(disposition => disposition.signal);
+    const allHandled = dispositions.every(disposition => disposition.kind === 'execute'
+      ? true : disposition.kind === 'invalid_lifecycle_open'
+      ? state.hasSeen(disposition.evidenceKey)
+      : signalWasSeen(disposition.signal, key => state.hasSeen(key)));
+    const highWaterMs = dispositions.reduce(
+      (highWater, disposition) => disposition.kind === 'invalid_lifecycle_open'
+        ? highWater : Math.max(highWater, disposition.signal.sourceTimeMs ?? highWater),
+      target.processedThroughMs,
+    );
+    if (allHandled && openResult.complete && buffered.length === 0) {
+      directWatch.commitHydration(target.portfolioId, highWaterMs);
+      directWatchMetrics.signalsHandled += dispositions.length;
+    }
+    if (openResult.complete && buffered.length === 0) {
+      directWatch.commitRetirementOpenPoll(target.portfolioId, openRows, observedAtMs);
+    }
+    if (!openResult.complete) directWatchMetrics.openOverflowRiskCount += 1;
+    if (openResult.orderingViolation) directWatchMetrics.openOrderingViolationCount += 1;
+    log({ type: 'elite_direct_retirement_open_drain', portfolioId: target.portfolioId,
+      signalCount: dispositions.length, allHandled, highWaterMs,
+      pagesFetched: openResult.pagesFetched, endpointComplete: openResult.complete,
+      overflow: openResult.overflow, orderingViolation: openResult.orderingViolation, live: false });
+    if (!openResult.complete || !allHandled) {
+      throw new Error(`incomplete retirement OPEN proof for ${target.portfolioId}`);
+    }
+    if (!buffered.length) return null;
+    return { portfolioId: target.portfolioId, signals: buffered, highWaterMs,
+      commit: watermark => {
+        directWatch.commitHydration(target.portfolioId, watermark);
+        directWatch.commitRetirementOpenPoll(target.portfolioId, openRows, observedAtMs);
+      } };
+  }
   const signals = signalsFromDirectInvestments(
-    openRows, closedRows, target, target.processedThroughMs, observedAtMs,
+    openRows, [], target, target.processedThroughMs, observedAtMs,
   );
   directWatchMetrics.hydrationCount += 1;
   directWatchMetrics.signalsObserved += signals.length;
-  for (const signal of signals) {
-    await execute(signal, `elite_direct:${reason}`, observedAtMs, target.sourceFilter);
-  }
-  const allHandled = signals.every(signal => {
-    if (state.hasSeen(signal.key)) return true;
-    if (signal.sourceTimeMs == null) return false;
-    return state.hasSeen(`source-event:${signal.sourceBaseId}:${signal.sourceTimeMs}`);
-  });
   const highWaterMs = signals.reduce(
     (highWater, signal) => Math.max(highWater, signal.sourceTimeMs ?? highWater),
     target.processedThroughMs,
   );
-  if (allHandled) {
+  if (signals.length === 0 && openResult.complete) {
     directWatch.commitHydration(
       target.portfolioId,
       highWaterMs,
       selectorUpdatedAtMs == null ? undefined : selectorUpdatedAtMs,
     );
-    directWatch.noteFallbackPoll(target.portfolioId, observedAtMs);
     directWatchMetrics.signalsHandled += signals.length;
     directWatchMetrics.lastSuccessAtMs = Date.now();
   }
+  if (!openResult.complete) directWatchMetrics.openOverflowRiskCount += 1;
+  if (openResult.orderingViolation) directWatchMetrics.openOrderingViolationCount += 1;
   log({
     type: 'elite_direct_hydration',
     source: 'portfolio_specific_read_only',
@@ -1344,71 +1673,285 @@ async function hydrateDirectTarget(
     previousProcessedThroughMs: target.processedThroughMs,
     highWaterMs,
     signalCount: signals.length,
-    allHandled,
+    allHandled: signals.length === 0, pagesFetched: openResult.pagesFetched, endpointComplete: openResult.complete,
+    overflow: openResult.overflow, orderingViolation: openResult.orderingViolation,
+    watermarkCommitted: signals.length === 0 && openResult.complete,
     live: false,
   });
+  if (!openResult.complete) throw new Error(`incomplete OPEN proof for ${target.portfolioId}`);
+  if (!signals.length) return null;
+  return { portfolioId: target.portfolioId, signals, highWaterMs,
+    commit: watermark => directWatch.commitHydration(target.portfolioId, watermark,
+      selectorUpdatedAtMs == null ? undefined : selectorUpdatedAtMs) };
+}
+
+async function hydrateClosedHistory(
+  target: ReturnType<EliteDirectWatchState['targets']>[number],
+  reason: 'closed_history_baseline' | 'periodic_closed_poll',
+  observedAtMs: number,
+) {
+  if (!target.closedHistoryInitialized && target.lifecycle === 'RETIRING') {
+    // A target can demote before its first CLOSED baseline. Start at its original
+    // selection instant so a short round trip between selection and demotion is evidence.
+    directWatch.initializeRetirementDrain(target.portfolioId);
+    const initialized = directWatch.targets().find(row => row.portfolioId === target.portfolioId);
+    if (initialized) return hydrateClosedHistory(initialized, 'periodic_closed_poll', observedAtMs);
+  }
+  if (!target.closedHistoryInitialized) {
+    const baseline = await establishClosedBaseline(async page => {
+      return directInvestmentRows(await getBudgetedDirectInvestments(target.portfolioId, false, page, 'CLOSED'));
+    }, cfg.directWatchClosedMaxPages, 100);
+    directWatchMetrics.closedHydrationCount += 1;
+    if (baseline.overflow) directWatchMetrics.closedOverflowRiskCount += 1;
+    if (baseline.boundaryReached) {
+      directWatch.commitClosedHydration(target.portfolioId, baseline.boundaryRows, observedAtMs);
+      directWatchMetrics.closedBaselineCount += 1;
+    }
+    log({
+      type: baseline.orderingViolation ? 'ordering_violation'
+        : baseline.overflow ? 'elite_direct_closed_baseline_overflow' : 'elite_direct_closed_history_baseline',
+      source: 'elite_direct_closed_history_baseline',
+      portfolioId: target.portfolioId, indexedRows: baseline.boundaryRows.length,
+      boundaryTimestampMs: baseline.boundaryTimestampMs, boundaryIds: baseline.boundaryIds.length,
+      pagesFetched: baseline.pagesFetched, boundaryReached: baseline.boundaryReached,
+      boundaryReason: baseline.boundaryReason, overflow: baseline.overflow,
+      orderingViolation: baseline.orderingViolation,
+      watermarkCommitted: baseline.boundaryReached, replayedSignals: 0, live: false,
+    });
+    if (!baseline.boundaryReached) throw new Error(`incomplete CLOSED baseline for ${target.portfolioId}`);
+    return;
+  }
+  const rows: any[] = [];
+  let boundaryReached = false;
+  let boundaryReason: ReturnType<typeof closedBoundaryProof>['reason'] = null;
+  const storedBoundaryIds = new Set(target.closedBoundaryIds);
+  const encounteredBoundaryIds = new Set<string>();
+  let pagesFetched = 0;
+  let priorPageLastTimestampMs: number | null = null;
+  let orderingViolation: ReturnType<typeof validateClosedPageOrdering>['violation'] = null;
+  for (let page = 1; page <= cfg.directWatchClosedMaxPages; page += 1) {
+    const payload = await getBudgetedDirectInvestments(target.portfolioId, false, page, 'CLOSED');
+    pagesFetched += 1;
+    const pageRows = directInvestmentRows(payload);
+    const ordering = validateClosedPageOrdering(pageRows, page, priorPageLastTimestampMs);
+    if (ordering.violation) {
+      orderingViolation = ordering.violation;
+      break;
+    }
+    priorPageLastTimestampMs = ordering.lastTimestampMs ?? priorPageLastTimestampMs;
+    rows.push(...pageRows);
+    const proof = target.closedHistoryInitialized
+      ? closedBoundaryProof(
+          pageRows, target.closedProcessedThroughMs, storedBoundaryIds,
+          encounteredBoundaryIds, 100,
+        )
+      : { reached: pageRows.length < 100, reason: pageRows.length < 100 ? 'endpoint_exhausted' as const : null };
+    if (proof.reached) {
+      boundaryReached = true;
+      boundaryReason = proof.reason;
+      break;
+    }
+  }
+  directWatchMetrics.closedHydrationCount += 1;
+  if (!boundaryReached || orderingViolation) directWatchMetrics.closedOverflowRiskCount += 1;
+
+  if (orderingViolation) {
+    log({
+      type: 'ordering_violation', source: 'elite_direct_closed_history',
+      portfolioId: target.portfolioId, reason, pagesFetched, orderingViolation,
+      overflowRiskCounted: true, watermarkCommitted: false, live: false,
+    });
+    throw new Error(`CLOSED ordering violation for ${target.portfolioId}`);
+  }
+
+  const classified = classifyClosedHydrationRows(
+    rows, target, target.closedProcessedThroughMs, target.closedBoundaryIds, observedAtMs,
+  );
+  const { signals, unemittableFreshRows } = classified;
+  directWatchMetrics.signalsObserved += signals.length;
+  for (const signal of signals) await execute(signal, `elite_direct:${reason}`, observedAtMs, target.sourceFilter);
+  const allHandled = signals.every(signal => closedLifecycleWasHandled(
+    signal, key => state.hasSeen(key), sourceBaseId => state.hasHandledClose(sourceBaseId),
+  ));
+  const allFreshRowsEmittable = unemittableFreshRows.length === 0;
+  const watermarkCommitted = allHandled && allFreshRowsEmittable && boundaryReached;
+  if (watermarkCommitted) {
+    directWatch.commitClosedHydration(target.portfolioId, rows, observedAtMs);
+    directWatchMetrics.signalsHandled += signals.length;
+  }
+  if (!allFreshRowsEmittable) {
+    log({
+      type: 'closed_row_unemittable', portfolioId: target.portfolioId, reason,
+      freshRowCount: classified.freshRowCount,
+      unemittableCount: unemittableFreshRows.length,
+      unemittableFreshRows, watermarkCommitted: false, live: false,
+    });
+  }
+  log({
+    type: 'elite_direct_closed_hydration', portfolioId: target.portfolioId, reason,
+    previousClosedProcessedThroughMs: target.closedProcessedThroughMs,
+    signalCount: signals.length, freshRowCount: classified.freshRowCount,
+    unemittableFreshRowCount: unemittableFreshRows.length,
+    pagesFetched, boundaryReached, boundaryReason,
+    allHandled, allFreshRowsEmittable, watermarkCommitted, live: false,
+  });
+  if (!watermarkCommitted) throw new Error(`incomplete CLOSED proof for ${target.portfolioId}`);
+}
+
+function applyDirectWatchRateLimit(nowMs: number) {
+  directWatchMetrics.http429s += 1;
+  directWatchBackoffMs = Math.min(Math.max(directWatchBackoffMs * 2, 2_000), 30_000);
+  directWatchBackoffUntilMs = nowMs + directWatchBackoffMs;
+  directWatchRequestBudget.note429(directWatchBackoffUntilMs);
+  directWatch.setAdmissionHealth(false, 'rate_limit_cooldown');
+}
+
+function logTargetFailures(phase: string, failed: Array<{ item: any; error: unknown }>) {
+  for (const { item, error } of failed) {
+    directWatchMetrics.targetErrors += 1;
+    log({ type: 'elite_direct_target_error', phase, portfolioId: item.target.portfolioId,
+      status: (error as any)?.status, error: error instanceof Error ? error.message : String(error), live: false });
+  }
 }
 
 async function scanEliteDirectWatch(nowMs = Date.now()) {
-  if (cfg.live || nowMs < directWatchBackoffUntilMs) return;
-  const candidate = loadEliteDirectTargets(cfg.candidateStatePath, nowMs, cfg.candidateStateMaxAgeMs);
-  directWatch.syncTargets(candidate.targets, ownedDirectPortfolioIds(), nowMs);
-  const targets = directWatch.targets();
-  const targetsByFilter = new Map<string, typeof targets>();
-  for (const target of targets) {
-    const rows = targetsByFilter.get(target.sourceFilter) ?? [];
-    rows.push(target);
-    targetsByFilter.set(target.sourceFilter, rows);
+  if (cfg.live) return;
+  if (nowMs < directWatchBackoffUntilMs) {
+    directWatch.setAdmissionHealth(false, 'rate_limit_cooldown');
+    return;
   }
-  const hydrationQueue: Array<{
-    target: typeof targets[number];
-    selectorUpdatedAtMs: number | null;
-    reason: string;
-  }> = [];
+  directWatch.setAdmissionHealth(false, 'scan_in_progress');
+  const capturedOpenSignals: CapturedSignalBatch[] = [];
   try {
-    for (const [sourceFilter, filterTargets] of targetsByFilter) {
-      directWatchMetrics.selectorRequests += 1;
-      const payload = await invo.discoverPortfolios(sourceFilter, 1, 100);
-      const rows = Array.isArray(payload?.items) ? payload.items : [];
-      const byId = new Map(rows.map((row: any) => [String(row?.id ?? ''), row]));
-      for (const target of filterTargets) {
-        const row: any = byId.get(target.portfolioId);
-        const selectorUpdatedAtMs = directSourceTimeMs(row?.updatedAt);
-        if (selectorUpdatedAtMs != null) {
-          const decision = directWatch.observeSelector(target.portfolioId, selectorUpdatedAtMs);
-          if (decision.hydrate) hydrationQueue.push({ target, selectorUpdatedAtMs, reason: 'selector_change' });
-        } else if (directWatch.shouldFallbackPoll(target.portfolioId, nowMs, cfg.directWatchFallbackPollMs)) {
-          hydrationQueue.push({ target, selectorUpdatedAtMs: null, reason: 'selector_missing_fallback' });
-        }
+    await invo.ensureTokenFreshFor(Math.max(
+      directWatchConfiguredCapacity.worstCaseClosedSweepMsAtCap,
+      directWatchConfiguredCapacity.worstCaseOpenSweepMsAtCap,
+    ) + 30_000 + cfg.directWatchRequestTimeoutMs);
+    const candidate = loadEliteDirectTargets(cfg.candidateStatePath, nowMs, cfg.candidateStateMaxAgeMs);
+    if (candidate.validationError) {
+      directWatchMetrics.candidateStateRejections += 1;
+      directWatchMetrics.candidateStateLastError = candidate.validationError;
+      log({ type: 'elite_direct_candidate_state_rejected', reason: candidate.validationError,
+        observedAtMs: candidate.observedAtMs, live: false });
+    } else {
+      directWatchMetrics.candidateStateLastError = null;
+    }
+    const enrollmentPreconditionsHealthy = !candidate.stale
+      && directWatchConfiguredCapacity.provenResidentCap > 0;
+    const deferredBefore = new Set(directWatch.deferredAdmissions().map(row => row.portfolioId));
+    directWatch.syncTargets(candidate.targets, ownedDirectPortfolioIds(), nowMs, !candidate.stale,
+      120_000, new Set(candidate.demotedPortfolioIds), directWatchConfiguredCapacity.provenResidentCap,
+      cfg.directWatchNegativeMinObservations, cfg.directWatchNegativeGraceMs,
+      candidate.observedAtMs ?? nowMs, undefined, enrollmentPreconditionsHealthy);
+    for (const deferred of directWatch.deferredAdmissions()) {
+      if (deferredBefore.has(deferred.portfolioId)) continue;
+      directWatchMetrics.deferredAdmissions += 1;
+      const lifecycle = directWatch.status();
+      log({ type: 'elite_direct_admission_deferred', ...deferred,
+        residentCount: lifecycle.targetCount, lifecycleCounts: {
+          active: lifecycle.activeTargetCount, missingGrace: lifecycle.missingGraceTargetCount,
+          retiring: lifecycle.retiringTargetCount,
+        }, selectorReason: 'fresh_elite_candidate', live: false });
+    }
+    const targets = directWatch.targets();
+    // Selector timestamps were only hints and consumed deadline budget. Direct
+    // portfolio polling is authoritative, so the dedicated direct-watch loop does
+    // not issue selector traffic. Candidate research remains a separate producer.
+    const selectorChanges = new Map<string, number>();
+
+    // Selector timestamps are hints only. Periodic direct plans are constructed
+    // even when one or more selector requests fail.
+    const hydrationPlan = planDirectHydrations(
+      targets, selectorChanges, nowMs, cfg.directWatchFallbackPollMs,
+      cfg.directWatchMaxHydratesPerScan,
+    );
+    const closedPlan = planClosedHydrations(
+      directWatch.targets(), nowMs, cfg.directWatchClosedPollMs,
+      cfg.directWatchMaxClosedHydratesPerScan,
+    );
+    const schedule = planDeadlineHydrations(
+      hydrationPlan, closedPlan, cfg.directWatchFallbackPollMs, cfg.directWatchClosedPollMs,
+    );
+    directWatchMetrics.queueDepth = schedule.length;
+    for (const work of schedule) {
+      const age = work.phase === 'OPEN'
+        ? nowMs - work.item.target.lastFallbackPollAtMs : nowMs - work.item.target.lastClosedPollAtMs;
+      directWatchMetrics.maxObservedSweepAgeMs = Math.max(directWatchMetrics.maxObservedSweepAgeMs, age);
+      if (work.dueAtMs < nowMs) {
+        if (work.phase === 'OPEN') directWatchMetrics.openDeadlineMisses += 1;
+        else directWatchMetrics.closedDeadlineMisses += 1;
       }
     }
-    hydrationQueue.sort((a, b) => {
-      if (a.reason !== b.reason) return a.reason === 'selector_change' ? -1 : 1;
-      return (a.selectorUpdatedAtMs ?? 0) - (b.selectorUpdatedAtMs ?? 0);
-    });
-    for (const item of hydrationQueue.slice(0, cfg.directWatchMaxHydratesPerScan)) {
-      await hydrateDirectTarget(item.target, item.selectorUpdatedAtMs, item.reason, nowMs);
+    const run = await runConcurrentHydrations(
+      schedule, cfg.directWatchConcurrency,
+      work => {
+        if (work.phase === 'OPEN') directWatch.noteFallbackPoll(work.item.target.portfolioId, nowMs);
+        else directWatch.noteClosedPoll(work.item.target.portfolioId, nowMs);
+      },
+      async work => {
+        try {
+          if (work.phase === 'OPEN') {
+            const captured = await hydrateDirectTarget(
+              work.item.target, work.item.selectorUpdatedAtMs, work.item.reason, nowMs,
+            );
+            if (captured) capturedOpenSignals.push(captured);
+          }
+          else await hydrateClosedHistory(work.item.target, work.item.reason, nowMs);
+        } catch (error: any) {
+          if (error?.status === 429 && error?.cooldownUntilMs == null) applyDirectWatchRateLimit(Date.now());
+          throw error;
+        }
+      },
+    );
+    logTargetFailures('deadline_queue', run.failed);
+    directWatchMetrics.skippedAfterRateLimit += run.skippedAfterRateLimit.length;
+    if (run.rateLimited) {
+      log({ type: 'elite_direct_rate_limit_skip', phase: 'deadline_queue',
+        skipped: run.skippedAfterRateLimit.length, backoffMs: directWatchBackoffMs, live: false });
+      return;
+    }
+    if (run.failed.length > 0) {
+      directWatch.setAdmissionHealth(false, 'target_hydration_failure');
+      return;
+    }
+    const proofAtMs = Date.now();
+    const postScan = directWatch.status();
+    const openHealthy = postScan.oldestOpenPollAtMs == null
+      || proofAtMs - postScan.oldestOpenPollAtMs <= cfg.directWatchFallbackPollMs;
+    const closedHealthy = postScan.oldestClosedPollAtMs == null
+      || proofAtMs - postScan.oldestClosedPollAtMs <= cfg.directWatchClosedPollMs;
+    if (candidate.stale || postScan.targetCount > directWatchConfiguredCapacity.hardProvenResidentCap
+      || !openHealthy || !closedHealthy) {
+      directWatch.setAdmissionHealth(false, candidate.stale ? 'candidate_state_not_authoritative'
+        : !openHealthy || !closedHealthy ? 'successful_observation_overdue' : 'resident_capacity_unhealthy');
+      return;
+    }
+    const flush = await publishThenFlushCapturedSignals(
+      capturedOpenSignals,
+      () => directWatch.setAdmissionHealth(true),
+      signal => execute(signal, 'elite_direct:post_scan_admission_flush', nowMs, 'direct_watch'),
+      signal => signalWasSeen(signal, key => state.hasSeen(key)),
+    );
+    directWatchMetrics.signalsHandled += capturedOpenSignals
+      .filter(batch => flush.committed.includes(batch.portfolioId))
+      .reduce((count, batch) => count + batch.signals.length, 0);
+    if (flush.pending.length) {
+      directWatch.setAdmissionHealth(false, 'buffered_signal_not_terminal');
+      log({ type: 'elite_direct_buffered_signal_pending', portfolioIds: flush.pending,
+        signalCount: capturedOpenSignals.filter(batch => flush.pending.includes(batch.portfolioId))
+          .reduce((count, batch) => count + batch.signals.length, 0), live: false });
+      return;
     }
     directWatchBackoffMs = 0;
     directWatchBackoffUntilMs = 0;
     directWatchMetrics.lastSuccessAtMs = Date.now();
   } catch (err: any) {
-    const status = err?.status;
-    if (status === 429) {
-      directWatchMetrics.http429s += 1;
-      directWatchBackoffMs = Math.min(Math.max(directWatchBackoffMs * 2, 2_000), 30_000);
-      directWatchBackoffUntilMs = Date.now() + directWatchBackoffMs;
-    }
-    log({
-      type: 'elite_direct_watch_error',
-      source: 'portfolio_specific_read_only',
-      status,
-      backoffMs: directWatchBackoffMs,
-      error: err instanceof Error ? err.message : String(err),
-      live: false,
-    });
+    // State/filesystem faults remain scan-level failures; HTTP target faults are
+    // isolated above and never reach this guard.
+    log({ type: 'elite_direct_watch_error', source: 'portfolio_specific_read_only', status: err?.status,
+      backoffMs: directWatchBackoffMs, error: err instanceof Error ? err.message : String(err), live: false });
+    directWatch.setAdmissionHealth(false, err?.status === 401 ? 'authentication_failure' : 'scan_failure');
   } finally {
-    lastDirectWatchScanMs = nowMs;
     directWatchMetrics.lastScanAtMs = nowMs;
   }
 }
@@ -1440,6 +1983,27 @@ function startServer() {
     if (req.method === 'GET' && req.url === '/health') {
       const population = tracker.report();
       const snapshot = state.snapshot();
+      const directStatus = directWatch.status();
+      const healthNowMs = Date.now();
+      const oldestOpenPollAgeMs = directStatus.oldestOpenPollAtMs == null
+        ? null : Math.max(0, healthNowMs - directStatus.oldestOpenPollAtMs);
+      const oldestClosedPollAgeMs = directStatus.oldestClosedPollAtMs == null
+        ? null : Math.max(0, healthNowMs - directStatus.oldestClosedPollAtMs);
+      const directWatchCapacityHealthy = directWatchConfiguredCapacity.provenResidentCap > 0
+        && directStatus.targetCount <= directWatchConfiguredCapacity.provenResidentCap
+        && (oldestOpenPollAgeMs == null || oldestOpenPollAgeMs <= cfg.directWatchFallbackPollMs)
+        && (oldestClosedPollAgeMs == null || oldestClosedPollAgeMs <= cfg.directWatchClosedPollMs)
+        && healthNowMs >= directWatchBackoffUntilMs && directStatus.admissionsHealthy;
+      const initialized = cfg.discoverySurfaces.every(surface => state.hasFeedBaseline(surface));
+      const fundingHealthy = fundingOracleWorker?.health().healthy ?? false;
+      const operational = evaluateShadowOperationalHealth({
+        live: cfg.live, initialized, fundingHealthy, directWatchCapacityHealthy,
+        admissionsHealthy: directStatus.admissionsHealthy, admissionSuspensionReason: directStatus.admissionSuspensionReason,
+        lastDirectWatchSuccessAtMs: directWatchMetrics.lastSuccessAtMs,
+        directWatchFreshnessLimitMs: Math.max(10_000, cfg.directWatchScanMs * 4),
+        lastFeedSuccessAtMs: lastSuccessPollMs, feedFreshnessLimitMs: Math.max(10_000, cfg.pollMs * 4),
+        feedEvidenceHealthy: !feedEvidenceAssimilationSuspended && feedEvidencePersistenceErrors === 0, nowMs: healthNowMs,
+      });
       const paperPositions = Object.values(snapshot.managed).filter(position => position.paper);
       const unresolvedPaperPositions = paperPositions.filter(position => position.unresolvedAfterSourceClose);
       const markablePaperPositions = paperPositions.filter(position => !position.unresolvedAfterSourceClose);
@@ -1459,26 +2023,82 @@ function startServer() {
         }
       });
       return json(res, 200, {
-        ok: true,
+        ok: operational.shadowOperationalReady,
+        ...operational,
         initialized,
+        initializedSurfaces: cfg.discoverySurfaces.filter(surface => state.hasFeedBaseline(surface)),
         live: cfg.live,
         researchWide: !cfg.live,
         shadowAdmissionMode: cfg.live ? 'LIVE_SCOPE' : 'ELITE_ONLY',
         eliteAdmissionVersion: ELITE_ADMISSION_VERSION,
         candidateStatePath: cfg.candidateStatePath,
         candidateStateMaxAgeMs: cfg.candidateStateMaxAgeMs,
+        feedPortfolioEvidence: { ...feedPortfolioEvidence.report(), persistenceErrors: feedEvidencePersistenceErrors,
+          assimilationSuspended: feedEvidenceAssimilationSuspended },
         feedFilter: cfg.feedFilter,
         feedMaxPages: cfg.feedMaxPages,
         feedCursors: state.snapshot().feedCursors,
+        feedCursorPinned: !operational.feedPollHealthy || directStatus.admissionSuspensionReason != null,
+        feedBackfillGapRisk: !operational.feedPollHealthy || directStatus.admissionSuspensionReason != null,
+        feedCursorPolicy: 'no_rebase_while_owned_exposure_or_admission_is_unhealthy',
         directWatch: {
           enabled: !cfg.live,
-          ...directWatch.status(),
+          ...directStatus,
           ...directWatchMetrics,
           scanMs: cfg.directWatchScanMs,
           maxHydratesPerScan: cfg.directWatchMaxHydratesPerScan,
+          openMaxPages: cfg.directWatchOpenMaxPages,
           fallbackPollMs: cfg.directWatchFallbackPollMs,
+          closedPollMs: cfg.directWatchClosedPollMs,
+          maxClosedHydratesPerScan: cfg.directWatchMaxClosedHydratesPerScan,
+          closedMaxPages: cfg.directWatchClosedMaxPages,
+          residentCap: cfg.directWatchResidentCap,
+          provenResidentCap: directWatchConfiguredCapacity.provenResidentCap,
+          hardProvenResidentCap: directWatchConfiguredCapacity.hardProvenResidentCap,
+          hardCapLimitingReasons: directWatchConfiguredCapacity.limitingReasons,
+          residentBudgetHeadroom: directWatchConfiguredCapacity.provenResidentCap - directStatus.targetCount,
+          negativeMinObservations: cfg.directWatchNegativeMinObservations,
+          negativeGraceMs: cfg.directWatchNegativeGraceMs,
+          sustainableOpenTargetCeiling: directWatchConfiguredCapacity.sustainableOpenTargetCeiling,
+          sustainableClosedTargetCeiling: directWatchConfiguredCapacity.sustainableClosedTargetCeiling,
+          openTargetHeadroom: directWatchConfiguredCapacity.sustainableOpenTargetCeiling - directStatus.targetCount,
+          closedTargetHeadroom: directWatchConfiguredCapacity.sustainableClosedTargetCeiling - directStatus.targetCount,
+          requestTimeoutMs: cfg.directWatchRequestTimeoutMs,
+          worstCaseLogicalRequestMs: cfg.directWatchRequestTimeoutMs * 2,
+          fixedOverheadMs: directWatchConfiguredCapacity.fixedOverheadMs,
+          concurrency: cfg.directWatchConcurrency,
+          requestBudget: directWatchRequestBudget.status(),
+          configuredRequestBudgetPerSecond: cfg.directWatchRequestBudgetPerSecond,
+          fixedFeedSelectorReserveRequestsPerSecond: cfg.directWatchFixedReservePerSecond,
+          worstCaseRequestBudget: directWatchConfiguredCapacity.worstCaseRequestBudget,
+          worstCaseOpenSweepMsAtCap: directWatchConfiguredCapacity.worstCaseOpenSweepMsAtCap,
+          worstCaseClosedSweepMsAtCap: directWatchConfiguredCapacity.worstCaseClosedSweepMsAtCap,
+          oldestOpenPollAgeMs,
+          oldestOpenPollOverdueMs: oldestOpenPollAgeMs == null ? null : Math.max(0, oldestOpenPollAgeMs - cfg.directWatchFallbackPollMs),
+          oldestClosedPollAgeMs,
+          oldestClosedPollOverdueMs: oldestClosedPollAgeMs == null ? null : Math.max(0, oldestClosedPollAgeMs - cfg.directWatchClosedPollMs),
+          openFreshnessGuarantee: directWatchCapacityHealthy,
+          openFreshnessLimitReason: directWatchCapacityHealthy ? null
+            : 'observed deadline/cooldown state invalidates the configured hard-cap proof; new admissions fail closed',
+          capacityHealthy: directWatchCapacityHealthy,
+          unhealthyReason: directStatus.targetCount > directWatchConfiguredCapacity.provenResidentCap
+            ? 'resident_count_exceeds_proven_capacity'
+            : healthNowMs < directWatchBackoffUntilMs ? 'rate_limit_cooldown'
+              : (oldestOpenPollAgeMs != null && oldestOpenPollAgeMs > cfg.directWatchFallbackPollMs)
+                  || (oldestClosedPollAgeMs != null && oldestClosedPollAgeMs > cfg.directWatchClosedPollMs)
+                ? 'sweep_overdue' : directStatus.admissionSuspensionReason,
           backoffMs: directWatchBackoffMs,
           backoffUntilMs: directWatchBackoffUntilMs,
+        },
+        fundingEconomicsReady: !cfg.live && fundingHealthy,
+        liveFundingGate: cfg.live ? {
+          ready: false,
+          reason: 'live funding capture is not implemented; production live economics gate remains blocked',
+        } : { ready: false, reason: 'live trading disabled' },
+        fundingOracleWorker: cfg.live ? { enabled: false, economicsReady: false } : {
+          enabled: true,
+          stagingPath: cfg.fundingBoundaryPath,
+          ...fundingOracleWorker?.health(),
         },
         maxSignalAgeMs: cfg.maxSignalAgeMs,
         lastSuccessPollMs,
@@ -1546,35 +2166,47 @@ async function pollLoop() {
     await new Promise(r => setTimeout(r, wait));
     const surface = cfg.discoverySurfaces[discoverySurfaceIndex % cfg.discoverySurfaces.length];
     discoverySurfaceIndex += 1;
-    if (!cfg.live) {
-      try {
-        await captureFundingOracleCheckpoints(Date.now());
-      } catch (err) {
-        log({ type: 'funding_oracle_capture_error', error: err instanceof Error ? err.message : String(err) });
-      }
-    }
     await wake(`api_poll:${surface}`, undefined, Date.now(), surface);
-    const directNowMs = Date.now();
-    if (!cfg.live && directNowMs - lastDirectWatchScanMs >= cfg.directWatchScanMs) {
-      await scanEliteDirectWatch(directNowMs);
-    }
+  }
+}
+
+async function directWatchLoop() {
+  while (true) {
+    const startedAtMs = Date.now();
+    await scanEliteDirectWatch(startedAtMs);
+    const elapsedMs = Date.now() - startedAtMs;
+    await new Promise(resolveSleep => setTimeout(resolveSleep,
+      Math.max(0, cfg.directWatchScanMs - elapsedMs)));
   }
 }
 
 async function main() {
-  await invo.ensureToken();
+  if (!cfg.live) {
+    await startFundingBeforeInvoAuthentication(
+      () => startFundingOracleWorker(
+        { maxDelayMs: cfg.shadowFundingOracleMaxDelayMs, stagingPath: cfg.fundingBoundaryPath },
+        applyFundingOracleResult,
+        error => {
+          log({ type: 'funding_oracle_worker_error', error: error.message });
+          setImmediate(() => { throw error; });
+        },
+      ),
+      invo.ensureToken,
+      manager => { fundingOracleWorker = manager; },
+    );
+  } else {
+    await invo.ensureToken();
+  }
   if (cfg.live) {
     await hl.connect(HL_AGENT_KEY, WALLET_ADDRESS);
     await invo.checkAccountReady();
   }
-  if (!cfg.live) {
-    try {
-      await captureFundingOracleCheckpoints(Date.now());
-    } catch (err) {
-      log({ type: 'funding_oracle_capture_error', phase: 'startup', error: err instanceof Error ? err.message : String(err) });
-    }
+  // Establish every configured surface boundary before ingress and the rotating poller
+  // start. Sequential requests keep startup bounded/429-safe and minimize the window in
+  // which an event could arrive before a newly enabled surface has its own cursor.
+  for (const surface of cfg.discoverySurfaces) {
+    await wake(`startup_surface:${surface}`, undefined, Date.now(), surface);
   }
-  await wake('startup_baseline', undefined, Date.now());
   if (!cfg.live) await scanEliteDirectWatch(Date.now());
   startServer();
   log({
@@ -1585,6 +2217,7 @@ async function main() {
     eliteAdmissionVersion: ELITE_ADMISSION_VERSION,
     candidateStatePath: cfg.candidateStatePath,
     candidateStateMaxAgeMs: cfg.candidateStateMaxAgeMs,
+    feedPortfolioEvidencePath: cfg.feedPortfolioEvidencePath,
     pollMs: cfg.pollMs,
     maxSignalAgeMs: cfg.maxSignalAgeMs,
     feedFilter: cfg.feedFilter,
@@ -1597,11 +2230,20 @@ async function main() {
       scanMs: cfg.directWatchScanMs,
       maxHydratesPerScan: cfg.directWatchMaxHydratesPerScan,
       fallbackPollMs: cfg.directWatchFallbackPollMs,
+      closedPollMs: cfg.directWatchClosedPollMs,
+      maxClosedHydratesPerScan: cfg.directWatchMaxClosedHydratesPerScan,
+      closedMaxPages: cfg.directWatchClosedMaxPages,
+      concurrency: cfg.directWatchConcurrency,
+      hardProvenResidentCap: directWatchConfiguredCapacity.hardProvenResidentCap,
+      requestBudgetPerSecond: cfg.directWatchRequestBudgetPerSecond,
+      requestBudgetBurst: cfg.directWatchRequestBudgetBurst,
+      fixedFeedSelectorReserveRequestsPerSecond: cfg.directWatchFixedReservePerSecond,
       statePath: cfg.directWatchStatePath,
       source: 'portfolio_specific_read_only',
     },
     shadowExecutionPolicy: shadowPolicy,
     fundingOracleMaxDelayMs: cfg.shadowFundingOracleMaxDelayMs,
+    fundingBoundaryPath: cfg.fundingBoundaryPath,
     executionEvidenceVersion: EXECUTION_EVIDENCE_VERSION,
     costModelVersion: COST_MODEL_VERSION,
     closedOnlyProfitabilityForbidden: true,
@@ -1618,7 +2260,8 @@ async function main() {
     liveMaxPositions: cfg.maxPositions,
     allow: [...cfg.allow],
   });
-  await pollLoop();
+  if (cfg.live) await pollLoop();
+  else await Promise.all([pollLoop(), directWatchLoop()]);
 }
 
 main().catch(err => {

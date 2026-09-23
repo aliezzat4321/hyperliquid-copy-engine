@@ -1,7 +1,9 @@
 import { resolve } from 'path';
+import { existsSync } from 'fs';
 import { INVO_REFRESH_TOKEN, INVO_TOKEN, validateEnv } from './env.js';
 import * as invo from './invo-client.js';
 import { PortfolioCandidateLedger } from './portfolio-candidates.js';
+import { loadFeedPortfolioEvidence } from './feed-portfolio-evidence.js';
 import {
   CANONICAL_INVO_HORIZONS,
   InvoLeaderboardLedger,
@@ -42,6 +44,9 @@ async function main() {
   const snapshotsPath = resolve(process.env.INVO_PORTFOLIO_CANDIDATE_SNAPSHOTS_PATH ?? 'data/portfolio-candidate-snapshots.jsonl');
   const leaderboardStatePath = resolve(process.env.INVO_PORTFOLIO_LEADERBOARD_STATE_PATH ?? 'data/invo-leaderboards.json');
   const leaderboardSnapshotsPath = resolve(process.env.INVO_PORTFOLIO_LEADERBOARD_SNAPSHOTS_PATH ?? 'data/invo-leaderboard-snapshots.jsonl');
+  const feedEvidencePath = resolve(process.env.NOTIFICATION_TRADER_FEED_PORTFOLIO_EVIDENCE_PATH
+    ?? process.env.INVO_FEED_PORTFOLIO_EVIDENCE_PATH
+    ?? '/var/lib/hyperliquid-copy-engine/invo-notification-executor/feed-portfolio-evidence.json');
   const pages = Math.max(1, Math.min(20, Math.trunc(n('INVO_PORTFOLIO_DISCOVERY_PAGES', 4))));
   const pageSize = Math.max(1, Math.min(100, Math.trunc(n('INVO_PORTFOLIO_DISCOVERY_PAGE_SIZE', 50))));
   const leaderboardPages = Math.max(1, Math.min(20, Math.trunc(n('INVO_PORTFOLIO_LEADERBOARD_PAGES', pages))));
@@ -85,7 +90,8 @@ async function main() {
         const items = Array.isArray(data?.items) ? data.items : [];
         if (!items.length) break;
         rawItems += items.length;
-        accepted += ledger.observe(items, filter, observedAtMs).length;
+        const observed = ledger.observe(items, filter, observedAtMs);
+        accepted += observed.length;
         if (items.length < pageSize) break;
       } catch (err) {
         failure = err instanceof Error ? err.message : String(err);
@@ -94,7 +100,15 @@ async function main() {
     }
     endpointResults.push({ filter, accepted, failure });
   }
-
+  // Feed evidence is ingested only here, after the broad endpoint cycle. Its source
+  // trade time is provenance; observedAtMs is this research processing boundary.
+  const assimilationSuspensionPath = `${feedEvidencePath}.assimilation-suspended.json`;
+  const feedEvidence = loadFeedPortfolioEvidence(feedEvidencePath);
+  const feedAssimilation = existsSync(assimilationSuspensionPath)
+    ? { ...ledger.feedExpansionReport(observedAtMs), observationsProcessed: 0,
+      assimilationSuspended: true, suspensionMarkerPath: assimilationSuspensionPath }
+    : { ...ledger.assimilateFeedEvidence(Object.values(feedEvidence.portfolios), observedAtMs),
+      assimilationSuspended: false };
   const report = ledger.report();
   const leaderboards = leaderboardLedger.report();
   console.log(JSON.stringify({
@@ -157,6 +171,11 @@ async function main() {
         score: p.score,
         sourceFilter: p.sourceFilter,
       })),
+    },
+    feedCandidateExpansion: {
+      evidenceVersion: feedEvidence.version,
+      evidenceGeneratedAtMs: feedEvidence.generatedAtMs,
+      ...feedAssimilation,
     },
     leaderboardSelectionPolicy: 'COLLECT_FIRST_REVIEW_BEFORE_ELITE_SELECTOR_CHANGE',
     retroactiveSelectionForbidden: true,

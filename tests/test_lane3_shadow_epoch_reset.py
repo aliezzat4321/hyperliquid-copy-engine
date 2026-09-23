@@ -43,6 +43,9 @@ def test_reset_clears_derived_shadow_data_but_preserves_source_evidence(
                 "source": "following",
             }
         },
+        "feedBaselines": {"following": 123, "trending": 456},
+        "observedOpenSourceIds": ["source-a"],
+        "handledCloseSourceIds": ["source-closed"],
     }
     write(tmp_path / "state.json", json.dumps(state))
 
@@ -50,6 +53,7 @@ def test_reset_clears_derived_shadow_data_but_preserves_source_evidence(
         "trader-population.json": '{"traders":{"alice":{}}}\n',
         "invo-leaderboards.json": '{"leaderboardVersion":"raw-source"}\n',
         "invo-leaderboard-snapshots.jsonl": '{"surface":"1D"}\n',
+        "feed-portfolio-evidence.json.replay.bloom": "durable-replay-memory\n",
     }
     for name, content in preserved.items():
         write(tmp_path / name, content)
@@ -60,10 +64,13 @@ def test_reset_clears_derived_shadow_data_but_preserves_source_evidence(
     write(tmp_path / "audit.pre-old-epoch-1.jsonl", "old audit\n")
     historical_tracker = tmp_path / "trader-population.pre-old-epoch-1.json"
     write(historical_tracker, "historical discovery evidence\n")
+    causal_archive = tmp_path / "portfolio-candidate-snapshots.jsonl.archive"
+    causal_archive.mkdir()
+    write(causal_archive / "segment-1.jsonl", "historical selector audit evidence\n")
 
     result = reset_state_root(
         tmp_path,
-        epoch="lane3-hybrid-v3-clean-20260916",
+        epoch="lane3-hybrid-v4-clean-20260921",
         now=dt.datetime(
             2026, 9, 16, 20, 0, tzinfo=dt.timezone.utc  # noqa: UP017
         ),
@@ -72,20 +79,32 @@ def test_reset_clears_derived_shadow_data_but_preserves_source_evidence(
     after = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
     assert after["seen"] == state["seen"]
     assert after["feedCursors"] == state["feedCursors"]
+    assert after["feedBaselines"] == state["feedBaselines"]
+    assert after["observedOpenSourceIds"] == state["observedOpenSourceIds"]
+    assert after["handledCloseSourceIds"] == state["handledCloseSourceIds"]
     assert after["managed"] == {}
     for name, content in preserved.items():
         assert (tmp_path / name).read_text(encoding="utf-8") == content
     for name in DELETE_FILES:
         assert not (tmp_path / name).exists()
+    assert "elite-direct-watch-admissions.json" in DELETE_FILES
+    assert "elite-direct-watch.json.journal.jsonl" in DELETE_FILES
+    assert "feed-portfolio-evidence.json" in DELETE_FILES
+    assert "feed-portfolio-evidence.json.journal.jsonl" in DELETE_FILES
+    assert "portfolio-candidate-snapshots.jsonl.recent.json" in DELETE_FILES
     assert not (tmp_path / "state.pre-old-epoch-1.json").exists()
     assert not (tmp_path / "audit.pre-old-epoch-1.jsonl").exists()
     assert historical_tracker.read_text(encoding="utf-8") == (
         "historical discovery evidence\n"
     )
+    assert (causal_archive / "segment-1.jsonl").read_text(encoding="utf-8") == (
+        "historical selector audit evidence\n"
+    )
 
     assert result["managedPositionsRemoved"] == 1
     assert result["seenKeysPreserved"] == 2
     assert result["feedCursorsPreserved"] == 1
+    assert result["feedBaselinesPreserved"] == 2
     assert result["selectorVersion"] == SELECTOR_VERSION
     assert result["realTradingEnabled"] is False
     assert result["polymarketTouched"] is False
@@ -94,7 +113,7 @@ def test_reset_clears_derived_shadow_data_but_preserves_source_evidence(
         encoding="utf-8"
     ).splitlines()
     assert len(tombstones) == 1
-    assert json.loads(tombstones[0])["epoch"] == "lane3-hybrid-v3-clean-20260916"
+    assert json.loads(tombstones[0])["epoch"] == "lane3-hybrid-v4-clean-20260921"
 
 
 def test_invalid_state_fails_before_any_derived_file_is_deleted(
@@ -105,6 +124,53 @@ def test_invalid_state_fails_before_any_derived_file_is_deleted(
 
     with pytest.raises(RuntimeError, match="seen must be an array"):
         reset_state_root(tmp_path, epoch="test-epoch")
+
+    assert (tmp_path / "audit.jsonl").read_text(encoding="utf-8") == (
+        "must remain on failed validation\n"
+    )
+    assert not (tmp_path / "dataset-resets.jsonl").exists()
+
+
+def test_reset_accepts_legacy_state_without_feed_baselines(tmp_path: Path) -> None:
+    legacy = {
+        "seen": ["legacy-key"],
+        "managed": {},
+        "feedCursors": {
+            "following": {
+                "postId": "legacy-post",
+                "observedAtMs": 123,
+                "source": "startup_baseline",
+            }
+        },
+    }
+    write(tmp_path / "state.json", json.dumps(legacy))
+
+    result = reset_state_root(tmp_path, epoch="legacy-state-reset")
+
+    after = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert after["feedCursors"] == legacy["feedCursors"]
+    assert "feedBaselines" not in after
+    assert result["feedCursorsPreserved"] == 1
+    assert result["feedBaselinesPreserved"] == 0
+
+
+@pytest.mark.parametrize(
+    "invalid", [[], "123", None, {"following": False}, {"following": float("inf")}]
+)
+def test_invalid_feed_baselines_fail_before_deletion(
+    tmp_path: Path, invalid: object
+) -> None:
+    state = {
+        "seen": [],
+        "managed": {},
+        "feedCursors": {},
+        "feedBaselines": invalid,
+    }
+    write(tmp_path / "state.json", json.dumps(state))
+    write(tmp_path / "audit.jsonl", "must remain on failed validation\n")
+
+    with pytest.raises(RuntimeError, match="feedBaselines"):
+        reset_state_root(tmp_path, epoch="invalid-baselines")
 
     assert (tmp_path / "audit.jsonl").read_text(encoding="utf-8") == (
         "must remain on failed validation\n"
