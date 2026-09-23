@@ -49,12 +49,12 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
 | Fact | Value | Observed | Source |
 |---|---:|---|---|
-| integrated RC live authorization / real trading | authorization NONE / REAL_TRADING_ENABLED=NO | `2026-09-22T14:46:17Z` | commit `cda870ed8d9a1af9ccf6b0fa4f5ad22281a26060` |
-| reset/deploy/health pytest tests passing | 18 | `2026-09-22T14:46:17Z` | commit `cda870ed8d9a1af9ccf6b0fa4f5ad22281a26060` |
-| focused strict lifecycle/projector subtests passing | 18 | `2026-09-22T14:46:17Z` | commit `cda870ed8d9a1af9ccf6b0fa4f5ad22281a26060` |
-| AI-team contract pytest tests passing | 61 | `2026-09-22T14:46:17Z` | commit `cda870ed8d9a1af9ccf6b0fa4f5ad22281a26060` |
-| integrated RC full executor subtests passing | 294 | `2026-09-22T14:46:17Z` | commit `cda870ed8d9a1af9ccf6b0fa4f5ad22281a26060` |
-| integrated Lane 3 RC implementation commit | cda870ed8d9a1af9ccf6b0fa4f5ad22281a26060 | `2026-09-22T14:46:17Z` | commit `cda870ed8d9a1af9ccf6b0fa4f5ad22281a26060` |
+| integrated RC live authorization / real trading | authorization NONE / REAL_TRADING_ENABLED=NO | `2026-09-22T14:46:17Z` | commit `c17aadec15fd2c3e01afeca0f0c7d3617d9a31c0` |
+| reset/deploy/health pytest tests passing | 18 | `2026-09-22T14:46:17Z` | commit `c17aadec15fd2c3e01afeca0f0c7d3617d9a31c0` |
+| focused strict lifecycle/projector subtests passing | 18 | `2026-09-22T14:46:17Z` | commit `c17aadec15fd2c3e01afeca0f0c7d3617d9a31c0` |
+| AI-team contract pytest tests passing | 61 | `2026-09-22T14:46:17Z` | commit `c17aadec15fd2c3e01afeca0f0c7d3617d9a31c0` |
+| integrated RC full executor subtests passing | 295 | `2026-09-22T14:46:17Z` | commit `c17aadec15fd2c3e01afeca0f0c7d3617d9a31c0` |
+| integrated Lane 3 RC implementation commit | c17aadec15fd2c3e01afeca0f0c7d3617d9a31c0 | `2026-09-22T14:46:17Z` | commit `c17aadec15fd2c3e01afeca0f0c7d3617d9a31c0` |
 | Lane 3 final source-capture implementation commit | bbc574f | `2026-09-21T19:49:53Z` | commit `bbc574feb7ff31bcc1026e1c3522f4d9887a17aa` |
 | builder-validated executor subtests passing | 211 | `2026-09-21T19:49:53Z` | commit `bbc574feb7ff31bcc1026e1c3522f4d9887a17aa` |
 | default direct-watch resident capacity proven by timeout/page/deadline budget | 16 | `2026-09-20T15:33:55Z` | commit `67efba6` |
@@ -63,7 +63,7 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 | exploratory missing portfolios meeting frozen selector on visible evidence | 53 | `2026-09-17T23:46:12Z` | issue `#403` |
 | real trading enabled | False | `2026-09-17T23:10:50Z` | manual `VM runtime env 2026-09-17T23:10Z` |
 
-**Blocker:** Integrated Lane 3 RC implementation cda870ed8d9a1af9ccf6b0fa4f5ad22281a26060 includes causal source-time admission, admission-index v2, direct-watch state v8, and the managed-position sourceBaseShortId write/read schema repair while preserving the reviewed safety invariants. Malformed lifecycle variants fail closed; deployment uses the strict atomic publication reader; and the publication reader now accepts only the exact safe writer generation-id format, rejecting path-segment traversal before report/ledger reads. All prior strict selector/audit, canonical candidate/admission, runtime-health profitability, atomic publication, source capture, funding, replay, direct-watch, dedupe, readiness, reset, and live-off invariants remain intact. Exact validation passes 294/294 full executor subtests, 18/18 focused projector/atomic-publication subtests, 18/18 reset/deploy/health pytest tests, 61/61 contract tests, AI-team validator, ai_team_contract, git diff check, and deploy shell syntax checks. This is not profitability evidence. Production remains fd63de5 and real trading is OFF. Remaining gate: GitHub CI and BOTH independent exact-SHA reviews must PASS before shadow-only deployment.
+**Blocker:** Integrated Lane 3 RC implementation c17aadec15fd2c3e01afeca0f0c7d3617d9a31c0 includes causal source-time admission, admission-index v2, direct-watch state v8, the managed-position sourceBaseShortId write/read schema repair, and bounded atomic-publication generation retention while preserving the reviewed safety invariants. Malformed lifecycle variants fail closed; deployment uses the strict atomic publication reader; and the publication reader now accepts only the exact safe writer generation-id format, rejecting path-segment traversal before report/ledger reads. All prior strict selector/audit, canonical candidate/admission, runtime-health profitability, atomic publication, source capture, funding, replay, direct-watch, dedupe, readiness, reset, and live-off invariants remain intact. Exact validation passes 295/295 full executor subtests, 18/18 focused projector/atomic-publication subtests, 18/18 reset/deploy/health pytest tests, 61/61 contract tests, AI-team validator, ai_team_contract, git diff check, and deploy shell syntax checks. This is not profitability evidence. Production remains fd63de5 and real trading is OFF. Remaining gate: GitHub CI and BOTH independent exact-SHA reviews must PASS before shadow-only deployment.
 **Next:** Issue #400.
 
 ## Infrastructure
