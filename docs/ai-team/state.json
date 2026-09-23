@@ -147,7 +147,7 @@
           "unit": "text",
           "observed_at": "2026-09-22T14:46:17Z",
           "source_type": "COMMIT",
-          "source_ref": "79931540601214cb8e250de7afb5f6488fee9760"
+          "source_ref": "cda870ed8d9a1af9ccf6b0fa4f5ad22281a26060"
         },
         {
           "key": "integrated_lane3_rc_reset_contract_tests",
@@ -156,7 +156,7 @@
           "unit": "count",
           "observed_at": "2026-09-22T14:46:17Z",
           "source_type": "COMMIT",
-          "source_ref": "79931540601214cb8e250de7afb5f6488fee9760"
+          "source_ref": "cda870ed8d9a1af9ccf6b0fa4f5ad22281a26060"
         },
         {
           "key": "integrated_lane3_rc_discovery_tests",
@@ -165,7 +165,7 @@
           "unit": "count",
           "observed_at": "2026-09-22T14:46:17Z",
           "source_type": "COMMIT",
-          "source_ref": "79931540601214cb8e250de7afb5f6488fee9760"
+          "source_ref": "cda870ed8d9a1af9ccf6b0fa4f5ad22281a26060"
         },
         {
           "key": "integrated_lane3_rc_contract_tests",
@@ -174,25 +174,25 @@
           "unit": "count",
           "observed_at": "2026-09-22T14:46:17Z",
           "source_type": "COMMIT",
-          "source_ref": "79931540601214cb8e250de7afb5f6488fee9760"
+          "source_ref": "cda870ed8d9a1af9ccf6b0fa4f5ad22281a26060"
         },
         {
           "key": "integrated_lane3_rc_executor_tests",
           "label": "integrated RC full executor subtests passing",
-          "value": 293,
+          "value": 294,
           "unit": "count",
           "observed_at": "2026-09-22T14:46:17Z",
           "source_type": "COMMIT",
-          "source_ref": "79931540601214cb8e250de7afb5f6488fee9760"
+          "source_ref": "cda870ed8d9a1af9ccf6b0fa4f5ad22281a26060"
         },
         {
           "key": "integrated_lane3_rc_implementation",
           "label": "integrated Lane 3 RC implementation commit",
-          "value": "79931540601214cb8e250de7afb5f6488fee9760",
+          "value": "cda870ed8d9a1af9ccf6b0fa4f5ad22281a26060",
           "unit": "text",
           "observed_at": "2026-09-22T14:46:17Z",
           "source_type": "COMMIT",
-          "source_ref": "79931540601214cb8e250de7afb5f6488fee9760"
+          "source_ref": "cda870ed8d9a1af9ccf6b0fa4f5ad22281a26060"
         },
         {
           "key": "source_capture_pr_head",
@@ -258,7 +258,7 @@
           "source_ref": "VM runtime env 2026-09-17T23:10Z"
         }
       ],
-      "blocker": "Integrated Lane 3 RC implementation 79931540601214cb8e250de7afb5f6488fee9760 includes causal source-time admission, admission-index v2, and direct-watch state v8 while preserving the reviewed safety invariants. Malformed lifecycle variants fail closed; deployment uses the strict atomic publication reader; and the publication reader now accepts only the exact safe writer generation-id format, rejecting path-segment traversal before report/ledger reads. All prior strict selector/audit, canonical candidate/admission, runtime-health profitability, atomic publication, source capture, funding, replay, direct-watch, dedupe, readiness, reset, and live-off invariants remain intact. Exact validation passes 293/293 full executor subtests, 18/18 focused projector/atomic-publication subtests, 18/18 reset/deploy/health pytest tests, 61/61 contract tests, AI-team validator, ai_team_contract, git diff check, and deploy shell syntax checks. This is not profitability evidence. Production remains fd63de5 and real trading is OFF. Remaining gate: GitHub CI and BOTH independent exact-SHA reviews must PASS before shadow-only deployment.",
+      "blocker": "Integrated Lane 3 RC implementation cda870ed8d9a1af9ccf6b0fa4f5ad22281a26060 includes causal source-time admission, admission-index v2, direct-watch state v8, and the managed-position sourceBaseShortId write/read schema repair while preserving the reviewed safety invariants. Malformed lifecycle variants fail closed; deployment uses the strict atomic publication reader; and the publication reader now accepts only the exact safe writer generation-id format, rejecting path-segment traversal before report/ledger reads. All prior strict selector/audit, canonical candidate/admission, runtime-health profitability, atomic publication, source capture, funding, replay, direct-watch, dedupe, readiness, reset, and live-off invariants remain intact. Exact validation passes 294/294 full executor subtests, 18/18 focused projector/atomic-publication subtests, 18/18 reset/deploy/health pytest tests, 61/61 contract tests, AI-team validator, ai_team_contract, git diff check, and deploy shell syntax checks. This is not profitability evidence. Production remains fd63de5 and real trading is OFF. Remaining gate: GitHub CI and BOTH independent exact-SHA reviews must PASS before shadow-only deployment.",
       "next": "Issue #400"
     }
   },
