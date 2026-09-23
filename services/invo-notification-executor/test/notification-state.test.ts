@@ -4,6 +4,8 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { NotificationState } from '../src/notification-state.js';
+import { signalFromFeedPost } from '../src/notification-signal.js';
+import { signalsFromDirectInvestments, type EliteDirectTarget } from '../src/elite-direct-watch.js';
 
 function statePath(prefix = 'invo-notify-state-') {
   return join(mkdtempSync(join(tmpdir(), prefix)), 'state.json');
@@ -132,6 +134,57 @@ test('persists dedupe and source-position ownership across restart', () => {
   assert.deepEqual(second.getFeedCursor('following'), { postId: 'post-high-water', observedAtMs: 2, source: 'poll' });
   second.clearManagedBySource('base-1');
   assert.equal(second.getManagedBySource('base-1'), null);
+});
+
+test('reloads feed and direct shadow opens when upstream omits baseShortId', () => {
+  const path = statePath('notification-empty-source-short-id-');
+  const observedAtMs = 1_789_685_682_100;
+  const feedSignal = signalFromFeedPost({
+    id: 'feed-post',
+    owner: { id: 'feed-owner', username: 'feed-user' },
+    update: {
+      id: 'feed-investment', baseId: 'feed-base', ticker: 'BTC', verifiedTrade: true,
+      isOpen: true, directionLong: true, leverage: 3, entryPrice: 100, entrySize: 1,
+      updatedAt: observedAtMs - 100, portfolio: { id: 'feed-portfolio' },
+      owner: { id: 'feed-owner', username: 'feed-user' },
+    },
+  }, observedAtMs);
+  assert.ok(feedSignal);
+
+  const directTarget: EliteDirectTarget = {
+    portfolioId: 'direct-portfolio', ownerId: 'direct-owner', username: 'direct-user',
+    sourceFilter: 'trending', score: 100,
+  };
+  const [directSignal] = signalsFromDirectInvestments([{
+    id: 'direct-investment', baseId: 'direct-base', ticker: 'ETH', verifiedTrade: true,
+    isOpen: true, directionLong: false, leverage: 2, entryPrice: 200, entrySize: 1,
+    createdAt: observedAtMs - 50, updatedAt: observedAtMs - 50,
+    portfolio: { id: directTarget.portfolioId },
+  }], [], directTarget, observedAtMs - 100, observedAtMs);
+  assert.ok(directSignal);
+  assert.equal(feedSignal.sourceBaseShortId, '');
+  assert.equal(directSignal.sourceBaseShortId, '');
+
+  const state = new NotificationState(path);
+  for (const signal of [feedSignal, directSignal]) {
+    state.setManaged({
+      coin: signal.coin,
+      sourceBaseId: signal.sourceBaseId,
+      sourceBaseShortId: signal.sourceBaseShortId,
+      sourcePostId: signal.postId,
+      username: signal.username,
+      ownerId: signal.ownerId,
+      portfolioId: signal.portfolioId,
+      side: signal.side,
+      openedAtMs: observedAtMs,
+      paper: true,
+      size: signal.entrySize ?? 1,
+    });
+  }
+
+  const restarted = new NotificationState(path);
+  assert.equal(restarted.getManagedBySource('feed-base')?.sourceBaseShortId, '');
+  assert.equal(restarted.getManagedBySource('direct-base')?.sourceBaseShortId, '');
 });
 
 test('an empty feed baseline survives restart without inventing a post cursor', () => {

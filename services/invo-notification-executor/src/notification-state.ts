@@ -162,7 +162,7 @@ export function validateManagedPosition(value: unknown, path = 'managed position
   for (const key of ['coin', 'sourceBaseId', 'sourcePostId'] as const) {
     requireString(position[key], `${path}.${key}`);
   }
-  requireString(position.sourceBaseShortId, `${path}.sourceBaseShortId`);
+  requireString(position.sourceBaseShortId, `${path}.sourceBaseShortId`, true);
   if (position.side !== 'long' && position.side !== 'short') throw new Error(`${path}.side is invalid`);
   requireFiniteNumber(position.openedAtMs, `${path}.openedAtMs`);
   if (position.openedAtMs <= 0) throw new Error(`${path}.openedAtMs must be positive`);
