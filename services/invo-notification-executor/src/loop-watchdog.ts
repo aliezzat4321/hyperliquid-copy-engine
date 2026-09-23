@@ -10,9 +10,11 @@ export interface LoopWatchdogStatus {
 }
 
 export function feedWatchdogLimitMs(input: {
-  maxBackoffMs: number; pollMs: number; requestTimeoutMs: number; processingMarginMs: number;
+  maxBackoffMs: number; pollMs: number; maxPages: number;
+  requestTimeoutMs: number; maxRequestsPerPage: number; processingMarginMs: number;
 }): number {
-  return input.maxBackoffMs + input.pollMs + input.requestTimeoutMs + input.processingMarginMs;
+  const backfillRequestMs = input.maxPages * input.maxRequestsPerPage * input.requestTimeoutMs;
+  return input.maxBackoffMs + input.pollMs + backfillRequestMs + input.processingMarginMs;
 }
 
 export function directWatchdogLimitMs(input: {
@@ -20,7 +22,7 @@ export function directWatchdogLimitMs(input: {
   openMaxPages: number; closedMaxPages: number; maxAttemptsPerPage: number;
   concurrency: number; requestTimeoutMs: number;
   requestBudgetPerSecond: number; requestBudgetBurst: number; fixedReserveRequestsPerSecond: number;
-  fixedOverheadMs: number; processingMarginMs: number;
+  fixedOverheadMs: number; postScanFlushBudgetMs: number; processingMarginMs: number;
 }): number {
   const openRequests = input.openHydrates * input.openMaxPages * input.maxAttemptsPerPage;
   const closedRequests = input.closedHydrates * input.closedMaxPages * input.maxAttemptsPerPage;
@@ -32,7 +34,8 @@ export function directWatchdogLimitMs(input: {
   if (usableRate <= 0) throw new Error('direct-watch watchdog requires positive request budget');
   const budgetWaitMs = Math.ceil(Math.max(0,
     openRequests + closedRequests - input.requestBudgetBurst) / usableRate * 1000);
-  return input.fixedOverheadMs + openWallMs + closedWallMs + budgetWaitMs + input.processingMarginMs;
+  return input.fixedOverheadMs + openWallMs + closedWallMs + budgetWaitMs
+    + input.postScanFlushBudgetMs + input.processingMarginMs;
 }
 
 /**

@@ -284,7 +284,9 @@ const directWatchMetrics = {
 };
 const loopWatchdog = new LoopProgressWatchdog({
   feed: feedWatchdogLimitMs({ maxBackoffMs: 30_000, pollMs: cfg.pollMs,
-    requestTimeoutMs: invo.INVO_HTTP_REQUEST_TIMEOUT_MS, processingMarginMs: 15_000 }),
+    maxPages: cfg.feedMaxPages, requestTimeoutMs: invo.INVO_HTTP_REQUEST_TIMEOUT_MS,
+    // One page can consume the original request, refresh request, and one retry.
+    maxRequestsPerPage: 3, processingMarginMs: 15_000 }),
   direct_watch: directWatchdogLimitMs({
     openHydrates: cfg.directWatchMaxHydratesPerScan,
     closedHydrates: cfg.directWatchMaxClosedHydratesPerScan,
@@ -294,7 +296,10 @@ const loopWatchdog = new LoopProgressWatchdog({
     requestBudgetPerSecond: cfg.directWatchRequestBudgetPerSecond,
     requestBudgetBurst: cfg.directWatchRequestBudgetBurst,
     fixedReserveRequestsPerSecond: cfg.directWatchFixedReservePerSecond,
-    fixedOverheadMs: cfg.directWatchFixedOverheadMs, processingMarginMs: 15_000,
+    fixedOverheadMs: cfg.directWatchFixedOverheadMs,
+    // Captured NEW/ADD signals remain legitimately executable for this full window
+    // after hydration; publication/flush is part of the watched scan workload.
+    postScanFlushBudgetMs: cfg.maxSignalAgeMs, processingMarginMs: 15_000,
   }),
 }, Date.now());
 let loopWatchdogTimer: NodeJS.Timeout | null = null;
