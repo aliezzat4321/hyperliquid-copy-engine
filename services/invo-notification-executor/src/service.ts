@@ -84,7 +84,7 @@ import {
   isPositionExposedAcrossBoundary,
   syncStagedFundingForClose,
 } from './funding-boundary-accounting.js';
-import { directWatchdogLimitMs, feedWatchdogLimitMs, LoopProgressWatchdog } from './loop-watchdog.js';
+import { directWatchdogLimitMs, feedWatchdogLimitMs, LoopProgressWatchdog, type WatchedLoop } from './loop-watchdog.js';
 
 if (INVO_TOKEN) invo.setToken(INVO_TOKEN);
 if (INVO_REFRESH_TOKEN) invo.setRefreshToken(INVO_REFRESH_TOKEN);
@@ -282,12 +282,17 @@ const directWatchMetrics = {
   queueDepth: 0,
   lastScanAtMs: 0, lastSuccessAtMs: 0,
 };
-const loopWatchdog = new LoopProgressWatchdog({
+// direct_watch is only armed when directWatchLoop() actually runs (shadow mode). Live
+// mode never schedules that loop, so arming its watchdog there would fire a false
+// stall/exit once its bounded limit elapsed with no possible heartbeat.
+const watchdogLimits: Partial<Record<WatchedLoop, number>> = {
   feed: feedWatchdogLimitMs({ maxBackoffMs: 30_000, pollMs: cfg.pollMs,
     maxPages: cfg.feedMaxPages, requestTimeoutMs: invo.INVO_HTTP_REQUEST_TIMEOUT_MS,
     // One page can consume the original request, refresh request, and one retry.
     maxRequestsPerPage: 3, processingMarginMs: 15_000 }),
-  direct_watch: directWatchdogLimitMs({
+};
+if (!cfg.live) {
+  watchdogLimits.direct_watch = directWatchdogLimitMs({
     openHydrates: cfg.directWatchMaxHydratesPerScan,
     closedHydrates: cfg.directWatchMaxClosedHydratesPerScan,
     openMaxPages: cfg.directWatchOpenMaxPages, closedMaxPages: cfg.directWatchClosedMaxPages,
@@ -300,8 +305,9 @@ const loopWatchdog = new LoopProgressWatchdog({
     // Captured NEW/ADD signals remain legitimately executable for this full window
     // after hydration; publication/flush is part of the watched scan workload.
     postScanFlushBudgetMs: cfg.maxSignalAgeMs, processingMarginMs: 15_000,
-  }),
-}, Date.now());
+  });
+}
+const loopWatchdog = new LoopProgressWatchdog(watchdogLimits, Date.now());
 let loopWatchdogTimer: NodeJS.Timeout | null = null;
 const SOURCE_CLOSE_RETRY_BASE_MS = 250;
 const SOURCE_CLOSE_RETRY_MAX_MS = 30_000;
@@ -2228,7 +2234,7 @@ async function main() {
   startServer();
   const watchdogArmedAtMs = Date.now();
   loopWatchdog.beat('feed', watchdogArmedAtMs);
-  loopWatchdog.beat('direct_watch', watchdogArmedAtMs);
+  if (!cfg.live) loopWatchdog.beat('direct_watch', watchdogArmedAtMs);
   loopWatchdogTimer = setInterval(() => {
     const nowMs = Date.now();
     const stalled = loopWatchdog.firstStall(nowMs);

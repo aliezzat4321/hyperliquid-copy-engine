@@ -47,11 +47,12 @@ export class LoopProgressWatchdog {
   private readonly progress = new Map<WatchedLoop, number>();
 
   constructor(
-    private readonly limits: Record<WatchedLoop, number>,
+    private readonly limits: Partial<Record<WatchedLoop, number>>,
     armedAtMs: number,
   ) {
     for (const loop of Object.keys(limits) as WatchedLoop[]) {
-      if (!Number.isFinite(limits[loop]) || limits[loop] <= 0) {
+      const limit = limits[loop] as number;
+      if (!Number.isFinite(limit) || limit <= 0) {
         throw new Error(`invalid ${loop} watchdog limit`);
       }
       this.progress.set(loop, armedAtMs);
@@ -65,15 +66,16 @@ export class LoopProgressWatchdog {
 
   status(nowMs: number): LoopWatchdogStatus[] {
     return (Object.keys(this.limits) as WatchedLoop[]).map(loop => {
+      const maxSilenceMs = this.limits[loop] as number;
       const lastProgressAtMs = this.progress.get(loop) ?? nowMs;
       const silenceMs = Math.max(0, nowMs - lastProgressAtMs);
       return {
         loop,
         armedAtMs: lastProgressAtMs,
         lastProgressAtMs,
-        maxSilenceMs: this.limits[loop],
+        maxSilenceMs,
         silenceMs,
-        stalled: silenceMs > this.limits[loop],
+        stalled: silenceMs > maxSilenceMs,
       };
     });
   }

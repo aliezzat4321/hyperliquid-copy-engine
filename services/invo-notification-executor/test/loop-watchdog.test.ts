@@ -13,6 +13,19 @@ test('loop watchdog identifies a bounded direct-watch stall while a healthy feed
   assert.equal(watchdog.firstStall(12_500), null);
 });
 
+test('watchdog armed with only a feed limit never reports a direct-watch stall', () => {
+  const watchdog = new LoopProgressWatchdog({ feed: 1_000 }, 0);
+  // A loop that was never armed (live mode never runs directWatchLoop) must not be
+  // able to stall the process even after an arbitrarily long silence, because it has
+  // no status row at all rather than an unfed one.
+  const status = watchdog.status(10_000_000);
+  assert.equal(status.length, 1);
+  assert.equal(status[0].loop, 'feed');
+  assert.ok(!status.some(row => row.loop === 'direct_watch'));
+  watchdog.beat('feed', 10_000_000);
+  assert.equal(watchdog.firstStall(10_000_000), null);
+});
+
 test('feed watchdog strictly exceeds max-page backfill after max 429 backoff and auth retry', () => {
   const requestTimeoutMs = 2_000;
   const fullBackfillAfterBackoffMs = 30_000 + 20 * 3 * requestTimeoutMs;

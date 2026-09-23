@@ -36,6 +36,21 @@ test('service wires elite direct watch only in shadow and through normal execute
     'shadow-only direct watch must run independently of feed pagination');
 });
 
+test('live mode never arms the direct_watch watchdog that only directWatchLoop() can feed', () => {
+  const source = readFileSync(new URL('../../src/service.ts', import.meta.url), 'utf8');
+  const limitsDecl = source.indexOf('const watchdogLimits: Partial<Record<WatchedLoop, number>>');
+  const liveGuardedLimit = source.indexOf('if (!cfg.live) {\n  watchdogLimits.direct_watch', limitsDecl);
+  const watchdogCtor = source.indexOf('new LoopProgressWatchdog(watchdogLimits', limitsDecl);
+  assert.ok(limitsDecl >= 0, 'watchdog limits must be built as a partial record so live mode can omit direct_watch');
+  assert.ok(liveGuardedLimit > limitsDecl && liveGuardedLimit < watchdogCtor,
+    'direct_watch watchdog limit must only be set when live mode is off');
+  const armedAtDecl = source.indexOf('const watchdogArmedAtMs = Date.now();');
+  const feedBeat = source.indexOf("loopWatchdog.beat('feed', watchdogArmedAtMs);", armedAtDecl);
+  const directBeat = source.indexOf("if (!cfg.live) loopWatchdog.beat('direct_watch', watchdogArmedAtMs);", armedAtDecl);
+  assert.ok(armedAtDecl >= 0 && feedBeat > armedAtDecl && directBeat > feedBeat,
+    'startup must only beat direct_watch when directWatchLoop() will actually run to feed it');
+});
+
 test('direct OPEN evidence is recorded only after production admission and freshness gates', () => {
   const source = readFileSync(new URL('../../src/service.ts', import.meta.url), 'utf8');
   const denied = source.indexOf('if (!candidateAdmission.allowed)');
