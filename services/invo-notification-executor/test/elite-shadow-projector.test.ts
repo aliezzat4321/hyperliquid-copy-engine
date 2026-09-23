@@ -337,3 +337,42 @@ test('publication reader rejects generation-id path traversal before reading gen
   writeFileSync(manifestPath, JSON.stringify(manifest));
   assert.throws(() => readEliteShadowPublication(report, ledger), /invalid elite shadow publication manifest/);
 });
+
+
+test('publication reader requires expected ledger base and rejects manifest redirection', () => {
+  const root = mkdtempSync(join(tmpdir(), 'elite-shadow-ledger-base-'));
+  const snapshot = join(root, 'snapshots.jsonl'); const audit = join(root, 'audit.jsonl');
+  const report = join(root, 'report.json'); const ledger = join(root, 'ledger.jsonl');
+  writeFileSync(snapshot, ''); writeFileSync(audit, '');
+  writeEliteShadowReport(snapshot, audit, report, ledger, null);
+  assert.throws(() => (readEliteShadowPublication as any)(report), /invalid elite shadow publication manifest/);
+  const manifestPath = report + '.manifest.json';
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  const outside = join(root, 'outside.jsonl'); writeFileSync(outside, 'attacker-controlled');
+  manifest.ledgerPath = outside; writeFileSync(manifestPath, JSON.stringify(manifest));
+  assert.throws(() => readEliteShadowPublication(report, ledger), /invalid elite shadow publication manifest/);
+});
+
+test('failed publication removes unmatched final generation artifacts', () => {
+  const root = mkdtempSync(join(tmpdir(), 'elite-shadow-failed-generation-'));
+  const snapshot = join(root, 'snapshots.jsonl'); const audit = join(root, 'audit.jsonl');
+  const report = join(root, 'report.json'); const ledger = join(root, 'ledger.jsonl');
+  writeFileSync(snapshot, ''); writeFileSync(audit, '');
+  writeEliteShadowReport(snapshot, audit, report, ledger, null);
+  let finalRenames = 0;
+  const io: ElitePublicationIo = {
+    write: (path, data) => writeFileSync(path, data),
+    fsyncFile: path => { const fd = openSync(path, 'r'); try { fsyncSync(fd); } finally { closeSync(fd); } },
+    rename: (from, to) => {
+      if (to.includes('.generation-')) { finalRenames += 1; if (finalRenames === 2) throw new Error('injected second final rename failure'); }
+      renameSync(from, to);
+    },
+    fsyncDirectory: path => { const fd = openSync(path, 'r'); try { fsyncSync(fd); } finally { closeSync(fd); } },
+    remove: path => { try { unlinkSync(path); } catch {} },
+  };
+  assert.throws(() => writeEliteShadowReport(snapshot, audit, report, ledger, null, io), /injected/);
+  const files = readdirSync(root);
+  assert.equal(files.filter(name => name.startsWith('report.json.generation-')).length, 1);
+  assert.equal(files.filter(name => name.startsWith('ledger.jsonl.generation-')).length, 1);
+  assert.doesNotThrow(() => readEliteShadowPublication(report, ledger));
+});

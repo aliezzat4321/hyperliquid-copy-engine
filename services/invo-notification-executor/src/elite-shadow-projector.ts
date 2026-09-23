@@ -294,17 +294,17 @@ function reclaimSupersededPublications(output: string, ledger: string, currentGe
     const coherent = [...reports].filter(id => ledgers.has(id)).sort().reverse();
     const retained = new Set([currentGenerationId,
       ...coherent.filter(id => id !== currentGenerationId).slice(0, PRIOR_PUBLICATION_GENERATIONS_TO_RETAIN)]);
-    for (const generationId of coherent) {
+    // Reclaim every generation artifact not retained, including unmatched files
+    // left by a crash/failure after only one final rename completed.
+    for (const generationId of new Set([...reports, ...ledgers])) {
       if (retained.has(generationId)) continue;
-      // The manifest is already durable. Cleanup is deliberately best-effort so a
-      // filesystem race cannot turn a committed publication into a reported failure.
       try { io.remove(`${output}.generation-${generationId}`); } catch {}
       try { io.remove(`${ledger}.generation-${generationId}`); } catch {}
     }
   } catch { /* publication remains valid even when best-effort retention cannot run */ }
 }
 export function eliteShadowManifestPath(output: string) { return `${output}.manifest.json`; }
-export function readEliteShadowPublication(output: string, expectedLedgerBase?: string) {
+export function readEliteShadowPublication(output: string, expectedLedgerBase: string) {
   const manifest = JSON.parse(readFileSync(eliteShadowManifestPath(output), 'utf8'));
   const generationIdValid = typeof manifest?.generationId === 'string'
     && /^\d{13}-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(manifest.generationId);
@@ -312,7 +312,7 @@ export function readEliteShadowPublication(output: string, expectedLedgerBase?: 
     || !generationIdValid
     || typeof manifest.reportPath !== 'string' || manifest.reportPath !== `${output}.generation-${manifest.generationId}`
     || typeof manifest.ledgerPath !== 'string'
-    || (expectedLedgerBase != null && manifest.ledgerPath !== `${expectedLedgerBase}.generation-${manifest.generationId}`)
+    || (!expectedLedgerBase || manifest.ledgerPath !== `${expectedLedgerBase}.generation-${manifest.generationId}`)
     || typeof manifest.generatedAtMs !== 'number' || !Number.isFinite(manifest.generatedAtMs) || manifest.generatedAtMs <= 0) {
     throw new Error('invalid elite shadow publication manifest');
   }
@@ -343,7 +343,7 @@ export function writeEliteShadowReport(snapshotPath: string, auditPath: string, 
     if (dirname(ledger) !== dirname(output)) io.fsyncDirectory(dirname(ledger));
     io.rename(manifestTemp, manifestPath); io.fsyncDirectory(dirname(output));
   } catch (error) {
-    for (const path of [reportTemp, ledgerTemp, manifestTemp]) io.remove(path);
+    for (const path of [reportTemp, ledgerTemp, manifestTemp, reportFinal, ledgerFinal]) io.remove(path);
     throw error;
   }
   reclaimSupersededPublications(output, ledger, generationId, io);
