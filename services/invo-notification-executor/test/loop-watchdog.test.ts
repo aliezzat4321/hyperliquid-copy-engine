@@ -26,6 +26,19 @@ test('watchdog armed with only a feed limit never reports a direct-watch stall',
   assert.equal(watchdog.firstStall(10_000_000), null);
 });
 
+test('a live topology that arms no watchdog at all can never process.exit(1) mid-order', () => {
+  // Live execution places real Hyperliquid orders through SDK exchange calls that carry
+  // no timeout bound (see hl-client.ts placeMarketOrder/closePosition/setLeverage), so no
+  // per-signal heartbeat budget can soundly cover them. service.ts responds by building
+  // watchdogLimits as {} in live mode: no loop is armed, so firstStall() can never fire
+  // and kill a process that might be mid-order, no matter how long the silence is.
+  const watchdog = new LoopProgressWatchdog({}, 0);
+  const status = watchdog.status(Number.MAX_SAFE_INTEGER);
+  assert.deepEqual(status, [], 'live topology must arm zero loops');
+  assert.equal(watchdog.firstStall(Number.MAX_SAFE_INTEGER), null,
+    'an unarmed watchdog must never report a stall, even after unbounded silence');
+});
+
 test('feed watchdog bounds max 429 backoff, poll wait, and one page/signal unit of work', () => {
   const requestTimeoutMs = 2_000;
   const limit = feedWatchdogLimitMs({ maxBackoffMs: 30_000, pollMs: 1_000,

@@ -288,20 +288,29 @@ const directWatchMetrics = {
 // the worst-case wall time between two per-signal heartbeats, and — unlike the total
 // wake() cycle time — it does not grow with how many signals or pages a cycle processes,
 // so it stays correct under a future live topology with a far larger signal volume.
+// This budget only holds for shadow (paper) execution. Live execution additionally
+// calls the Hyperliquid SDK's exchange methods (setLeverage/placeOrder via
+// getSdk().exchange.*, see hl-client.ts) which — unlike every info() lookup — are not
+// wrapped in an AbortSignal timeout and so have no bound this budget could cover. Arming
+// a fixed-silence watchdog around that path risks process.exit(1) firing while an order
+// submission/verification is still in flight, which could abandon a real order mid-flight
+// with unknown fill/position state. REAL_TRADING_ENABLED is off and this PR is shadow
+// reliability only, so the feed watchdog stays unarmed in live mode until every live
+// exchange call is itself bounded and heartbeated.
 const FEED_SIGNAL_MAX_SEQUENTIAL_REQUESTS = 4;
 const feedSignalProcessingBudgetMs = FEED_SIGNAL_MAX_SEQUENTIAL_REQUESTS
   * Math.max(hl.HL_HTTP_REQUEST_TIMEOUT_MS, invo.INVO_HTTP_REQUEST_TIMEOUT_MS);
-// direct_watch is only armed when directWatchLoop() actually runs (shadow mode). Live
-// mode never schedules that loop, so arming its watchdog there would fire a false
-// stall/exit once its bounded limit elapsed with no possible heartbeat.
-const watchdogLimits: Partial<Record<WatchedLoop, number>> = {
-  feed: feedWatchdogLimitMs({ maxBackoffMs: 30_000, pollMs: cfg.pollMs,
+// Both watched loops are only armed when a loop that can actually feed them runs in this
+// topology. Live mode never schedules directWatchLoop() and its executeUnlocked() path
+// makes unbounded/unheartbeated live exchange calls the feed budget above does not cover,
+// so arming either watchdog there would risk a false stall/exit with no safe heartbeat.
+const watchdogLimits: Partial<Record<WatchedLoop, number>> = {};
+if (!cfg.live) {
+  watchdogLimits.feed = feedWatchdogLimitMs({ maxBackoffMs: 30_000, pollMs: cfg.pollMs,
     requestTimeoutMs: invo.INVO_HTTP_REQUEST_TIMEOUT_MS,
     // One page can consume the original request, refresh request, and one retry.
     maxRequestsPerPage: 3, signalProcessingBudgetMs: feedSignalProcessingBudgetMs,
-    processingMarginMs: 15_000 }),
-};
-if (!cfg.live) {
+    processingMarginMs: 15_000 });
   watchdogLimits.direct_watch = directWatchdogLimitMs({
     openHydrates: cfg.directWatchMaxHydratesPerScan,
     closedHydrates: cfg.directWatchMaxClosedHydratesPerScan,
@@ -915,6 +924,7 @@ async function executeUnlocked(
               managed,
               fill.receivedAtMs,
               cfg.shadowFundingOracleMaxDelayMs,
+              heartbeat,
             );
             fullPositionFundingUsd = funding.fundingUsd;
             fundingUsd = funding.fundingUsd * fraction;
@@ -2266,8 +2276,10 @@ async function main() {
   if (!cfg.live) await scanEliteDirectWatch(Date.now());
   startServer();
   const watchdogArmedAtMs = Date.now();
-  loopWatchdog.beat('feed', watchdogArmedAtMs);
-  if (!cfg.live) loopWatchdog.beat('direct_watch', watchdogArmedAtMs);
+  if (!cfg.live) {
+    loopWatchdog.beat('feed', watchdogArmedAtMs);
+    loopWatchdog.beat('direct_watch', watchdogArmedAtMs);
+  }
   loopWatchdogTimer = setInterval(() => {
     const nowMs = Date.now();
     const stalled = loopWatchdog.firstStall(nowMs);

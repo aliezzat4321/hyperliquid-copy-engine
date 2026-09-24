@@ -36,19 +36,46 @@ test('service wires elite direct watch only in shadow and through normal execute
     'shadow-only direct watch must run independently of feed pagination');
 });
 
-test('live mode never arms the direct_watch watchdog that only directWatchLoop() can feed', () => {
+test('live mode never arms the feed or direct_watch watchdog, since live exchange calls are unbounded/unheartbeated', () => {
   const source = readFileSync(new URL('../../src/service.ts', import.meta.url), 'utf8');
-  const limitsDecl = source.indexOf('const watchdogLimits: Partial<Record<WatchedLoop, number>>');
-  const liveGuardedLimit = source.indexOf('if (!cfg.live) {\n  watchdogLimits.direct_watch', limitsDecl);
+  const limitsDecl = source.indexOf('const watchdogLimits: Partial<Record<WatchedLoop, number>> = {};');
+  const liveGuardBlock = source.indexOf('if (!cfg.live) {', limitsDecl);
+  const feedInGuard = source.indexOf('watchdogLimits.feed = feedWatchdogLimitMs(', liveGuardBlock);
+  const directInGuard = source.indexOf('watchdogLimits.direct_watch = directWatchdogLimitMs(', liveGuardBlock);
   const watchdogCtor = source.indexOf('new LoopProgressWatchdog(watchdogLimits', limitsDecl);
-  assert.ok(limitsDecl >= 0, 'watchdog limits must be built as a partial record so live mode can omit direct_watch');
-  assert.ok(liveGuardedLimit > limitsDecl && liveGuardedLimit < watchdogCtor,
+  assert.ok(limitsDecl >= 0, 'watchdog limits must start empty so live mode can omit every loop');
+  assert.ok(liveGuardBlock > limitsDecl, 'watchdog limits must be assigned inside an explicit !cfg.live guard');
+  assert.ok(feedInGuard > liveGuardBlock && feedInGuard < watchdogCtor,
+    'feed watchdog limit must only be set when live mode is off, because live order calls ' +
+    '(setLeverage/placeOrder) are not timeout-bounded the way every info() lookup is');
+  assert.ok(directInGuard > feedInGuard && directInGuard < watchdogCtor,
     'direct_watch watchdog limit must only be set when live mode is off');
   const armedAtDecl = source.indexOf('const watchdogArmedAtMs = Date.now();');
+  const beatGuard = source.indexOf('if (!cfg.live) {', armedAtDecl);
   const feedBeat = source.indexOf("loopWatchdog.beat('feed', watchdogArmedAtMs);", armedAtDecl);
-  const directBeat = source.indexOf("if (!cfg.live) loopWatchdog.beat('direct_watch', watchdogArmedAtMs);", armedAtDecl);
-  assert.ok(armedAtDecl >= 0 && feedBeat > armedAtDecl && directBeat > feedBeat,
-    'startup must only beat direct_watch when directWatchLoop() will actually run to feed it');
+  const directBeat = source.indexOf("loopWatchdog.beat('direct_watch', watchdogArmedAtMs);", armedAtDecl);
+  assert.ok(armedAtDecl >= 0 && beatGuard > armedAtDecl
+    && feedBeat > beatGuard && directBeat > feedBeat,
+    'startup must only beat feed/direct_watch when a loop exists in this topology that can actually feed them');
+});
+
+test('live mode cannot arm any watchdog capable of firing mid-order: an unbounded live exchange call has no heartbeat to save it', () => {
+  const source = readFileSync(new URL('../../src/service.ts', import.meta.url), 'utf8');
+  // hl.placeMarketOrder/hl.closePosition/hl.setLeverage go through the Hyperliquid SDK's
+  // own exchange.* methods, not the bounded info() helper, so they carry no
+  // HL_HTTP_REQUEST_TIMEOUT_MS ceiling. A watchdog armed around a path containing these
+  // calls could process.exit(1) while an order is still in flight. The only sound fix
+  // while REAL_TRADING_ENABLED stays off is: no watchdog is armed at all in live mode.
+  const liveOrderCalls = ['hl.setLeverage(', 'hl.placeMarketOrder(', 'hl.closePosition('];
+  for (const call of liveOrderCalls) assert.ok(source.includes(call), `expected ${call} in service.ts`);
+  const hlClientSource = readFileSync(new URL('../../src/hl-client.ts', import.meta.url), 'utf8');
+  assert.match(hlClientSource, /export async function placeMarketOrder[\s\S]*?getSdk\(\)\.exchange\.placeOrder/,
+    'placeMarketOrder must go through the SDK exchange client, confirming it bypasses the bounded info() timeout');
+  assert.doesNotMatch(
+    hlClientSource.slice(hlClientSource.indexOf('export async function setLeverage')),
+    /AbortSignal\.timeout/,
+    'live exchange calls (setLeverage/placeOrder) are not timeout-bounded today, so no fixed-silence watchdog can safely wrap them',
+  );
 });
 
 test('direct OPEN evidence is recorded only after production admission and freshness gates', () => {

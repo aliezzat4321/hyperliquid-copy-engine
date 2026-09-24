@@ -44,6 +44,38 @@ test('a single shadow signal execution beats the watchdog through its bounded fu
     'the potentially long multi-funding-boundary catch-up wait must heartbeat on every poll');
 });
 
+test('the close-path funding lookup threads heartbeat through fundingForPosition as its onPage callback', () => {
+  const source = readFileSync(new URL('../../src/service.ts', import.meta.url), 'utf8');
+  const executeUnlocked = source.indexOf('async function executeUnlocked(');
+  const execute = source.indexOf('async function execute(', executeUnlocked);
+  assert.ok(executeUnlocked >= 0 && execute > executeUnlocked);
+  const body = source.slice(executeUnlocked, execute);
+  assert.match(body, /fundingForPosition\(\s*[\s\S]*?heartbeat,\s*\)/,
+    'getFundingHistory can page up to 20 sequential requests inside one close signal; the ' +
+    'per-signal heartbeat must reach every page, not only the whole executeUnlocked() call');
+});
+
+test('fundingForPosition and getFundingHistory accept and forward an onPage progress callback', () => {
+  const shadowMarketSource = readFileSync(new URL('../../src/shadow-market.ts', import.meta.url), 'utf8');
+  const fundingForPosition = shadowMarketSource.indexOf('export async function fundingForPosition(');
+  assert.ok(fundingForPosition >= 0);
+  const signatureEnd = shadowMarketSource.indexOf('): Promise<{', fundingForPosition);
+  const signature = shadowMarketSource.slice(fundingForPosition, signatureEnd);
+  assert.match(signature, /onPage\?:\s*\(\)\s*=>\s*void/,
+    'fundingForPosition must accept an optional per-page progress callback');
+  assert.match(shadowMarketSource, /hl\.getFundingHistory\(position\.coin, startTimeMs, endTimeMs, onPage\)/,
+    'fundingForPosition must forward its onPage callback into getFundingHistory');
+
+  const hlClientSource = readFileSync(new URL('../../src/hl-client.ts', import.meta.url), 'utf8');
+  const getFundingHistory = hlClientSource.indexOf('export async function getFundingHistory(');
+  const getFundingHistoryEnd = hlClientSource.indexOf('\n}', getFundingHistory);
+  const getFundingHistoryBody = hlClientSource.slice(getFundingHistory, getFundingHistoryEnd);
+  assert.match(getFundingHistoryBody, /onPage\?:\s*\(\)\s*=>\s*void/,
+    'getFundingHistory must accept an optional per-page progress callback');
+  assert.match(getFundingHistoryBody, /const batch = await info\(\{ type: 'fundingHistory'[\s\S]*?onPage\?\.\(\);/,
+    'getFundingHistory must beat onPage immediately after each page request resolves, before the next page fetch');
+});
+
 test('every Hyperliquid info() request the feed path can make carries a bounded abort signal', () => {
   const source = readFileSync(new URL('../../src/hl-client.ts', import.meta.url), 'utf8');
   assert.match(source, /export const HL_HTTP_REQUEST_TIMEOUT_MS/);

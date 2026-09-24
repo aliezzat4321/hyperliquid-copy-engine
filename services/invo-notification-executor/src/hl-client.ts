@@ -107,6 +107,7 @@ export async function getFundingHistory(
   coin: string,
   startTime: number,
   endTime: number,
+  onPage?: () => void,
 ): Promise<FundingHistoryQuery> {
   if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || startTime > endTime) {
     throw new Error(`Invalid funding history boundary for ${coin}: ${startTime}..${endTime}`);
@@ -118,6 +119,7 @@ export async function getFundingHistory(
   const maxPages = 20;
   for (let page = 0; page < maxPages && cursor <= endTime; page += 1) {
     const batch = await info({ type: 'fundingHistory', coin, startTime: cursor, endTime });
+    onPage?.();
     if (!Array.isArray(batch)) throw new Error(`Invalid funding history for ${coin}`);
     returnedRows.push(...batch.map(row => ({
       coin: row?.coin,
