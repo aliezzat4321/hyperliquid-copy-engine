@@ -30,6 +30,12 @@
  * 4. **No request is issued into a known rejection.** While a class is in cooldown,
  *    `acquire` throws instead of spending a token, which removes traffic that is certain
  *    to be rejected.
+ * 5. **Priority survives the scheduler.** The queue order above is only a real guarantee if
+ *    the thing draining the queue honours it. The internal pump therefore sleeps
+ *    interruptibly: an arriving request that is servable before the pump's current wake-up
+ *    reschedules it. Without that, a pump parked on a `DIRECT_WATCH` head's `1 + reserve`
+ *    deficit would hold back a later `FEED` request that needed only one token — feed
+ *    priority in the data structure, reconciliation priority in wall-clock time.
  *
  * `minRequestsPerSecond` is the AIMD floor. Every static bound that must hold even while
  * the budget is degraded (the direct-watch loop watchdog) is computed from that floor,
@@ -95,6 +101,9 @@ export interface InvoRequestBudgetStatus {
   feedCooldownShare: number;
   consecutive429s: number;
   total429s: number;
+  /** 429s that carried a usable server `Retry-After`. */
+  retryAfterObservedCount: number;
+  /** The subset of those whose delay actually set the cooldown, rather than being superseded. */
   retryAfterHonoredCount: number;
   rateReductions: number;
   rateRecoveries: number;
@@ -102,9 +111,19 @@ export interface InvoRequestBudgetStatus {
   cooldownUntilMs: Record<InvoRequestClass, number>;
   cooldownRemainingMs: Record<InvoRequestClass, number>;
   classes: Record<InvoRequestClass, InvoRequestClassMetrics>;
-  /** Feed priority is only healthy while the feed is provably not the throttled class. */
+  /**
+   * Live view: the feed is not, right now, the throttled class. These conditions clear when
+   * the state that caused them clears, so a recovered budget reports itself recovered.
+   */
   feedPriorityHealthy: boolean;
   feedPriorityFailures: string[];
+  /**
+   * Durable view: a feed request was starved at some point in this process's life. This
+   * never clears, because a missed feed NEW/ADD cannot be recovered later. The deployment
+   * gate fails closed on it, so recovery of the *live* flag is not a way to forget a breach.
+   */
+  feedPriorityEverBreached: boolean;
+  feedPriorityBreaches: string[];
   feedStarvationGuard: string;
 }
 
@@ -116,6 +135,9 @@ export interface InvoRateLimitDecision {
   peerCooldownUntilMs: number;
   effectiveRequestsPerSecond: number;
   consecutive429s: number;
+  /** The server's delay was usable. */
+  retryAfterObserved: boolean;
+  /** The server's delay actually determined this cooldown. */
   retryAfterHonored: boolean;
 }
 
@@ -166,11 +188,18 @@ export class InvoRequestBudget {
   };
   private readonly queues: Record<InvoRequestClass, QueuedRequest[]> = { FEED: [], DIRECT_WATCH: [] };
   private pumping = false;
+  /** Resolves the pump's current sleep early when an arriving request can be served sooner. */
+  private pumpWake: (() => void) | null = null;
+  /** When the pump's current sleep is due to end; 0 whenever it is not sleeping. */
+  private pumpWakeAtMs = 0;
   private consecutive429s = 0;
   private last429AtMs = 0;
   private lastRecoveryAtMs: number;
   private total429sCount = 0;
+  private retryAfterObservedCount = 0;
   private retryAfterHonoredCount = 0;
+  /** Latched feed-starvation evidence; see `feedPriorityBreaches`. */
+  private readonly feedPriorityBreachSet = new Set<string>();
   private rateReductions = 0;
   private rateRecoveries = 0;
 
@@ -238,6 +267,9 @@ export class InvoRequestBudget {
       metrics.waits += 1;
       metrics.waitMs += waitMs;
       metrics.maxWaitMs = Math.max(metrics.maxWaitMs, waitMs);
+      if (entry.requestClass === INVO_PRIMARY_REQUEST_CLASS && waitMs >= this.config.maxAcquireWaitMs) {
+        this.feedPriorityBreachSet.add('feed_wait_reached_bound');
+      }
     }
     entry.resolve();
   }
@@ -292,6 +324,9 @@ export class InvoRequestBudget {
         if (atMs - queue[index].startedAtMs < this.config.maxAcquireWaitMs) continue;
         const [entry] = queue.splice(index, 1);
         this.metrics[requestClass].waitExceeded += 1;
+        if (requestClass === INVO_PRIMARY_REQUEST_CLASS) {
+          this.feedPriorityBreachSet.add('feed_budget_wait_exceeded');
+        }
         entry.reject(budgetError(requestClass, atMs, 'budget_wait_exceeded',
           `invo request budget wait exceeded ${this.config.maxAcquireWaitMs}ms for ${requestClass}`));
       }
@@ -316,6 +351,35 @@ export class InvoRequestBudget {
     return Math.max(1, Math.min(...candidates));
   }
 
+  /**
+   * Sleeps for `waitMs`, or until `wakePump()` fires — whichever happens first.
+   *
+   * The pump computes its next wake from the queue as it stood when it went to sleep. A
+   * `DIRECT_WATCH` head parks it on a `1 + reserve` token deficit, while a `FEED` request
+   * arriving a moment later needs one token and is servable far sooner. An uninterruptible
+   * sleep would make that feed request wait out reconciliation's refill: the priority
+   * inversion the reserve exists to prevent, reintroduced by the scheduler rather than by
+   * the queue. So the sleep is interruptible and the pump re-derives its own deadline.
+   */
+  private sleepUntilWake(waitMs: number): Promise<void> {
+    return new Promise<void>(resolve => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        if (this.pumpWake === finish) {
+          this.pumpWake = null;
+          this.pumpWakeAtMs = 0;
+        }
+        resolve();
+      };
+      this.pumpWake = finish;
+      this.pumpWakeAtMs = this.now() + waitMs;
+      // A late timer from a superseded sleep is harmless: `finish` is idempotent.
+      void Promise.resolve(this.sleep(waitMs)).then(finish, finish);
+    });
+  }
+
   private async pump(): Promise<void> {
     if (this.pumping) return;
     this.pumping = true;
@@ -326,10 +390,12 @@ export class InvoRequestBudget {
         this.serve(atMs);
         this.expire(atMs);
         if (this.queued() === 0) return;
-        await this.sleep(this.nextWakeMs(this.now()));
+        await this.sleepUntilWake(this.nextWakeMs(this.now()));
       }
     } finally {
       this.pumping = false;
+      this.pumpWake = null;
+      this.pumpWakeAtMs = 0;
     }
   }
 
@@ -354,7 +420,18 @@ export class InvoRequestBudget {
       const atMs = this.now();
       this.advance(atMs);
       this.serve(atMs);
-      if (this.queued() > 0) void this.pump();
+      if (this.queued() === 0) return;
+      if (!this.pumping) {
+        void this.pump();
+        return;
+      }
+      // The pump is asleep on a deadline computed before this request existed. If the queue
+      // is now servable earlier than that deadline — the FEED-behind-DIRECT_WATCH case —
+      // wake it now and let it re-derive its wait, instead of serving the primary path at
+      // reconciliation's refill rate. `pumpWakeAtMs === 0` means the pump is mid-cycle and
+      // will re-derive its deadline anyway.
+      const wakeAtMs = this.now() + this.nextWakeMs(this.now());
+      if (this.pumpWakeAtMs > 0 && wakeAtMs < this.pumpWakeAtMs) this.pumpWake?.();
     });
   }
 
@@ -392,10 +469,18 @@ export class InvoRequestBudget {
       this.config.baseCooldownMs * 2 ** Math.min(16, this.consecutive429s - 1),
     );
     const observedMs = retryAfterMs != null && Number.isFinite(retryAfterMs) && retryAfterMs > 0
-      ? Math.min(this.config.maxRetryAfterCooldownMs, Math.max(this.config.baseCooldownMs, retryAfterMs))
+      ? Math.min(this.config.maxRetryAfterCooldownMs, retryAfterMs)
       : null;
-    if (observedMs != null) this.retryAfterHonoredCount += 1;
+    if (observedMs != null) this.retryAfterObservedCount += 1;
+    // `exponentialMs` is never below `baseCooldownMs`, so taking the larger of the two both
+    // keeps the local floor and lets a longer server delay win.
     const cooldownMs = Math.max(observedMs ?? 0, exponentialMs);
+    // "Honoured" must mean the server's delay actually set the backoff. A Retry-After
+    // shorter than the local escalation is observed and recorded, but it did not decide
+    // anything, and counting it would overstate how closely this budget follows the server
+    // — in a metric whose whole purpose is to be trusted about the account's real limits.
+    const retryAfterHonored = observedMs != null && observedMs >= exponentialMs;
+    if (retryAfterHonored) this.retryAfterHonoredCount += 1;
     // Multiplicative decrease: the configured ceiling was demonstrably too high for the
     // account right now, so stop treating it as proven until quiet windows earn it back.
     const reducedRate = Math.max(this.config.minRequestsPerSecond, this.effectiveRate * this.config.rateDecreaseFactor);
@@ -421,7 +506,8 @@ export class InvoRequestBudget {
       peerClass, peerCooldownUntilMs: this.cooldowns[peerClass],
       effectiveRequestsPerSecond: this.effectiveRate,
       consecutive429s: this.consecutive429s,
-      retryAfterHonored: observedMs != null,
+      retryAfterObserved: observedMs != null,
+      retryAfterHonored,
     };
   }
 
@@ -448,12 +534,14 @@ export class InvoRequestBudget {
   }
 
   status(atMs: number = this.now()): InvoRequestBudgetStatus {
-    const feed = this.metrics.FEED;
+    // Live conditions only. A cooldown comparison must be made on the *remaining* time at
+    // `atMs`: two expired deadlines are not a live priority inversion, and reporting them
+    // as one would leave the budget permanently unhealthy with no recovery path.
     const feedPriorityFailures: string[] = [];
     if (this.config.feedReservedRequestsPerSecond < 1) feedPriorityFailures.push('feed_reserve_not_configured');
-    if (feed.waitExceeded > 0) feedPriorityFailures.push('feed_budget_wait_exceeded');
-    if (this.cooldowns.FEED > this.cooldowns.DIRECT_WATCH) feedPriorityFailures.push('feed_cooldown_exceeds_direct_watch');
-    if (feed.maxWaitMs >= this.config.maxAcquireWaitMs) feedPriorityFailures.push('feed_wait_reached_bound');
+    if (Math.max(0, this.cooldowns.FEED - atMs) > Math.max(0, this.cooldowns.DIRECT_WATCH - atMs)) {
+      feedPriorityFailures.push('feed_cooldown_exceeds_direct_watch');
+    }
     return {
       version: INVO_REQUEST_BUDGET_VERSION,
       coordinated: true,
@@ -470,6 +558,7 @@ export class InvoRequestBudget {
       feedCooldownShare: this.config.feedCooldownShare,
       consecutive429s: this.consecutive429s,
       total429s: this.total429sCount,
+      retryAfterObservedCount: this.retryAfterObservedCount,
       retryAfterHonoredCount: this.retryAfterHonoredCount,
       rateReductions: this.rateReductions,
       rateRecoveries: this.rateRecoveries,
@@ -482,6 +571,8 @@ export class InvoRequestBudget {
       classes: { FEED: { ...this.metrics.FEED }, DIRECT_WATCH: { ...this.metrics.DIRECT_WATCH } },
       feedPriorityHealthy: feedPriorityFailures.length === 0,
       feedPriorityFailures,
+      feedPriorityEverBreached: this.feedPriorityBreachSet.size > 0,
+      feedPriorityBreaches: [...this.feedPriorityBreachSet].sort(),
       feedStarvationGuard: 'direct_watch_may_not_consume_reserved_feed_tokens_or_overtake_a_waiting_feed_request',
     };
   }

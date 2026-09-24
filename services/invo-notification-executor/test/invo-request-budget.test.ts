@@ -27,6 +27,35 @@ function config(overrides: Partial<InvoRequestBudgetConfig> = {}): InvoRequestBu
   };
 }
 
+/**
+ * Controllable virtual clock: `sleep` parks a waiter, and only `drain` releases one, so
+ * concurrent acquirers are replayed deterministically in due order rather than raced.
+ */
+function controllableClock() {
+  const clock = { nowMs: 0 };
+  const waiters: Array<{ dueAtMs: number; resolve: () => void; seq: number }> = [];
+  let seq = 0;
+  return {
+    clock,
+    waiters,
+    now: () => clock.nowMs,
+    sleep: (ms: number) => new Promise<void>(resolve => {
+      waiters.push({ dueAtMs: clock.nowMs + Math.max(1, ms), resolve, seq: seq += 1 });
+    }),
+    /** Releases due waiters, earliest first, until `done()` or the waiter queue empties. */
+    async drain(done: () => boolean, maxTicks = 200) {
+      for (let tick = 0; tick < maxTicks && !done(); tick += 1) {
+        await new Promise(resolve => setImmediate(resolve));
+        if (!waiters.length) continue;
+        waiters.sort((a, b) => a.dueAtMs - b.dueAtMs || a.seq - b.seq);
+        const next = waiters.shift()!;
+        clock.nowMs = Math.max(clock.nowMs, next.dueAtMs);
+        next.resolve();
+      }
+    },
+  };
+}
+
 /** Sequential virtual clock: enough for single-acquirer pacing assertions. */
 function sequentialClock() {
   const clock = { nowMs: 0 };
@@ -99,13 +128,7 @@ test('the feed may draw the bucket below the reserve; only direct watch is held 
 });
 
 test('direct watch stands aside while a feed request is waiting for capacity', async () => {
-  const clock = { nowMs: 0 };
-  const waiters: Array<{ dueAtMs: number; resolve: () => void; seq: number }> = [];
-  let seq = 0;
-  const now = () => clock.nowMs;
-  const sleep = (ms: number) => new Promise<void>(resolve => {
-    waiters.push({ dueAtMs: clock.nowMs + Math.max(1, ms), resolve, seq: seq += 1 });
-  });
+  const { clock, now, sleep, drain } = controllableClock();
   const budget = new InvoRequestBudget(config({
     maxRequestsPerSecond: 4, minRequestsPerSecond: 4, burst: 5, feedReservedRequestsPerSecond: 3,
   }), now, sleep);
@@ -114,17 +137,45 @@ test('direct watch stands aside while a feed request is waiting for capacity', a
   const order: string[] = [];
   const feed = budget.acquire('FEED').then(() => { order.push('FEED'); });
   const direct = budget.acquire('DIRECT_WATCH').then(() => { order.push('DIRECT_WATCH'); });
-  for (let tick = 0; tick < 200 && order.length < 2; tick += 1) {
-    await new Promise(resolve => setImmediate(resolve));
-    if (!waiters.length) continue;
-    waiters.sort((a, b) => a.dueAtMs - b.dueAtMs || a.seq - b.seq);
-    const next = waiters.shift()!;
-    clock.nowMs = Math.max(clock.nowMs, next.dueAtMs);
-    next.resolve();
-  }
+  await drain(() => order.length >= 2);
   await Promise.all([feed, direct]);
   assert.deepEqual(order, ['FEED', 'DIRECT_WATCH'], 'reconciliation must not overtake the primary path');
   assert.ok(budget.status(clock.nowMs).classes.DIRECT_WATCH.reserveYields > 0);
+});
+
+test('a feed request arriving behind an already-queued direct-watch request is not paced by it', async () => {
+  // Priority inversion regression. Arrival order is the case the queue alone cannot fix:
+  // DIRECT_WATCH queues first and parks the internal pump on its own `1 + reserve` refill
+  // deficit. A FEED request arriving afterwards needs a single token and is servable four
+  // times sooner, so if the sleeping pump is not rescheduled the primary admission path is
+  // served at reconciliation's rate — feed priority on paper, direct-watch priority in
+  // wall-clock time, and exactly the missed-NEW/ADD risk this budget exists to remove.
+  const { clock, now, sleep, waiters, drain } = controllableClock();
+  const budget = new InvoRequestBudget(config({
+    maxRequestsPerSecond: 4, minRequestsPerSecond: 4, burst: 5, feedReservedRequestsPerSecond: 3,
+  }), now, sleep);
+  for (let index = 0; index < 5; index += 1) await budget.acquire('FEED');
+  assert.equal(clock.nowMs, 0);
+
+  const grantedAtMs: Record<string, number> = {};
+  const direct = budget.acquire('DIRECT_WATCH').then(() => { grantedAtMs.DIRECT_WATCH = clock.nowMs; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(waiters.map(waiter => waiter.dueAtMs), [1_000],
+    'the pump parks on the direct-watch head: 1 + 3 reserved tokens at 4 req/s');
+
+  const feed = budget.acquire('FEED').then(() => { grantedAtMs.FEED = clock.nowMs; });
+  await drain(() => grantedAtMs.FEED != null && grantedAtMs.DIRECT_WATCH != null);
+  await Promise.all([feed, direct]);
+
+  assert.equal(grantedAtMs.FEED, 250, 'the feed must be served at its own one-token refill');
+  assert.equal(grantedAtMs.DIRECT_WATCH, 1_250,
+    'reconciliation waits for the reserve to refill behind the feed grant, not ahead of it');
+  const status = budget.status(clock.nowMs);
+  assert.equal(status.classes.FEED.maxWaitMs, 250);
+  assert.equal(status.classes.FEED.waitExceeded, 0);
+  assert.ok(status.classes.DIRECT_WATCH.reserveYields > 0);
+  assert.equal(status.feedPriorityHealthy, true);
+  assert.equal(status.feedPriorityEverBreached, false);
 });
 
 test('a direct-watch 429 costs the feed only its configured share of the cooldown', () => {
@@ -166,15 +217,32 @@ test('a server Retry-After is honoured in preference to local escalation and bou
   const { now, sleep } = sequentialClock();
   const budget = new InvoRequestBudget(config(), now, sleep);
   const honoured = budget.note429('DIRECT_WATCH', 45_000, 0);
+  assert.equal(honoured.retryAfterObserved, true);
   assert.equal(honoured.retryAfterHonored, true);
   assert.equal(honoured.cooldownMs, 45_000, 'Retry-After above the local ceiling is still honoured');
   const clamped = budget.note429('DIRECT_WATCH', 900_000, 200_000);
   assert.equal(clamped.cooldownMs, 120_000, 'a poisoned Retry-After cannot freeze the loop');
-  // A Retry-After shorter than the current escalation never shortens the backoff.
+  assert.equal(clamped.retryAfterHonored, true);
+  // A Retry-After shorter than the current escalation never shortens the backoff — and is
+  // not reported as honoured, because the local escalation, not the server, set the delay.
   const shorter = budget.note429('DIRECT_WATCH', 100, 250_000);
   assert.equal(shorter.consecutive429s, 3);
   assert.equal(shorter.cooldownMs, 8_000);
-  assert.equal(budget.status(250_000).retryAfterHonoredCount, 3);
+  assert.equal(shorter.retryAfterObserved, true);
+  assert.equal(shorter.retryAfterHonored, false,
+    'a superseded Retry-After must not be counted as followed');
+  const status = budget.status(250_000);
+  assert.equal(status.retryAfterObservedCount, 3);
+  assert.equal(status.retryAfterHonoredCount, 2);
+});
+
+test('a Retry-After below the base cooldown still cannot shorten the local floor', () => {
+  const { now, sleep } = sequentialClock();
+  const budget = new InvoRequestBudget(config(), now, sleep);
+  const decision = budget.note429('FEED', 100, 0);
+  assert.equal(decision.cooldownMs, 2_000, 'the base cooldown is a floor the server cannot lower');
+  assert.equal(decision.retryAfterObserved, true);
+  assert.equal(decision.retryAfterHonored, false);
 });
 
 test('the sustained rate decreases multiplicatively on 429 and recovers additively when quiet', async () => {
@@ -240,8 +308,30 @@ test('status reports the coordinated contract and surfaces a feed-priority breac
   await starved.acquire('FEED');
   await assert.rejects(() => starved.acquire('FEED'), (error: any) => error.reason === 'budget_wait_exceeded');
   const breached = starved.status(clock.nowMs);
-  assert.equal(breached.feedPriorityHealthy, false);
-  assert.ok(breached.feedPriorityFailures.includes('feed_budget_wait_exceeded'));
+  // A starved feed request is latched permanently: the NEW/ADD it would have carried cannot
+  // be recovered later, so the durable record must survive the contention clearing.
+  assert.equal(breached.feedPriorityEverBreached, true);
+  assert.deepEqual(breached.feedPriorityBreaches, ['feed_budget_wait_exceeded']);
+  assert.equal(breached.classes.FEED.waitExceeded, 1);
+  // The *live* flag describes the live state, so a budget that has drained its backlog
+  // reports itself recovered instead of staying unhealthy forever with no recovery path.
+  // `scripts/validate_lane3_shadow_health.py` fails closed on the latched record, so this
+  // separation is not a way to forget the breach.
+  assert.equal(breached.feedPriorityHealthy, true);
+  assert.deepEqual(breached.feedPriorityFailures, []);
+});
+
+test('a feed cooldown that has already expired is not reported as a live priority inversion', () => {
+  const { now, sleep } = sequentialClock();
+  const budget = new InvoRequestBudget(config(), now, sleep);
+  budget.note429('FEED', null, 0);
+  assert.equal(budget.status(0).cooldownRemainingMs.FEED, 2_000);
+  assert.equal(budget.status(0).feedPriorityHealthy, true);
+  const recovered = budget.status(600_000);
+  assert.deepEqual(recovered.cooldownRemainingMs, { FEED: 0, DIRECT_WATCH: 0 });
+  assert.equal(recovered.feedPriorityHealthy, true);
+  assert.equal(recovered.feedPriorityEverBreached, false,
+    'a served cooldown is adaptive pacing, not feed starvation');
 });
 
 test('an unsatisfiable budget configuration is rejected at construction', () => {
@@ -277,6 +367,8 @@ test('status carries every field the Lane 3 deployment health gate reads', () =>
   assert.equal(status.primaryClass, 'FEED');
   assert.equal(typeof status.feedPriorityHealthy, 'boolean');
   assert.ok(Array.isArray(status.feedPriorityFailures));
+  assert.equal(status.feedPriorityEverBreached, false);
+  assert.deepEqual(status.feedPriorityBreaches, []);
   assert.equal(typeof status.reservedForFeedRequestsPerSecond, 'number');
   assert.equal(typeof status.cooldownRemainingMs.FEED, 'number');
   assert.equal(typeof status.cooldownRemainingMs.DIRECT_WATCH, 'number');

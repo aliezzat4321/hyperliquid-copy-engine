@@ -33,9 +33,28 @@ export class InvoHttpError extends Error {
  * That only ever mis-attributed a metric, never a gate, but an untrue footprint metric is
  * exactly what this subsystem exists to make trustworthy.
  */
-let authRequestObserver: ((requestClass: InvoRequestClass) => void) | null = null;
-export function setAuthRequestObserver(observer: ((requestClass: InvoRequestClass) => void) | null) {
+export interface InvoAuthRequestObserver {
+  /** One refresh is leaving the process, charged to the class that needed the token. */
+  charge(requestClass: InvoRequestClass): void;
+  /**
+   * The refresh itself was rate limited. A refresh is ungated, never retried here, and its
+   * failure surfaces to the caller as a generic auth error, so without this hook the one
+   * request that proves the account is limited would be the one request the budget never
+   * hears about — leaving it to keep pacing at a rate the account has already refused.
+   */
+  rateLimited(requestClass: InvoRequestClass, retryAfterMs: number | null): void;
+}
+
+let authRequestObserver: InvoAuthRequestObserver | null = null;
+export function setAuthRequestObserver(observer: InvoAuthRequestObserver | null) {
   authRequestObserver = observer;
+}
+
+/** Observation must never block or fail authentication, which everything else depends on. */
+function observeAuth(notify: (observer: InvoAuthRequestObserver) => void) {
+  const observer = authRequestObserver;
+  if (!observer) return;
+  try { notify(observer); } catch { /* an observer fault cannot be allowed to break auth */ }
 }
 
 export function setToken(value: string) {
@@ -62,12 +81,17 @@ function accessTokenStillFresh(minValidityMs = 30_000): boolean {
 
 async function refreshAccessToken(requestClass: InvoRequestClass): Promise<boolean> {
   if (!refreshToken) return false;
-  try { authRequestObserver?.(requestClass); } catch { /* observation must never block authentication */ }
+  observeAuth(observer => observer.charge(requestClass));
   const resp = await fetch(`${BASE}/v1_0/auth/refresh_token`, {
     method: 'GET',
     headers: { Authorization: `Bearer ${refreshToken}`, ...APP_HEADERS },
     signal: AbortSignal.timeout(INVO_HTTP_REQUEST_TIMEOUT_MS),
   });
+  if (resp.status === 429) {
+    observeAuth(observer => observer.rateLimited(
+      requestClass, parseRetryAfterMs(resp.headers.get('retry-after'), Date.now()),
+    ));
+  }
   if (resp.status !== 200) return false;
   const data: any = await resp.json();
   if (!data?.accessToken) return false;

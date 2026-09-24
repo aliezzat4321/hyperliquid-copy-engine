@@ -159,8 +159,12 @@ test('an auth refresh is attributed to the request that triggered it, not to pro
   // deliberately ungated — but it made the per-class footprint metric untrue, which is the
   // one thing this subsystem exists to report honestly.
   assert.match(clientSource, /async function refreshAccessToken\(requestClass: InvoRequestClass\)/);
-  assert.match(clientSource, /authRequestObserver\?\.\(requestClass\)/,
+  assert.match(clientSource, /observer\.charge\(requestClass\)/,
     'the observer must receive the triggering class');
+  assert.match(clientSource, /resp\.status === 429/,
+    'a rate-limited refresh is the one 429 no loop handler can see; it must be reported');
+  assert.match(clientSource, /observer\.rateLimited\(\s*requestClass, parseRetryAfterMs\(resp\.headers\.get\('retry-after'\)/,
+    'the refresh 429 must adapt the coordinated budget with the class that paid for it');
   assert.doesNotMatch(clientSource, /^let\s+(?:current|active|last)\w*RequestClass/m,
     'a latched request class would reintroduce the cross-loop attribution race');
   for (const name of ['ensureToken', 'ensureTokenFreshFor', 'post']) {

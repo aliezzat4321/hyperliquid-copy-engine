@@ -88,6 +88,7 @@ import { directWatchdogLimitMs, feedWatchdogLimitMs, LoopProgressWatchdog, type 
 import {
   INVO_REQUEST_BUDGET_VERSION,
   InvoRequestBudget,
+  type InvoRequestClass,
 } from './invo-request-budget.js';
 
 if (INVO_TOKEN) invo.setToken(INVO_TOKEN);
@@ -339,16 +340,37 @@ const invoRequestBudget = new InvoRequestBudget({
   consecutiveDecayMs: cfg.invoRateLimitDecayMs,
   maxAcquireWaitMs: cfg.invoRequestMaxWaitMs,
 });
+const feedRequestMetrics = {
+  pageRequests: 0, redundantSurfacePollsSuppressed: 0, budgetCooldownSkips: 0,
+  http429s: 0, lastRetryAfterMs: null as number | null, lastCooldownUntilMs: 0,
+};
+const authRefreshMetrics = {
+  requests: 0, http429s: 0, lastRequestClass: null as InvoRequestClass | null,
+  lastRetryAfterMs: null as number | null, lastCooldownUntilMs: 0,
+};
 // Token refreshes precede every budgeted request and must never be gated, but they are
 // real account traffic, so they are charged to the class that needed them. The class comes
 // from the request that triggered the refresh, not from process state: both loops run
 // concurrently, so a latched "current class" would attribute refreshes to whichever loop
 // wrote it last and make the per-class footprint metrics untrue.
-invo.setAuthRequestObserver(requestClass => invoRequestBudget.chargeUnbudgeted(requestClass));
-const feedRequestMetrics = {
-  pageRequests: 0, redundantSurfacePollsSuppressed: 0, budgetCooldownSkips: 0,
-  http429s: 0, lastRetryAfterMs: null as number | null, lastCooldownUntilMs: 0,
-};
+invo.setAuthRequestObserver({
+  charge: requestClass => {
+    authRefreshMetrics.requests += 1;
+    authRefreshMetrics.lastRequestClass = requestClass;
+    invoRequestBudget.chargeUnbudgeted(requestClass);
+  },
+  // A rate-limited refresh is a real account 429 on the one request that cannot be gated.
+  // It never reaches either loop's 429 handler — the caller only sees a generic auth
+  // failure — so adapting the budget here is what stops the process from continuing to
+  // pace at a rate the account has already refused, and what makes the rejection visible.
+  rateLimited: (requestClass, retryAfterMs) => {
+    authRefreshMetrics.http429s += 1;
+    authRefreshMetrics.lastRetryAfterMs = retryAfterMs;
+    authRefreshMetrics.lastCooldownUntilMs = requestClass === 'DIRECT_WATCH'
+      ? applyDirectWatchRateLimit(Date.now(), retryAfterMs, 'auth_refresh')
+      : applyFeedRateLimit(Date.now(), retryAfterMs, 'auth_refresh');
+  },
+});
 /** Rotating discovery polls of a surface another trigger just fetched are pure duplication. */
 const lastSurfaceFetchAtMs = new Map<InvoFeedSurface, number>();
 async function acquireFeedRequestBudget() {
@@ -1703,17 +1725,8 @@ async function wake(
         // bounded wait) must not escalate the cooldown that produced it; only a real Invo
         // 429 does, and it adapts to the server's Retry-After when one was supplied.
         if (status === 429 && err?.budgetCooldown !== true) {
-          feedRequestMetrics.http429s += 1;
-          feedRequestMetrics.lastRetryAfterMs = err?.retryAfterMs ?? null;
-          const decision = invoRequestBudget.note429('FEED', err?.retryAfterMs ?? null, Date.now());
-          feedRequestMetrics.lastCooldownUntilMs = decision.cooldownUntilMs;
-          backoffMs = feedBackoffFromCooldown(decision.cooldownUntilMs);
-          log({ type: 'invo_rate_limit_adapted', requestClass: 'FEED', source: current.source,
-            retryAfterMs: err?.retryAfterMs ?? null, retryAfterHonored: decision.retryAfterHonored,
-            cooldownMs: decision.cooldownMs, cooldownUntilMs: decision.cooldownUntilMs,
-            directWatchCooldownUntilMs: decision.peerCooldownUntilMs,
-            effectiveRequestsPerSecond: decision.effectiveRequestsPerSecond,
-            consecutive429s: decision.consecutive429s, live: cfg.live });
+          backoffMs = feedBackoffFromCooldown(
+            applyFeedRateLimit(Date.now(), err?.retryAfterMs ?? null, current.source));
         } else if (status === 429) {
           feedRequestMetrics.budgetCooldownSkips += 1;
           backoffMs = feedBackoffFromCooldown(err?.cooldownUntilMs ?? Date.now());
@@ -1726,6 +1739,27 @@ async function wake(
   } finally {
     hydrating = false;
   }
+}
+
+/**
+ * Adaptive cooldown for an observed feed-class 429, from either a feed page read or an
+ * ungated token refresh that was charged to the feed. The coordinated budget owns the
+ * escalation, the Retry-After adaptation and the rate reduction. Returns the cooldown
+ * deadline the caller must respect.
+ */
+function applyFeedRateLimit(nowMs: number, retryAfterMs: number | null, source: string): number {
+  feedRequestMetrics.http429s += 1;
+  feedRequestMetrics.lastRetryAfterMs = retryAfterMs;
+  const decision = invoRequestBudget.note429('FEED', retryAfterMs, nowMs);
+  feedRequestMetrics.lastCooldownUntilMs = decision.cooldownUntilMs;
+  log({ type: 'invo_rate_limit_adapted', requestClass: 'FEED', source,
+    retryAfterMs, retryAfterObserved: decision.retryAfterObserved,
+    retryAfterHonored: decision.retryAfterHonored,
+    cooldownMs: decision.cooldownMs, cooldownUntilMs: decision.cooldownUntilMs,
+    directWatchCooldownUntilMs: decision.peerCooldownUntilMs,
+    effectiveRequestsPerSecond: decision.effectiveRequestsPerSecond,
+    consecutive429s: decision.consecutive429s, live: cfg.live });
+  return decision.cooldownUntilMs;
 }
 
 /**
@@ -2021,19 +2055,23 @@ async function hydrateClosedHistory(
  * cooldown it produced. The feed serves only `invoFeedCooldownShare` of this penalty,
  * because reconciliation overconsumption must not silence the primary admission path.
  */
-function applyDirectWatchRateLimit(nowMs: number, retryAfterMs: number | null) {
+function applyDirectWatchRateLimit(
+  nowMs: number, retryAfterMs: number | null, source = 'direct_watch',
+): number {
   directWatchMetrics.http429s += 1;
   const decision = invoRequestBudget.note429('DIRECT_WATCH', retryAfterMs, nowMs);
   directWatchBackoffMs = decision.cooldownMs;
   directWatchBackoffUntilMs = decision.cooldownUntilMs;
   directWatch.setAdmissionHealth(false, 'rate_limit_cooldown');
-  log({ type: 'invo_rate_limit_adapted', requestClass: 'DIRECT_WATCH',
-    retryAfterMs, retryAfterHonored: decision.retryAfterHonored,
+  log({ type: 'invo_rate_limit_adapted', requestClass: 'DIRECT_WATCH', source,
+    retryAfterMs, retryAfterObserved: decision.retryAfterObserved,
+    retryAfterHonored: decision.retryAfterHonored,
     cooldownMs: decision.cooldownMs, cooldownUntilMs: decision.cooldownUntilMs,
     feedCooldownUntilMs: decision.peerCooldownUntilMs,
     feedCooldownShare: cfg.invoFeedCooldownShare,
     effectiveRequestsPerSecond: decision.effectiveRequestsPerSecond,
     consecutive429s: decision.consecutive429s, live: cfg.live });
+  return decision.cooldownUntilMs;
 }
 
 /** A feed 429 proves the account is limited, so it also gates reconciliation scans. */
@@ -2358,6 +2396,9 @@ function startServer() {
           redundantSurfacePollsSuppressed: feedRequestMetrics.redundantSurfacePollsSuppressed,
           minSurfaceRepollMs: cfg.feedMinSurfaceRepollMs,
           feedBackoffMs: backoffMs,
+          // The ungated precondition traffic, reported separately so it can never be
+          // mistaken for paced traffic and can never disappear from the footprint.
+          authRefresh: { ...authRefreshMetrics },
         },
         fundingEconomicsReady: !cfg.live && fundingHealthy,
         liveFundingGate: cfg.live ? {

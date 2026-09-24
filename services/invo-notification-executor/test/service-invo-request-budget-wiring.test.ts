@@ -24,8 +24,14 @@ test('every feed and direct-watch Invo request is charged to the shared budget',
   assert.ok(getBudgeted >= 0 && hydrate > getBudgeted);
   assert.match(source.slice(getBudgeted, hydrate), /invoRequestBudget\.acquire\('DIRECT_WATCH'\)/,
     'direct-watch hydration must draw from the lower-priority class of the same budget');
-  assert.match(source, /invo\.setAuthRequestObserver\(requestClass => invoRequestBudget\.chargeUnbudgeted\(requestClass\)\)/,
+  const observer = source.indexOf('invo.setAuthRequestObserver({');
+  assert.ok(observer >= 0);
+  const observerBody = source.slice(observer, source.indexOf('});', observer));
+  assert.match(observerBody, /charge: requestClass => \{[\s\S]*?invoRequestBudget\.chargeUnbudgeted\(requestClass\)/,
     'token refreshes must be counted against the account footprint without being gated');
+  assert.match(observerBody,
+    /rateLimited: \(requestClass, retryAfterMs\) => \{[\s\S]*?applyDirectWatchRateLimit\(Date\.now\(\), retryAfterMs, 'auth_refresh'\)[\s\S]*?applyFeedRateLimit\(Date\.now\(\), retryAfterMs, 'auth_refresh'\)/,
+    'a 429 on the ungated refresh must still adapt the budget, in the class that paid for it');
   assert.doesNotMatch(source, /invoAuthRequestClass/,
     'a latched auth class would mis-attribute a refresh triggered by the concurrent peer loop');
 });
@@ -43,8 +49,13 @@ test('a feed 429 gates reconciliation while a direct-watch 429 only costs the fe
   const scan = source.indexOf('async function scanEliteDirectWatch(');
   assert.match(source.slice(scan, scan + 300), /if \(nowMs < directWatchCooldownUntilMs\(\)\)/,
     'the scan gate must observe the coordinated cooldown, not only its own backoff');
-  assert.match(source, /if \(status === 429 && err\?\.budgetCooldown !== true\) \{[\s\S]*?invoRequestBudget\.note429\('FEED', err\?\.retryAfterMs \?\? null/,
+  assert.match(source, /if \(status === 429 && err\?\.budgetCooldown !== true\) \{[\s\S]*?applyFeedRateLimit\(Date\.now\(\), err\?\.retryAfterMs \?\? null, current\.source\)/,
     'a real feed 429 must adapt the shared budget');
+  const applyFeed = source.indexOf('function applyFeedRateLimit(');
+  assert.ok(applyFeed >= 0);
+  assert.match(source.slice(applyFeed, source.indexOf('\n}', applyFeed)),
+    /invoRequestBudget\.note429\('FEED', retryAfterMs, nowMs\)/,
+    'every feed-class 429, page read or ungated refresh, adapts one shared budget');
   assert.match(source, /error\?\.status === 429 && error\?\.budgetCooldown !== true && error\?\.cooldownUntilMs == null/,
     'a locally generated cooldown rejection must never escalate the cooldown that produced it');
 });
@@ -92,6 +103,8 @@ test('health reports the coordinated budget and its feed-priority proof', () => 
   assert.match(body, /invoRequestBudget: \{\s*\.\.\.budgetStatus,/,
     'the whole coordinated budget status must be exposed, including feedPriorityHealthy');
   assert.match(body, /redundantSurfacePollsSuppressed: feedRequestMetrics\.redundantSurfacePollsSuppressed/);
+  assert.match(body, /authRefresh: \{ \.\.\.authRefreshMetrics \}/,
+    'ungated precondition traffic must stay visible in the reported footprint');
   assert.match(body, /degradedResidentCap: directWatchDegradedCapacity\.provenResidentCap/,
     'residency that survives a degraded budget must be reported, not assumed');
   assert.match(body, /residentCountOversubscribed: directStatus\.targetCount > directWatchConfiguredCapacity\.provenResidentCap/,

@@ -158,6 +158,7 @@ test('41 residents saturating direct watch never delay a primary feed request', 
   assert.equal(status.classes.FEED.waits, 0);
   assert.equal(status.classes.FEED.waitExceeded, 0);
   assert.equal(status.feedPriorityHealthy, true);
+  assert.equal(status.feedPriorityEverBreached, false);
   assert.equal(status.total429s, 0, 'coordinated pacing must not need a 429 to stay inside the ceiling');
 });
 
@@ -175,6 +176,7 @@ test('a 20-page feed backfill outruns 41 residents of reconciliation traffic', a
   assert.ok(status.classes.DIRECT_WATCH.reserveYields > 0,
     'reconciliation must be observed standing aside for the backfill');
   assert.equal(status.feedPriorityHealthy, true);
+  assert.equal(status.feedPriorityEverBreached, false);
   assert.equal(run.directGranted, RESIDENTS * REQUESTS_PER_RESIDENT,
     'yielding must not drop reconciliation work, only defer it');
 });
@@ -198,9 +200,13 @@ test('a mid-sweep 429 stops 41 residents of reconciliation while the feed resume
   }
   const status = run.budget.status(run.finishedAtMs);
   assert.equal(status.cooldownRemainingMs.FEED, 0, 'the feed must be out of cooldown long before direct watch');
-  assert.equal(status.retryAfterHonoredCount, 1);
+  assert.equal(status.retryAfterObservedCount, 1);
+  assert.equal(status.retryAfterHonoredCount, 1,
+    'the 5s server delay exceeded the 2s local escalation, so it is what actually gated');
   assert.equal(status.effectiveRequestsPerSecond, 6, 'multiplicative decrease down to the AIMD floor');
   assert.equal(status.feedPriorityHealthy, true);
+  assert.equal(status.feedPriorityEverBreached, false,
+    'a reconciliation 429 must not starve a single feed request');
   // The feed keeps polling through the reconciliation penalty: it serves only 1s of the 5s
   // cooldown, so at 1s spacing at most one poll is lost.
   assert.ok(run.feedGranted >= 11, `feed only completed ${run.feedGranted}/12 polls`);
