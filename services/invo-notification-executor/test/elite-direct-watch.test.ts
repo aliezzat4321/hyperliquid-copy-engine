@@ -17,7 +17,6 @@ import {
   planClosedHydrations,
   planDeadlineHydrations,
   planDirectHydrations,
-  DirectWatchRequestBudget,
   runConcurrentHydrations,
   runIsolatedHydrations,
   retiringOpenDispositions,
@@ -1184,16 +1183,6 @@ test('bounded concurrent workers isolate failure and stop launching peers after 
   assert.equal(maxActive, 2);
   assert.equal(result.rateLimited, true);
   assert.ok(result.skippedAfterRateLimit.length >= 2);
-});
-
-test('token bucket never exceeds burst plus configured refill and 429 pauses acquisition', async () => {
-  let now = 0;
-  const budget = new DirectWatchRequestBudget(2, 2, () => now, async ms => { now += ms; });
-  const granted: number[] = [];
-  for (let index = 0; index < 5; index += 1) { await budget.acquire(); granted.push(now); }
-  assert.deepEqual(granted, [0, 0, 500, 1000, 1500]);
-  budget.note429(2_500);
-  await assert.rejects(() => budget.acquire(), (error: any) => error.status === 429);
 });
 
 test('v4 state migrates without resetting causal fields and fails closed above cap', () => {

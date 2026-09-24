@@ -375,3 +375,73 @@ This supersedes the earlier task-class policy that withheld automatic merge from
   `367d3d8c31cad5d2a40db55d789bec8b37c840c8`, not prospective runtime recall proof.
   Issues #397 and #401 remain open gates. Production and live-trading permissions are
   unchanged; `REAL_TRADING_ENABLED=NO`.
+
+## 2026-09-24 — Lane 3 ingestion is paced by one coordinated Invo request budget with feed priority
+
+- Feed polling and the elite direct watcher consume the **same** Invo account quota, so
+  they now share **one** token bucket (`services/invo-notification-executor/src/invo-request-budget.ts`).
+  Before this change the direct watcher owned a private bucket and the feed path was
+  unpaced, so the configured "12 req/s with 4 req/s reserved for feed ingress" envelope was
+  an assumption rather than an enforced property, and a reconciliation burst could consume
+  the account's allowance and 429 the feed.
+- The feed is the primary class and its priority is structural, not advisory. A
+  `DIRECT_WATCH` request is granted only while the bucket holds more than
+  `INVO_FEED_RESERVED_REQUESTS_PER_SECOND` tokens, and every scheduling pass serves the
+  whole feed queue first. A feed request can therefore only ever wait behind another feed
+  request. Since the feed-primary admission fix (PR #413) made the feed the primary shadow
+  admission path, reconciliation delaying it is a causal-recall problem, not a tuning
+  preference: a missed feed NEW/ADD cannot be made causal by a later reconciliation.
+- Within a class the queue is FIFO. A poll-and-retry waiter design lets whichever waiter
+  computes the shortest sleep overtake its peers, which starved individual direct-watch
+  targets for the full bounded wait at 41 residents even though aggregate throughput was
+  fine. Ordered queues make each waiter's delay a function only of the work ahead of it.
+- 429 handling is adaptive. A server `Retry-After` wins when present (bounded by
+  `INVO_RATE_LIMIT_MAX_RETRY_AFTER_COOLDOWN_MS` so a poisoned header cannot freeze the
+  loop); otherwise the cooldown escalates exponentially over consecutive rejections and
+  resets after a quiet window. Each 429 also halves the sustained rate down to
+  `INVO_MIN_REQUESTS_PER_SECOND`, recovered additively over quiet intervals. The rejected
+  class serves the full cooldown; a feed 429 gates reconciliation in full (the account is
+  provably limited) while a direct-watch 429 costs the feed only
+  `INVO_FEED_COOLDOWN_SHARE` of the penalty.
+- Static worst-case bounds that must survive degradation are computed at the AIMD **floor**,
+  not the configured ceiling. In particular the direct-watch loop-watchdog limit uses
+  `INVO_MIN_REQUESTS_PER_SECOND`, because a bound taken at the ceiling would fire a false
+  stall and `process.exit(1)` precisely while the budget was adapting to a real 429.
+- A request whose class is in cooldown is rejected locally without spending a token, and a
+  saturated budget fails closed on `INVO_REQUEST_MAX_WAIT_MS` rather than stalling a
+  watched loop. Redundant traffic is otherwise removed only where provably safe: a rotating
+  discovery re-poll of a surface another trigger already fetched within
+  `NOTIFICATION_TRADER_FEED_MIN_SURFACE_REPOLL_MS` is skipped, while push hydration,
+  startup baselines, gap recovery and owned-close reconciliation are never skipped and a
+  suppressed poll neither marks a post seen nor advances the durable cursor.
+- Direct-watch OPEN polls are deliberately **not** suppressed on the grounds that the feed
+  recently observed the same portfolio. That would create a window in which a feed miss has
+  no reconciliation, and it would break the observed-freshness guarantee that gates
+  admissions. Rejected on purpose; record it as considered rather than overlooked.
+- Resident oversubscription is reported, never capped. There is no trader cap, so when the
+  qualified-elite population exceeds the proven transport ceiling the health payload states
+  it (`residentCountOversubscribed`, `degradedResidentCap`) and direct-watch admissions fail
+  closed on observed deadline health. Feed admission is unaffected, which is the property
+  the 41-resident load tests assert.
+- `scripts/validate_lane3_shadow_health.py` now fails closed on a missing or uncoordinated
+  budget, an unconfigured feed reserve, an exhausted feed wait, and any state in which the
+  feed is gated longer than direct watch.
+- The budget only bounds the account footprint if every call site uses it, and that is a
+  property of the call sites rather than of the budget module. An enforced inventory
+  (`test/invo-call-site-inventory.test.ts`) therefore pins every Invo surface to a declared
+  class — `BUDGETED_FEED`, `BUDGETED_DIRECT_WATCH`, `UNBUDGETED_AUTH_PRECONDITION`,
+  `LIVE_ONLY` or `OFFLINE_CLI` — and checks it against the source in both directions, with
+  the declared per-surface call-site count, the live gate guarding each `LIVE_ONLY` call,
+  and the rule that only `post()`/`refreshAccessToken()` may reach `fetch`. A new endpoint,
+  a second feed read or a raw request now fails a test instead of silently re-inflating the
+  ceiling.
+- The class charged for an Invo access-token refresh is threaded from the triggering
+  request instead of latched in module state. Both ingestion loops run concurrently, so a
+  latched "current class" was attributed by whichever loop wrote it last. It never
+  mis-gated anything — refreshes are deliberately ungated and the token is spent
+  account-wide either way — but a per-class footprint metric that can be wrong is the one
+  thing this subsystem exists to report honestly.
+- Deterministic implementation and load-test evidence only; not profitability evidence and
+  not runtime recall proof. `REAL_TRADING_ENABLED=NO` and `NOTIFICATION_TRADER_LIVE=false`
+  are unchanged, and no real-order permission, routing, signing, credential or capital
+  setting is touched. Hyperliquid remains the only venue.

@@ -27,8 +27,8 @@ test('service wires elite direct watch only in shadow and through normal execute
   assert.doesNotMatch(source, /const admissionsHealthy = false/,
     'scan-start authorization suspension must not deadlock clean-state enrollment');
   assert.match(source, /ensureTokenFreshFor\(/, 'direct scans must preflight auth for the hard scan horizon');
-  assert.match(source, /getPortfolioInvestments\([\s\S]*}, false\)/,
-    'direct requests must not hide an unbudgeted 401 refresh retry');
+  assert.match(source, /getPortfolioInvestments\([\s\S]*}, false, 'DIRECT_WATCH'\)/,
+    'direct requests must not hide an unbudgeted 401 refresh retry, and must be charged to their own class');
   assert.match(source, /retiringOpenDispositions\(/, 'retiring rows must be causally classified before execution');
   assert.match(source, /retirement_post_demotion_open_ignored/, 'post-demotion opens must be handled without retry');
   assert.match(source, /missed_pre_demotion_open/, 'stale first observations must leave explicit recall evidence');
