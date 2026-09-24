@@ -128,6 +128,16 @@ function base(portfolioId: string): EliteAdmissionDecision {
  * No future observation, retroactive elite membership, or stale selector policy can
  * authorize an earlier signal. evaluatedAtMs is used only for current publication
  * freshness/health; it never moves the membership boundary past decisionAtMs.
+ *
+ * requireDirectWatchAdmission gates a second, independent proof: that the dedicated
+ * direct-watch loop has already baselined this portfolio. That proof is meaningful for
+ * signals the direct-watch loop generates about itself (it always publishes its own
+ * admission before consuming its own signals), but a fresh Invo feed notification for a
+ * causally elite-qualified portfolio is already source-time authorized by the candidate
+ * state above; direct-watch's independent hydration backlog, rate-limit cooldown or
+ * resident-capacity scheduling must not additionally gate it. Callers pass false for
+ * feed-originated signals so direct-watch remains reconciliation/fallback, not the
+ * primary admission path.
  */
 export function eliteAdmissionFromState(
   statePath: string,
@@ -138,6 +148,7 @@ export function eliteAdmissionFromState(
   admissionIndexPath?: string,
   maxAdmissionIndexAgeMs = Math.min(maxStateAgeMs, 60_000),
   evaluatedAtMs = decisionAtMs,
+  requireDirectWatchAdmission = true,
 ): EliteAdmissionDecision {
   const denied = base(portfolioId);
   if (!portfolioId) return { ...denied, reason: 'portfolio_id_missing' };
@@ -145,7 +156,7 @@ export function eliteAdmissionFromState(
   // temporary scan/cooldown can be mislabeled as a terminal stale-candidate denial
   // and ingress will consume the signal that the direct watcher is trying to protect.
   let admissionIndex: any = null;
-  if (admissionIndexPath) {
+  if (requireDirectWatchAdmission && admissionIndexPath) {
     if (!existsSync(admissionIndexPath)) return { ...denied, disposition: 'TRANSIENT', retryable: true,
       reason: 'direct_watch_admission_index_missing' };
     try {
@@ -341,6 +352,19 @@ export function eliteAdmissionFromState(
   }
   if (firstEliteAtMs == null || firstEliteAtMs > decisionAtMs) {
     return { ...enriched, reason: 'portfolio_not_elite_at_decision_time' };
+  }
+
+  // The feed is the primary admission path: a fresh notification from a portfolio
+  // already proven causally elite-qualified above needs no further direct-watch proof.
+  // Direct-watch's own emitted signals still require its self-published admission below.
+  if (!requireDirectWatchAdmission) {
+    return {
+      ...enriched,
+      allowed: true,
+      disposition: 'ALLOWED',
+      retryable: false,
+      reason: historical ? 'elite_candidate_pretrade_snapshot_qualified' : 'elite_candidate_pretrade_qualified',
+    };
   }
 
   if (!admissionIndexPath || !existsSync(admissionIndexPath)) {
