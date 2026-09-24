@@ -9,12 +9,23 @@ export interface LoopWatchdogStatus {
   stalled: boolean;
 }
 
+/**
+ * The feed loop now beats progress per backfill page and per processed signal (see
+ * `fetchFeedBackfill`'s `onPage` and `runSignalBatchBySource`'s `onProgress`), so the
+ * watchdog only ever needs to bound the silence between two consecutive heartbeats, not
+ * the wall time of an entire wake() cycle. That silence window is at most one page fetch
+ * or one signal's bounded external-request budget — never the total page/signal count —
+ * so a legitimately large backlog (or a future live topology with far more traders/
+ * signals per cycle) cannot by itself trip a false stall/restart.
+ */
 export function feedWatchdogLimitMs(input: {
-  maxBackoffMs: number; pollMs: number; maxPages: number;
-  requestTimeoutMs: number; maxRequestsPerPage: number; processingMarginMs: number;
+  maxBackoffMs: number; pollMs: number;
+  requestTimeoutMs: number; maxRequestsPerPage: number;
+  signalProcessingBudgetMs: number; processingMarginMs: number;
 }): number {
-  const backfillRequestMs = input.maxPages * input.maxRequestsPerPage * input.requestTimeoutMs;
-  return input.maxBackoffMs + input.pollMs + backfillRequestMs + input.processingMarginMs;
+  const perPageMs = input.maxRequestsPerPage * input.requestTimeoutMs;
+  const perHeartbeatMs = Math.max(perPageMs, input.signalProcessingBudgetMs);
+  return input.maxBackoffMs + input.pollMs + perHeartbeatMs + input.processingMarginMs;
 }
 
 export function directWatchdogLimitMs(input: {

@@ -2,8 +2,8 @@
 
 Generated from `docs/ai-team/state.json`. Do not hand-edit.
 
-**Snapshot:** 2026-09-22T14:46:17Z
-**Updated by:** CODEX_CHATGPT
+**Snapshot:** 2026-09-24T08:23:07Z
+**Updated by:** CLAUDE
 **Observed main head:** `fd63de5c60fc9d19ec643a2c491d5a815581765a`
 **Mission:** Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.
 
@@ -55,15 +55,15 @@ Generated from `docs/ai-team/state.json`. Do not hand-edit.
 | AI-team contract pytest tests passing | 61 | `2026-09-22T14:46:17Z` | commit `39d53c57f65a4dfae4eac52f60de5ed15d20e30a` |
 | integrated RC full executor subtests passing | 298 | `2026-09-22T14:46:17Z` | commit `39d53c57f65a4dfae4eac52f60de5ed15d20e30a` |
 | integrated Lane 3 RC implementation commit | 39d53c57f65a4dfae4eac52f60de5ed15d20e30a | `2026-09-22T14:46:17Z` | commit `39d53c57f65a4dfae4eac52f60de5ed15d20e30a` |
+| feed watchdog rebuilt on per-page/per-signal heartbeats plus bounded HL HTTP requests (PR #409 branch, not yet committed/CI-verified) | pending commit on codex/lane3-no-cap-watchdog | `2026-09-24T08:23:07Z` | manual `Claude builder session 2026-09-24: sandbox blocked commit/push/tsc/npm test, code+tests written in working tree only` |
 | Lane 3 final source-capture implementation commit | bbc574f | `2026-09-21T19:49:53Z` | commit `bbc574feb7ff31bcc1026e1c3522f4d9887a17aa` |
 | builder-validated executor subtests passing | 211 | `2026-09-21T19:49:53Z` | commit `bbc574feb7ff31bcc1026e1c3522f4d9887a17aa` |
-| default direct-watch resident capacity proven by timeout/page/deadline budget | 16 | `2026-09-20T15:33:55Z` | commit `67efba6` |
 | verified Invo trade-feed surfaces | 4 | `2026-09-17T23:46:12Z` | issue `#400` |
 | exploratory feed-exposed portfolios missing from current selector | 109 | `2026-09-17T23:46:12Z` | issue `#403` |
 | exploratory missing portfolios meeting frozen selector on visible evidence | 53 | `2026-09-17T23:46:12Z` | issue `#403` |
 | real trading enabled | False | `2026-09-17T23:10:50Z` | manual `VM runtime env 2026-09-17T23:10Z` |
 
-**Blocker:** Integrated Lane 3 RC implementation 39d53c57f65a4dfae4eac52f60de5ed15d20e30a includes causal source-time admission, admission-index v2, direct-watch state v8, the managed-position sourceBaseShortId write/read schema repair, and bounded atomic-publication generation retention while preserving the reviewed safety invariants. Malformed lifecycle variants fail closed; deployment uses the strict atomic publication reader; and the publication reader now accepts only the exact safe writer generation-id format, rejecting path-segment traversal before report/ledger reads. All prior strict selector/audit, canonical candidate/admission, runtime-health profitability, atomic publication, source capture, funding, replay, direct-watch, dedupe, readiness, reset, and live-off invariants remain intact. Exact validation passes 298/298 full executor subtests, 22/22 focused projector/atomic-publication subtests, 18/18 reset/deploy/health pytest tests, 61/61 contract tests, AI-team validator, ai_team_contract, git diff check, and deploy shell syntax checks. This is not profitability evidence. Production remains fd63de5 and real trading is OFF. Remaining gate: GitHub CI and BOTH independent exact-SHA reviews must PASS before shadow-only deployment.
+**Blocker:** Integrated Lane 3 RC implementation 39d53c57f65a4dfae4eac52f60de5ed15d20e30a includes causal source-time admission, admission-index v2, direct-watch state v8, the managed-position sourceBaseShortId write/read schema repair, and bounded atomic-publication generation retention while preserving the reviewed safety invariants. Malformed lifecycle variants fail closed; deployment uses the strict atomic publication reader; and the publication reader now accepts only the exact safe writer generation-id format, rejecting path-segment traversal before report/ledger reads. All prior strict selector/audit, canonical candidate/admission, runtime-health profitability, atomic publication, source capture, funding, replay, direct-watch, dedupe, readiness, reset, and live-off invariants remain intact. The 298/22/18/61 subtest counts above are pinned to 39d53c57 and are now stale: PR #409's codex/lane3-no-cap-watchdog branch has since removed the uncapped-residency count cap and rebuilt the feed watchdog on per-page/per-signal progress heartbeats (fetchFeedBackfill onPage, runSignalBatchBySource onProgress, syncStagedFundingForClose onWait) plus a bounded AbortSignal.timeout on every Hyperliquid info() request, so the watchdog bound no longer scales with page/signal count or a future live topology's larger trader population. The previously recorded 'default direct-watch resident capacity proven by timeout/page/deadline budget = 16' fact has been removed as obsolete: it described a hard admission cap that commit 4d64c74 already removed. This session could not produce fresh exact-SHA executor/contract/pytest counts or a new commit: the sandbox blocked all code-execution and git-mutation commands (npm/tsc/pytest, git add/commit/push) pending approval unavailable in this non-interactive run. Code and new regression tests exist only in the working tree pending commit. Remaining gate before this is treated as validated: someone with shell approval must run `npm run check` in services/invo-notification-executor, run the relevant Python/pytest suite, regenerate this file with `python scripts/render_ai_team_state.py`, commit, push, and re-sync state.json with the real commit SHA and fresh counts. This is not profitability evidence. Production remains fd63de5 and real trading is OFF. Remaining gate: GitHub CI and BOTH independent exact-SHA reviews must PASS before shadow-only deployment.
 **Next:** Issue #400.
 
 ## Infrastructure

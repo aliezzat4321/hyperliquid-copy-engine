@@ -26,16 +26,39 @@ test('watchdog armed with only a feed limit never reports a direct-watch stall',
   assert.equal(watchdog.firstStall(10_000_000), null);
 });
 
-test('feed watchdog strictly exceeds max-page backfill after max 429 backoff and auth retry', () => {
+test('feed watchdog bounds max 429 backoff, poll wait, and one page/signal unit of work', () => {
   const requestTimeoutMs = 2_000;
-  const fullBackfillAfterBackoffMs = 30_000 + 20 * 3 * requestTimeoutMs;
   const limit = feedWatchdogLimitMs({ maxBackoffMs: 30_000, pollMs: 1_000,
-    maxPages: 20, requestTimeoutMs, maxRequestsPerPage: 3, processingMarginMs: 15_000 });
-  assert.equal(limit, 166_000);
-  assert.ok(limit > fullBackfillAfterBackoffMs);
+    requestTimeoutMs, maxRequestsPerPage: 3, signalProcessingBudgetMs: 5_000,
+    processingMarginMs: 15_000 });
+  // perPageMs (6_000) < signalProcessingBudgetMs (5_000) is false here, so the page
+  // budget (3 * 2_000 = 6_000) wins over the smaller signal budget.
+  assert.equal(limit, 30_000 + 1_000 + 6_000 + 15_000);
   const watchdog = new LoopProgressWatchdog({ feed: limit, direct_watch: limit + 1 }, 0);
   assert.equal(watchdog.firstStall(limit), null);
   assert.equal(watchdog.firstStall(limit + 1)?.loop, 'feed');
+});
+
+test('feed watchdog limit is driven by whichever of the page or signal budget is larger', () => {
+  const limit = feedWatchdogLimitMs({ maxBackoffMs: 30_000, pollMs: 1_000,
+    requestTimeoutMs: 2_000, maxRequestsPerPage: 3, signalProcessingBudgetMs: 40_000,
+    processingMarginMs: 15_000 });
+  assert.equal(limit, 30_000 + 1_000 + 40_000 + 15_000);
+});
+
+test('per-page heartbeats let a backlog far beyond any fixed page cap avoid a false stall', () => {
+  const requestTimeoutMs = 2_000;
+  const limit = feedWatchdogLimitMs({ maxBackoffMs: 30_000, pollMs: 1_000,
+    requestTimeoutMs, maxRequestsPerPage: 3, signalProcessingBudgetMs: 5_000,
+    processingMarginMs: 15_000 });
+  const watchdog = new LoopProgressWatchdog({ feed: limit }, 0);
+  let nowMs = 0;
+  const pageCount = 500; // far beyond any previously-hardcoded feedMaxPages worst case
+  for (let page = 0; page < pageCount; page += 1) {
+    nowMs += requestTimeoutMs; // bounded per-page transport time before the next beat
+    watchdog.beat('feed', nowMs);
+    assert.equal(watchdog.firstStall(nowMs), null, `page ${page} must not trip a false stall`);
+  }
 });
 
 test('direct watchdog covers a full 24 OPEN plus 24 CLOSED worst-case scan', () => {

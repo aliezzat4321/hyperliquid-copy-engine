@@ -2,6 +2,13 @@ import { Hyperliquid } from 'hyperliquid';
 
 const INVO_BUILDER = { address: '0x557edb253b1d7ed5f15b248a5a3fd919fa5d3c81', fee: 35 };
 
+// Every info() call (book, meta, funding history, clearinghouse state) must resolve or
+// abort within this bound. Without it, a single hung Hyperliquid request has no ceiling,
+// so no per-signal watchdog budget could ever be a sound bound on legitimate progress.
+export const HL_HTTP_REQUEST_TIMEOUT_MS = Math.max(250, Number.parseInt(
+  process.env.HL_HTTP_REQUEST_TIMEOUT_MS ?? '5000', 10,
+) || 5000);
+
 function toSdkCoin(coin: string): string {
   return coin.includes('-') ? coin : `${coin}-PERP`;
 }
@@ -23,6 +30,7 @@ async function info(body: unknown): Promise<any> {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(HL_HTTP_REQUEST_TIMEOUT_MS),
   });
   if (!resp.ok) throw new Error(`Hyperliquid info HTTP ${resp.status}: ${await resp.text()}`);
   return resp.json();

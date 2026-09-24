@@ -198,6 +198,31 @@ test('close waits for a staged terminal record and applies it', async () => {
   assert.deepEqual(synced.appliedBoundaries, [1_000]);
 });
 
+test('onWait fires on every poll so a caller-owned watchdog sees progress across multiple funding boundaries', async () => {
+  // A position reopened after a long gap can legitimately cross many funding boundaries
+  // in one close; each individually bounded by maxDelayMs but unbounded in count. onWait
+  // must fire on every poll so a watchdog's silence window stays bounded by pollMs
+  // instead of by the (open-ended) total multi-boundary catch-up wait.
+  const store = new FundingBoundaryStore(mkdtempSync(join(tmpdir(), 'funding-onwait-')));
+  let now = 1_000;
+  let waits = 0;
+  const pendingBoundaries = [1_000, 2_000, 3_000];
+  const synced = await syncStagedFundingForClose(position(), 3_020, store, 100, {
+    intervalMs: 1_000, now: () => now, pollMs: 10,
+    sleep: async delay => {
+      now += delay;
+      const boundary = pendingBoundaries.shift();
+      if (boundary != null) {
+        store.publish(terminalResult({ fundingTimeMs: boundary, finalObservedAtMs: boundary + 10, finalDelayMs: 10 }));
+      }
+    },
+    onWait: () => { waits += 1; },
+  });
+  assert.equal(synced.waited, true);
+  assert.deepEqual(synced.appliedBoundaries, [1_000, 2_000, 3_000]);
+  assert.equal(waits, 3, 'must heartbeat once per crossed funding boundary that had to wait');
+});
+
 test('close marks missing durable evidence incomplete after the deadline', async () => {
   const store = new FundingBoundaryStore(mkdtempSync(join(tmpdir(), 'funding-missing-')));
   const synced = await syncStagedFundingForClose(position(), 1_020, store, 100, {

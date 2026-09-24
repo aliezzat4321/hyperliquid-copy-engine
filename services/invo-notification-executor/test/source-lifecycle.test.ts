@@ -38,6 +38,21 @@ test('durable known close dominates a later-arriving older open across ingress p
   assert.equal(managed.has('same'), false);
 });
 
+test('onProgress fires once per signal, independent of how many sources or signals are batched', async () => {
+  const signals = [
+    signal('open', 'a'), signal('open', 'b'), signal('open', 'c'),
+    signal('close', 'a'), signal('close', 'b'), signal('close', 'c'),
+  ];
+  const beaten: string[] = [];
+  await runSignalBatchBySource(
+    signals,
+    async () => {},
+    processed => { beaten.push(processed.key); },
+  );
+  assert.equal(beaten.length, signals.length);
+  assert.deepEqual(new Set(beaten), new Set(signals.map(s => s.key)));
+});
+
 test('feed and direct ingress serialize the same source while different sources overlap', async () => {
   const queue = new SourceLifecycleQueue();
   const events: string[] = [];

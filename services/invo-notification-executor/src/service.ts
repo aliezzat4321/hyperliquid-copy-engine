@@ -282,14 +282,24 @@ const directWatchMetrics = {
   queueDepth: 0,
   lastScanAtMs: 0, lastSuccessAtMs: 0,
 };
+// A single shadow signal's execute() makes at most a small, fixed number of sequential
+// external requests (asset book, account equity/funding lookups); each is independently
+// timeout-bounded (HL_HTTP_REQUEST_TIMEOUT_MS / INVO_HTTP_REQUEST_TIMEOUT_MS). This is
+// the worst-case wall time between two per-signal heartbeats, and — unlike the total
+// wake() cycle time — it does not grow with how many signals or pages a cycle processes,
+// so it stays correct under a future live topology with a far larger signal volume.
+const FEED_SIGNAL_MAX_SEQUENTIAL_REQUESTS = 4;
+const feedSignalProcessingBudgetMs = FEED_SIGNAL_MAX_SEQUENTIAL_REQUESTS
+  * Math.max(hl.HL_HTTP_REQUEST_TIMEOUT_MS, invo.INVO_HTTP_REQUEST_TIMEOUT_MS);
 // direct_watch is only armed when directWatchLoop() actually runs (shadow mode). Live
 // mode never schedules that loop, so arming its watchdog there would fire a false
 // stall/exit once its bounded limit elapsed with no possible heartbeat.
 const watchdogLimits: Partial<Record<WatchedLoop, number>> = {
   feed: feedWatchdogLimitMs({ maxBackoffMs: 30_000, pollMs: cfg.pollMs,
-    maxPages: cfg.feedMaxPages, requestTimeoutMs: invo.INVO_HTTP_REQUEST_TIMEOUT_MS,
+    requestTimeoutMs: invo.INVO_HTTP_REQUEST_TIMEOUT_MS,
     // One page can consume the original request, refresh request, and one retry.
-    maxRequestsPerPage: 3, processingMarginMs: 15_000 }),
+    maxRequestsPerPage: 3, signalProcessingBudgetMs: feedSignalProcessingBudgetMs,
+    processingMarginMs: 15_000 }),
 };
 if (!cfg.live) {
   watchdogLimits.direct_watch = directWatchdogLimitMs({
@@ -661,7 +671,10 @@ async function shadowReup(
   });
 }
 
-async function executeUnlocked(signal: InvoSignal, wakeSource: string, receivedAtMs: number, feedFilter: string) {
+async function executeUnlocked(
+  signal: InvoSignal, wakeSource: string, receivedAtMs: number, feedFilter: string,
+  heartbeat: () => void = () => {},
+) {
   const eventKey = sourceEventKey(signal);
   const lifecycleKey = closeLifecycleKey(signal);
   const inFlightKey = eventKey ?? signal.key;
@@ -864,6 +877,7 @@ async function executeUnlocked(signal: InvoSignal, wakeSource: string, receivedA
         try {
           stagedFunding = await syncStagedFundingForClose(
             managed, fill.receivedAtMs, fundingBoundaryStore, cfg.shadowFundingOracleMaxDelayMs,
+            { onWait: heartbeat },
           );
         } catch (error) {
           const reason = error instanceof Error ? error.message : String(error);
@@ -1279,8 +1293,12 @@ async function executeUnlocked(signal: InvoSignal, wakeSource: string, receivedA
   }
 }
 
-async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: number, feedFilter: string) {
-  return sourceLifecycleQueue.run(signal.sourceBaseId, () => executeUnlocked(signal, wakeSource, receivedAtMs, feedFilter));
+async function execute(
+  signal: InvoSignal, wakeSource: string, receivedAtMs: number, feedFilter: string,
+  heartbeat: () => void = () => {},
+) {
+  return sourceLifecycleQueue.run(signal.sourceBaseId,
+    () => executeUnlocked(signal, wakeSource, receivedAtMs, feedFilter, heartbeat));
 }
 
 
@@ -1377,13 +1395,17 @@ function applyFundingOracleResult(result: FundingOracleCaptureResult) {
   logBoundaryRetention();
 }
 
-async function fetchAndProcess(source: string, hints: NotificationHints | undefined, receivedAtMs: number, feedFilter = cfg.feedFilter): Promise<number> {
+async function fetchAndProcess(
+  source: string, hints: NotificationHints | undefined, receivedAtMs: number,
+  feedFilter = cfg.feedFilter, heartbeat: () => void = () => {},
+): Promise<number> {
   if (!cfg.live) {
     const pendingCloses = Object.values(state.snapshot().managed)
       .map(position => position.pendingSourceClose)
       .filter((signal): signal is InvoSignal => Boolean(signal));
     for (const signal of pendingCloses) {
-      await execute(signal, `${source}:source_close_reconciliation`, receivedAtMs, feedFilter);
+      await execute(signal, `${source}:source_close_reconciliation`, receivedAtMs, feedFilter, heartbeat);
+      heartbeat();
     }
   }
   const saved = state.getFeedCursor(feedFilter);
@@ -1391,6 +1413,7 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
     lastPostId => invo.getFeed(feedFilter, lastPostId, cfg.feedLimit),
     saved?.postId ?? null,
     cfg.feedMaxPages,
+    heartbeat,
   );
   const posts = backfill.posts;
   // Persistence is scheduled only after the core reconciliation path below. A disk
@@ -1421,7 +1444,8 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
     // page disappear. Reconcile only closes for exposure this service still owns; leave
     // all other gap posts unseen and never advance the cursor across the missing range.
     for (const signal of gapPlan.ownedCloses) {
-      await execute(signal, `${source}:gap_recovery`, receivedAtMs, feedFilter);
+      await execute(signal, `${source}:gap_recovery`, receivedAtMs, feedFilter, heartbeat);
+      heartbeat();
     }
     const remainingManagedCount = state.managedCount();
     const prospectiveRebaseAllowed = canProspectivelyRebaseGap(
@@ -1483,7 +1507,8 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
     state.markFeedBaselined(feedFilter, baselineAtMs);
     log({ type: 'surface_baseline_indexed', posts: posts.length, skippedOpenAddsAndUnownedCloses: baseline.skipped.length, recoverableCloses: baseline.recoverableCloses.length, live: cfg.live, feedFilter, feedLimit: cfg.feedLimit, traderFunnel: tracker.report().funnel });
     for (const signal of baseline.recoverableCloses) {
-      await execute(signal, 'surface_baseline_owned_close_recovery', receivedAtMs, feedFilter);
+      await execute(signal, 'surface_baseline_owned_close_recovery', receivedAtMs, feedFilter, heartbeat);
+      heartbeat();
     }
     const startupHandled = baseline.recoverableCloses.every(signal => closedLifecycleWasHandled(
       signal, key => state.hasSeen(key), sourceBaseId => state.hasHandledClose(sourceBaseId),
@@ -1508,9 +1533,14 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
 
   // In shadow, sources are independent and can be hydrated in parallel. Live remains sequential.
   if (cfg.live) {
-    for (const signal of ordered) await execute(signal, source, receivedAtMs, feedFilter);
+    for (const signal of ordered) {
+      await execute(signal, source, receivedAtMs, feedFilter, heartbeat);
+      heartbeat();
+    }
   } else {
-    await runSignalBatchBySource(ordered, signal => execute(signal, source, receivedAtMs, feedFilter));
+    await runSignalBatchBySource(
+      ordered, signal => execute(signal, source, receivedAtMs, feedFilter, heartbeat), heartbeat,
+    );
   }
   const allHandled = ordered.every(signal => signalWasSeen(signal, key => state.hasSeen(key)));
   if (allHandled && backfill.newestPostId) state.setFeedCursor(feedFilter, { postId: backfill.newestPostId, observedAtMs: Date.now(), source });
@@ -1519,7 +1549,10 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
   return ordered.length;
 }
 
-async function wake(source: string, hints?: NotificationHints, receivedAtMs = Date.now(), feedFilter = cfg.feedFilter) {
+async function wake(
+  source: string, hints?: NotificationHints, receivedAtMs = Date.now(),
+  feedFilter = cfg.feedFilter, heartbeat: () => void = () => {},
+) {
   pendingWake = { source, hints, receivedAtMs, feedFilter };
   if (hydrating) return;
   hydrating = true;
@@ -1528,11 +1561,11 @@ async function wake(source: string, hints?: NotificationHints, receivedAtMs = Da
       const current = pendingWake;
       pendingWake = null;
       try {
-        let found = await fetchAndProcess(current.source, current.hints, current.receivedAtMs, current.feedFilter);
+        let found = await fetchAndProcess(current.source, current.hints, current.receivedAtMs, current.feedFilter, heartbeat);
         if (current.source === 'push_notification' && current.hints && found === 0) {
           for (const delayMs of [120, 280, 600]) {
             await new Promise(r => setTimeout(r, delayMs));
-            found = await fetchAndProcess('push_hydration_retry', current.hints, current.receivedAtMs, current.feedFilter);
+            found = await fetchAndProcess('push_hydration_retry', current.hints, current.receivedAtMs, current.feedFilter, heartbeat);
             if (found > 0) break;
           }
         }
@@ -2164,7 +2197,7 @@ function startServer() {
           return json(res, 202, { ok: true, ignored: 'not_invo_package' });
         }
         const hints = extractNotificationHints(payload);
-        void wake('push_notification', hints, receivedAtMs);
+        void wake('push_notification', hints, receivedAtMs, cfg.feedFilter, () => loopWatchdog.beat('feed', Date.now()));
         return json(res, 202, { ok: true, hints });
       } catch (err) {
         return json(res, 400, { ok: false, error: err instanceof Error ? err.message : String(err) });
@@ -2187,7 +2220,7 @@ async function pollLoop() {
     await new Promise(r => setTimeout(r, wait));
     const surface = cfg.discoverySurfaces[discoverySurfaceIndex % cfg.discoverySurfaces.length];
     discoverySurfaceIndex += 1;
-    await wake(`api_poll:${surface}`, undefined, Date.now(), surface);
+    await wake(`api_poll:${surface}`, undefined, Date.now(), surface, () => loopWatchdog.beat('feed', Date.now()));
     loopWatchdog.beat('feed', Date.now());
   }
 }

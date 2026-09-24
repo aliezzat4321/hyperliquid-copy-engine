@@ -80,3 +80,23 @@ test('initial bootstrap is bounded to the newest page', async () => {
   assert.equal(result.cursorReached, true);
   assert.equal(result.newestPostId, 'new-2');
 });
+
+test('onPage fires once per fetched page so a caller-owned watchdog sees real progress', async () => {
+  let beats = 0;
+  const result = await fetchFeedBackfill(pages([
+    ['new-4', 'new-3'],
+    ['new-2', 'new-1'],
+    ['new-0', 'saved-high-water'],
+  ]), 'saved-high-water', 10, () => { beats += 1; });
+  assert.equal(result.pagesFetched, 3);
+  assert.equal(beats, result.pagesFetched);
+});
+
+test('a backlog spanning far more pages than any fixed cap still beats once per page', async () => {
+  const pageCount = 200;
+  const ids = Array.from({ length: pageCount }, (_, i) => [`post-${i}-a`, `post-${i}-b`]);
+  let beats = 0;
+  const result = await fetchFeedBackfill(pages(ids), 'never-reached', pageCount, () => { beats += 1; });
+  assert.equal(result.pagesFetched, pageCount);
+  assert.equal(beats, pageCount);
+});
