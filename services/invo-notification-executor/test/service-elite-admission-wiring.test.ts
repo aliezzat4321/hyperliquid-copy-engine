@@ -19,6 +19,21 @@ test('dry new exposure is gated by exact portfolio elite admission before open/r
     'authoritative source time must control prospective admission');
 });
 
+test('feed-originated signals are the primary admission path and cannot be blocked by direct-watch cooldown/capacity', () => {
+  const gate = serviceSource.indexOf("if (!cfg.live && signal.action !== 'close')");
+  const isDirectWatchSourced = serviceSource.indexOf('const isDirectWatchSourced = wakeSource.startsWith(', gate);
+  const admission = serviceSource.indexOf('eliteAdmissionFromState(', gate);
+  assert.ok(isDirectWatchSourced > gate, 'wakeSource-based direct-watch source detection missing');
+  assert.ok(admission > isDirectWatchSourced, 'source classification must precede the admission call');
+  assert.match(serviceSource, /isDirectWatchSourced \? cfg\.directWatchAdmissionIndexPath : undefined,/,
+    'the direct-watch admission index must only be consulted for direct-watch-sourced signals');
+  const call = serviceSource.slice(admission, serviceSource.indexOf(');', admission) + 2);
+  assert.match(call, /isDirectWatchSourced,\s*\);$/,
+    'requireDirectWatchAdmission must be wired to the wakeSource-derived classification');
+  assert.match(serviceSource, /wakeSource\.startsWith\('elite_direct:'\)/,
+    'only direct-watch\'s own emitted signals (elite_direct: prefix) require its admission proof');
+});
+
 test('owned closes bypass elite admission so demotion cannot orphan exposure', () => {
   assert.match(serviceSource, /if \(!cfg\.live && signal\.action !== 'close'\)/);
   const closePath = serviceSource.indexOf("if (signal.action === 'close')");

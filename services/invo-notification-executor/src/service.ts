@@ -726,15 +726,22 @@ async function executeUnlocked(
         });
         return;
       }
+      // The feed is the primary admission path: a fresh notification from a portfolio
+      // already causally elite-qualified needs no further proof. Direct-watch's own
+      // resident-capacity/rate-limit/hydration cooldown remains a gate only on the
+      // signals direct-watch generates about itself (reconciliation/fallback), never on
+      // feed-originated signals.
+      const isDirectWatchSourced = wakeSource.startsWith('elite_direct:');
       const candidateAdmission = eliteAdmissionFromState(
         cfg.candidateStatePath,
         signal.portfolioId,
         eligibilityCutoffMs,
         cfg.candidateStateMaxAgeMs,
         cfg.candidateSnapshotsPath,
-        cfg.directWatchAdmissionIndexPath,
+        isDirectWatchSourced ? cfg.directWatchAdmissionIndexPath : undefined,
         Math.max(10_000, Math.min(60_000, cfg.directWatchScanMs * 2)),
         decisionAtMs,
+        isDirectWatchSourced,
       );
       if (!candidateAdmission.allowed) {
         if (shouldPersistAdmissionDenial(candidateAdmission)) state.markSeen(signal.key);

@@ -650,6 +650,119 @@ test('candidate envelope version and future envelope fail transient before row s
   }
 });
 
+test('feed-originated signal is admitted on causal elite qualification alone, with no admission index at all', () => {
+  const path = stateFile(validState());
+  const decision = eliteAdmissionFromState(
+    path, portfolioId, decisionAtMs, 20 * 60_000, undefined, undefined,
+    undefined, decisionAtMs, false,
+  );
+  assert.equal(decision.allowed, true);
+  assert.equal(decision.disposition, 'ALLOWED');
+  assert.equal(decision.reason, 'elite_candidate_pretrade_qualified');
+});
+
+test('feed-originated signal ignores a missing, unhealthy, stale or corrupt direct-watch admission index', () => {
+  const path = stateFile(validState());
+  const missingIndexPath = join(path, '..', 'does-not-exist-admissions.json');
+  const brokenIndexPath = join(path, '..', 'elite-direct-watch-admissions.json');
+
+  const missing = eliteAdmissionFromState(
+    path, portfolioId, decisionAtMs, 20 * 60_000, undefined, missingIndexPath,
+    undefined, decisionAtMs, false,
+  );
+  assert.equal(missing.allowed, true, 'a missing admission index must not gate a feed-originated signal');
+  assert.equal(missing.reason, 'elite_candidate_pretrade_qualified');
+
+  writeFileSync(brokenIndexPath, JSON.stringify({
+    version: 2, generatedAtMs: decisionAtMs, healthy: false, suspensionReason: 'scan_in_progress', rows: {},
+  }));
+  const suspended = eliteAdmissionFromState(
+    path, portfolioId, decisionAtMs, 20 * 60_000, undefined, brokenIndexPath,
+    undefined, decisionAtMs, false,
+  );
+  assert.equal(suspended.allowed, true, 'direct-watch suspension must not gate a feed-originated signal');
+  assert.equal(suspended.reason, 'elite_candidate_pretrade_qualified');
+
+  writeFileSync(brokenIndexPath, '{not valid json');
+  const corrupt = eliteAdmissionFromState(
+    path, portfolioId, decisionAtMs, 20 * 60_000, undefined, brokenIndexPath,
+    undefined, decisionAtMs, false,
+  );
+  assert.equal(corrupt.allowed, true, 'a corrupt admission index must not gate a feed-originated signal');
+  assert.equal(corrupt.reason, 'elite_candidate_pretrade_qualified');
+
+  writeFileSync(brokenIndexPath, JSON.stringify({
+    version: 2, generatedAtMs: decisionAtMs, healthy: true, suspensionReason: null, rows: {},
+  }));
+  const emptyRows = eliteAdmissionFromState(
+    path, portfolioId, decisionAtMs, 20 * 60_000, undefined, brokenIndexPath,
+    undefined, decisionAtMs, false,
+  );
+  assert.equal(emptyRows.allowed, true, 'no admitted interval for this portfolio must not gate a feed-originated signal');
+});
+
+test('feed-originated signal still fails closed on stale, future or non-elite candidate state', () => {
+  const stale = eliteAdmissionFromState(
+    stateFile(validState({ lastObservedAtMs: decisionAtMs - 21 * 60_000 })),
+    portfolioId, decisionAtMs, 20 * 60_000, undefined, undefined, undefined, decisionAtMs, false,
+  );
+  assert.equal(stale.allowed, false);
+  assert.equal(stale.reason, 'candidate_state_stale');
+
+  const future = eliteAdmissionFromState(
+    stateFile(validState({
+      lastObservedAtMs: decisionAtMs - 10_000,
+      firstEliteAtMs: { [portfolioId]: decisionAtMs + 1 },
+    })),
+    portfolioId, decisionAtMs, 20 * 60_000, undefined, undefined, undefined, decisionAtMs, false,
+  );
+  assert.equal(future.allowed, false);
+  assert.equal(future.reason, 'portfolio_not_elite_at_decision_time');
+
+  const notElite = eliteAdmissionFromState(
+    stateFile(validState({
+      portfolios: { [portfolioId]: { ...(validState().portfolios as any)[portfolioId], bucket: 'RESEARCH_WIDE' } },
+    })),
+    portfolioId, decisionAtMs, 20 * 60_000, undefined, undefined, undefined, decisionAtMs, false,
+  );
+  assert.equal(notElite.allowed, false);
+  assert.equal(notElite.reason, 'portfolio_not_elite');
+});
+
+test('feed-originated signal resolves through the same historical pre-trade snapshot as direct-watch', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lane3-feed-primary-historical-'));
+  const path = join(dir, 'portfolio-candidates.json');
+  const snapshots = join(dir, 'portfolio-candidate-snapshots.jsonl');
+  writeFileSync(path, JSON.stringify(validState({ lastObservedAtMs: decisionAtMs + 20_000,
+    portfolios: { [portfolioId]: {
+      ...(validState().portfolios as any)[portfolioId], observedAtMs: decisionAtMs + 20_000,
+      bucket: 'REJECTED_DEMOTED',
+    } } })));
+  writeFileSync(`${snapshots}.recent.json`, JSON.stringify({ version: 1,
+    selectorVersion: ELITE_SELECTOR_VERSION, rows: [{
+      ...(validState().portfolios as any)[portfolioId], observedAtMs: decisionAtMs - 1_000,
+    }] }));
+  const decision = eliteAdmissionFromState(
+    path, portfolioId, decisionAtMs, 20 * 60_000, snapshots, undefined,
+    undefined, decisionAtMs + 30_000, false,
+  );
+  assert.equal(decision.allowed, true);
+  assert.equal(decision.reason, 'elite_candidate_pretrade_snapshot_qualified');
+});
+
+test('direct-watch-originated signal (default requireDirectWatchAdmission) is unaffected by the feed-primary change', () => {
+  const path = stateFile(validState());
+  const waitlisted = eliteAdmissionFromState(path, portfolioId, decisionAtMs, 20 * 60_000, undefined, undefined, undefined, decisionAtMs, true);
+  assert.equal(waitlisted.allowed, false);
+  assert.equal(waitlisted.reason, 'direct_watch_admission_index_missing');
+
+  const admitted = eliteAdmissionFromState(
+    path, portfolioId, decisionAtMs, 20 * 60_000, undefined, admissionIndex(path), undefined, decisionAtMs, true,
+  );
+  assert.equal(admitted.allowed, true);
+  assert.equal(admitted.reason, 'elite_candidate_pretrade_qualified');
+});
+
 test('admission index requires exact complete writer row schema', () => {
   const valid = { portfolioId, admittedAtMs: candidateObservedAtMs - 1_000,
     admittedUntilMs: null, score: 63.4, selectorVersion: ELITE_SELECTOR_VERSION };
