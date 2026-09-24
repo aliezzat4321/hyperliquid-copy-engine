@@ -110,6 +110,11 @@ export async function syncStagedFundingForClose(
     now?: () => number;
     sleep?: (delayMs: number) => Promise<void>;
     pollMs?: number;
+    // A position reopened after a long gap can legitimately cross many funding
+    // boundaries, each independently bounded by maxDelayMs but unbounded in count.
+    // Firing this on every poll keeps a liveness watchdog's silence window bounded by
+    // pollMs instead of by the (open-ended) total catch-up wait.
+    onWait?: () => void;
   } = {},
 ): Promise<FundingBoundarySyncResult> {
   const now = options.now ?? Date.now;
@@ -128,6 +133,7 @@ export async function syncStagedFundingForClose(
     let record = store.read(boundary);
     while (!record && now() <= deadlineMs) {
       waited = true;
+      options.onWait?.();
       await sleep(Math.max(1, Math.min(pollMs, deadlineMs - now() + 1)));
       record = store.read(boundary);
     }

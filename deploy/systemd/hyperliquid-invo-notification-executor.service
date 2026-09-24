@@ -11,8 +11,9 @@ Environment=NOTIFICATION_TRADER_LIVE=false
 EnvironmentFile=/etc/hyperliquid-copy-engine/invo.env
 EnvironmentFile=-/etc/hyperliquid-copy-engine/invo-notification-executor.env
 ExecStart=/usr/bin/node /root/hyperliquid-copy-engine/services/invo-notification-executor/dist/src/service.js
-Restart=always
+Restart=on-failure
 RestartSec=2
+TimeoutStopSec=10s
 User=root
 Group=root
 UMask=0077

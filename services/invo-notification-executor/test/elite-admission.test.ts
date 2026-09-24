@@ -352,9 +352,6 @@ test('malformed admission interval history fails closed as transient corruption'
     [{ admittedAtMs: decisionAtMs, admittedUntilMs: decisionAtMs - 1 }],
     [{ admittedAtMs: decisionAtMs - 10, admittedUntilMs: decisionAtMs + 10 },
       { admittedAtMs: decisionAtMs, admittedUntilMs: null }],
-    Array.from({ length: 17 }, (_, offset) => ({
-      admittedAtMs: decisionAtMs - 100 + offset * 2, admittedUntilMs: decisionAtMs - 99 + offset * 2,
-    })),
   ];
   for (const intervals of malformed) {
     writeFileSync(index, JSON.stringify({ version: 2, generatedAtMs: decisionAtMs + 40_000,
@@ -366,6 +363,23 @@ test('malformed admission interval history fails closed as transient corruption'
     assert.equal(result.reason, 'direct_watch_admission_index_invalid');
     assert.equal(result.disposition, 'TRANSIENT');
   }
+});
+
+test('valid admission history is not rejected by an arbitrary interval-count limit', () => {
+  const path = stateFile(validState());
+  const index = join(path, '..', 'elite-direct-watch-admissions.json');
+  const intervals = Array.from({ length: 17 }, (_, offset) => ({
+    admittedAtMs: decisionAtMs - 100 + offset * 2,
+    admittedUntilMs: decisionAtMs - 99 + offset * 2,
+  }));
+  writeFileSync(index, JSON.stringify({ version: 2, generatedAtMs: decisionAtMs + 40_000,
+    healthy: true, suspensionReason: null, rows: {
+      [portfolioId]: { portfolioId, intervals, score: 63.4, selectorVersion: ELITE_SELECTOR_VERSION },
+    } }));
+  const result = eliteAdmissionFromState(path, portfolioId, decisionAtMs - 100,
+    20 * 60_000, undefined, index, 60_000, decisionAtMs + 40_000);
+  assert.equal(result.allowed, true);
+  assert.equal(result.reason, 'elite_candidate_pretrade_qualified');
 });
 
 test('admission timestamp after index generation is transient corruption and never consumable', () => {

@@ -329,6 +329,26 @@ This supersedes the earlier task-class policy that withheld automatic merge from
   and #401 remain open gates. No deployment or real-trading permission changed;
   `REAL_TRADING_ENABLED=NO`.
 
+## 2026-09-23 — Lane 3 residency is not an arbitrary trader-count selection gate
+
+- This decision supersedes the configured 48-resident and hard-proven 16-resident
+  admission exclusions above. Every causally qualified ELITE portfolio may enter the
+  direct-watch resident lifecycle; neither selector admission nor historical admission
+  intervals are rejected because a fixed trader or interval count was reached.
+- The calculated positive integer `transportTargetCeiling` remains health telemetry for
+  the configured timeout, pagination, concurrency, and request budget. It is not an
+  authorization cap. Actual overdue OPEN/CLOSED observations and cooldown state still
+  suspend new admission publication fail closed, while the deadline-first schedulers
+  rotate bounded attempts fairly across all residents.
+- Captured signals advance a portfolio watermark only when every signal has a durable
+  terminal disposition. A nonterminal signal remains retryable on a later scan without
+  preventing an independent portfolio from committing its terminal batch.
+- A process-local watchdog detects bounded feed or direct-watch loop silence and exits
+  nonzero; systemd restarts only that failure path. Normal operator stops remain stopped.
+- This remains shadow-only. `REAL_TRADING_ENABLED` and `NOTIFICATION_TRADER_LIVE` remain
+  disabled, and no real-order permission, routing, signing, credential, or capital setting
+  changes.
+
 ## 2026-09-21 — Lane 3 scan suspension is replay-safe capture, not a terminal decision
 
 - Every direct-watch scan still publishes an unhealthy/empty authorization index before

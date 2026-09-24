@@ -92,6 +92,7 @@ export async function fundingForPosition(
   position: ManagedPosition,
   endTimeMs: number,
   maxOracleDelayMs = 10_000,
+  onPage?: () => void,
 ): Promise<{
   fundingUsd: number;
   fundingPoints: number;
@@ -113,7 +114,7 @@ export async function fundingForPosition(
   if (!Number.isFinite(carryUsd)) throw new Error('invalid funding carry');
   const accruedThroughMs = Number(position.fundingAccruedThroughMs ?? position.openedAtMs);
   const startTimeMs = accruedThroughMs > position.openedAtMs ? accruedThroughMs + 1 : position.openedAtMs;
-  const query = await hl.getFundingHistory(position.coin, startTimeMs, endTimeMs);
+  const query = await hl.getFundingHistory(position.coin, startTimeMs, endTimeMs, onPage);
   const rawHistory: FundingPoint[] = query.rows
     .map(row => ({ timeMs: Number(row.time), rate: Number(row.fundingRate) }))
     .filter(row => Number.isFinite(row.timeMs) && Number.isFinite(row.rate));

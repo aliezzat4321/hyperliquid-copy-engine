@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import {
   EliteDirectWatchState,
+  ELITE_DIRECT_WATCH_VERSION,
   establishClosedBaseline,
   fetchCompleteOpenInvestments,
   closedBoundaryProof,
@@ -447,6 +448,20 @@ test('clean startup enrolls up to proven cap while publication is suspended, the
   assert.equal(watch.status().closedInitializedCount, 16);
   assert.equal(watch.status().activeTargetCount, 16);
   assert.equal(watch.status().admissionPublished, false);
+});
+
+test('more than 41 qualified elites are all resident without resident_capacity_full deferral', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elite-no-count-cap-'));
+  const admissionPath = join(dir, 'admissions.json');
+  const watch = new EliteDirectWatchState(join(dir, 'state.json'), admissionPath, Number.MAX_SAFE_INTEGER);
+  const candidates = Array.from({ length: 42 }, (_, index) => ({
+    ...target, portfolioId: `qualified-${String(index).padStart(2, '0')}`, score: 100 - index,
+  }));
+  watch.syncTargets(candidates, new Set(), BASE, true, 120_000, new Set(), Number.MAX_SAFE_INTEGER,
+    2, 600_000, BASE, ELITE_SELECTOR_VERSION, true);
+  assert.equal(watch.status().residentCount, 42);
+  assert.equal(watch.status().enrollingTargetCount, 42);
+  assert.equal(watch.deferredAdmissions().some(row => row.reason === 'resident_capacity_full'), false);
 });
 
 test('attempt rotation cannot refresh admission health; suspension and successful recovery are atomic', () => {
@@ -1071,8 +1086,8 @@ test('tombstone restores causal watermarks without consuming resident capacity',
   assert.deepEqual(restored.closedBoundaryIds, []);
 });
 
-test('default capacity proof sustains hard floor 16 at timeout/page/concurrency/rate bounds', () => {
-  const defaults = validateDirectWatchCapacity({ residentCap: 48, scanMs: 3_000,
+test('default transport capacity reports freshness throughput at timeout/page/concurrency/rate bounds', () => {
+  const defaults = validateDirectWatchCapacity({ scanMs: 3_000,
     maxOpenHydratesPerScan: 24, openPollMs: 18_000,
     maxClosedHydratesPerScan: 24, closedPollMs: 60_000,
     requestTimeoutMs: 2_000, maxAttemptsPerPage: 2,
@@ -1081,9 +1096,8 @@ test('default capacity proof sustains hard floor 16 at timeout/page/concurrency/
     fixedReserveRequestsPerSecond: 4 });
   assert.equal(defaults.sustainableOpenTargetCeiling, 16);
   assert.ok(defaults.sustainableClosedTargetCeiling >= 16);
-  assert.equal(defaults.hardProvenResidentCap, 16);
   assert.equal(defaults.worstCaseOpenSweepMsAtCap, 14_000);
-  assert.throws(() => validateDirectWatchCapacity({ residentCap: 48, scanMs: 3_000,
+  assert.throws(() => validateDirectWatchCapacity({ scanMs: 3_000,
     maxOpenHydratesPerScan: 8, openPollMs: 18_000,
     maxClosedHydratesPerScan: 3, closedPollMs: 60_000,
     requestTimeoutMs: 2_000, maxAttemptsPerPage: 2,
@@ -1241,7 +1255,7 @@ test('two-phase enrollment absorbs a pre-admission round trip and admits only af
     Math.max(admitted.processedThroughMs, admitted.admittedAtMs ?? 0), BASE + 6)[0]?.sourceBaseId, 'post');
 });
 
-test('demotion, tombstone restart, and re-enrollment retain bounded admission intervals', () => {
+test('demotion, tombstone restart, and re-enrollment retain admission intervals', () => {
   const dir = mkdtempSync(join(tmpdir(), 'elite-interval-restart-'));
   const watchPath = join(dir, 'watch.json');
   const admissionPath = join(dir, 'admissions.json');
@@ -1269,6 +1283,36 @@ test('demotion, tombstone restart, and re-enrollment retain bounded admission in
     { admittedAtMs: BASE + 2, admittedUntilMs: BASE + 10 },
     { admittedAtMs: BASE + 21, admittedUntilMs: null },
   ]);
+});
+
+test('more than 16 admission intervals survive publication and restart without truncation', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elite-long-interval-history-'));
+  const watchPath = join(dir, 'watch.json');
+  const admissionPath = join(dir, 'admissions.json');
+  const intervals = Array.from({ length: 17 }, (_, index) => ({
+    admittedAtMs: BASE + index * 10,
+    admittedUntilMs: BASE + index * 10 + 5,
+  }));
+  const disk = {
+    version: ELITE_DIRECT_WATCH_VERSION, targets: {}, deferredAdmissions: {},
+    tombstones: { p1: { ...target, lifecycle: 'TOMBSTONE', processedThroughMs: BASE,
+      closedProcessedThroughMs: BASE, admittedAtMs: intervals[0].admittedAtMs,
+      retiredAtMs: intervals[16].admittedUntilMs, admissionIntervals: intervals } },
+  };
+  writeFileSync(watchPath, JSON.stringify(disk));
+  const watch = new EliteDirectWatchState(watchPath, admissionPath, 1);
+  watch.setAdmissionHealth(true);
+  assert.deepEqual(JSON.parse(readFileSync(admissionPath, 'utf8')).rows.p1.intervals, intervals);
+  const restarted = new EliteDirectWatchState(watchPath, admissionPath, 1);
+  assert.deepEqual(restarted.tombstones()[0].admissionIntervals, intervals);
+  restarted.syncTargets([target], new Set(), BASE + 200, true, 1, new Set(), 1);
+  restarted.commitClosedHydration('p1', [], BASE + 200);
+  restarted.commitOpenBaseline('p1', [], BASE + 201);
+  restarted.setAdmissionHealth(true);
+  const extended = JSON.parse(readFileSync(admissionPath, 'utf8')).rows.p1.intervals;
+  assert.equal(extended.length, 18);
+  assert.deepEqual(extended.slice(0, 17), intervals);
+  assert.deepEqual(extended[17], { admittedAtMs: BASE + 201, admittedUntilMs: null });
 });
 
 test('higher-score candidate displaces by safe retirement and remains waitlisted until capacity frees', () => {

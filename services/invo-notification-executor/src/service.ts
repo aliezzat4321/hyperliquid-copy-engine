@@ -84,6 +84,7 @@ import {
   isPositionExposedAcrossBoundary,
   syncStagedFundingForClose,
 } from './funding-boundary-accounting.js';
+import { directWatchdogLimitMs, feedWatchdogLimitMs, LoopProgressWatchdog, type WatchedLoop } from './loop-watchdog.js';
 
 if (INVO_TOKEN) invo.setToken(INVO_TOKEN);
 if (INVO_REFRESH_TOKEN) invo.setRefreshToken(INVO_REFRESH_TOKEN);
@@ -161,7 +162,6 @@ function loadConfig() {
     directWatchClosedPollMs: Math.max(30_000, n('NOTIFICATION_TRADER_DIRECT_WATCH_CLOSED_POLL_MS', 60_000)),
     directWatchMaxClosedHydratesPerScan: Math.max(1, Math.min(64, Math.trunc(n('NOTIFICATION_TRADER_DIRECT_WATCH_MAX_CLOSED_HYDRATES_PER_SCAN', 24)))),
     directWatchClosedMaxPages: Math.max(1, Math.min(3, Math.trunc(n('NOTIFICATION_TRADER_DIRECT_WATCH_CLOSED_MAX_PAGES', 2)))),
-    directWatchResidentCap: Math.max(1, Math.trunc(n('MAX_DIRECT_WATCH_RESIDENT_TARGETS', 48))),
     directWatchRequestTimeoutMs: invo.INVO_HTTP_REQUEST_TIMEOUT_MS,
     directWatchFixedOverheadMs: Math.max(0, n('DIRECT_WATCH_FIXED_OVERHEAD_MS', 2_000)),
     directWatchConcurrency: Math.max(1, Math.min(32, Math.trunc(n('DIRECT_WATCH_CONCURRENCY', 16)))),
@@ -179,7 +179,6 @@ function loadConfig() {
 
 const cfg = loadConfig();
 const directWatchConfiguredCapacity = validateDirectWatchCapacity({
-  residentCap: cfg.directWatchResidentCap,
   scanMs: cfg.directWatchScanMs,
   maxOpenHydratesPerScan: cfg.directWatchMaxHydratesPerScan,
   openPollMs: cfg.directWatchFallbackPollMs,
@@ -254,9 +253,8 @@ function scheduleFeedEvidencePersistence(posts: any[], feedFilter: InvoFeedSurfa
 }
 const directWatch = new EliteDirectWatchState(
   cfg.directWatchStatePath, cfg.directWatchAdmissionIndexPath,
-  directWatchConfiguredCapacity.hardProvenResidentCap,
+  Number.MAX_SAFE_INTEGER,
 );
-directWatch.assertResidentCap(directWatchConfiguredCapacity.hardProvenResidentCap);
 const inFlight = new Set<string>();
 const inFlightSourceEvents = new Set<string>();
 const sourceLifecycleQueue = new SourceLifecycleQueue();
@@ -284,6 +282,52 @@ const directWatchMetrics = {
   queueDepth: 0,
   lastScanAtMs: 0, lastSuccessAtMs: 0,
 };
+// A single shadow signal's execute() makes at most a small, fixed number of sequential
+// external requests (asset book, account equity/funding lookups); each is independently
+// timeout-bounded (HL_HTTP_REQUEST_TIMEOUT_MS / INVO_HTTP_REQUEST_TIMEOUT_MS). This is
+// the worst-case wall time between two per-signal heartbeats, and — unlike the total
+// wake() cycle time — it does not grow with how many signals or pages a cycle processes,
+// so it stays correct under a future live topology with a far larger signal volume.
+// This budget only holds for shadow (paper) execution. Live execution additionally
+// calls the Hyperliquid SDK's exchange methods (setLeverage/placeOrder via
+// getSdk().exchange.*, see hl-client.ts) which — unlike every info() lookup — are not
+// wrapped in an AbortSignal timeout and so have no bound this budget could cover. Arming
+// a fixed-silence watchdog around that path risks process.exit(1) firing while an order
+// submission/verification is still in flight, which could abandon a real order mid-flight
+// with unknown fill/position state. REAL_TRADING_ENABLED is off and this PR is shadow
+// reliability only, so the feed watchdog stays unarmed in live mode until every live
+// exchange call is itself bounded and heartbeated.
+const FEED_SIGNAL_MAX_SEQUENTIAL_REQUESTS = 4;
+const feedSignalProcessingBudgetMs = FEED_SIGNAL_MAX_SEQUENTIAL_REQUESTS
+  * Math.max(hl.HL_HTTP_REQUEST_TIMEOUT_MS, invo.INVO_HTTP_REQUEST_TIMEOUT_MS);
+// Both watched loops are only armed when a loop that can actually feed them runs in this
+// topology. Live mode never schedules directWatchLoop() and its executeUnlocked() path
+// makes unbounded/unheartbeated live exchange calls the feed budget above does not cover,
+// so arming either watchdog there would risk a false stall/exit with no safe heartbeat.
+const watchdogLimits: Partial<Record<WatchedLoop, number>> = {};
+if (!cfg.live) {
+  watchdogLimits.feed = feedWatchdogLimitMs({ maxBackoffMs: 30_000, pollMs: cfg.pollMs,
+    requestTimeoutMs: invo.INVO_HTTP_REQUEST_TIMEOUT_MS,
+    // One page can consume the original request, refresh request, and one retry.
+    maxRequestsPerPage: 3, signalProcessingBudgetMs: feedSignalProcessingBudgetMs,
+    processingMarginMs: 15_000 });
+  watchdogLimits.direct_watch = directWatchdogLimitMs({
+    openHydrates: cfg.directWatchMaxHydratesPerScan,
+    closedHydrates: cfg.directWatchMaxClosedHydratesPerScan,
+    openMaxPages: cfg.directWatchOpenMaxPages, closedMaxPages: cfg.directWatchClosedMaxPages,
+    maxAttemptsPerPage: 2, concurrency: cfg.directWatchConcurrency,
+    requestTimeoutMs: cfg.directWatchRequestTimeoutMs,
+    requestBudgetPerSecond: cfg.directWatchRequestBudgetPerSecond,
+    requestBudgetBurst: cfg.directWatchRequestBudgetBurst,
+    fixedReserveRequestsPerSecond: cfg.directWatchFixedReservePerSecond,
+    fixedOverheadMs: cfg.directWatchFixedOverheadMs,
+    // Captured NEW/ADD signals remain legitimately executable for this full window
+    // after hydration; publication/flush is part of the watched scan workload.
+    postScanFlushBudgetMs: cfg.maxSignalAgeMs, processingMarginMs: 15_000,
+  });
+}
+const loopWatchdog = new LoopProgressWatchdog(watchdogLimits, Date.now());
+let loopWatchdogTimer: NodeJS.Timeout | null = null;
 const SOURCE_CLOSE_RETRY_BASE_MS = 250;
 const SOURCE_CLOSE_RETRY_MAX_MS = 30_000;
 const HEALTH_MTM_CONCURRENCY = 4;
@@ -636,7 +680,10 @@ async function shadowReup(
   });
 }
 
-async function executeUnlocked(signal: InvoSignal, wakeSource: string, receivedAtMs: number, feedFilter: string) {
+async function executeUnlocked(
+  signal: InvoSignal, wakeSource: string, receivedAtMs: number, feedFilter: string,
+  heartbeat: () => void = () => {},
+) {
   const eventKey = sourceEventKey(signal);
   const lifecycleKey = closeLifecycleKey(signal);
   const inFlightKey = eventKey ?? signal.key;
@@ -839,6 +886,7 @@ async function executeUnlocked(signal: InvoSignal, wakeSource: string, receivedA
         try {
           stagedFunding = await syncStagedFundingForClose(
             managed, fill.receivedAtMs, fundingBoundaryStore, cfg.shadowFundingOracleMaxDelayMs,
+            { onWait: heartbeat },
           );
         } catch (error) {
           const reason = error instanceof Error ? error.message : String(error);
@@ -876,6 +924,7 @@ async function executeUnlocked(signal: InvoSignal, wakeSource: string, receivedA
               managed,
               fill.receivedAtMs,
               cfg.shadowFundingOracleMaxDelayMs,
+              heartbeat,
             );
             fullPositionFundingUsd = funding.fundingUsd;
             fundingUsd = funding.fundingUsd * fraction;
@@ -1254,8 +1303,12 @@ async function executeUnlocked(signal: InvoSignal, wakeSource: string, receivedA
   }
 }
 
-async function execute(signal: InvoSignal, wakeSource: string, receivedAtMs: number, feedFilter: string) {
-  return sourceLifecycleQueue.run(signal.sourceBaseId, () => executeUnlocked(signal, wakeSource, receivedAtMs, feedFilter));
+async function execute(
+  signal: InvoSignal, wakeSource: string, receivedAtMs: number, feedFilter: string,
+  heartbeat: () => void = () => {},
+) {
+  return sourceLifecycleQueue.run(signal.sourceBaseId,
+    () => executeUnlocked(signal, wakeSource, receivedAtMs, feedFilter, heartbeat));
 }
 
 
@@ -1352,13 +1405,17 @@ function applyFundingOracleResult(result: FundingOracleCaptureResult) {
   logBoundaryRetention();
 }
 
-async function fetchAndProcess(source: string, hints: NotificationHints | undefined, receivedAtMs: number, feedFilter = cfg.feedFilter): Promise<number> {
+async function fetchAndProcess(
+  source: string, hints: NotificationHints | undefined, receivedAtMs: number,
+  feedFilter = cfg.feedFilter, heartbeat: () => void = () => {},
+): Promise<number> {
   if (!cfg.live) {
     const pendingCloses = Object.values(state.snapshot().managed)
       .map(position => position.pendingSourceClose)
       .filter((signal): signal is InvoSignal => Boolean(signal));
     for (const signal of pendingCloses) {
-      await execute(signal, `${source}:source_close_reconciliation`, receivedAtMs, feedFilter);
+      await execute(signal, `${source}:source_close_reconciliation`, receivedAtMs, feedFilter, heartbeat);
+      heartbeat();
     }
   }
   const saved = state.getFeedCursor(feedFilter);
@@ -1366,6 +1423,7 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
     lastPostId => invo.getFeed(feedFilter, lastPostId, cfg.feedLimit),
     saved?.postId ?? null,
     cfg.feedMaxPages,
+    heartbeat,
   );
   const posts = backfill.posts;
   // Persistence is scheduled only after the core reconciliation path below. A disk
@@ -1396,7 +1454,8 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
     // page disappear. Reconcile only closes for exposure this service still owns; leave
     // all other gap posts unseen and never advance the cursor across the missing range.
     for (const signal of gapPlan.ownedCloses) {
-      await execute(signal, `${source}:gap_recovery`, receivedAtMs, feedFilter);
+      await execute(signal, `${source}:gap_recovery`, receivedAtMs, feedFilter, heartbeat);
+      heartbeat();
     }
     const remainingManagedCount = state.managedCount();
     const prospectiveRebaseAllowed = canProspectivelyRebaseGap(
@@ -1458,7 +1517,8 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
     state.markFeedBaselined(feedFilter, baselineAtMs);
     log({ type: 'surface_baseline_indexed', posts: posts.length, skippedOpenAddsAndUnownedCloses: baseline.skipped.length, recoverableCloses: baseline.recoverableCloses.length, live: cfg.live, feedFilter, feedLimit: cfg.feedLimit, traderFunnel: tracker.report().funnel });
     for (const signal of baseline.recoverableCloses) {
-      await execute(signal, 'surface_baseline_owned_close_recovery', receivedAtMs, feedFilter);
+      await execute(signal, 'surface_baseline_owned_close_recovery', receivedAtMs, feedFilter, heartbeat);
+      heartbeat();
     }
     const startupHandled = baseline.recoverableCloses.every(signal => closedLifecycleWasHandled(
       signal, key => state.hasSeen(key), sourceBaseId => state.hasHandledClose(sourceBaseId),
@@ -1483,9 +1543,14 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
 
   // In shadow, sources are independent and can be hydrated in parallel. Live remains sequential.
   if (cfg.live) {
-    for (const signal of ordered) await execute(signal, source, receivedAtMs, feedFilter);
+    for (const signal of ordered) {
+      await execute(signal, source, receivedAtMs, feedFilter, heartbeat);
+      heartbeat();
+    }
   } else {
-    await runSignalBatchBySource(ordered, signal => execute(signal, source, receivedAtMs, feedFilter));
+    await runSignalBatchBySource(
+      ordered, signal => execute(signal, source, receivedAtMs, feedFilter, heartbeat), heartbeat,
+    );
   }
   const allHandled = ordered.every(signal => signalWasSeen(signal, key => state.hasSeen(key)));
   if (allHandled && backfill.newestPostId) state.setFeedCursor(feedFilter, { postId: backfill.newestPostId, observedAtMs: Date.now(), source });
@@ -1494,7 +1559,10 @@ async function fetchAndProcess(source: string, hints: NotificationHints | undefi
   return ordered.length;
 }
 
-async function wake(source: string, hints?: NotificationHints, receivedAtMs = Date.now(), feedFilter = cfg.feedFilter) {
+async function wake(
+  source: string, hints?: NotificationHints, receivedAtMs = Date.now(),
+  feedFilter = cfg.feedFilter, heartbeat: () => void = () => {},
+) {
   pendingWake = { source, hints, receivedAtMs, feedFilter };
   if (hydrating) return;
   hydrating = true;
@@ -1503,11 +1571,11 @@ async function wake(source: string, hints?: NotificationHints, receivedAtMs = Da
       const current = pendingWake;
       pendingWake = null;
       try {
-        let found = await fetchAndProcess(current.source, current.hints, current.receivedAtMs, current.feedFilter);
+        let found = await fetchAndProcess(current.source, current.hints, current.receivedAtMs, current.feedFilter, heartbeat);
         if (current.source === 'push_notification' && current.hints && found === 0) {
           for (const delayMs of [120, 280, 600]) {
             await new Promise(r => setTimeout(r, delayMs));
-            found = await fetchAndProcess('push_hydration_retry', current.hints, current.receivedAtMs, current.feedFilter);
+            found = await fetchAndProcess('push_hydration_retry', current.hints, current.receivedAtMs, current.feedFilter, heartbeat);
             if (found > 0) break;
           }
         }
@@ -1840,7 +1908,7 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
       && directWatchConfiguredCapacity.provenResidentCap > 0;
     const deferredBefore = new Set(directWatch.deferredAdmissions().map(row => row.portfolioId));
     directWatch.syncTargets(candidate.targets, ownedDirectPortfolioIds(), nowMs, !candidate.stale,
-      120_000, new Set(candidate.demotedPortfolioIds), directWatchConfiguredCapacity.provenResidentCap,
+      120_000, new Set(candidate.demotedPortfolioIds), Number.MAX_SAFE_INTEGER,
       cfg.directWatchNegativeMinObservations, cfg.directWatchNegativeGraceMs,
       candidate.observedAtMs ?? nowMs, undefined, enrollmentPreconditionsHealthy);
     for (const deferred of directWatch.deferredAdmissions()) {
@@ -1920,10 +1988,9 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
       || proofAtMs - postScan.oldestOpenPollAtMs <= cfg.directWatchFallbackPollMs;
     const closedHealthy = postScan.oldestClosedPollAtMs == null
       || proofAtMs - postScan.oldestClosedPollAtMs <= cfg.directWatchClosedPollMs;
-    if (candidate.stale || postScan.targetCount > directWatchConfiguredCapacity.hardProvenResidentCap
-      || !openHealthy || !closedHealthy) {
+    if (candidate.stale || !openHealthy || !closedHealthy) {
       directWatch.setAdmissionHealth(false, candidate.stale ? 'candidate_state_not_authoritative'
-        : !openHealthy || !closedHealthy ? 'successful_observation_overdue' : 'resident_capacity_unhealthy');
+        : 'successful_observation_overdue');
       return;
     }
     const flush = await publishThenFlushCapturedSignals(
@@ -1990,7 +2057,6 @@ function startServer() {
       const oldestClosedPollAgeMs = directStatus.oldestClosedPollAtMs == null
         ? null : Math.max(0, healthNowMs - directStatus.oldestClosedPollAtMs);
       const directWatchCapacityHealthy = directWatchConfiguredCapacity.provenResidentCap > 0
-        && directStatus.targetCount <= directWatchConfiguredCapacity.provenResidentCap
         && (oldestOpenPollAgeMs == null || oldestOpenPollAgeMs <= cfg.directWatchFallbackPollMs)
         && (oldestClosedPollAgeMs == null || oldestClosedPollAgeMs <= cfg.directWatchClosedPollMs)
         && healthNowMs >= directWatchBackoffUntilMs && directStatus.admissionsHealthy;
@@ -2052,11 +2118,11 @@ function startServer() {
           closedPollMs: cfg.directWatchClosedPollMs,
           maxClosedHydratesPerScan: cfg.directWatchMaxClosedHydratesPerScan,
           closedMaxPages: cfg.directWatchClosedMaxPages,
-          residentCap: cfg.directWatchResidentCap,
           provenResidentCap: directWatchConfiguredCapacity.provenResidentCap,
-          hardProvenResidentCap: directWatchConfiguredCapacity.hardProvenResidentCap,
-          hardCapLimitingReasons: directWatchConfiguredCapacity.limitingReasons,
-          residentBudgetHeadroom: directWatchConfiguredCapacity.provenResidentCap - directStatus.targetCount,
+          transportTargetCeiling: directWatchConfiguredCapacity.provenResidentCap,
+          transportLimitingReasons: directWatchConfiguredCapacity.limitingReasons,
+          transportTargetHeadroom: directWatchConfiguredCapacity.provenResidentCap - directStatus.targetCount,
+          throughputSufficientForResidentCount: directStatus.targetCount <= directWatchConfiguredCapacity.provenResidentCap,
           negativeMinObservations: cfg.directWatchNegativeMinObservations,
           negativeGraceMs: cfg.directWatchNegativeGraceMs,
           sustainableOpenTargetCeiling: directWatchConfiguredCapacity.sustainableOpenTargetCeiling,
@@ -2079,11 +2145,9 @@ function startServer() {
           oldestClosedPollOverdueMs: oldestClosedPollAgeMs == null ? null : Math.max(0, oldestClosedPollAgeMs - cfg.directWatchClosedPollMs),
           openFreshnessGuarantee: directWatchCapacityHealthy,
           openFreshnessLimitReason: directWatchCapacityHealthy ? null
-            : 'observed deadline/cooldown state invalidates the configured hard-cap proof; new admissions fail closed',
+            : 'observed deadline/cooldown state invalidates transport freshness; new admissions fail closed',
           capacityHealthy: directWatchCapacityHealthy,
-          unhealthyReason: directStatus.targetCount > directWatchConfiguredCapacity.provenResidentCap
-            ? 'resident_count_exceeds_proven_capacity'
-            : healthNowMs < directWatchBackoffUntilMs ? 'rate_limit_cooldown'
+          unhealthyReason: healthNowMs < directWatchBackoffUntilMs ? 'rate_limit_cooldown'
               : (oldestOpenPollAgeMs != null && oldestOpenPollAgeMs > cfg.directWatchFallbackPollMs)
                   || (oldestClosedPollAgeMs != null && oldestClosedPollAgeMs > cfg.directWatchClosedPollMs)
                 ? 'sweep_overdue' : directStatus.admissionSuspensionReason,
@@ -2143,7 +2207,7 @@ function startServer() {
           return json(res, 202, { ok: true, ignored: 'not_invo_package' });
         }
         const hints = extractNotificationHints(payload);
-        void wake('push_notification', hints, receivedAtMs);
+        void wake('push_notification', hints, receivedAtMs, cfg.feedFilter, () => loopWatchdog.beat('feed', Date.now()));
         return json(res, 202, { ok: true, hints });
       } catch (err) {
         return json(res, 400, { ok: false, error: err instanceof Error ? err.message : String(err) });
@@ -2166,7 +2230,8 @@ async function pollLoop() {
     await new Promise(r => setTimeout(r, wait));
     const surface = cfg.discoverySurfaces[discoverySurfaceIndex % cfg.discoverySurfaces.length];
     discoverySurfaceIndex += 1;
-    await wake(`api_poll:${surface}`, undefined, Date.now(), surface);
+    await wake(`api_poll:${surface}`, undefined, Date.now(), surface, () => loopWatchdog.beat('feed', Date.now()));
+    loopWatchdog.beat('feed', Date.now());
   }
 }
 
@@ -2174,6 +2239,7 @@ async function directWatchLoop() {
   while (true) {
     const startedAtMs = Date.now();
     await scanEliteDirectWatch(startedAtMs);
+    loopWatchdog.beat('direct_watch', Date.now());
     const elapsedMs = Date.now() - startedAtMs;
     await new Promise(resolveSleep => setTimeout(resolveSleep,
       Math.max(0, cfg.directWatchScanMs - elapsedMs)));
@@ -2209,6 +2275,20 @@ async function main() {
   }
   if (!cfg.live) await scanEliteDirectWatch(Date.now());
   startServer();
+  const watchdogArmedAtMs = Date.now();
+  if (!cfg.live) {
+    loopWatchdog.beat('feed', watchdogArmedAtMs);
+    loopWatchdog.beat('direct_watch', watchdogArmedAtMs);
+  }
+  loopWatchdogTimer = setInterval(() => {
+    const nowMs = Date.now();
+    const stalled = loopWatchdog.firstStall(nowMs);
+    if (!stalled) return;
+    const event = { type: 'executor_loop_watchdog_stall', ...stalled, action: 'exit_for_systemd_recovery', live: cfg.live };
+    try { log(event); } catch { console.error(JSON.stringify({ ts: new Date(nowMs).toISOString(), ...event })); }
+    process.exit(1);
+  }, 1_000);
+  loopWatchdogTimer.unref();
   log({
     type: 'service_started',
     live: cfg.live,
@@ -2234,7 +2314,7 @@ async function main() {
       maxClosedHydratesPerScan: cfg.directWatchMaxClosedHydratesPerScan,
       closedMaxPages: cfg.directWatchClosedMaxPages,
       concurrency: cfg.directWatchConcurrency,
-      hardProvenResidentCap: directWatchConfiguredCapacity.hardProvenResidentCap,
+      transportTargetCeiling: directWatchConfiguredCapacity.provenResidentCap,
       requestBudgetPerSecond: cfg.directWatchRequestBudgetPerSecond,
       requestBudgetBurst: cfg.directWatchRequestBudgetBurst,
       fixedFeedSelectorReserveRequestsPerSecond: cfg.directWatchFixedReservePerSecond,

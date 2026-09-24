@@ -24,7 +24,7 @@ def healthy() -> dict:
             "capacityHealthy": True,
             "admissionsHealthy": True,
             "admissionSuspensionReason": None,
-            "hardProvenResidentCap": 16,
+            "transportTargetCeiling": 16,
         },
         "feedPortfolioEvidence": {"assimilationSuspended": False},
     }
@@ -48,7 +48,7 @@ def test_health_contract_accepts_only_complete_shadow_readiness() -> None:
         ("capacityHealthy", False),
         ("admissionsHealthy", False),
         ("admissionSuspensionReason", "failure"),
-        ("hardProvenResidentCap", 15),
+        ("transportTargetCeiling", 0),
     ]:
         payload = healthy()
         payload["directWatch"][key] = value
@@ -56,6 +56,10 @@ def test_health_contract_accepts_only_complete_shadow_readiness() -> None:
     payload = healthy()
     payload["feedPortfolioEvidence"]["assimilationSuspended"] = True
     assert validate(payload)
+    for invalid_ceiling in [True, 0.5, "16", None]:
+        payload = healthy()
+        payload["directWatch"]["transportTargetCeiling"] = invalid_ceiling
+        assert "direct_watch_transport_ceiling_invalid" in validate(payload)
 
 
 def test_health_contract_rejects_malformed_or_missing_fields() -> None:

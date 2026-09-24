@@ -1,6 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, truncateSync, writeFileSync } from 'fs';
 import { dirname } from 'path';
 import type { InvoSignal } from './notification-signal.js';
+import { MAX_ADMISSION_INDEX_BYTES } from './elite-admission.js';
 import { ELITE_SELECTOR_VERSION, isCanonicalPortfolioSnapshot, type PortfolioBucket } from './portfolio-candidates.js';
 import { signalWasSeen } from './source-event-dedupe.js';
 
@@ -501,7 +502,6 @@ export interface DirectWatchCapacity {
   worstCaseOpenSweepMsAtCap: number;
   worstCaseClosedSweepMsAtCap: number;
   provenResidentCap: number;
-  hardProvenResidentCap: number;
   worstCaseRequestBudget: number;
   fixedOverheadMs: number;
   concurrency: number;
@@ -512,7 +512,6 @@ export interface DirectWatchCapacity {
 }
 
 export function directWatchCapacity(input: {
-  residentCap: number;
   scanMs: number;
   maxOpenHydratesPerScan: number;
   openPollMs: number;
@@ -549,10 +548,10 @@ export function directWatchCapacity(input: {
   const sustainableOpenTargetCeiling = Math.min(input.maxOpenHydratesPerScan, wallOpen, openBurstCapacity);
   const sustainableClosedTargetCeiling = Math.min(input.maxClosedHydratesPerScan, wallClosed, closedBurstCapacity);
   const provenResidentCap = Math.max(0, Math.min(
-    input.residentCap, sustainableOpenTargetCeiling, sustainableClosedTargetCeiling, rateCapacity,
+    sustainableOpenTargetCeiling, sustainableClosedTargetCeiling, rateCapacity,
   ));
   const limitingReasons = [
-    ['configured_resident_cap', input.residentCap], ['open_deadline', sustainableOpenTargetCeiling],
+    ['open_deadline', sustainableOpenTargetCeiling],
     ['closed_deadline', sustainableClosedTargetCeiling], ['steady_state_request_budget', rateCapacity],
   ].filter(([, value]) => value === provenResidentCap).map(([reason]) => String(reason));
   return {
@@ -563,7 +562,6 @@ export function directWatchCapacity(input: {
     worstCaseClosedSweepMsAtCap: input.fixedOverheadMs
       + Math.ceil(provenResidentCap / input.concurrency) * (openTargetCostMs + closedTargetCostMs),
     provenResidentCap,
-    hardProvenResidentCap: provenResidentCap,
     worstCaseRequestBudget: provenResidentCap * (openRequestsPerTarget + closedRequestsPerTarget),
     fixedOverheadMs: input.fixedOverheadMs,
     concurrency: input.concurrency, requestBudgetPerSecond: input.requestBudgetPerSecond,
@@ -691,7 +689,6 @@ export class EliteDirectWatchState {
   private readonly journalPath: string;
   readonly admissionIndexPath: string;
   private readonly maxRetainedTombstones = 256;
-  private readonly maxAdmissionIntervals = 16;
   private readonly maxDeferredAdmissions = 256;
   private readonly maxJournalBytes = 1024 * 1024;
   private enforcedResidentCap: number;
@@ -800,7 +797,7 @@ export class EliteDirectWatchState {
   private normalizedAdmissionIntervals(raw: unknown, admittedAtMs: number | null,
     admittedUntilMs: number | null, strict: boolean): AdmissionInterval[] {
     if (raw == null && !strict) return admittedAtMs == null ? [] : [{ admittedAtMs, admittedUntilMs }];
-    if (!Array.isArray(raw) || raw.length > this.maxAdmissionIntervals) {
+    if (!Array.isArray(raw)) {
       throw new Error('invalid direct-watch admission interval history');
     }
     let priorUntil = -Infinity;
@@ -857,7 +854,11 @@ export class EliteDirectWatchState {
   private save() {
     mkdirSync(dirname(this.path), { recursive: true });
     const temp = `${this.path}.tmp`;
-    writeFileSync(temp, JSON.stringify(this.state, null, 2));
+    const serialized = JSON.stringify(this.state, null, 2);
+    if (Buffer.byteLength(serialized) > MAX_ADMISSION_INDEX_BYTES) {
+      throw new Error('direct-watch state exceeds safe persistence size');
+    }
+    writeFileSync(temp, serialized);
     renameSync(temp, this.path);
     if (existsSync(this.journalPath)) truncateSync(this.journalPath, 0);
     this.writeAdmissionIndex();
@@ -898,7 +899,11 @@ export class EliteDirectWatchState {
     const index: AdmissionIndexDiskState = { version: 2, generatedAtMs: Date.now(),
       healthy: capacityHealthy && this.admissionsEnabled,
       suspensionReason: capacityHealthy ? this.admissionSuspensionReason : 'resident_capacity_unhealthy', rows };
-    writeFileSync(temp, JSON.stringify(index));
+    const serialized = JSON.stringify(index);
+    if (Buffer.byteLength(serialized) > MAX_ADMISSION_INDEX_BYTES) {
+      throw new Error('direct-watch admission index exceeds safe persistence size');
+    }
+    writeFileSync(temp, serialized);
     renameSync(temp, this.admissionIndexPath);
   }
 
@@ -1220,7 +1225,6 @@ export class EliteDirectWatchState {
     target.admittedAtMs = polledAtMs;
     target.admissionIntervals ??= [];
     target.admissionIntervals.push({ admittedAtMs: polledAtMs, admittedUntilMs: null });
-    if (target.admissionIntervals.length > this.maxAdmissionIntervals) target.admissionIntervals.shift();
     target.lifecycle = 'ACTIVE';
     target.lastFallbackPollAtMs = polledAtMs;
     target.lastOpenSuccessAtMs = polledAtMs;
