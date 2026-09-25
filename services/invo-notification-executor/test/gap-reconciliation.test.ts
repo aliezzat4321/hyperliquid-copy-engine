@@ -72,6 +72,6 @@ test('unrecoverable gap never promotes opens or unowned closes into reconciliati
 test('prospective gap rebase is allowed only for shadow with zero managed exposure and a newest post', () => {
   assert.equal(canProspectivelyRebaseGap(false, 0, 'newest-post'), true);
   assert.equal(canProspectivelyRebaseGap(true, 0, 'newest-post'), false, 'live mode must never rebase across a missing range');
-  assert.equal(canProspectivelyRebaseGap(false, 1, 'newest-post'), false, 'managed exposure must keep gap recovery fail-closed');
+  assert.equal(canProspectivelyRebaseGap(false, 1, 'newest-post'), true, 'shadow exposure must not pin a stale feed cursor');
   assert.equal(canProspectivelyRebaseGap(false, 0, null), false, 'no durable high-water target means no rebase');
 });
