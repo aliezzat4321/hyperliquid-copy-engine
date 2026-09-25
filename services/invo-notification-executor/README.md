@@ -222,12 +222,61 @@ npm install --ignore-scripts --no-audit --no-fund
 npm run check
 ```
 
+## Coordinated Invo request budget
+
+Feed polling and the elite direct watcher share one Invo account quota, so they share one
+token bucket (`src/invo-request-budget.ts`) rather than pacing themselves independently.
+The bucket has two priority classes and the feed is primary:
+
+- **Direct watch can never take the reserved feed tokens.** A `DIRECT_WATCH` request is
+  granted only while the bucket holds more than `INVO_FEED_RESERVED_REQUESTS_PER_SECOND`
+  tokens, and every scheduling pass drains the feed queue first. A feed request can
+  therefore only ever wait behind another *feed* request — never behind reconciliation,
+  whatever the resident count or hydration backlog.
+- **FIFO within a class.** Direct-watch targets are served in arrival order, so no single
+  resident is starved by its peers while the sweep is oversubscribed.
+- **Adaptive 429 cooldown.** A server `Retry-After` is honoured when present (bounded by
+  `INVO_RATE_LIMIT_MAX_RETRY_AFTER_COOLDOWN_MS`); otherwise the cooldown escalates
+  exponentially over consecutive rejections and resets after
+  `INVO_RATE_LIMIT_DECAY_MS` of quiet. Each 429 also halves the sustained rate down to
+  `INVO_MIN_REQUESTS_PER_SECOND`, recovered additively over quiet intervals. A feed 429
+  gates both classes in full; a direct-watch 429 costs the feed only
+  `INVO_FEED_COOLDOWN_SHARE` of the penalty.
+- **Nothing is sent into a known rejection.** A request whose class is in cooldown is
+  rejected locally without spending a token, and a saturated budget fails closed on
+  `INVO_REQUEST_MAX_WAIT_MS` instead of stalling a watched loop.
+- **Static bounds use the rate floor.** The direct-watch loop-watchdog limit is computed at
+  `INVO_MIN_REQUESTS_PER_SECOND`, so an adaptive reduction cannot turn a legitimately
+  slower scan into a false stall and a process exit.
+
+Every Invo surface and every call site of one is pinned by an enforced inventory
+(`test/invo-call-site-inventory.test.ts`): each surface declares the class that pays for it
+and how many times the service may reference it, only `post()` may reach the network, and a
+`LIVE_ONLY` surface must stay behind its live gate. Adding an endpoint or a call site
+without classifying it fails the suite.
+
+Redundant traffic is removed where it is provably safe: a rotating discovery poll of a
+surface that another trigger already fetched within
+`NOTIFICATION_TRADER_FEED_MIN_SURFACE_REPOLL_MS` is skipped. Push hydration, startup
+baselines, gap recovery and owned-close reconciliation are never skipped, and a suppressed
+poll neither marks a post seen nor advances the durable cursor, so no event can be lost.
+
+Resident oversubscription is reported, not capped: there is no trader cap, so when the
+qualified-elite population exceeds `transportTargetCeiling` the health payload says so
+(`residentCountOversubscribed`, `degradedResidentCap`) and direct-watch admissions fail
+closed on observed deadline health. The feed path is unaffected by that degradation.
+
 ## Health
 
 ```bash
 curl -s http://127.0.0.1:8787/health
 curl -s http://127.0.0.1:8787/traders
 ```
+
+`invoRequestBudget.feedPriorityHealthy` is the operational proof that reconciliation never
+delayed the primary path: the feed reserve is configured, no feed request exhausted its
+bounded wait, and the feed is never gated longer than direct watch.
+`scripts/validate_lane3_shadow_health.py` fails closed on all three.
 
 ## Optional push wake
 

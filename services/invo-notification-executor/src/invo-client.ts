@@ -1,3 +1,7 @@
+import {
+  INVO_PRIMARY_REQUEST_CLASS, parseRetryAfterMs, type InvoRequestClass,
+} from './invo-request-budget.js';
+
 const BASE = 'https://api.invoapp.com';
 const APP_HEADERS = { 'x-app-version': '0.0.75', 'x-platform': 'web' } as const;
 export const INVO_HTTP_REQUEST_TIMEOUT_MS = Math.max(250, Number.parseInt(
@@ -8,10 +12,49 @@ let token = '';
 let refreshToken = '';
 
 export class InvoHttpError extends Error {
-  constructor(path: string, public readonly status: number, data: unknown) {
+  constructor(
+    path: string, public readonly status: number, data: unknown,
+    /** Server-stated retry delay, when the rejection carried one. Drives adaptive cooldown. */
+    public readonly retryAfterMs: number | null = null,
+  ) {
     super(`Invo ${path} ${status}: ${JSON.stringify(data)}`);
     this.name = 'InvoHttpError';
   }
+}
+
+/**
+ * Token refreshes are a hard precondition of every other request, so they are never gated
+ * behind the coordinated request budget. They are still reported so the budget's view of
+ * the account-wide footprint stays truthful.
+ *
+ * The class is threaded explicitly from the calling request rather than read from shared
+ * module state: the feed poller and the direct watcher run concurrently, so a latched
+ * "current class" would attribute a refresh to whichever loop happened to write it last.
+ * That only ever mis-attributed a metric, never a gate, but an untrue footprint metric is
+ * exactly what this subsystem exists to make trustworthy.
+ */
+export interface InvoAuthRequestObserver {
+  /** One refresh is leaving the process, charged to the class that needed the token. */
+  charge(requestClass: InvoRequestClass): void;
+  /**
+   * The refresh itself was rate limited. A refresh is ungated, never retried here, and its
+   * failure surfaces to the caller as a generic auth error, so without this hook the one
+   * request that proves the account is limited would be the one request the budget never
+   * hears about — leaving it to keep pacing at a rate the account has already refused.
+   */
+  rateLimited(requestClass: InvoRequestClass, retryAfterMs: number | null): void;
+}
+
+let authRequestObserver: InvoAuthRequestObserver | null = null;
+export function setAuthRequestObserver(observer: InvoAuthRequestObserver | null) {
+  authRequestObserver = observer;
+}
+
+/** Observation must never block or fail authentication, which everything else depends on. */
+function observeAuth(notify: (observer: InvoAuthRequestObserver) => void) {
+  const observer = authRequestObserver;
+  if (!observer) return;
+  try { notify(observer); } catch { /* an observer fault cannot be allowed to break auth */ }
 }
 
 export function setToken(value: string) {
@@ -36,13 +79,19 @@ function accessTokenStillFresh(minValidityMs = 30_000): boolean {
   }
 }
 
-async function refreshAccessToken(): Promise<boolean> {
+async function refreshAccessToken(requestClass: InvoRequestClass): Promise<boolean> {
   if (!refreshToken) return false;
+  observeAuth(observer => observer.charge(requestClass));
   const resp = await fetch(`${BASE}/v1_0/auth/refresh_token`, {
     method: 'GET',
     headers: { Authorization: `Bearer ${refreshToken}`, ...APP_HEADERS },
     signal: AbortSignal.timeout(INVO_HTTP_REQUEST_TIMEOUT_MS),
   });
+  if (resp.status === 429) {
+    observeAuth(observer => observer.rateLimited(
+      requestClass, parseRetryAfterMs(resp.headers.get('retry-after'), Date.now()),
+    ));
+  }
   if (resp.status !== 200) return false;
   const data: any = await resp.json();
   if (!data?.accessToken) return false;
@@ -51,16 +100,20 @@ async function refreshAccessToken(): Promise<boolean> {
   return true;
 }
 
-export async function ensureToken(): Promise<void> {
+export async function ensureToken(
+  requestClass: InvoRequestClass = INVO_PRIMARY_REQUEST_CLASS,
+): Promise<void> {
   if (accessTokenStillFresh()) return;
-  const refreshed = await refreshAccessToken();
+  const refreshed = await refreshAccessToken(requestClass);
   if (!refreshed && !token) throw new Error('No valid Invo token and refresh failed');
 }
 
 /** Direct-watch scans require one token proven valid for their whole hard horizon. */
-export async function ensureTokenFreshFor(minValidityMs: number): Promise<void> {
+export async function ensureTokenFreshFor(
+  minValidityMs: number, requestClass: InvoRequestClass = INVO_PRIMARY_REQUEST_CLASS,
+): Promise<void> {
   if (accessTokenStillFresh(minValidityMs)) return;
-  const refreshed = await refreshAccessToken();
+  const refreshed = await refreshAccessToken(requestClass);
   if (!refreshed || !accessTokenStillFresh(minValidityMs)) {
     throw new Error(`Invo token is not provably fresh for ${minValidityMs}ms direct-watch horizon`);
   }
@@ -74,8 +127,9 @@ function decodeResponse(text: string): unknown {
 
 async function post(
   path: string, body: unknown, retried = false, beforeRequest?: () => Promise<void>, allowAuthRetry = true,
+  requestClass: InvoRequestClass = INVO_PRIMARY_REQUEST_CLASS,
 ): Promise<any> {
-  await ensureToken();
+  await ensureToken(requestClass);
   await beforeRequest?.();
   const resp = await fetch(`${BASE}${path}`, {
     method: 'POST',
@@ -88,10 +142,13 @@ async function post(
     signal: AbortSignal.timeout(INVO_HTTP_REQUEST_TIMEOUT_MS),
   });
   const data = decodeResponse(await resp.text());
-  if (resp.status === 401 && allowAuthRetry && !retried && await refreshAccessToken()) {
-    return post(path, body, true, beforeRequest, allowAuthRetry);
+  if (resp.status === 401 && allowAuthRetry && !retried && await refreshAccessToken(requestClass)) {
+    return post(path, body, true, beforeRequest, allowAuthRetry, requestClass);
   }
-  if (resp.status >= 400) throw new InvoHttpError(path, resp.status, data);
+  if (resp.status >= 400) {
+    throw new InvoHttpError(path, resp.status, data,
+      parseRetryAfterMs(resp.headers.get('retry-after'), Date.now()));
+  }
   return data;
 }
 
@@ -105,22 +162,25 @@ export async function discoverPortfolios(filter: string, page = 1, size = 50, us
   return post('/v1_0/trending/get_portfolios_pl', body);
 }
 
-export async function getFeed(filter = 'following', lastPostId: string | null = null, itemLimit = 30) {
+export async function getFeed(
+  filter = 'following', lastPostId: string | null = null, itemLimit = 30,
+  beforeRequest?: () => Promise<void>, requestClass: InvoRequestClass = 'FEED',
+) {
   return post('/v1_0/posts/get_feed', {
     filter: { filter, assetTypes: [] },
     params: { lastPostId, itemLimit },
-  });
+  }, false, beforeRequest, true, requestClass);
 }
 
 export async function getPortfolioInvestments(
   portfolioId: string, isOpen: boolean, page = 1, size = 100, beforeRequest?: () => Promise<void>,
-  allowAuthRetry = true,
+  allowAuthRetry = true, requestClass: InvoRequestClass = INVO_PRIMARY_REQUEST_CLASS,
 ) {
   return post('/v1_0/investments/get_investments', {
     portfolioId,
     isOpen,
     params: { page, size },
-  }, false, beforeRequest, allowAuthRetry);
+  }, false, beforeRequest, allowAuthRetry, requestClass);
 }
 
 export async function checkAccountReady() {

@@ -40,9 +40,39 @@ def validate(payload: object) -> list[str]:
             failures.append("direct_watch_admissions_unhealthy")
         if direct.get("admissionSuspensionReason") is not None:
             failures.append("direct_watch_admission_suspended")
+        if direct.get("requestBudgetCoordinated") is not True:
+            failures.append("direct_watch_request_budget_not_coordinated")
         ceiling = direct.get("transportTargetCeiling")
         if not isinstance(ceiling, int) or isinstance(ceiling, bool) or ceiling < 1:
             failures.append("direct_watch_transport_ceiling_invalid")
+    budget = payload.get("invoRequestBudget")
+    if not isinstance(budget, dict):
+        failures.append("invo_request_budget_missing")
+    else:
+        # One coordinated Invo budget across feed polling and direct watch, with the primary
+        # feed path structurally protected. Anything less means reconciliation traffic can
+        # delay or starve prospective feed admission, so deployment must fail closed.
+        if budget.get("coordinated") is not True:
+            failures.append("invo_request_budget_not_coordinated")
+        if budget.get("primaryClass") != "FEED":
+            failures.append("invo_request_budget_primary_class_not_feed")
+        if budget.get("feedPriorityHealthy") is not True:
+            failures.append("invo_request_budget_feed_priority_unhealthy")
+        priority_failures = budget.get("feedPriorityFailures")
+        if not isinstance(priority_failures, list) or priority_failures:
+            failures.append("invo_request_budget_feed_priority_failures_present")
+        reserved = budget.get("reservedForFeedRequestsPerSecond")
+        if isinstance(reserved, bool) or not isinstance(reserved, (int, float)) or reserved < 1:
+            failures.append("invo_request_budget_feed_reserve_invalid")
+        classes = budget.get("classes")
+        feed_class = classes.get("FEED") if isinstance(classes, dict) else None
+        if not isinstance(feed_class, dict) or feed_class.get("waitExceeded") != 0:
+            failures.append("invo_request_budget_feed_wait_exhausted")
+        remaining = budget.get("cooldownRemainingMs")
+        if not isinstance(remaining, dict):
+            failures.append("invo_request_budget_cooldown_missing")
+        elif remaining.get("FEED", 0) > remaining.get("DIRECT_WATCH", 0):
+            failures.append("invo_request_budget_feed_gated_longer_than_direct_watch")
     evidence = payload.get("feedPortfolioEvidence")
     if not isinstance(evidence, dict) or evidence.get("assimilationSuspended") is not False:
         failures.append("feed_evidence_persistence_suspended")

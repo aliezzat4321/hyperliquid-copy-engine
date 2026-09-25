@@ -142,44 +142,13 @@ export async function runConcurrentHydrations<T>(
   return result;
 }
 
-export class DirectWatchRequestBudget {
-  private tokens: number;
-  private lastRefillMs: number;
-  private cooldownUntilMs = 0;
-  constructor(
-    readonly maxRequestsPerSecond: number, readonly burst: number,
-    private readonly now: () => number = Date.now,
-    private readonly sleep: (ms: number) => Promise<void> = ms => new Promise(resolve => setTimeout(resolve, ms)),
-  ) {
-    if (!(maxRequestsPerSecond > 0) || !(burst >= 1)) throw new Error('invalid direct-watch request budget');
-    this.tokens = burst;
-    this.lastRefillMs = now();
-  }
-  private refill(atMs: number) {
-    this.tokens = Math.min(this.burst, this.tokens + (atMs - this.lastRefillMs) * this.maxRequestsPerSecond / 1000);
-    this.lastRefillMs = atMs;
-  }
-  async acquire(): Promise<void> {
-    while (true) {
-      const atMs = this.now();
-      if (atMs < this.cooldownUntilMs) {
-        const error: any = new Error('direct-watch global rate-limit cooldown');
-        error.status = 429; error.cooldownUntilMs = this.cooldownUntilMs;
-        throw error;
-      }
-      this.refill(atMs);
-      if (this.tokens >= 1) { this.tokens -= 1; return; }
-      await this.sleep(Math.max(1, Math.ceil((1 - this.tokens) * 1000 / this.maxRequestsPerSecond)));
-    }
-  }
-  note429(cooldownUntilMs: number) {
-    this.cooldownUntilMs = Math.max(this.cooldownUntilMs, cooldownUntilMs);
-    this.tokens = 0;
-  }
-  status() { return { maxRequestsPerSecond: this.maxRequestsPerSecond, burst: this.burst,
-    availableTokens: this.tokens, cooldownUntilMs: this.cooldownUntilMs }; }
-}
-
+/**
+ * The per-subsystem direct-watch token bucket that used to live here has been replaced by
+ * the single process-wide `InvoRequestBudget` (`src/invo-request-budget.ts`), which paces
+ * feed polling and direct-watch against one account-wide ceiling and structurally reserves
+ * capacity for the primary feed path. Capacity/watchdog maths below take that budget's
+ * rates as inputs; they never own a bucket of their own.
+ */
 /**
  * Runs bounded target work without allowing one target failure to starve its peers.
  * A 429 is different: callers must apply a global cooldown, so remaining work is

@@ -35,8 +35,8 @@ import {
   planDirectHydrations,
   retiringOpenDispositions,
   runConcurrentHydrations,
+  directWatchCapacity,
   RetirementOpenDisposition,
-  DirectWatchRequestBudget,
   signalsFromDirectInvestments,
   unownedCloseEvidence,
   validateClosedPageOrdering,
@@ -85,6 +85,11 @@ import {
   syncStagedFundingForClose,
 } from './funding-boundary-accounting.js';
 import { directWatchdogLimitMs, feedWatchdogLimitMs, LoopProgressWatchdog, type WatchedLoop } from './loop-watchdog.js';
+import {
+  INVO_REQUEST_BUDGET_VERSION,
+  InvoRequestBudget,
+  type InvoRequestClass,
+} from './invo-request-budget.js';
 
 if (INVO_TOKEN) invo.setToken(INVO_TOKEN);
 if (INVO_REFRESH_TOKEN) invo.setRefreshToken(INVO_REFRESH_TOKEN);
@@ -94,6 +99,15 @@ function n(name: string, fallback: number): number {
   const value = raw == null || raw === '' ? fallback : Number(raw);
   if (!Number.isFinite(value)) throw new Error(`Invalid ${name}: ${raw}`);
   return value;
+}
+
+/** First set name wins; later names are retained deployment aliases. */
+function nAlias(names: readonly string[], fallback: number): number {
+  for (const name of names) {
+    const raw = process.env[name];
+    if (raw != null && raw !== '') return n(name, fallback);
+  }
+  return fallback;
 }
 
 function b(name: string, fallback: boolean): boolean {
@@ -112,11 +126,25 @@ function loadConfig() {
   const discoverySurfaces = parseDiscoverySurfaces(
     process.env.NOTIFICATION_TRADER_DISCOVERY_SURFACES ?? INVO_FEED_SURFACES.join(','),
   );
+  const pollMs = Math.max(500, n('NOTIFICATION_TRADER_POLL_MS', 1000));
+  // One account-wide Invo ceiling shared by feed polling and direct watch. The
+  // DIRECT_WATCH_* names are retained deployment aliases for the same knobs, which keeps
+  // the production footprint byte-identical to the pre-coordination configuration.
+  const invoRequestBudgetPerSecond = Math.max(1, nAlias(
+    ['INVO_MAX_REQUESTS_PER_SECOND', 'DIRECT_WATCH_MAX_REQUESTS_PER_SECOND'], 12));
+  const invoFeedReservedPerSecond = Math.max(1, Math.min(
+    invoRequestBudgetPerSecond - 1,
+    nAlias(['INVO_FEED_RESERVED_REQUESTS_PER_SECOND', 'DIRECT_WATCH_FIXED_RESERVE_REQUESTS_PER_SECOND'], 4),
+  ));
   return {
     live: b('NOTIFICATION_TRADER_LIVE', false),
     host: process.env.NOTIFICATION_TRADER_HOST ?? '127.0.0.1',
     port: n('NOTIFICATION_TRADER_PORT', 8787),
-    pollMs: Math.max(500, n('NOTIFICATION_TRADER_POLL_MS', 1000)),
+    pollMs,
+    // Suppresses only a *rotating discovery* re-poll of a surface another trigger (a push
+    // notification hydration) already fetched within this window. Never suppresses a push
+    // wake, a startup baseline, gap recovery or close reconciliation.
+    feedMinSurfaceRepollMs: Math.max(0, n('NOTIFICATION_TRADER_FEED_MIN_SURFACE_REPOLL_MS', pollMs)),
     // Research requirement: accept canonical Invo signals up to 25 seconds old.
     maxSignalAgeMs: Math.max(1000, n('NOTIFICATION_TRADER_MAX_SIGNAL_AGE_MS', 25_000)),
     feedFilter,
@@ -165,9 +193,26 @@ function loadConfig() {
     directWatchRequestTimeoutMs: invo.INVO_HTTP_REQUEST_TIMEOUT_MS,
     directWatchFixedOverheadMs: Math.max(0, n('DIRECT_WATCH_FIXED_OVERHEAD_MS', 2_000)),
     directWatchConcurrency: Math.max(1, Math.min(32, Math.trunc(n('DIRECT_WATCH_CONCURRENCY', 16)))),
-    directWatchRequestBudgetPerSecond: Math.max(1, n('DIRECT_WATCH_MAX_REQUESTS_PER_SECOND', 12)),
-    directWatchRequestBudgetBurst: Math.max(1, Math.trunc(n('DIRECT_WATCH_REQUEST_BURST', 32))),
-    directWatchFixedReservePerSecond: Math.max(0, n('DIRECT_WATCH_FIXED_RESERVE_REQUESTS_PER_SECOND', 4)),
+    invoRequestBudgetPerSecond,
+    invoRequestBudgetBurst: Math.max(invoFeedReservedPerSecond + 1, Math.trunc(nAlias(
+      ['INVO_REQUEST_BURST', 'DIRECT_WATCH_REQUEST_BURST'], 32))),
+    invoFeedReservedPerSecond,
+    // AIMD floor. Every static worst-case bound that must survive a degraded budget (the
+    // direct-watch loop watchdog) is derived from this, never from the configured ceiling.
+    invoMinRequestBudgetPerSecond: Math.max(
+      invoFeedReservedPerSecond + 1,
+      Math.min(invoRequestBudgetPerSecond, nAlias(['INVO_MIN_REQUESTS_PER_SECOND'],
+        Math.max(invoFeedReservedPerSecond + 1, Math.ceil(invoRequestBudgetPerSecond / 2)))),
+    ),
+    invoRateLimitBaseCooldownMs: Math.max(250, n('INVO_RATE_LIMIT_BASE_COOLDOWN_MS', 2_000)),
+    invoRateLimitMaxCooldownMs: Math.max(1_000, n('INVO_RATE_LIMIT_MAX_COOLDOWN_MS', 30_000)),
+    invoRateLimitMaxRetryAfterCooldownMs: Math.max(1_000, n('INVO_RATE_LIMIT_MAX_RETRY_AFTER_COOLDOWN_MS', 120_000)),
+    invoFeedCooldownShare: Math.min(1, Math.max(0.01, n('INVO_FEED_COOLDOWN_SHARE', 0.2))),
+    invoRateDecreaseFactor: Math.min(0.99, Math.max(0.05, n('INVO_RATE_DECREASE_FACTOR', 0.5))),
+    invoRateRecoveryStepPerSecond: Math.max(0.1, n('INVO_RATE_RECOVERY_STEP_PER_SECOND', 1)),
+    invoRateRecoveryIntervalMs: Math.max(1_000, n('INVO_RATE_RECOVERY_INTERVAL_MS', 30_000)),
+    invoRateLimitDecayMs: Math.max(1_000, n('INVO_RATE_LIMIT_DECAY_MS', 120_000)),
+    invoRequestMaxWaitMs: Math.max(100, n('INVO_REQUEST_MAX_WAIT_MS', 10_000)),
     directWatchNegativeMinObservations: Math.max(2, Math.trunc(n('DIRECT_WATCH_NEGATIVE_MIN_OBSERVATIONS', 2))),
     directWatchNegativeGraceMs: Math.max(600_000, n('DIRECT_WATCH_NEGATIVE_GRACE_MS', 600_000)),
     minEvidenceEvents: Math.max(1, Math.trunc(n('NOTIFICATION_TRADER_MIN_EVIDENCE_EVENTS', 20))),
@@ -178,7 +223,7 @@ function loadConfig() {
 }
 
 const cfg = loadConfig();
-const directWatchConfiguredCapacity = validateDirectWatchCapacity({
+const directWatchCapacityInput = {
   scanMs: cfg.directWatchScanMs,
   maxOpenHydratesPerScan: cfg.directWatchMaxHydratesPerScan,
   openPollMs: cfg.directWatchFallbackPollMs,
@@ -190,9 +235,19 @@ const directWatchConfiguredCapacity = validateDirectWatchCapacity({
   closedMaxPages: cfg.directWatchClosedMaxPages,
   fixedOverheadMs: cfg.directWatchFixedOverheadMs,
   concurrency: cfg.directWatchConcurrency,
-  requestBudgetPerSecond: cfg.directWatchRequestBudgetPerSecond,
-  requestBudgetBurst: cfg.directWatchRequestBudgetBurst,
-  fixedReserveRequestsPerSecond: cfg.directWatchFixedReservePerSecond,
+  requestBudgetPerSecond: cfg.invoRequestBudgetPerSecond,
+  requestBudgetBurst: cfg.invoRequestBudgetBurst,
+  fixedReserveRequestsPerSecond: cfg.invoFeedReservedPerSecond,
+};
+// Nominal: what the coordinated budget proves while it is running at its configured
+// ceiling. Admission freshness is additionally gated on *observed* deadline health, so a
+// degraded budget fails closed through observation rather than through this static proof.
+const directWatchConfiguredCapacity = validateDirectWatchCapacity(directWatchCapacityInput);
+// Degraded: the same proof at the AIMD rate floor. This is the residency that survives an
+// adaptive 429 reduction, and it is what the loop watchdog bound must be built from.
+const directWatchDegradedCapacity = directWatchCapacity({
+  ...directWatchCapacityInput,
+  requestBudgetPerSecond: cfg.invoMinRequestBudgetPerSecond,
 });
 const shadowPolicy: ShadowExecutionPolicy = {
   maxBookAgeMs: cfg.shadowMaxBookAgeMs,
@@ -266,10 +321,66 @@ let discoverySurfaceIndex = 0;
 const finalizedFundingOracleBoundaries = new Set<number>();
 let directWatchBackoffMs = 0;
 let directWatchBackoffUntilMs = 0;
-const directWatchRequestBudget = new DirectWatchRequestBudget(
-  cfg.directWatchRequestBudgetPerSecond - cfg.directWatchFixedReservePerSecond,
-  cfg.directWatchRequestBudgetBurst,
-);
+// The single Invo request budget for this process. Feed polling and direct watch are two
+// priority classes of one account-wide ceiling: direct watch can never consume the feed's
+// reserved tokens and always yields to a waiting feed request, so reconciliation traffic
+// cannot delay or starve the primary shadow admission path.
+const invoRequestBudget = new InvoRequestBudget({
+  maxRequestsPerSecond: cfg.invoRequestBudgetPerSecond,
+  burst: cfg.invoRequestBudgetBurst,
+  feedReservedRequestsPerSecond: cfg.invoFeedReservedPerSecond,
+  minRequestsPerSecond: cfg.invoMinRequestBudgetPerSecond,
+  baseCooldownMs: cfg.invoRateLimitBaseCooldownMs,
+  maxCooldownMs: cfg.invoRateLimitMaxCooldownMs,
+  maxRetryAfterCooldownMs: Math.max(cfg.invoRateLimitMaxCooldownMs, cfg.invoRateLimitMaxRetryAfterCooldownMs),
+  feedCooldownShare: cfg.invoFeedCooldownShare,
+  rateDecreaseFactor: cfg.invoRateDecreaseFactor,
+  rateRecoveryStepPerSecond: cfg.invoRateRecoveryStepPerSecond,
+  rateRecoveryIntervalMs: cfg.invoRateRecoveryIntervalMs,
+  consecutiveDecayMs: cfg.invoRateLimitDecayMs,
+  maxAcquireWaitMs: cfg.invoRequestMaxWaitMs,
+});
+const feedRequestMetrics = {
+  pageRequests: 0, redundantSurfacePollsSuppressed: 0, budgetCooldownSkips: 0,
+  http429s: 0, lastRetryAfterMs: null as number | null, lastCooldownUntilMs: 0,
+};
+const authRefreshMetrics = {
+  requests: 0, http429s: 0, lastRequestClass: null as InvoRequestClass | null,
+  lastRetryAfterMs: null as number | null, lastCooldownUntilMs: 0,
+};
+// Token refreshes precede every budgeted request and must never be gated, but they are
+// real account traffic, so they are charged to the class that needed them. The class comes
+// from the request that triggered the refresh, not from process state: both loops run
+// concurrently, so a latched "current class" would attribute refreshes to whichever loop
+// wrote it last and make the per-class footprint metrics untrue.
+invo.setAuthRequestObserver({
+  charge: requestClass => {
+    authRefreshMetrics.requests += 1;
+    authRefreshMetrics.lastRequestClass = requestClass;
+    invoRequestBudget.chargeUnbudgeted(requestClass);
+  },
+  // A rate-limited refresh is a real account 429 on the one request that cannot be gated.
+  // It never reaches either loop's 429 handler — the caller only sees a generic auth
+  // failure — so adapting the budget here is what stops the process from continuing to
+  // pace at a rate the account has already refused, and what makes the rejection visible.
+  rateLimited: (requestClass, retryAfterMs) => {
+    authRefreshMetrics.http429s += 1;
+    authRefreshMetrics.lastRetryAfterMs = retryAfterMs;
+    authRefreshMetrics.lastCooldownUntilMs = requestClass === 'DIRECT_WATCH'
+      ? applyDirectWatchRateLimit(Date.now(), retryAfterMs, 'auth_refresh')
+      : applyFeedRateLimit(Date.now(), retryAfterMs, 'auth_refresh');
+  },
+});
+/** Rotating discovery polls of a surface another trigger just fetched are pure duplication. */
+const lastSurfaceFetchAtMs = new Map<InvoFeedSurface, number>();
+async function acquireFeedRequestBudget() {
+  await invoRequestBudget.acquire('FEED');
+  feedRequestMetrics.pageRequests += 1;
+}
+// The feed loop's sleep must never exceed the silence the feed watchdog was armed for, so
+// the same constant bounds the backoff and the watchdog limit. A longer budget cooldown is
+// served across several cheap, watchdog-beating attempts rather than one long sleep.
+const FEED_MAX_BACKOFF_MS = 30_000;
 const directWatchMetrics = {
   selectorRequests: 0, hydrationRequests: 0, openPhaseRequests: 0, closedPhaseRequests: 0, hydrationCount: 0,
   closedHydrationCount: 0, closedBaselineCount: 0, closedOverflowRiskCount: 0,
@@ -306,7 +417,7 @@ const feedSignalProcessingBudgetMs = FEED_SIGNAL_MAX_SEQUENTIAL_REQUESTS
 // so arming either watchdog there would risk a false stall/exit with no safe heartbeat.
 const watchdogLimits: Partial<Record<WatchedLoop, number>> = {};
 if (!cfg.live) {
-  watchdogLimits.feed = feedWatchdogLimitMs({ maxBackoffMs: 30_000, pollMs: cfg.pollMs,
+  watchdogLimits.feed = feedWatchdogLimitMs({ maxBackoffMs: FEED_MAX_BACKOFF_MS, pollMs: cfg.pollMs,
     requestTimeoutMs: invo.INVO_HTTP_REQUEST_TIMEOUT_MS,
     // One page can consume the original request, refresh request, and one retry.
     maxRequestsPerPage: 3, signalProcessingBudgetMs: feedSignalProcessingBudgetMs,
@@ -317,9 +428,13 @@ if (!cfg.live) {
     openMaxPages: cfg.directWatchOpenMaxPages, closedMaxPages: cfg.directWatchClosedMaxPages,
     maxAttemptsPerPage: 2, concurrency: cfg.directWatchConcurrency,
     requestTimeoutMs: cfg.directWatchRequestTimeoutMs,
-    requestBudgetPerSecond: cfg.directWatchRequestBudgetPerSecond,
-    requestBudgetBurst: cfg.directWatchRequestBudgetBurst,
-    fixedReserveRequestsPerSecond: cfg.directWatchFixedReservePerSecond,
+    // The coordinated budget can adaptively reduce its rate after a 429, which lengthens a
+    // scan's legitimate budget wait. A watchdog bound computed at the configured ceiling
+    // would then fire a false stall and exit the process mid-degradation, so the bound is
+    // computed at the AIMD floor instead.
+    requestBudgetPerSecond: cfg.invoMinRequestBudgetPerSecond,
+    requestBudgetBurst: cfg.invoRequestBudgetBurst,
+    fixedReserveRequestsPerSecond: cfg.invoFeedReservedPerSecond,
     fixedOverheadMs: cfg.directWatchFixedOverheadMs,
     // Captured NEW/ADD signals remain legitimately executable for this full window
     // after hydration; publication/flush is part of the watched scan workload.
@@ -1425,13 +1540,30 @@ async function fetchAndProcess(
       heartbeat();
     }
   }
+  // Redundant-traffic elimination, narrowly scoped: a rotating discovery poll of a surface
+  // that another trigger already fetched within `feedMinSurfaceRepollMs` re-reads the same
+  // newest-first window for nothing. Only that rotation is suppressed — push hydration,
+  // startup baselines, gap recovery and the pending-close reconciliation above always run —
+  // and nothing is marked seen or advanced here, so the durable cursor still pins every
+  // unread post and no event can be dropped by skipping the duplicate read.
+  const lastFetchAtMs = lastSurfaceFetchAtMs.get(feedFilter) ?? 0;
+  const sinceLastFetchMs = Date.now() - lastFetchAtMs;
+  if (source.startsWith('api_poll:') && lastFetchAtMs > 0 && state.hasFeedBaseline(feedFilter)
+    && sinceLastFetchMs < cfg.feedMinSurfaceRepollMs) {
+    feedRequestMetrics.redundantSurfacePollsSuppressed += 1;
+    log({ type: 'feed_surface_poll_suppressed', feedFilter, source, sinceLastFetchMs,
+      minSurfaceRepollMs: cfg.feedMinSurfaceRepollMs, cursorAdvanced: false,
+      reason: 'duplicate_rotating_surface_poll_within_min_interval', live: cfg.live });
+    return 0;
+  }
   const saved = state.getFeedCursor(feedFilter);
   const backfill = await fetchFeedBackfill(
-    lastPostId => invo.getFeed(feedFilter, lastPostId, cfg.feedLimit),
+    lastPostId => invo.getFeed(feedFilter, lastPostId, cfg.feedLimit, acquireFeedRequestBudget, 'FEED'),
     saved?.postId ?? null,
     cfg.feedMaxPages,
     heartbeat,
   );
+  lastSurfaceFetchAtMs.set(feedFilter, Date.now());
   const posts = backfill.posts;
   // Persistence is scheduled only after the core reconciliation path below. A disk
   // failure suspends new feed-derived assimilation, but can never block owned closes,
@@ -1589,13 +1721,54 @@ async function wake(
         backoffMs = 0;
       } catch (err: any) {
         const status = err?.status;
-        if (status === 429) backoffMs = Math.min(Math.max(backoffMs * 2, 2000), 30_000);
-        log({ type: 'hydrate_error', source: current.source, status, backoffMs, error: err instanceof Error ? err.message : String(err) });
+        // A rejection the coordinated budget generated locally (class cooldown / exhausted
+        // bounded wait) must not escalate the cooldown that produced it; only a real Invo
+        // 429 does, and it adapts to the server's Retry-After when one was supplied.
+        if (status === 429 && err?.budgetCooldown !== true) {
+          backoffMs = feedBackoffFromCooldown(
+            applyFeedRateLimit(Date.now(), err?.retryAfterMs ?? null, current.source));
+        } else if (status === 429) {
+          feedRequestMetrics.budgetCooldownSkips += 1;
+          backoffMs = feedBackoffFromCooldown(err?.cooldownUntilMs ?? Date.now());
+        }
+        log({ type: 'hydrate_error', source: current.source, status, backoffMs,
+          budgetCooldown: err?.budgetCooldown === true, budgetCooldownReason: err?.reason ?? null,
+          error: err instanceof Error ? err.message : String(err) });
       }
     }
   } finally {
     hydrating = false;
   }
+}
+
+/**
+ * Adaptive cooldown for an observed feed-class 429, from either a feed page read or an
+ * ungated token refresh that was charged to the feed. The coordinated budget owns the
+ * escalation, the Retry-After adaptation and the rate reduction. Returns the cooldown
+ * deadline the caller must respect.
+ */
+function applyFeedRateLimit(nowMs: number, retryAfterMs: number | null, source: string): number {
+  feedRequestMetrics.http429s += 1;
+  feedRequestMetrics.lastRetryAfterMs = retryAfterMs;
+  const decision = invoRequestBudget.note429('FEED', retryAfterMs, nowMs);
+  feedRequestMetrics.lastCooldownUntilMs = decision.cooldownUntilMs;
+  log({ type: 'invo_rate_limit_adapted', requestClass: 'FEED', source,
+    retryAfterMs, retryAfterObserved: decision.retryAfterObserved,
+    retryAfterHonored: decision.retryAfterHonored,
+    cooldownMs: decision.cooldownMs, cooldownUntilMs: decision.cooldownUntilMs,
+    directWatchCooldownUntilMs: decision.peerCooldownUntilMs,
+    effectiveRequestsPerSecond: decision.effectiveRequestsPerSecond,
+    consecutive429s: decision.consecutive429s, live: cfg.live });
+  return decision.cooldownUntilMs;
+}
+
+/**
+ * Sleeping past the feed watchdog's armed silence would exit the process, so a longer
+ * coordinated cooldown is served as repeated bounded sleeps: each attempt re-enters
+ * pollLoop, beats the watchdog, and is rejected without spending a token.
+ */
+function feedBackoffFromCooldown(cooldownUntilMs: number): number {
+  return Math.min(FEED_MAX_BACKOFF_MS, Math.max(cfg.pollMs, cooldownUntilMs - Date.now()));
 }
 
 function ownedDirectPortfolioIds(): Set<string> {
@@ -1610,11 +1783,14 @@ async function getBudgetedDirectInvestments(
   portfolioId: string, isOpen: boolean, page: number, phase: 'OPEN' | 'CLOSED',
 ) {
   return invo.getPortfolioInvestments(portfolioId, isOpen, page, 100, async () => {
-    await directWatchRequestBudget.acquire();
+    // Reconciliation traffic draws from the same account-wide budget as the feed, at the
+    // lower priority class: it can never take the feed's reserved tokens and yields to any
+    // waiting feed request.
+    await invoRequestBudget.acquire('DIRECT_WATCH');
     directWatchMetrics.hydrationRequests += 1;
     if (phase === 'OPEN') directWatchMetrics.openPhaseRequests += 1;
     else directWatchMetrics.closedPhaseRequests += 1;
-  }, false);
+  }, false, 'DIRECT_WATCH');
 }
 
 async function hydrateDirectTarget(
@@ -1873,12 +2049,34 @@ async function hydrateClosedHistory(
   if (!watermarkCommitted) throw new Error(`incomplete CLOSED proof for ${target.portfolioId}`);
 }
 
-function applyDirectWatchRateLimit(nowMs: number) {
+/**
+ * Adaptive cooldown for an observed direct-watch 429. The coordinated budget owns the
+ * escalation, the Retry-After adaptation and the rate reduction; the loop just adopts the
+ * cooldown it produced. The feed serves only `invoFeedCooldownShare` of this penalty,
+ * because reconciliation overconsumption must not silence the primary admission path.
+ */
+function applyDirectWatchRateLimit(
+  nowMs: number, retryAfterMs: number | null, source = 'direct_watch',
+): number {
   directWatchMetrics.http429s += 1;
-  directWatchBackoffMs = Math.min(Math.max(directWatchBackoffMs * 2, 2_000), 30_000);
-  directWatchBackoffUntilMs = nowMs + directWatchBackoffMs;
-  directWatchRequestBudget.note429(directWatchBackoffUntilMs);
+  const decision = invoRequestBudget.note429('DIRECT_WATCH', retryAfterMs, nowMs);
+  directWatchBackoffMs = decision.cooldownMs;
+  directWatchBackoffUntilMs = decision.cooldownUntilMs;
   directWatch.setAdmissionHealth(false, 'rate_limit_cooldown');
+  log({ type: 'invo_rate_limit_adapted', requestClass: 'DIRECT_WATCH', source,
+    retryAfterMs, retryAfterObserved: decision.retryAfterObserved,
+    retryAfterHonored: decision.retryAfterHonored,
+    cooldownMs: decision.cooldownMs, cooldownUntilMs: decision.cooldownUntilMs,
+    feedCooldownUntilMs: decision.peerCooldownUntilMs,
+    feedCooldownShare: cfg.invoFeedCooldownShare,
+    effectiveRequestsPerSecond: decision.effectiveRequestsPerSecond,
+    consecutive429s: decision.consecutive429s, live: cfg.live });
+  return decision.cooldownUntilMs;
+}
+
+/** A feed 429 proves the account is limited, so it also gates reconciliation scans. */
+function directWatchCooldownUntilMs(): number {
+  return Math.max(directWatchBackoffUntilMs, invoRequestBudget.cooldownUntilMs('DIRECT_WATCH'));
 }
 
 function logTargetFailures(phase: string, failed: Array<{ item: any; error: unknown }>) {
@@ -1891,7 +2089,7 @@ function logTargetFailures(phase: string, failed: Array<{ item: any; error: unkn
 
 async function scanEliteDirectWatch(nowMs = Date.now()) {
   if (cfg.live) return;
-  if (nowMs < directWatchBackoffUntilMs) {
+  if (nowMs < directWatchCooldownUntilMs()) {
     directWatch.setAdmissionHealth(false, 'rate_limit_cooldown');
     return;
   }
@@ -1901,7 +2099,7 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
     await invo.ensureTokenFreshFor(Math.max(
       directWatchConfiguredCapacity.worstCaseClosedSweepMsAtCap,
       directWatchConfiguredCapacity.worstCaseOpenSweepMsAtCap,
-    ) + 30_000 + cfg.directWatchRequestTimeoutMs);
+    ) + 30_000 + cfg.directWatchRequestTimeoutMs, 'DIRECT_WATCH');
     const candidate = loadEliteDirectTargets(cfg.candidateStatePath, nowMs, cfg.candidateStateMaxAgeMs);
     if (candidate.validationError) {
       directWatchMetrics.candidateStateRejections += 1;
@@ -1973,7 +2171,9 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
           }
           else await hydrateClosedHistory(work.item.target, work.item.reason, nowMs);
         } catch (error: any) {
-          if (error?.status === 429 && error?.cooldownUntilMs == null) applyDirectWatchRateLimit(Date.now());
+          if (error?.status === 429 && error?.budgetCooldown !== true && error?.cooldownUntilMs == null) {
+            applyDirectWatchRateLimit(Date.now(), error?.retryAfterMs ?? null);
+          }
           throw error;
         }
       },
@@ -1982,7 +2182,10 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
     directWatchMetrics.skippedAfterRateLimit += run.skippedAfterRateLimit.length;
     if (run.rateLimited) {
       log({ type: 'elite_direct_rate_limit_skip', phase: 'deadline_queue',
-        skipped: run.skippedAfterRateLimit.length, backoffMs: directWatchBackoffMs, live: false });
+        skipped: run.skippedAfterRateLimit.length, backoffMs: directWatchBackoffMs,
+        cooldownUntilMs: directWatchCooldownUntilMs(),
+        feedCooldownUntilMs: invoRequestBudget.cooldownUntilMs('FEED'),
+        effectiveRequestsPerSecond: invoRequestBudget.effectiveRequestsPerSecond, live: false });
       return;
     }
     if (run.failed.length > 0) {
@@ -2063,10 +2266,12 @@ function startServer() {
         ? null : Math.max(0, healthNowMs - directStatus.oldestOpenPollAtMs);
       const oldestClosedPollAgeMs = directStatus.oldestClosedPollAtMs == null
         ? null : Math.max(0, healthNowMs - directStatus.oldestClosedPollAtMs);
+      const budgetStatus = invoRequestBudget.status(healthNowMs);
+      const directWatchCooldownMs = directWatchCooldownUntilMs();
       const directWatchCapacityHealthy = directWatchConfiguredCapacity.provenResidentCap > 0
         && (oldestOpenPollAgeMs == null || oldestOpenPollAgeMs <= cfg.directWatchFallbackPollMs)
         && (oldestClosedPollAgeMs == null || oldestClosedPollAgeMs <= cfg.directWatchClosedPollMs)
-        && healthNowMs >= directWatchBackoffUntilMs && directStatus.admissionsHealthy;
+        && healthNowMs >= directWatchCooldownMs && directStatus.admissionsHealthy;
       const initialized = cfg.discoverySurfaces.every(surface => state.hasFeedBaseline(surface));
       const fundingHealthy = fundingOracleWorker?.health().healthy ?? false;
       const operational = evaluateShadowOperationalHealth({
@@ -2140,9 +2345,25 @@ function startServer() {
           worstCaseLogicalRequestMs: cfg.directWatchRequestTimeoutMs * 2,
           fixedOverheadMs: directWatchConfiguredCapacity.fixedOverheadMs,
           concurrency: cfg.directWatchConcurrency,
-          requestBudget: directWatchRequestBudget.status(),
-          configuredRequestBudgetPerSecond: cfg.directWatchRequestBudgetPerSecond,
-          fixedFeedSelectorReserveRequestsPerSecond: cfg.directWatchFixedReservePerSecond,
+          requestBudgetCoordinated: true,
+          requestBudgetClass: 'DIRECT_WATCH',
+          requestBudget: {
+            availableTokens: budgetStatus.availableTokens,
+            effectiveRequestsPerSecond: budgetStatus.effectiveRequestsPerSecond,
+            usableRequestsPerSecond: budgetStatus.directWatchUsableRequestsPerSecond,
+            cooldownUntilMs: budgetStatus.cooldownUntilMs.DIRECT_WATCH,
+            ...budgetStatus.classes.DIRECT_WATCH,
+          },
+          configuredRequestBudgetPerSecond: cfg.invoRequestBudgetPerSecond,
+          fixedFeedSelectorReserveRequestsPerSecond: cfg.invoFeedReservedPerSecond,
+          // Residency that still holds if the coordinated budget has adaptively degraded to
+          // its rate floor. Below the live resident count this is an honest oversubscription
+          // signal, not a cap: admissions fail closed on observed deadline health.
+          degradedResidentCap: directWatchDegradedCapacity.provenResidentCap,
+          degradedLimitingReasons: directWatchDegradedCapacity.limitingReasons,
+          residentCountOversubscribed: directStatus.targetCount > directWatchConfiguredCapacity.provenResidentCap,
+          residentOversubscriptionCount: Math.max(0,
+            directStatus.targetCount - directWatchConfiguredCapacity.provenResidentCap),
           worstCaseRequestBudget: directWatchConfiguredCapacity.worstCaseRequestBudget,
           worstCaseOpenSweepMsAtCap: directWatchConfiguredCapacity.worstCaseOpenSweepMsAtCap,
           worstCaseClosedSweepMsAtCap: directWatchConfiguredCapacity.worstCaseClosedSweepMsAtCap,
@@ -2154,12 +2375,30 @@ function startServer() {
           openFreshnessLimitReason: directWatchCapacityHealthy ? null
             : 'observed deadline/cooldown state invalidates transport freshness; new admissions fail closed',
           capacityHealthy: directWatchCapacityHealthy,
-          unhealthyReason: healthNowMs < directWatchBackoffUntilMs ? 'rate_limit_cooldown'
+          unhealthyReason: healthNowMs < directWatchCooldownMs ? 'rate_limit_cooldown'
               : (oldestOpenPollAgeMs != null && oldestOpenPollAgeMs > cfg.directWatchFallbackPollMs)
                   || (oldestClosedPollAgeMs != null && oldestClosedPollAgeMs > cfg.directWatchClosedPollMs)
                 ? 'sweep_overdue' : directStatus.admissionSuspensionReason,
           backoffMs: directWatchBackoffMs,
-          backoffUntilMs: directWatchBackoffUntilMs,
+          backoffUntilMs: directWatchCooldownMs,
+        },
+        // One coordinated Invo budget across feed polling and direct watch. `feedPriorityHealthy`
+        // is the operational proof that reconciliation never delayed or silenced the primary
+        // feed path: the feed reserve is configured, no feed request exhausted its bounded
+        // wait, and the feed is never gated longer than direct watch.
+        invoRequestBudget: {
+          ...budgetStatus,
+          feedPageRequests: feedRequestMetrics.pageRequests,
+          feedHttp429s: feedRequestMetrics.http429s,
+          feedBudgetCooldownSkips: feedRequestMetrics.budgetCooldownSkips,
+          feedLastRetryAfterMs: feedRequestMetrics.lastRetryAfterMs,
+          feedLastCooldownUntilMs: feedRequestMetrics.lastCooldownUntilMs,
+          redundantSurfacePollsSuppressed: feedRequestMetrics.redundantSurfacePollsSuppressed,
+          minSurfaceRepollMs: cfg.feedMinSurfaceRepollMs,
+          feedBackoffMs: backoffMs,
+          // The ungated precondition traffic, reported separately so it can never be
+          // mistaken for paced traffic and can never disappear from the footprint.
+          authRefresh: { ...authRefreshMetrics },
         },
         fundingEconomicsReady: !cfg.live && fundingHealthy,
         liveFundingGate: cfg.live ? {
@@ -2322,11 +2561,27 @@ async function main() {
       closedMaxPages: cfg.directWatchClosedMaxPages,
       concurrency: cfg.directWatchConcurrency,
       transportTargetCeiling: directWatchConfiguredCapacity.provenResidentCap,
-      requestBudgetPerSecond: cfg.directWatchRequestBudgetPerSecond,
-      requestBudgetBurst: cfg.directWatchRequestBudgetBurst,
-      fixedFeedSelectorReserveRequestsPerSecond: cfg.directWatchFixedReservePerSecond,
+      degradedTransportTargetCeiling: directWatchDegradedCapacity.provenResidentCap,
       statePath: cfg.directWatchStatePath,
       source: 'portfolio_specific_read_only',
+    },
+    invoRequestBudget: {
+      version: INVO_REQUEST_BUDGET_VERSION,
+      coordinated: true,
+      primaryClass: 'FEED',
+      maxRequestsPerSecond: cfg.invoRequestBudgetPerSecond,
+      minRequestsPerSecond: cfg.invoMinRequestBudgetPerSecond,
+      burst: cfg.invoRequestBudgetBurst,
+      reservedForFeedRequestsPerSecond: cfg.invoFeedReservedPerSecond,
+      feedCooldownShare: cfg.invoFeedCooldownShare,
+      baseCooldownMs: cfg.invoRateLimitBaseCooldownMs,
+      maxCooldownMs: cfg.invoRateLimitMaxCooldownMs,
+      maxRetryAfterCooldownMs: cfg.invoRateLimitMaxRetryAfterCooldownMs,
+      rateDecreaseFactor: cfg.invoRateDecreaseFactor,
+      rateRecoveryStepPerSecond: cfg.invoRateRecoveryStepPerSecond,
+      rateRecoveryIntervalMs: cfg.invoRateRecoveryIntervalMs,
+      maxAcquireWaitMs: cfg.invoRequestMaxWaitMs,
+      minSurfaceRepollMs: cfg.feedMinSurfaceRepollMs,
     },
     shadowExecutionPolicy: shadowPolicy,
     fundingOracleMaxDelayMs: cfg.shadowFundingOracleMaxDelayMs,
