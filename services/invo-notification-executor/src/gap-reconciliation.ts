@@ -10,7 +10,7 @@ export function canProspectivelyRebaseGap(
   managedCount: number,
   newestPostId: string | null,
 ): boolean {
-  return !live && managedCount === 0 && Boolean(newestPostId);
+  return !live && managedCount >= 0 && Boolean(newestPostId);
 }
 
 /**
