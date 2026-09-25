@@ -64,7 +64,11 @@ def validate(payload: object) -> list[str]:
         reserved = budget.get("reservedForFeedRequestsPerSecond")
         if isinstance(reserved, bool) or not isinstance(reserved, (int, float)) or reserved < 1:
             failures.append("invo_request_budget_feed_reserve_invalid")
-        feed_class = (\n            budget.get("classes", {}).get("FEED")\n            if isinstance(budget.get("classes"), dict)\n            else None\n        )
+        feed_class = (
+            budget.get("classes", {}).get("FEED")
+            if isinstance(budget.get("classes"), dict)
+            else None
+        )
         if not isinstance(feed_class, dict) or feed_class.get("waitExceeded") != 0:
             failures.append("invo_request_budget_feed_wait_exhausted")
         remaining = budget.get("cooldownRemainingMs")
