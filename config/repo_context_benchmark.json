@@ -1,0 +1,24 @@
+{
+  "schema": "repo-context-workload/v1",
+  "max_files": 12,
+  "tasks": [
+    {
+      "id": "review-routing",
+      "query": "Review config/ai_team_router.json and scripts/ai_team_orchestrator.py route_review Claude exact SHA context",
+      "required_files": ["config/ai_team_router.json", "scripts/ai_team_orchestrator.py"],
+      "warm": true
+    },
+    {
+      "id": "orchestrator-regression",
+      "query": "Repair scripts/ai_team_orchestrator.py with tests/test_ai_team_orchestrator.py acceptance evidence runner",
+      "required_files": ["scripts/ai_team_orchestrator.py", "tests/test_ai_team_orchestrator.py"],
+      "warm": true
+    },
+    {
+      "id": "durable-state-docs",
+      "query": "Update docs/ai-team/state.json using scripts/render_ai_team_state.py and contract validation",
+      "required_files": ["docs/ai-team/state.json", "scripts/render_ai_team_state.py", "scripts/validate_ai_team_contract.py"],
+      "warm": true
+    }
+  ]
+}
