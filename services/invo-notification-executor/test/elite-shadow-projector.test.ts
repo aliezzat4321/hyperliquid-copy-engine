@@ -241,12 +241,33 @@ test('shadow marks require complete common and status-specific producer fields',
   }
 });
 
+test('lifecycle audit accepts canonical ISO audit ts when causal numeric time is present', () => {
+  const report = projectEliteShadow([snap('p', 100)], [{
+    ...opened('x', 'p', 200), ts: '2026-09-24T15:19:29.875Z',
+  }], health({ x: { paper: true, sourceBaseId: 'x' } }));
+  assert.equal(report.auditedResearchEvents, 1);
+  assert.equal(report.openElitePositions, 1);
+});
+
+test('streamed audit reader handles records spanning read chunks without weakening validation', () => {
+  const root = mkdtempSync(join(tmpdir(), 'elite-shadow-streamed-audit-'));
+  const snapshots = join(root, 'snapshots.jsonl'); const audit = join(root, 'audit.jsonl');
+  const report = join(root, 'report.json'); const ledger = join(root, 'ledger.jsonl');
+  writeFileSync(snapshots, `${JSON.stringify(snap('p', 100))}\n`);
+  const row = { ...opened('x', 'p', 200), ts: '2026-09-24T15:19:29.875Z', padding: 'x'.repeat(1_100_000) };
+  writeFileSync(audit, `${JSON.stringify(row)}\n`);
+  const rendered = writeEliteShadowReport(snapshots, audit, report, ledger,
+    health({ x: { paper: true, sourceBaseId: 'x' } }));
+  assert.equal(rendered.auditedResearchEvents, 1);
+  assert.equal(rendered.openElitePositions, 1);
+});
 test('lifecycle identities times and complete economics are never coerced', () => {
   for (const row of [
     { type: 'shadow_opened', sourceBaseId: {}, portfolioId: 'p', decisionAtMs: 200 },
     { type: 'shadow_opened', sourceBaseId: 'x', portfolioId: true, decisionAtMs: 200 },
     { type: 'shadow_opened', sourceBaseId: 'x', portfolioId: 'p', decisionAtMs: '200' },
     { type: 'shadow_opened', sourceBaseId: 'x', portfolioId: 'p', decisionAtMs: true },
+    { type: 'shadow_opened', sourceBaseId: 'x', portfolioId: 'p', decisionAtMs: 200, ts: 'not-a-time' },
     { type: 'shadow_closed', sourceBaseId: 'x', portfolioId: 'p', decisionAtMs: 200,
       economicsCompleteness: {}, netPnlUsd: 1 },
     ...['7', null, Number.NaN, Number.POSITIVE_INFINITY].map(netPnlUsd => ({ type: 'shadow_closed',
