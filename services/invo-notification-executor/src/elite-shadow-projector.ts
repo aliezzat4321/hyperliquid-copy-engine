@@ -1,8 +1,9 @@
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync,
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync,
   statSync, unlinkSync, writeFileSync } from 'fs';
 import { randomUUID } from 'crypto';
 import { basename, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
+import { StringDecoder } from 'string_decoder';
 import { ALLOWED_PORTFOLIO_BUCKETS, ELITE_SELECTOR_VERSION, type PortfolioSnapshot } from './portfolio-candidates.js';
 import { validateManagedPosition } from './notification-state.js';
 import { validateShadowMark } from './shadow-market.js';
@@ -16,23 +17,58 @@ function plain(value: unknown): value is Row {
   return prototype === Object.prototype || prototype === null;
 }
 
-function jsonl(path: string, kind: 'selector' | 'audit'): any[] {
-  if (!existsSync(path)) return [];
-  return readFileSync(path, 'utf8').split(/\r?\n/).flatMap((line, index) => {
-    if (!line.trim()) return [];
-    try {
-      const parsed = JSON.parse(line);
-      if (!plain(parsed)) throw new Error(`${kind} row must be a plain object`);
-      if (kind === 'selector') validateSelectorRow(parsed, `${path}:${index + 1}`);
-      else validateAuditRow(parsed, `${path}:${index + 1}`);
-      return [parsed];
-    }
-    catch (error) {
-      throw new Error(`corrupt JSONL evidence ${path}:${index + 1}: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  });
+function parseJsonlLine(line: string, path: string, lineNumber: number, kind: 'selector' | 'audit'): any | null {
+  if (!line.trim()) return null;
+  try {
+    const parsed = JSON.parse(line);
+    if (!plain(parsed)) throw new Error(`${kind} row must be a plain object`);
+    if (kind === 'selector') validateSelectorRow(parsed, `${path}:${lineNumber}`);
+    else validateAuditRow(parsed, `${path}:${lineNumber}`);
+    return parsed;
+  }
+  catch (error) {
+    throw new Error(`corrupt JSONL evidence ${path}:${lineNumber}: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
+function* jsonlRows(path: string, kind: 'selector' | 'audit'): Generator<any> {
+  if (!existsSync(path)) return;
+  const fd = openSync(path, 'r');
+  const decoder = new StringDecoder('utf8');
+  const chunk = Buffer.allocUnsafe(1024 * 1024);
+  let pending = '';
+  let lineNumber = 0;
+  try {
+    for (;;) {
+      const bytes = readSync(fd, chunk, 0, chunk.length, null);
+      if (bytes === 0) break;
+      pending += decoder.write(chunk.subarray(0, bytes));
+      for (;;) {
+        const newline = pending.indexOf('\n');
+        if (newline < 0) break;
+        let line = pending.slice(0, newline);
+        pending = pending.slice(newline + 1);
+        lineNumber += 1;
+        if (line.endsWith('\r')) line = line.slice(0, -1);
+        const parsed = parseJsonlLine(line, path, lineNumber, kind);
+        if (parsed != null) yield parsed;
+      }
+    }
+    pending += decoder.end();
+    if (pending.length > 0) {
+      lineNumber += 1;
+      if (pending.endsWith('\r')) pending = pending.slice(0, -1);
+      const parsed = parseJsonlLine(pending, path, lineNumber, kind);
+      if (parsed != null) yield parsed;
+    }
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function jsonl(path: string, kind: 'selector' | 'audit'): any[] {
+  return [...jsonlRows(path, kind)];
+}
 function validateSelectorRow(row: unknown, location = 'selector snapshot'): asserts row is PortfolioSnapshot {
   if (!plain(row)
     || typeof row.portfolioId !== 'string' || row.portfolioId.trim().length === 0
@@ -59,9 +95,14 @@ function validateAuditRow(row: unknown, location = 'audit row'): asserts row is 
     throw new Error(`corrupt audit evidence ${location}: unrecognized lifecycle type`);
   }
   if (LIFECYCLE_TYPES.has(type)) {
-    for (const field of ['decisionAtMs', 'bookReceivedAtMs', 'observedAtMs', 'time', 'ts']) {
+    for (const field of ['decisionAtMs', 'bookReceivedAtMs', 'observedAtMs', 'time']) {
       if (row[field] !== undefined && (typeof row[field] !== 'number' || !Number.isFinite(row[field]) || row[field] <= 0))
         throw new Error(`corrupt audit evidence ${location}: ${field} missing or invalid`);
+    }
+    if (row.ts !== undefined) {
+      const validEpoch = typeof row.ts === 'number' && Number.isFinite(row.ts) && row.ts > 0;
+      const validIso = typeof row.ts === 'string' && row.ts.trim().length > 0 && Number.isFinite(Date.parse(row.ts));
+      if (!validEpoch && !validIso) throw new Error(`corrupt audit evidence ${location}: ts missing or invalid`);
     }
     if (at(row) == null) throw new Error(`corrupt audit evidence ${location}: lifecycle time missing or invalid`);
     if (baseId(row) == null || portfolio(row) == null) {
@@ -128,10 +169,12 @@ function histories(rows: PortfolioSnapshot[]) { const out = new Map<string, Port
 function selectedAt(all: Map<string, PortfolioSnapshot[]>, id: string, when: number) { let found: PortfolioSnapshot | null = null;
   for (const row of all.get(id) ?? []) { if (row.observedAtMs <= when) found = row; else break; } return found; }
 
-export function projectEliteShadow(snapshots: PortfolioSnapshot[], audit: Row[], health: any | null) {
+export function projectEliteShadow(snapshots: PortfolioSnapshot[], audit: Iterable<Row>, health: any | null) {
   const all = histories(snapshots); const active = new Map<string, Membership>(); const included: Row[] = [];
   const rejects: Row[] = []; const orphanEliteCloses: Row[] = []; let selectorSnapshotUnresolvedOpenEvents = 0;
-  for (const [index, row] of audit.entries()) { validateAuditRow(row, `projection row ${index + 1}`);
+  let auditedResearchEvents = 0;
+  for (const row of audit) { const index = auditedResearchEvents; auditedResearchEvents += 1;
+    validateAuditRow(row, `projection row ${index + 1}`);
     const when = at(row); if (when == null) continue;
     const id = baseId(row), pid = portfolio(row), type = row.type as string, selected = pid ? selectedAt(all, pid, when) : null;
     if (open(type) && id && pid) { if (!selected) selectorSnapshotUnresolvedOpenEvents += 1;
@@ -246,7 +289,7 @@ export function projectEliteShadow(snapshots: PortfolioSnapshot[], audit: Row[],
   const openByPortfolio: Record<string, number> = {}; for (const m of active.values())
     openByPortfolio[m.portfolioId] = (openByPortfolio[m.portfolioId] ?? 0) + 1;
   return { selectorVersion: ELITE_SELECTOR_VERSION, methodology: 'causal_execution_realistic_elite_shadow',
-    retroactiveSelectionForbidden: true, candidateSnapshotCount: snapshots.length, auditedResearchEvents: audit.length,
+    retroactiveSelectionForbidden: true, candidateSnapshotCount: snapshots.length, auditedResearchEvents,
     eliteLifecycleEvents: included.length, eliteCandidateRejects: rejects.length, selectorSnapshotUnresolvedOpenEvents,
     openElitePositions: active.size, openEliteByPortfolio: openByPortfolio, markedElitePositions,
     openMarkIncompletePositions, unresolvedSourceCloseExposureCount,
@@ -347,7 +390,7 @@ export function readEliteShadowPublication(output: string, expectedLedgerBase: s
 }
 export function writeEliteShadowReport(snapshotPath: string, auditPath: string, output: string,
   ledger: string, health: any | null, io: ElitePublicationIo = publicationIo) {
-  const report = projectEliteShadow(loadCandidateSnapshots(snapshotPath), jsonl(auditPath, 'audit'), health);
+  const report = projectEliteShadow(loadCandidateSnapshots(snapshotPath), jsonlRows(auditPath, 'audit'), health);
   const { included, ...summary } = report;
   const rendered = { generatedAtMs: Date.now(), ...summary, ...candidateSnapshotStorage(snapshotPath) };
   const reportData = JSON.stringify(rendered, null, 2);
