@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { planDirectHydrations, type EliteDirectTarget } from '../src/elite-direct-watch.js';
+import { planClosedHydrations, planDirectHydrations, type EliteDirectTarget } from '../src/elite-direct-watch.js';
 
 const BASE = 1_780_000_000_000;
 const target: EliteDirectTarget = {
@@ -31,6 +31,19 @@ for (const count of [2, 5, 10, 20, 42]) {
     const fast = planDirectHydrations(rows, new Map(), BASE + 20_000, 18_000, count, hot, 600_000);
     assert.deepEqual(fast.map(row => row.target.portfolioId), [...hot]);
     const safety = planDirectHydrations(rows, new Map(), BASE + 600_001, 18_000, count, hot, 600_000);
+    assert.equal(safety.length, count);
+    assert.deepEqual(safety.slice(0, 2).map(row => row.target.portfolioId), [...hot]);
+  });
+}
+
+
+for (const count of [2, 5, 10, 20, 42]) {
+  test(`event-driven closed reconciliation scales to ${count} residents without fast-polling idle portfolios`, () => {
+    const rows = residents(count);
+    const hot = new Set([rows[0].portfolioId, rows[rows.length - 1].portfolioId]);
+    const fast = planClosedHydrations(rows, BASE + 61_000, 60_000, count, hot, 600_000);
+    assert.deepEqual(fast.map(row => row.target.portfolioId), [...hot]);
+    const safety = planClosedHydrations(rows, BASE + 600_001, 60_000, count, hot, 600_000);
     assert.equal(safety.length, count);
     assert.deepEqual(safety.slice(0, 2).map(row => row.target.portfolioId), [...hot]);
   });
