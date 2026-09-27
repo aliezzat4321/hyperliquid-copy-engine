@@ -2156,7 +2156,8 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
       }
     }
     const run = await runConcurrentHydrations(
-      schedule, cfg.directWatchConcurrency,
+      schedule, Math.max(1, Math.min(cfg.directWatchConcurrency,
+        directWatchConfiguredCapacity.provenResidentCap)),
       work => {
         if (work.phase === 'OPEN') directWatch.noteFallbackPoll(work.item.target.portfolioId, nowMs);
         else directWatch.noteClosedPoll(work.item.target.portfolioId, nowMs);
