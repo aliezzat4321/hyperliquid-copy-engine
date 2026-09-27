@@ -2144,7 +2144,7 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
     );
     const closedPlan = planClosedHydrations(
       directWatch.targets(), nowMs, cfg.directWatchClosedPollMs,
-      cfg.directWatchMaxClosedHydratesPerScan,
+      cfg.directWatchMaxClosedHydratesPerScan, hotPortfolioIds, 10 * 60_000,
     );
     const schedule = planDeadlineHydrations(
       hydrationPlan, closedPlan, cfg.directWatchFallbackPollMs, cfg.directWatchClosedPollMs,
@@ -2199,10 +2199,15 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
     }
     const proofAtMs = Date.now();
     const postScan = directWatch.status();
-    const openHealthy = postScan.oldestOpenPollAtMs == null
-      || proofAtMs - postScan.oldestOpenPollAtMs <= cfg.directWatchFallbackPollMs;
-    const closedHealthy = postScan.oldestClosedPollAtMs == null
-      || proofAtMs - postScan.oldestClosedPollAtMs <= cfg.directWatchClosedPollMs;
+    const postTargets = directWatch.targets();
+    const protectedIds = new Set([...hotPortfolioIds,
+      ...postTargets.filter(target => target.lifecycle === 'RETIRING' || target.lifecycle === 'ENROLLING')
+        .map(target => target.portfolioId)]);
+    const protectedTargets = postTargets.filter(target => protectedIds.has(target.portfolioId));
+    const openHealthy = protectedTargets.every(target =>
+      proofAtMs - (target.lastOpenSuccessAtMs ?? 0) <= cfg.directWatchFallbackPollMs);
+    const closedHealthy = protectedTargets.every(target =>
+      proofAtMs - (target.lastClosedSuccessAtMs ?? 0) <= cfg.directWatchClosedPollMs);
     if (candidate.stale || !openHealthy || !closedHealthy) {
       directWatch.setAdmissionHealth(false, candidate.stale ? 'candidate_state_not_authoritative'
         : 'successful_observation_overdue');
