@@ -2201,7 +2201,7 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
     const postScan = directWatch.status();
     const postTargets = directWatch.targets();
     const protectedIds = new Set([...hotPortfolioIds,
-      ...postTargets.filter(target => target.lifecycle === 'RETIRING' || target.lifecycle === 'ENROLLING')
+      ...postTargets.filter(target => target.lifecycle === 'ENROLLING')
         .map(target => target.portfolioId)]);
     const protectedTargets = postTargets.filter(target => protectedIds.has(target.portfolioId));
     const openHealthy = protectedTargets.every(target =>
@@ -2278,7 +2278,7 @@ function startServer() {
         healthNowMs - Math.max(cfg.maxSignalAgeMs, cfg.directWatchFallbackPollMs),
       )) healthHotIds.add(portfolioId);
       const healthProtectedTargets = healthTargets.filter(target => healthHotIds.has(target.portfolioId)
-        || target.lifecycle === 'RETIRING' || target.lifecycle === 'ENROLLING');
+        || target.lifecycle === 'ENROLLING');
       const oldestProtectedOpenPollAtMs = healthProtectedTargets.length
         ? Math.min(...healthProtectedTargets.map(target => target.lastOpenSuccessAtMs ?? 0)) : null;
       const oldestProtectedClosedPollAtMs = healthProtectedTargets.length
