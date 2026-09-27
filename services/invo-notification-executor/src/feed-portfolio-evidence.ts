@@ -351,6 +351,12 @@ export class FeedPortfolioEvidenceStore {
     return accepted;
   }
 
+  recentPortfolioIds(sinceMs: number): Set<string> {
+    return new Set(Object.values(this.state.portfolios)
+      .filter(record => record.lastSeenAtMs >= sinceMs)
+      .map(record => record.portfolioId));
+  }
+
   report() {
     const records = Object.values(this.state.portfolios);
     return {

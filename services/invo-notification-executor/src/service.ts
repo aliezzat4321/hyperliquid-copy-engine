@@ -2134,9 +2134,13 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
 
     // Selector timestamps are hints only. Periodic direct plans are constructed
     // even when one or more selector requests fail.
+    const hotPortfolioIds = ownedDirectPortfolioIds();
+    for (const portfolioId of feedPortfolioEvidence.recentPortfolioIds(
+      nowMs - Math.max(cfg.maxSignalAgeMs, cfg.directWatchFallbackPollMs),
+    )) hotPortfolioIds.add(portfolioId);
     const hydrationPlan = planDirectHydrations(
       targets, selectorChanges, nowMs, cfg.directWatchFallbackPollMs,
-      cfg.directWatchMaxHydratesPerScan,
+      cfg.directWatchMaxHydratesPerScan, hotPortfolioIds, 10 * 60_000,
     );
     const closedPlan = planClosedHydrations(
       directWatch.targets(), nowMs, cfg.directWatchClosedPollMs,
