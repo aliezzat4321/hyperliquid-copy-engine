@@ -48,3 +48,21 @@ for (const count of [2, 5, 10, 20, 42]) {
     assert.deepEqual(safety.slice(0, 2).map(row => row.target.portfolioId), [...hot]);
   });
 }
+
+
+test('non-owned retiring residents use idle backstop while hot retiring exposure stays fast', () => {
+  const rows = residents(20).map((row, index) => ({ ...row,
+    lifecycle: index < 10 ? 'RETIRING' as const : row.lifecycle,
+    lastRetirementOpenPollAtMs: BASE,
+  }));
+  const hotRetiring = rows[0].portfolioId;
+  const hot = new Set([hotRetiring]);
+  const fastOpen = planDirectHydrations(rows, new Map(), BASE + 20_000, 18_000, 20, hot, 600_000);
+  assert.deepEqual(fastOpen.map(row => row.target.portfolioId), [hotRetiring]);
+  const fastClosed = planClosedHydrations(rows, BASE + 61_000, 60_000, 20, hot, 600_000);
+  assert.equal(fastClosed.some(row => row.target.portfolioId === hotRetiring), true);
+  assert.equal(fastClosed.some(row => row.target.lifecycle === 'RETIRING'
+    && row.target.portfolioId !== hotRetiring), false);
+  const safetyOpen = planDirectHydrations(rows, new Map(), BASE + 600_001, 18_000, 20, hot, 600_000);
+  assert.equal(safetyOpen.filter(row => row.target.lifecycle === 'RETIRING').length, 10);
+});
