@@ -784,3 +784,32 @@ test('admission index requires exact complete writer row schema', () => {
     assert.equal(shouldPersistAdmissionDenial(decision), false);
   }
 });
+
+
+test('historical admission falls back to rotated previous snapshot without using future evidence', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lane3-rotated-history-'));
+  const path = join(dir, 'portfolio-candidates.json');
+  const snapshots = join(dir, 'portfolio-candidate-snapshots.jsonl');
+  writeFileSync(path, JSON.stringify(validState({ lastObservedAtMs: decisionAtMs + 20_000,
+    portfolios: { [portfolioId]: {
+      ...(validState().portfolios as any)[portfolioId], observedAtMs: decisionAtMs + 20_000,
+      bucket: 'ELITE_CANDIDATE',
+    } } })));
+  writeFileSync(`${snapshots}.recent.json`, JSON.stringify({ version: 1,
+    selectorVersion: ELITE_SELECTOR_VERSION, rows: [{
+      ...(validState().portfolios as any)[portfolioId], observedAtMs: decisionAtMs + 10_000,
+    }] }));
+  writeFileSync(`${snapshots}.previous`, [
+    JSON.stringify({ ...(validState().portfolios as any)[portfolioId],
+      observedAtMs: decisionAtMs - 5_000, bucket: 'ELITE_CANDIDATE' }),
+    JSON.stringify({ ...(validState().portfolios as any)[portfolioId],
+      observedAtMs: decisionAtMs + 5_000, bucket: 'REJECTED_DEMOTED' }),
+  ].join('\n'));
+  const decision = eliteAdmissionFromState(
+    path, portfolioId, decisionAtMs, 20 * 60_000, snapshots, undefined,
+    undefined, decisionAtMs + 30_000, false,
+  );
+  assert.equal(decision.allowed, true);
+  assert.equal(decision.candidateObservedAtMs, decisionAtMs - 5_000);
+  assert.equal(decision.reason, 'elite_candidate_pretrade_snapshot_qualified');
+});
