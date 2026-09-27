@@ -384,7 +384,8 @@ export function planDirectHydrations(
       // position can be copied open and then swallowed by its first CLOSED baseline.
       if (!target.closedHistoryInitialized) return [];
       if (target.lifecycle === 'RETIRING') {
-        if (nowMs - (target.lastRetirementOpenPollAtMs ?? 0) < fallbackPollMs) return [];
+        const pollMs = hotPortfolioIds.has(target.portfolioId) ? fallbackPollMs : idlePollMs;
+        if (nowMs - (target.lastRetirementOpenPollAtMs ?? 0) < pollMs) return [];
         return [{ target, selectorUpdatedAtMs: null, reason: 'retirement_open_drain' as const }];
       }
       const selectorUpdatedAtMs = selectorChanges.get(target.portfolioId) ?? null;
@@ -415,13 +416,13 @@ export function planClosedHydrations(
   return targets
     .filter(target => {
       if (!target.closedHistoryInitialized) return true;
-      const protectedLifecycle = target.lifecycle === 'RETIRING' || target.lifecycle === 'ENROLLING';
+      const protectedLifecycle = target.lifecycle === 'ENROLLING';
       const pollMs = protectedLifecycle || hotPortfolioIds.has(target.portfolioId) ? closedPollMs : idlePollMs;
       return nowMs - target.lastClosedPollAtMs >= pollMs;
     })
     .sort((a, b) => {
-      const protectedA = a.lifecycle === 'RETIRING' || a.lifecycle === 'ENROLLING' || hotPortfolioIds.has(a.portfolioId);
-      const protectedB = b.lifecycle === 'RETIRING' || b.lifecycle === 'ENROLLING' || hotPortfolioIds.has(b.portfolioId);
+      const protectedA = a.lifecycle === 'ENROLLING' || hotPortfolioIds.has(a.portfolioId);
+      const protectedB = b.lifecycle === 'ENROLLING' || hotPortfolioIds.has(b.portfolioId);
       const hotDelta = Number(protectedB) - Number(protectedA);
       return hotDelta || a.lastClosedPollAtMs - b.lastClosedPollAtMs || a.portfolioId.localeCompare(b.portfolioId);
     })
