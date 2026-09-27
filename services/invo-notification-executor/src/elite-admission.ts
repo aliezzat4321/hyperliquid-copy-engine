@@ -32,32 +32,45 @@ function latestHistoricalSnapshot(
 ): { row: any | null; error: string | null } {
   if (!snapshotsPath) return { row: null, error: null };
   const indexPath = `${snapshotsPath}.recent.json`;
-  if (!existsSync(indexPath)) return { row: null, error: null };
-  let stat;
-  try { stat = statSync(indexPath); } catch { return { row: null, error: 'candidate_snapshot_index_io_error' }; }
-  if (stat.size > MAX_RECENT_INDEX_BYTES) return { row: null, error: 'candidate_snapshot_index_oversize' };
-  let cached = snapshotCache.get(indexPath);
-  if (!cached || cached.mtimeMs !== stat.mtimeMs || cached.size !== stat.size) {
-    try {
-      const parsed = JSON.parse(readFileSync(indexPath, 'utf8'));
-      if (!isPlainObject(parsed) || parsed.version !== 1
-        || parsed.selectorVersion !== ELITE_SELECTOR_VERSION || !Array.isArray(parsed.rows)) {
-        return { row: null, error: 'candidate_snapshot_index_invalid_wrapper' };
-      }
-      if (!parsed.rows.every(validRecentRow)) {
-        return { row: null, error: 'candidate_snapshot_index_invalid_row' };
-      }
-      cached = { mtimeMs: stat.mtimeMs, size: stat.size, rows: parsed.rows };
-      snapshotCache.set(indexPath, cached);
-    } catch { return { row: null, error: 'candidate_snapshot_index_unparseable' }; }
-  }
   let chosen: any | null = null;
-  for (const row of cached.rows) {
-    if (row?.portfolioId !== portfolioId) continue;
-    const observedAtMs = Number(row?.observedAtMs);
-    if (Number.isFinite(observedAtMs) && observedAtMs <= decisionAtMs
-      && (chosen == null || observedAtMs > Number(chosen.observedAtMs))) chosen = row;
+  if (existsSync(indexPath)) {
+    let stat;
+    try { stat = statSync(indexPath); } catch { return { row: null, error: 'candidate_snapshot_index_io_error' }; }
+    if (stat.size > MAX_RECENT_INDEX_BYTES) return { row: null, error: 'candidate_snapshot_index_oversize' };
+    let cached = snapshotCache.get(indexPath);
+    if (!cached || cached.mtimeMs !== stat.mtimeMs || cached.size !== stat.size) {
+      try {
+        const parsed = JSON.parse(readFileSync(indexPath, 'utf8'));
+        if (!isPlainObject(parsed) || parsed.version !== 1
+          || parsed.selectorVersion !== ELITE_SELECTOR_VERSION || !Array.isArray(parsed.rows)) {
+          return { row: null, error: 'candidate_snapshot_index_invalid_wrapper' };
+        }
+        if (!parsed.rows.every(validRecentRow)) return { row: null, error: 'candidate_snapshot_index_invalid_row' };
+        cached = { mtimeMs: stat.mtimeMs, size: stat.size, rows: parsed.rows };
+        snapshotCache.set(indexPath, cached);
+      } catch { return { row: null, error: 'candidate_snapshot_index_unparseable' }; }
+    }
+    for (const row of cached.rows) {
+      if (row?.portfolioId !== portfolioId) continue;
+      const observedAtMs = Number(row?.observedAtMs);
+      if (Number.isFinite(observedAtMs) && observedAtMs <= decisionAtMs
+        && (chosen == null || observedAtMs > Number(chosen.observedAtMs))) chosen = row;
+    }
   }
+  if (chosen != null) return { row: chosen, error: null };
+  const previousPath = `${snapshotsPath}.previous`;
+  if (!existsSync(previousPath)) return { row: null, error: null };
+  try {
+    for (const line of readFileSync(previousPath, 'utf8').split('\n')) {
+      if (!line.includes(portfolioId)) continue;
+      let row: any;
+      try { row = JSON.parse(line); } catch { continue; }
+      if (!validRecentRow(row) || row.portfolioId !== portfolioId) continue;
+      const observedAtMs = Number(row.observedAtMs);
+      if (Number.isFinite(observedAtMs) && observedAtMs <= decisionAtMs
+        && (chosen == null || observedAtMs > Number(chosen.observedAtMs))) chosen = row;
+    }
+  } catch { return { row: null, error: 'candidate_snapshot_previous_io_error' }; }
   return { row: chosen, error: null };
 }
 
