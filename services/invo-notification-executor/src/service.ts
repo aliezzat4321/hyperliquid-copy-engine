@@ -2082,7 +2082,7 @@ function directWatchCooldownUntilMs(): number {
 function logTargetFailures(phase: string, failed: Array<{ item: any; error: unknown }>) {
   for (const { item, error } of failed) {
     directWatchMetrics.targetErrors += 1;
-    log({ type: 'elite_direct_target_error', phase, portfolioId: item.target.portfolioId,
+    log({ type: 'elite_direct_target_error', phase, portfolioId: item?.target?.portfolioId ?? item?.item?.target?.portfolioId ?? null,
       status: (error as any)?.status, error: error instanceof Error ? error.message : String(error), live: false });
   }
 }
@@ -2226,7 +2226,7 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
     // State/filesystem faults remain scan-level failures; HTTP target faults are
     // isolated above and never reach this guard.
     log({ type: 'elite_direct_watch_error', source: 'portfolio_specific_read_only', status: err?.status,
-      backoffMs: directWatchBackoffMs, error: err instanceof Error ? err.message : String(err), live: false });
+      backoffMs: directWatchBackoffMs, error: err instanceof Error ? err.message : String(err), stack: err instanceof Error ? err.stack : undefined, live: false });
     directWatch.setAdmissionHealth(false, err?.status === 401 ? 'authentication_failure' : 'scan_failure');
   } finally {
     directWatchMetrics.lastScanAtMs = nowMs;
