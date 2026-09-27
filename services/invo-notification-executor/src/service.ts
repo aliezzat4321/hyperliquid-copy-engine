@@ -2113,7 +2113,7 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
       && directWatchConfiguredCapacity.provenResidentCap > 0;
     const deferredBefore = new Set(directWatch.deferredAdmissions().map(row => row.portfolioId));
     directWatch.syncTargets(candidate.targets, ownedDirectPortfolioIds(), nowMs, !candidate.stale,
-      120_000, new Set(candidate.demotedPortfolioIds), Number.MAX_SAFE_INTEGER,
+      120_000, new Set(candidate.demotedPortfolioIds), directWatchConfiguredCapacity.provenResidentCap,
       cfg.directWatchNegativeMinObservations, cfg.directWatchNegativeGraceMs,
       candidate.observedAtMs ?? nowMs, undefined, enrollmentPreconditionsHealthy);
     for (const deferred of directWatch.deferredAdmissions()) {
