@@ -410,10 +410,21 @@ export function planDirectHydrations(
 
 export function planClosedHydrations(
   targets: StoredTarget[], nowMs: number, closedPollMs: number, maxHydrations: number,
+  hotPortfolioIds: ReadonlySet<string> = new Set(), idlePollMs = closedPollMs,
 ): ClosedHydrationPlanItem[] {
   return targets
-    .filter(target => nowMs - target.lastClosedPollAtMs >= closedPollMs)
-    .sort((a, b) => a.lastClosedPollAtMs - b.lastClosedPollAtMs || a.portfolioId.localeCompare(b.portfolioId))
+    .filter(target => {
+      if (!target.closedHistoryInitialized) return true;
+      const protectedLifecycle = target.lifecycle === 'RETIRING' || target.lifecycle === 'ENROLLING';
+      const pollMs = protectedLifecycle || hotPortfolioIds.has(target.portfolioId) ? closedPollMs : idlePollMs;
+      return nowMs - target.lastClosedPollAtMs >= pollMs;
+    })
+    .sort((a, b) => {
+      const protectedA = a.lifecycle === 'RETIRING' || a.lifecycle === 'ENROLLING' || hotPortfolioIds.has(a.portfolioId);
+      const protectedB = b.lifecycle === 'RETIRING' || b.lifecycle === 'ENROLLING' || hotPortfolioIds.has(b.portfolioId);
+      const hotDelta = Number(protectedB) - Number(protectedA);
+      return hotDelta || a.lastClosedPollAtMs - b.lastClosedPollAtMs || a.portfolioId.localeCompare(b.portfolioId);
+    })
     .slice(0, Math.max(0, maxHydrations))
     .map(target => ({ target, reason: target.closedHistoryInitialized ? 'periodic_closed_poll' : 'closed_history_baseline' }));
 }
