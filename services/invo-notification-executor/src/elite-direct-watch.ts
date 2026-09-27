@@ -375,6 +375,8 @@ export function planDirectHydrations(
   nowMs: number,
   fallbackPollMs: number,
   maxHydrations: number,
+  hotPortfolioIds: ReadonlySet<string> = new Set(),
+  idlePollMs = fallbackPollMs,
 ): DirectHydrationPlanItem[] {
   return targets
     .flatMap<DirectHydrationPlanItem>(target => {
@@ -386,7 +388,8 @@ export function planDirectHydrations(
         return [{ target, selectorUpdatedAtMs: null, reason: 'retirement_open_drain' as const }];
       }
       const selectorUpdatedAtMs = selectorChanges.get(target.portfolioId) ?? null;
-      const periodicDue = nowMs - target.lastFallbackPollAtMs >= fallbackPollMs;
+      const pollMs = hotPortfolioIds.has(target.portfolioId) ? fallbackPollMs : idlePollMs;
+      const periodicDue = nowMs - target.lastFallbackPollAtMs >= pollMs;
       if (!periodicDue && selectorUpdatedAtMs == null) return [];
       return [{
         target,
@@ -395,6 +398,8 @@ export function planDirectHydrations(
       }];
     })
     .sort((a, b) => {
+      const hotDelta = Number(hotPortfolioIds.has(b.target.portfolioId)) - Number(hotPortfolioIds.has(a.target.portfolioId));
+      if (hotDelta) return hotDelta;
       if (a.target.lastFallbackPollAtMs !== b.target.lastFallbackPollAtMs) {
         return a.target.lastFallbackPollAtMs - b.target.lastFallbackPollAtMs;
       }
