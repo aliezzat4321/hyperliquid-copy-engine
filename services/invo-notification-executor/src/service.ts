@@ -2272,10 +2272,21 @@ function startServer() {
       const snapshot = state.snapshot();
       const directStatus = directWatch.status();
       const healthNowMs = Date.now();
-      const oldestOpenPollAgeMs = directStatus.oldestOpenPollAtMs == null
-        ? null : Math.max(0, healthNowMs - directStatus.oldestOpenPollAtMs);
-      const oldestClosedPollAgeMs = directStatus.oldestClosedPollAtMs == null
-        ? null : Math.max(0, healthNowMs - directStatus.oldestClosedPollAtMs);
+      const healthTargets = directWatch.targets();
+      const healthHotIds = ownedDirectPortfolioIds();
+      for (const portfolioId of feedPortfolioEvidence.recentPortfolioIds(
+        healthNowMs - Math.max(cfg.maxSignalAgeMs, cfg.directWatchFallbackPollMs),
+      )) healthHotIds.add(portfolioId);
+      const healthProtectedTargets = healthTargets.filter(target => healthHotIds.has(target.portfolioId)
+        || target.lifecycle === 'RETIRING' || target.lifecycle === 'ENROLLING');
+      const oldestProtectedOpenPollAtMs = healthProtectedTargets.length
+        ? Math.min(...healthProtectedTargets.map(target => target.lastOpenSuccessAtMs ?? 0)) : null;
+      const oldestProtectedClosedPollAtMs = healthProtectedTargets.length
+        ? Math.min(...healthProtectedTargets.map(target => target.lastClosedSuccessAtMs ?? 0)) : null;
+      const oldestOpenPollAgeMs = oldestProtectedOpenPollAtMs == null
+        ? null : Math.max(0, healthNowMs - oldestProtectedOpenPollAtMs);
+      const oldestClosedPollAgeMs = oldestProtectedClosedPollAtMs == null
+        ? null : Math.max(0, healthNowMs - oldestProtectedClosedPollAtMs);
       const budgetStatus = invoRequestBudget.status(healthNowMs);
       const directWatchCooldownMs = directWatchCooldownUntilMs();
       const directWatchCapacityHealthy = directWatchConfiguredCapacity.provenResidentCap > 0
