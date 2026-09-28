@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
-  "snapshot_at": "2026-09-25T07:50:00Z",
-  "updated_by": "CLAUDE",
-  "head_observed": "71525cd7869cb5f91876dd3f856495f73af2df94",
+  "snapshot_at": "2026-09-28T11:11:00Z",
+  "updated_by": "CODEX_CHATGPT",
+  "head_observed": "2f789377f3705b1053fb2e141e25a9fb01cca90e",
   "mission": "Maximum sustainable executable risk-aware net profitability across the three Hyperliquid lanes.",
   "live_trading": {
     "authorized": false,
