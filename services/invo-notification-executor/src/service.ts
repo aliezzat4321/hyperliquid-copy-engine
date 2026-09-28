@@ -2541,6 +2541,9 @@ async function directWatchLoop() {
 }
 
 async function main() {
+  // Health/ingress must be reachable before any external startup await. All execution
+  // remains fail-closed until authentication, surface baselines, and reconciliation succeed.
+  startServer();
   if (!cfg.live) {
     await startFundingBeforeInvoAuthentication(
       () => startFundingOracleWorker(
@@ -2567,10 +2570,6 @@ async function main() {
   for (const surface of cfg.discoverySurfaces) {
     await wake(`startup_surface:${surface}`, undefined, Date.now(), surface);
   }
-  // Bind health/ingress before the potentially long initial reconciliation sweep.
-  // Admissions are already fail-closed until scanEliteDirectWatch publishes healthy state,
-  // so exposing health here reports startup truth without authorizing shadow execution.
-  startServer();
   const watchdogArmedAtMs = Date.now();
   if (!cfg.live) await scanEliteDirectWatch(Date.now());
   if (!cfg.live) {

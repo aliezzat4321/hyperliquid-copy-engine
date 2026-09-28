@@ -146,7 +146,11 @@ test('health ingress binds before the initial direct-watch reconciliation sweep'
   const source = readFileSync(new URL('../../src/service.ts', import.meta.url), 'utf8');
   const main = source.slice(source.indexOf('async function main()'));
   const server = main.indexOf('startServer();');
+  const fundingAuth = main.indexOf('startFundingBeforeInvoAuthentication(');
+  const directEnsure = main.indexOf('await invo.ensureToken()');
+  const startupSurface = main.indexOf('startup_surface:');
   const initialScan = main.indexOf('await scanEliteDirectWatch(Date.now())');
-  assert.ok(server >= 0 && initialScan >= 0 && server < initialScan,
-    'health/ingress must be reachable while the initial fail-closed reconciliation is running');
+  assert.ok(server >= 0 && fundingAuth >= 0 && directEnsure >= 0 && startupSurface >= 0 && initialScan >= 0);
+  assert.ok(server < fundingAuth && server < directEnsure && server < startupSurface && server < initialScan,
+    'health/ingress must bind before every potentially slow external startup await');
 });
