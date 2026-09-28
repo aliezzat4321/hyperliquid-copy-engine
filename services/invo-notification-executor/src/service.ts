@@ -823,6 +823,26 @@ async function executeUnlocked(
       log({ type: 'skip', reason: 'lifecycle_already_closed', signal, wakeSource });
       return;
     }
+    // Expired non-close signals are terminal historical evidence, not retryable admission work.
+    // Reject them before candidate/direct-watch freshness checks so an old snapshot cannot pin
+    // the reconciliation watermark forever. Fresh signals still pass every fail-closed gate below.
+    const ageMs = signal.sourceTimeMs == null ? null : decisionAtMs - signal.sourceTimeMs;
+    if (signal.action !== 'close' && ageMs != null && ageMs > cfg.maxSignalAgeMs) {
+      state.markSeen(signal.key);
+      const missedPreDemotion = isMissedPreDemotionOpen(
+        signal, wakeSource, decisionAtMs, cfg.maxSignalAgeMs,
+      );
+      log({
+        type: missedPreDemotion ? 'missed_pre_demotion_open' : 'skip',
+        reason: missedPreDemotion ? 'missed_pre_demotion_open' : 'stale_signal_over_25s_window',
+        lifecycleCopyability: missedPreDemotion ? 'NON_COPYABLE_STALE_FIRST_OBSERVATION' : undefined,
+        reconstructedOpenExecuted: missedPreDemotion ? false : undefined,
+        handledNoRetry: missedPreDemotion ? true : undefined,
+        ageMs, maxSignalAgeMs: cfg.maxSignalAgeMs, signal, wakeSource,
+      });
+      return;
+    }
+
     // Discovery remains broad in the separate portfolio-research collector, but NEW
     // Lane 3 shadow exposure is portfolio-level elite-only. Closes bypass this gate so
     // previously owned broad-research exposure can always unwind after a demotion.
@@ -890,22 +910,7 @@ async function executeUnlocked(
       return;
     }
 
-    const ageMs = signal.sourceTimeMs == null ? null : decisionAtMs - signal.sourceTimeMs;
-    if (signal.action !== 'close' && ageMs != null && ageMs > cfg.maxSignalAgeMs) {
-      state.markSeen(signal.key);
-      const missedPreDemotion = isMissedPreDemotionOpen(
-        signal, wakeSource, decisionAtMs, cfg.maxSignalAgeMs,
-      );
-      log({
-        type: missedPreDemotion ? 'missed_pre_demotion_open' : 'skip',
-        reason: missedPreDemotion ? 'missed_pre_demotion_open' : 'stale_signal_over_25s_window',
-        lifecycleCopyability: missedPreDemotion ? 'NON_COPYABLE_STALE_FIRST_OBSERVATION' : undefined,
-        reconstructedOpenExecuted: missedPreDemotion ? false : undefined,
-        handledNoRetry: missedPreDemotion ? true : undefined,
-        ageMs, maxSignalAgeMs: cfg.maxSignalAgeMs, signal, wakeSource,
-      });
-      return;
-    }
+
 
     // An observed OPEN is ownership-gap evidence only after it has passed the
     // admission/scope/freshness gates for this shadow epoch. A denied
