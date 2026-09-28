@@ -140,3 +140,13 @@ test('service arms shadow funding capture before any Invo authentication await',
   assert.ok(startup >= 0 && startup < directEnsure && directEnsure < startupSurface);
   assert.match(main, /startFundingBeforeInvoAuthentication\([\s\S]*startFundingOracleWorker\([\s\S]*invo\.ensureToken/);
 });
+
+
+test('health ingress binds before the initial direct-watch reconciliation sweep', () => {
+  const source = readFileSync(new URL('../../src/service.ts', import.meta.url), 'utf8');
+  const main = source.slice(source.indexOf('async function main()'));
+  const server = main.indexOf('startServer();');
+  const initialScan = main.indexOf('await scanEliteDirectWatch(Date.now())');
+  assert.ok(server >= 0 && initialScan >= 0 && server < initialScan,
+    'health/ingress must be reachable while the initial fail-closed reconciliation is running');
+});
