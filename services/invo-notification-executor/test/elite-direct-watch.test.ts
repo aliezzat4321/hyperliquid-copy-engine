@@ -1361,3 +1361,21 @@ test('unknown, malformed, and corrupt journal state fail closed loudly', () => {
   writeFileSync(`${path}.journal.jsonl`, '{bad\n');
   assert.throws(() => new EliteDirectWatchState(path), /state load failed closed/);
 });
+
+
+test('deadline scheduler never lets RETIRING cleanup starve current reconciliation', () => {
+  const target = (portfolioId: string, lifecycle: any, at: number) => ({
+    portfolioId, ownerId: portfolioId, username: portfolioId, sourceFilter: portfolioId, score: 1,
+    lifecycle, baselineAtMs: 1, processedThroughMs: 1, selectorInitialized: true,
+    lastSelectorUpdatedAtMs: null, lastFallbackPollAtMs: at, closedHistoryInitialized: true,
+    closedProcessedThroughMs: 1, closedBoundaryIds: [], lastClosedPollAtMs: at,
+    lastRetirementOpenPollAtMs: at,
+  });
+  const retiring = target('retiring-old', 'RETIRING', 0);
+  const active = target('active-current', 'ACTIVE', 100);
+  const schedule = planDeadlineHydrations(
+    [{ target: retiring, selectorUpdatedAtMs: null, reason: 'retirement_open_drain' },
+     { target: active, selectorUpdatedAtMs: null, reason: 'periodic_direct_poll' }], [], 18_000, 60_000);
+  assert.equal(schedule[0].item.target.portfolioId, 'active-current');
+  assert.equal(schedule[1].item.target.portfolioId, 'retiring-old');
+});
