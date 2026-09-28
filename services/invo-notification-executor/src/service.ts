@@ -2223,7 +2223,12 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
       proofAtMs - (target.lastOpenSuccessAtMs ?? 0) <= protectedOpenDeadlineMs);
     const closedHealthy = protectedTargets.every(target =>
       proofAtMs - (target.lastClosedSuccessAtMs ?? 0) <= protectedClosedDeadlineMs);
-    if (candidate.stale || !openHealthy || !closedHealthy) {
+    // Captured OPEN/ADD signals must be flushed before open-freshness is judged: their
+    // durable terminal disposition is what permits commitHydration() to advance the OPEN
+    // watermark. Requiring openHealthy here creates a circular deadlock for an overdue
+    // target. Candidate authority and CLOSED freshness remain prerequisites for publishing
+    // the temporary admission needed to evaluate the captured batch.
+    if (candidate.stale || !closedHealthy) {
       directWatch.setAdmissionHealth(false, candidate.stale ? 'candidate_state_not_authoritative'
         : 'successful_observation_overdue');
       return;
@@ -2242,6 +2247,13 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
       log({ type: 'elite_direct_buffered_signal_pending', portfolioIds: flush.pending,
         signalCount: capturedOpenSignals.filter(batch => flush.pending.includes(batch.portfolioId))
           .reduce((count, batch) => count + batch.signals.length, 0), live: false });
+      return;
+    }
+    const postFlushTargets = directWatch.targets().filter(target => protectedIds.has(target.portfolioId));
+    const postFlushOpenHealthy = postFlushTargets.every(target =>
+      Date.now() - (target.lastOpenSuccessAtMs ?? 0) <= protectedOpenDeadlineMs);
+    if (!postFlushOpenHealthy) {
+      directWatch.setAdmissionHealth(false, 'successful_observation_overdue');
       return;
     }
     directWatchBackoffMs = 0;
