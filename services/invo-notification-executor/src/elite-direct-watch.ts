@@ -861,8 +861,7 @@ export class EliteDirectWatchState {
 
   private writeAdmissionIndex() {
     const rows: Record<string, AdmissionIndexRow> = {};
-    const capacityHealthy = Object.keys(this.state.targets).length <= this.enforcedResidentCap;
-    for (const target of capacityHealthy && this.admissionsEnabled ? Object.values(this.state.targets) : []) {
+    for (const target of this.admissionsEnabled ? Object.values(this.state.targets) : []) {
       if (!['ACTIVE', 'MISSING_GRACE', 'RETIRING'].includes(target.lifecycle ?? '')
         || !target.openHistoryInitialized || !target.closedHistoryInitialized
         || !Number.isFinite(target.admittedAtMs)) continue;
@@ -874,7 +873,7 @@ export class EliteDirectWatchState {
         score: target.score,
         selectorVersion: ELITE_SELECTOR_VERSION };
     }
-    for (const tombstone of capacityHealthy && this.admissionsEnabled ? Object.values(this.state.tombstones) : []) {
+    for (const tombstone of this.admissionsEnabled ? Object.values(this.state.tombstones) : []) {
       if (!Number.isFinite(tombstone.admittedAtMs) || !Number.isFinite(tombstone.retiredAtMs)) continue;
       rows[tombstone.portfolioId] = { portfolioId: tombstone.portfolioId,
         intervals: tombstone.admissionIntervals,
@@ -883,8 +882,8 @@ export class EliteDirectWatchState {
     mkdirSync(dirname(this.admissionIndexPath), { recursive: true });
     const temp = `${this.admissionIndexPath}.tmp`;
     const index: AdmissionIndexDiskState = { version: 2, generatedAtMs: Date.now(),
-      healthy: capacityHealthy && this.admissionsEnabled,
-      suspensionReason: capacityHealthy ? this.admissionSuspensionReason : 'resident_capacity_unhealthy', rows };
+      healthy: this.admissionsEnabled,
+      suspensionReason: this.admissionSuspensionReason, rows };
     const serialized = JSON.stringify(index);
     if (Buffer.byteLength(serialized) > MAX_ADMISSION_INDEX_BYTES) {
       throw new Error('direct-watch admission index exceeds safe persistence size');
@@ -1202,8 +1201,7 @@ export class EliteDirectWatchState {
 
   commitOpenBaseline(portfolioId: string, rows: any[], polledAtMs: number) {
     const target = this.state.targets[portfolioId];
-    if (!target || target.lifecycle !== 'ENROLLING' || !target.closedHistoryInitialized
-      || Object.keys(this.state.targets).length > this.enforcedResidentCap) return;
+    if (!target || target.lifecycle !== 'ENROLLING' || !target.closedHistoryInitialized) return;
     const newest = rows.reduce((value, row) => Math.max(value,
       directSourceTimeMs(row?.updatedAt) ?? directSourceTimeMs(row?.createdAt) ?? 0), target.processedThroughMs);
     target.processedThroughMs = Math.max(newest, polledAtMs);
@@ -1234,8 +1232,7 @@ export class EliteDirectWatchState {
     const processed = targets.map(target => target.processedThroughMs).filter(Number.isFinite);
     const closedProcessed = targets.filter(target => target.closedHistoryInitialized)
       .map(target => target.closedProcessedThroughMs).filter(Number.isFinite);
-    const admissionPublished = this.admissionsEnabled && targets.length <= this.enforcedResidentCap
-      && targets.some(target =>
+    const admissionPublished = this.admissionsEnabled && targets.some(target =>
       target.lifecycle === 'ACTIVE' && target.openHistoryInitialized && target.closedHistoryInitialized
         && Number.isFinite(target.admittedAtMs));
     return {
