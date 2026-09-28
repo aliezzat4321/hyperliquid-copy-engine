@@ -2204,10 +2204,20 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
       ...postTargets.filter(target => target.lifecycle === 'ENROLLING')
         .map(target => target.portfolioId)]);
     const protectedTargets = postTargets.filter(target => protectedIds.has(target.portfolioId));
+    const protectedCount = Math.max(1, protectedTargets.length);
+    const budgetStatus = invoRequestBudget.status(proofAtMs);
+    const usableDirectRps = Math.max(0.001, budgetStatus.directWatchUsableRequestsPerSecond);
+    const logicalRequestMs = cfg.directWatchRequestTimeoutMs * 2;
+    const protectedOpenDeadlineMs = Math.max(cfg.directWatchFallbackPollMs,
+      Math.ceil((protectedCount * cfg.directWatchOpenMaxPages * logicalRequestMs) / usableDirectRps)
+        + directWatchConfiguredCapacity.fixedOverheadMs);
+    const protectedClosedDeadlineMs = Math.max(cfg.directWatchClosedPollMs,
+      Math.ceil((protectedCount * cfg.directWatchClosedMaxPages * logicalRequestMs) / usableDirectRps)
+        + directWatchConfiguredCapacity.fixedOverheadMs);
     const openHealthy = protectedTargets.every(target =>
-      proofAtMs - (target.lastOpenSuccessAtMs ?? 0) <= cfg.directWatchFallbackPollMs);
+      proofAtMs - (target.lastOpenSuccessAtMs ?? 0) <= protectedOpenDeadlineMs);
     const closedHealthy = protectedTargets.every(target =>
-      proofAtMs - (target.lastClosedSuccessAtMs ?? 0) <= cfg.directWatchClosedPollMs);
+      proofAtMs - (target.lastClosedSuccessAtMs ?? 0) <= protectedClosedDeadlineMs);
     if (candidate.stale || !openHealthy || !closedHealthy) {
       directWatch.setAdmissionHealth(false, candidate.stale ? 'candidate_state_not_authoritative'
         : 'successful_observation_overdue');
