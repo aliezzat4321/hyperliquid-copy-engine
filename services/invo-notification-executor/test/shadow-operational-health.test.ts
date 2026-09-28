@@ -7,11 +7,19 @@ const good = (override: Record<string, unknown> = {}) => evaluateShadowOperation
   directWatchFreshnessLimitMs: 50, lastFeedSuccessAtMs: 990, feedFreshnessLimitMs: 50,
   feedEvidenceHealthy: true, nowMs: 1000, ...override,
 });
-test('operational readiness is integrated and fail closed', () => {
+test('primary SHADOW collection health fails closed on data-integrity inputs', () => {
   assert.equal(good().shadowOperationalReady, true);
   for (const override of [{ initialized: false }, { fundingHealthy: false },
-    { directWatchCapacityHealthy: false }, { admissionsHealthy: false },
-    { admissionSuspensionReason: 'scan_failure' }, { lastDirectWatchSuccessAtMs: 1 },
     { lastFeedSuccessAtMs: 1 }, { feedEvidenceHealthy: false }, { live: true }])
     assert.equal(good(override).shadowOperationalReady, false, JSON.stringify(override));
+});
+test('direct-watch fallback degradation is visible but does not invalidate healthy primary feed collection', () => {
+  for (const override of [{ directWatchCapacityHealthy: false }, { admissionsHealthy: false },
+    { admissionSuspensionReason: 'successful_observation_overdue' }, { lastDirectWatchSuccessAtMs: 1 }]) {
+    const health = good(override);
+    assert.equal(health.shadowOperationalReady, true, JSON.stringify(override));
+    assert.equal(health.shadowDataCollectionReady, true, JSON.stringify(override));
+    assert.equal(health.directWatchFallbackReady, false, JSON.stringify(override));
+    assert.ok(health.directWatchFallbackFailures.length > 0);
+  }
 });
