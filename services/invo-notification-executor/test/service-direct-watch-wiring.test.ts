@@ -80,12 +80,12 @@ test('live mode cannot arm any watchdog capable of firing mid-order: an unbounde
 
 test('direct OPEN evidence is recorded only after production admission and freshness gates', () => {
   const source = readFileSync(new URL('../../src/service.ts', import.meta.url), 'utf8');
-  const denied = source.indexOf('if (!candidateAdmission.allowed)');
-  const stale = source.indexOf("reason: missedPreDemotion ? 'missed_pre_demotion_open'", denied);
+  const stale = source.indexOf("reason: missedPreDemotion ? 'missed_pre_demotion_open'");
+  const denied = source.indexOf('if (!candidateAdmission.allowed)', stale);
   const observed = source.indexOf('state.markObservedOpen(signal.sourceBaseId)', denied);
   const close = source.indexOf("if (signal.action === 'close')", observed);
-  assert.ok(denied >= 0 && stale > denied && observed > stale && close > observed,
-    'denied/stale OPEN must return before owned observed-open evidence is recorded');
+  assert.ok(stale >= 0 && denied > stale && observed > denied && close > observed,
+    'expired OPEN must terminate before admission retry, while denied/fresh OPEN remains gated before ownership evidence');
 });
 
 test('malformed HTTP-200 direct-investment envelopes throw for both OPEN and CLOSED paths', () => {
