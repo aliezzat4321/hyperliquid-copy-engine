@@ -2567,9 +2567,12 @@ async function main() {
   for (const surface of cfg.discoverySurfaces) {
     await wake(`startup_surface:${surface}`, undefined, Date.now(), surface);
   }
-  if (!cfg.live) await scanEliteDirectWatch(Date.now());
+  // Bind health/ingress before the potentially long initial reconciliation sweep.
+  // Admissions are already fail-closed until scanEliteDirectWatch publishes healthy state,
+  // so exposing health here reports startup truth without authorizing shadow execution.
   startServer();
   const watchdogArmedAtMs = Date.now();
+  if (!cfg.live) await scanEliteDirectWatch(Date.now());
   if (!cfg.live) {
     loopWatchdog.beat('feed', watchdogArmedAtMs);
     loopWatchdog.beat('direct_watch', watchdogArmedAtMs);
