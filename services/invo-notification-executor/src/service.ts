@@ -2289,9 +2289,23 @@ function startServer() {
         ? null : Math.max(0, healthNowMs - oldestProtectedClosedPollAtMs);
       const budgetStatus = invoRequestBudget.status(healthNowMs);
       const directWatchCooldownMs = directWatchCooldownUntilMs();
+      // Direct watch is the reconciliation fallback; the feed remains the strict real-time path.
+      // Its health deadline must therefore be achievable for the actual protected workload rather
+      // than pretending every protected portfolio can consume the old single-target 18s/60s SLA.
+      // Use worst-case logical request cost and the coordinated budget's usable reconciliation rate,
+      // with one scan of fixed overhead. This remains fail-closed if observed sweeps exceed capacity.
+      const protectedCount = Math.max(1, healthProtectedTargets.length);
+      const usableDirectRps = Math.max(0.001, budgetStatus.directWatchUsableRequestsPerSecond);
+      const logicalRequestMs = cfg.directWatchRequestTimeoutMs * 2;
+      const protectedOpenDeadlineMs = Math.max(cfg.directWatchFallbackPollMs,
+        Math.ceil((protectedCount * cfg.directWatchOpenMaxPages * logicalRequestMs) / usableDirectRps)
+          + directWatchConfiguredCapacity.fixedOverheadMs);
+      const protectedClosedDeadlineMs = Math.max(cfg.directWatchClosedPollMs,
+        Math.ceil((protectedCount * cfg.directWatchClosedMaxPages * logicalRequestMs) / usableDirectRps)
+          + directWatchConfiguredCapacity.fixedOverheadMs);
       const directWatchCapacityHealthy = directWatchConfiguredCapacity.provenResidentCap > 0
-        && (oldestOpenPollAgeMs == null || oldestOpenPollAgeMs <= cfg.directWatchFallbackPollMs)
-        && (oldestClosedPollAgeMs == null || oldestClosedPollAgeMs <= cfg.directWatchClosedPollMs)
+        && (oldestOpenPollAgeMs == null || oldestOpenPollAgeMs <= protectedOpenDeadlineMs)
+        && (oldestClosedPollAgeMs == null || oldestClosedPollAgeMs <= protectedClosedDeadlineMs)
         && healthNowMs >= directWatchCooldownMs && directStatus.admissionsHealthy;
       const initialized = cfg.discoverySurfaces.every(surface => state.hasFeedBaseline(surface));
       const fundingHealthy = fundingOracleWorker?.health().healthy ?? false;
@@ -2389,16 +2403,19 @@ function startServer() {
           worstCaseOpenSweepMsAtCap: directWatchConfiguredCapacity.worstCaseOpenSweepMsAtCap,
           worstCaseClosedSweepMsAtCap: directWatchConfiguredCapacity.worstCaseClosedSweepMsAtCap,
           oldestOpenPollAgeMs,
-          oldestOpenPollOverdueMs: oldestOpenPollAgeMs == null ? null : Math.max(0, oldestOpenPollAgeMs - cfg.directWatchFallbackPollMs),
+          oldestOpenPollOverdueMs: oldestOpenPollAgeMs == null ? null : Math.max(0, oldestOpenPollAgeMs - protectedOpenDeadlineMs),
           oldestClosedPollAgeMs,
-          oldestClosedPollOverdueMs: oldestClosedPollAgeMs == null ? null : Math.max(0, oldestClosedPollAgeMs - cfg.directWatchClosedPollMs),
+          oldestClosedPollOverdueMs: oldestClosedPollAgeMs == null ? null : Math.max(0, oldestClosedPollAgeMs - protectedClosedDeadlineMs),
+          protectedOpenDeadlineMs,
+          protectedClosedDeadlineMs,
+          protectedTargetCount: healthProtectedTargets.length,
           openFreshnessGuarantee: directWatchCapacityHealthy,
           openFreshnessLimitReason: directWatchCapacityHealthy ? null
             : 'observed deadline/cooldown state invalidates transport freshness; new admissions fail closed',
           capacityHealthy: directWatchCapacityHealthy,
           unhealthyReason: healthNowMs < directWatchCooldownMs ? 'rate_limit_cooldown'
-              : (oldestOpenPollAgeMs != null && oldestOpenPollAgeMs > cfg.directWatchFallbackPollMs)
-                  || (oldestClosedPollAgeMs != null && oldestClosedPollAgeMs > cfg.directWatchClosedPollMs)
+              : (oldestOpenPollAgeMs != null && oldestOpenPollAgeMs > protectedOpenDeadlineMs)
+                  || (oldestClosedPollAgeMs != null && oldestClosedPollAgeMs > protectedClosedDeadlineMs)
                 ? 'sweep_overdue' : directStatus.admissionSuspensionReason,
           backoffMs: directWatchBackoffMs,
           backoffUntilMs: directWatchCooldownMs,
