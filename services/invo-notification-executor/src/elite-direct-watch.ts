@@ -109,9 +109,17 @@ export function planDeadlineHydrations(
         ? item.target.lastRetirementOpenPollAtMs ?? 0 : item.target.lastFallbackPollAtMs) + openPollMs })),
     ...closedItems.map(item => ({ phase: 'CLOSED' as const, item,
       dueAtMs: item.target.lastClosedPollAtMs + closedPollMs })),
-  ].sort((a, b) => (a.phase === b.phase ? 0 : a.phase === 'OPEN' ? -1 : 1)
-    || a.dueAtMs - b.dueAtMs
-    || a.item.target.portfolioId.localeCompare(b.item.target.portfolioId));
+  ].sort((a, b) => {
+    // Retirement is cleanup, not part of the latency guarantee. Never let a backlog of
+    // historical drains run ahead of ACTIVE/ENROLLING reconciliation that protects current
+    // copying. CLOSED still follows OPEN within the same priority class.
+    const retiringDelta = Number(a.item.target.lifecycle === 'RETIRING')
+      - Number(b.item.target.lifecycle === 'RETIRING');
+    if (retiringDelta) return retiringDelta;
+    return (a.phase === b.phase ? 0 : a.phase === 'OPEN' ? -1 : 1)
+      || a.dueAtMs - b.dueAtMs
+      || a.item.target.portfolioId.localeCompare(b.item.target.portfolioId);
+  });
 }
 
 /** Fixed-size worker pool. Failures are isolated; a 429 prevents new work from starting. */
