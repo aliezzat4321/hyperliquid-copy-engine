@@ -154,3 +154,16 @@ test('health ingress binds before the initial direct-watch reconciliation sweep'
   assert.ok(server < fundingAuth && server < directEnsure && server < startupSurface && server < initialScan,
     'health/ingress must bind before every potentially slow external startup await');
 });
+
+
+test('captured OPEN batches flush before post-flush OPEN freshness proof', () => {
+  const source = readFileSync(new URL('../../src/service.ts', import.meta.url), 'utf8');
+  const closedGate = source.indexOf('if (candidate.stale || !closedHealthy)');
+  const flush = source.indexOf('publishThenFlushCapturedSignals(', closedGate);
+  const postFlush = source.indexOf('postFlushOpenHealthy', flush);
+  assert.ok(closedGate >= 0 && flush > closedGate && postFlush > flush,
+    'OPEN watermark commit must be allowed to happen before OPEN freshness is evaluated');
+  const gated = source.slice(closedGate, flush);
+  assert.doesNotMatch(gated, /!openHealthy/,
+    'pre-flush health gate must not require the OPEN freshness that the flush itself establishes');
+});
