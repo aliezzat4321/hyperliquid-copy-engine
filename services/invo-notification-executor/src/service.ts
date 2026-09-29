@@ -523,24 +523,26 @@ function baseShadowSlice(equity: number, mid: number, leverage: number) {
   return { marginUsd, notionalUsd, size };
 }
 
-function shadowReupSize(managed: ManagedPosition, signal: InvoSignal, fallbackSize: number) {
+function shadowReupSize(
+  managed: ManagedPosition, signal: InvoSignal, fallbackSize: number, maxPositionSize: number,
+) {
   const sourceIncrementSize = positive(signal.entrySize);
   const priorSourceSize = positive(managed.sourceSize);
   const priorCopySize = positive(managed.size);
+  const remainingPositionSize = Math.max(0, maxPositionSize - (priorCopySize ?? 0));
+  if (!(remainingPositionSize > 0)) return {
+    addSize: 0, sourceIncrementSize, sizingModel: 'position_risk_budget_exhausted', copyPerSourceUnit: null,
+  };
   if (sourceIncrementSize && priorSourceSize && priorCopySize) {
     const copyPerSourceUnit = priorCopySize / priorSourceSize;
     return {
-      addSize: sourceIncrementSize * copyPerSourceUnit,
-      sourceIncrementSize,
-      sizingModel: 'relative_source_increment',
-      copyPerSourceUnit,
+      addSize: Math.min(sourceIncrementSize * copyPerSourceUnit, remainingPositionSize),
+      sourceIncrementSize, sizingModel: 'relative_source_increment_risk_capped', copyPerSourceUnit,
     };
   }
   return {
-    addSize: fallbackSize,
-    sourceIncrementSize,
-    sizingModel: 'fallback_equal_shadow_slice',
-    copyPerSourceUnit: null,
+    addSize: Math.min(fallbackSize, remainingPositionSize), sourceIncrementSize,
+    sizingModel: 'fallback_equal_shadow_slice_risk_capped', copyPerSourceUnit: null,
   };
 }
 
@@ -713,7 +715,12 @@ async function shadowReup(
 
   const equity = await hl.getAccountEquity(WALLET_ADDRESS);
   const fallback = baseShadowSlice(equity, mid, leverage);
-  const reup = shadowReupSize(managed, signal, fallback.size);
+  const reup = shadowReupSize(managed, signal, fallback.size, fallback.size);
+  if (!(reup.addSize > 0)) {
+    state.markSeen(signal.key);
+    log({ type: 'skip', reason: 'shadow_position_risk_budget_exhausted', signal, wakeSource, decisionAtMs });
+    return;
+  }
   const result = simulateL2Fill(
     assetBook.book,
     openAction(signal.side),
@@ -1238,7 +1245,12 @@ async function executeUnlocked(
       const equity = await hl.getAccountEquity(WALLET_ADDRESS);
       const fallbackNotional = Math.min(equity * (cfg.marginPct / 100) * leverage, cfg.maxNotionalUsd);
       const fallbackSize = fallbackNotional / snap.mid;
-      const reup = shadowReupSize(existingManaged, signal, fallbackSize);
+      const reup = shadowReupSize(existingManaged, signal, fallbackSize, fallbackSize);
+      if (!(reup.addSize > 0)) {
+        state.markSeen(signal.key);
+        log({ type: 'skip', reason: 'position_risk_budget_exhausted', signal, wakeSource, decisionAtMs });
+        return;
+      }
       const size = roundSize(reup.addSize, snap.asset.szDecimals);
       await hl.setLeverage(signal.coin, leverage);
       const orderAtMs = Date.now();

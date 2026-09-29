@@ -53,3 +53,15 @@ test('cross-surface canonical completion persists ingress key and feed completio
   assert.match(serviceSource, /if \(alreadySeen\) \{[\s\S]*state\.markSeen\(signal\.key\);[\s\S]*return;[\s\S]*\}/);
   assert.match(serviceSource, /const allHandled = ordered\.every\(signal => signalWasSeen\(signal, key => state\.hasSeen\(key\)\)\);/);
 });
+
+test('shadow re-ups cannot exceed the same per-position risk slice used at entry', () => {
+  const sizing = serviceSource.slice(
+    serviceSource.indexOf('function shadowReupSize('),
+    serviceSource.indexOf('async function marketSnapshot'),
+  );
+  assert.match(sizing, /remainingPositionSize = Math\.max\(0, maxPositionSize - \(priorCopySize \?\? 0\)\)/);
+  assert.match(sizing, /Math\.min\(sourceIncrementSize \* copyPerSourceUnit, remainingPositionSize\)/);
+  assert.match(sizing, /relative_source_increment_risk_capped/);
+  assert.match(serviceSource, /shadow_position_risk_budget_exhausted/);
+  assert.match(serviceSource, /position_risk_budget_exhausted/);
+});
