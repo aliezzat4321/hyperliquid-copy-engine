@@ -636,7 +636,7 @@ def test_review_enqueue_never_creates_pre_review_merge_gate(tmp_path):
     ).fetchone() is None
 
 
-def test_ledger_recovers_orchestrator_restart_mid_task(tmp_path):
+def test_healthy_recorded_worker_remains_running(tmp_path, monkeypatch):
     ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
     task_id = ledger.create_task(
         issue_number=1,
@@ -644,12 +644,20 @@ def test_ledger_recovers_orchestrator_restart_mid_task(tmp_path):
         agent="CODEX_CHATGPT",
         model_class="CODEX_DEFAULT",
         task_class="ROUTINE",
-        status="RUNNING",
+        status="RUNNING", systemd_unit="hl-ai-codex-healthy-1",
     )
-    ledger.recover_interrupted()
+    team = object.__new__(orch.Orchestrator)
+    team.ledger = ledger
+    team.runtime = type("Runtime", (), {"event": lambda *args, **kwargs: None})()
+    calls = []
+    monkeypatch.setattr(orch, "run", lambda args, **kwargs: (
+        calls.append(args) or subprocess.CompletedProcess(args, 0, "active\n", "")
+    ))
+    team.reconcile_running_workers()
     row = ledger.get(task_id)
-    assert row["status"] == "RETRY"
-    assert "restarted" in row["last_error"]
+    assert row["status"] == "RUNNING"
+    assert row["systemd_unit"] == "hl-ai-codex-healthy-1"
+    assert calls == [["systemctl", "is-active", "hl-ai-codex-healthy-1"]]
 
 
 def test_ledger_keeps_rate_limited_task_and_resume_session(tmp_path):
@@ -757,7 +765,8 @@ def test_non_limit_probe_failure_consumes_budget_and_leaves_wait_state(tmp_path,
     assert "ordinary failure" in row["last_error"]
     assert row["limit_text"] is None
 
-def test_watchdog_requeues_same_review_checkpoint(tmp_path):
+def test_watchdog_reclaims_vanished_worker_once_and_preserves_checkpoint(
+        tmp_path, monkeypatch):
     ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
     task_id = ledger.create_task(
         issue_number=4, pr_number=14, task_type="REVIEW", agent="CLAUDE",
@@ -765,12 +774,26 @@ def test_watchdog_requeues_same_review_checkpoint(tmp_path):
         target_sha="b" * 40, session_id="checkpoint-session", attempt=1,
         systemd_unit="hl-ai-claude-deadbeef-1",
     )
-    stale = ledger.recover_interrupted()
-    assert stale[0]["id"] == task_id
+    events = []
+    team = object.__new__(orch.Orchestrator)
+    team.ledger = ledger
+    team.runtime = type("Runtime", (), {
+        "event": lambda self, kind, **fields: events.append((kind, fields))
+    })()
+    monkeypatch.setattr(
+        orch, "run", lambda args, **kwargs:
+        subprocess.CompletedProcess(args, 3, "inactive\n", ""),
+    )
+    team.reconcile_running_workers()
+    team.reconcile_running_workers()
     row = ledger.get(task_id)
     assert row["status"] == "RETRY"
     assert row["target_sha"] == "b" * 40
     assert row["session_id"] == "checkpoint-session"
+    assert row["attempt"] == 1
+    assert row["systemd_unit"] is None
+    assert row["next_action"] == "retry from preserved checkpoint/session"
+    assert [kind for kind, _ in events] == ["VANISHED_WORKER_REQUEUED"]
 
 
 def test_only_one_active_task_per_issue_is_detected(tmp_path):
@@ -1668,6 +1691,96 @@ def test_rollout_existing_active_phase_remains_idempotent(tmp_path):
     assert [row["id"] for row in rows] == [phase_id]
 
 
+def test_unrelated_main_advance_does_not_supersede_evidence(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    sha = "a" * 40
+    ledger.create_task(
+        issue_number=289, pr_number=290, task_type="MERGE_CHECKPOINT",
+        agent="TRUSTED_MANAGER", model_class="NONE", status="DONE",
+        lifecycle_phase="MERGED", target_sha=sha,
+    )
+    phase_id = ledger.create_task(
+        issue_number=289, task_type="MEASUREMENT", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", status="RETRY", lifecycle_phase="MEASUREMENT",
+        target_sha=sha, session_id="deterministic-checkpoint",
+    )
+
+    assert ledger.supersede_acceptance_tasks(289, sha) == []
+    phase = ledger.get(phase_id)
+    assert phase["status"] == "RETRY"
+    assert phase["session_id"] == "deterministic-checkpoint"
+
+
+def test_newer_same_issue_acceptance_sha_supersedes_once_without_old_recreation(tmp_path):
+    ledger = orch.Ledger(tmp_path / "ledger.sqlite3")
+    old_sha, new_sha = "a" * 40, "b" * 40
+    ledger.create_task(
+        issue_number=289, pr_number=290, task_type="MERGE_CHECKPOINT",
+        agent="TRUSTED_MANAGER", model_class="NONE", status="DONE",
+        lifecycle_phase="MERGED", target_sha=old_sha,
+    )
+    old_phase = ledger.create_task(
+        issue_number=289, task_type="MEASUREMENT", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", status="RETRY", lifecycle_phase="MEASUREMENT",
+        target_sha=old_sha,
+    )
+    ledger.create_task(
+        issue_number=289, pr_number=291, task_type="MERGE_CHECKPOINT",
+        agent="TRUSTED_MANAGER", model_class="NONE", status="DONE",
+        lifecycle_phase="MERGED", target_sha=new_sha,
+    )
+    events = []
+
+    class GH:
+        def issue(self, number):
+            return {"number": number, "state": "open", "author_association": "OWNER",
+                    "body": ""}
+        def add_labels(self, number, values):
+            pass
+
+    team = object.__new__(orch.Orchestrator)
+    team.cfg = {**orch.DEFAULT_CONFIG,
+                "completion_reconciliation": {"289": ["MEASUREMENT_PROOF"]}}
+    team.ledger, team.gh, team.trusted = ledger, GH(), {"OWNER"}
+    team.runtime = type("Runtime", (), {
+        "event": lambda self, kind, **fields: events.append((kind, fields))
+    })()
+
+    team.reconcile_completion_rollout()
+    team.reconcile_completion_rollout()
+
+    assert ledger.get(old_phase)["status"] == "STALE"
+    phases = ledger.db.execute(
+        "SELECT * FROM tasks WHERE issue_number=289 AND lifecycle_phase='MEASUREMENT' "
+        "ORDER BY rowid"
+    ).fetchall()
+    assert [(row["target_sha"], row["status"]) for row in phases] == [
+        (old_sha, "STALE"), (new_sha, "PENDING")
+    ]
+    assert [kind for kind, _ in events].count("ACCEPTANCE_SHA_SUPERSEDED") == 1
+
+
+def test_runtime_projection_prefers_executing_or_actionable_build(tmp_path):
+    ledger = orch.Ledger(tmp_path / "projection.sqlite3")
+    ledger.create_task(
+        id="old-evidence", issue_number=146, task_type="PRODUCTION_VALIDATION",
+        agent="CODEX_CHATGPT", model_class="CODEX_DEFAULT", status="RETRY",
+        retry_at=orch.utcnow(),
+    )
+    pending = ledger.create_task(
+        issue_number=324, task_type="BUILD", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", status="PENDING",
+    )
+    runtime = orch.RuntimeLedgerFiles(
+        tmp_path / "runtime", tmp_path / "projection.sqlite3", orch.REPO, 130
+    )
+    assert runtime.project_current()["assignment"]["codex"]["assignment_id"] == pending
+    ledger.update(pending, status="RUNNING", systemd_unit="hl-ai-codex-current-1")
+    current = runtime.project_current()
+    assert current["assignment"]["codex"]["assignment_id"] == pending
+    assert current["runtime"]["codex"]["assignment_id"] == pending
+
+
 def test_rollout_existing_proven_phase_remains_idempotent(tmp_path):
     sha = "e" * 40
     root, evidence = trusted_artifact(
@@ -2046,6 +2159,20 @@ def test_p0_277_scheduler_reconciliation_regressions(tmp_path):
     assert ledger.has_queue_claim_conflict() is True
     ledger.update(pending, status="DONE")
     assert ledger.get(retry)["status"] == "RETRY"
+
+
+def test_due_queue_prefers_ordinary_retry_to_older_evidence_retry(tmp_path):
+    ledger = orch.Ledger(tmp_path / "fairness.sqlite3")
+    evidence = ledger.create_task(
+        issue_number=146, task_type="PRODUCTION_VALIDATION", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", status="RETRY", retry_at=orch.utcnow(),
+    )
+    build = ledger.create_task(
+        issue_number=324, task_type="BUILD", agent="CODEX_CHATGPT",
+        model_class="CODEX_DEFAULT", status="RETRY", retry_at=orch.utcnow(),
+    )
+    assert evidence != build
+    assert ledger.due()["id"] == build
 
 
 def test_p0_277_due_closed_issue_is_retired_without_execution(tmp_path):

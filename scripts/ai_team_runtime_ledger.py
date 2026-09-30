@@ -20,7 +20,27 @@ from typing import Any
 
 MAX_RAW_BYTES = 256 * 1024
 MAX_HANDOFF_BYTES = 3900
-ACTIVE = {"PENDING", "RETRY", "WAITING_RATE_LIMIT", "WAITING_CI", "RUNNING"}
+ACTIVE = {
+    "PENDING", "RETRY", "WAITING_RATE_LIMIT", "WAITING_CI",
+    "WAITING_EVIDENCE_WINDOW", "RUNNING",
+}
+
+
+def _assignment_order(task: dict[str, Any]) -> tuple[Any, ...]:
+    """Order by execution ownership, actionability, then stable ledger chronology."""
+    status = str(task.get("status") or "")
+    status_rank = {
+        "RUNNING": 0, "PENDING": 1, "WAITING_CI": 2, "RETRY": 3,
+        "WAITING_RATE_LIMIT": 4, "WAITING_EVIDENCE_WINDOW": 5,
+    }.get(status, 5)
+    task_type = str(task.get("task_type") or "")
+    evidence_rank = int(task_type in {
+        "POST_MERGE_EVIDENCE", "DEPLOY", "PRODUCTION_VALIDATION", "MEASUREMENT",
+        "PRODUCTION_AUDIT", "IMMUTABLE_PLAN", "DESTRUCTIVE_REVIEW",
+        "AUTHORIZED_APPLY", "EVIDENCE_AUDIT", "FINAL_VERDICT",
+    })
+    return (status_rank, evidence_rank, str(task.get("retry_at") or ""),
+            str(task.get("created_at") or ""), str(task.get("id") or ""))
 
 _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"sk-ant-[A-Za-z0-9_-]+"), "[REDACTED_ANTHROPIC]"),
@@ -479,10 +499,10 @@ class RuntimeLedgerFiles:
             for key in ("codex", "claude"):
                 candidates = [r for r in active if _agent_key(str(r.get("agent") or "")) == key]
                 if candidates:
-                    assignment[key] = self._task_view(candidates[0])
+                    assignment[key] = self._task_view(min(candidates, key=_assignment_order))
                 running = [r for r in candidates if r.get("status") == "RUNNING"]
                 if running:
-                    runtime[key] = self._task_view(running[0])
+                    runtime[key] = self._task_view(min(running, key=_assignment_order))
             last_review_row = db.execute(
                 "SELECT * FROM tasks WHERE task_type='REVIEW' ORDER BY updated_at DESC LIMIT 1"
             ).fetchone()
