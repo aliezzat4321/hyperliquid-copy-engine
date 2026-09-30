@@ -7,10 +7,11 @@ Wants=network-online.target
 Type=oneshot
 WorkingDirectory=/root/hyperliquid-copy-engine
 Environment=REAL_TRADING_ENABLED=NO
-ExecStart=/usr/bin/env \
+ExecStart=/usr/bin/flock --wait 60 /run/hyperliquid-copy-engine/invo-pipeline.lock \
   /root/hyperliquid-copy-engine/.venv/bin/python -m hlcopy.discovery.verified_identity_shadow_sync \
   --identities /var/lib/hyperliquid-copy-engine/invo/identified_wallets.json \
-  --registry /mnt/HC_Volume_106576526/hyperliquid/shadow/wallets.json
+  --registry /mnt/HC_Volume_106576526/hyperliquid/shadow/wallets.json \
+  --reserved-invo-validation-slots 2
 User=root
 Group=root
 UMask=0077
