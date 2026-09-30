@@ -316,6 +316,7 @@ const sourceLifecycleQueue = new SourceLifecycleQueue();
 let hydrating = false;
 let pendingWake: { source: string; hints?: NotificationHints; receivedAtMs: number; feedFilter?: InvoFeedSurface } | null = null;
 let lastSuccessPollMs = 0;
+let unresolvedFeedGapSinceMs = 0;
 let backoffMs = 0;
 let discoverySurfaceIndex = 0;
 const finalizedFundingOracleBoundaries = new Set<number>();
@@ -1593,6 +1594,7 @@ async function fetchAndProcess(
       sourceBaseId => Boolean(state.getManagedBySource(sourceBaseId)),
       key => state.hasSeen(key),
     );
+    unresolvedFeedGapSinceMs ||= Date.now();
     log({
       type: 'unrecoverable_feed_gap',
       feedFilter,
@@ -1653,6 +1655,7 @@ async function fetchAndProcess(
     persistFeedEvidence();
     return gapPlan.ownedCloses.length;
   }
+  unresolvedFeedGapSinceMs = 0;
   const tracked = (posts as any[]).map((post: any) => {
     const signal = signalFromFeedPost(post);
     tracker.observe(post, feedFilter, signal, receivedAtMs, false);
@@ -2354,7 +2357,7 @@ function startServer() {
         lastDirectWatchSuccessAtMs: directWatchMetrics.lastSuccessAtMs,
         directWatchFreshnessLimitMs: Math.max(10_000, cfg.directWatchScanMs * 4),
         lastFeedSuccessAtMs: lastSuccessPollMs, feedFreshnessLimitMs: Math.max(10_000, cfg.pollMs * 4),
-        feedEvidenceHealthy: !feedEvidenceAssimilationSuspended && feedEvidencePersistenceErrors === 0, nowMs: healthNowMs,
+        feedEvidenceHealthy: !feedEvidenceAssimilationSuspended && feedEvidencePersistenceErrors === 0, unresolvedFeedGapSinceMs, nowMs: healthNowMs,
       });
       const paperPositions = Object.values(snapshot.managed).filter(position => position.paper);
       const unresolvedPaperPositions = paperPositions.filter(position => position.unresolvedAfterSourceClose);
