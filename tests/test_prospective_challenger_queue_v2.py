@@ -82,3 +82,47 @@ def test_funnel_does_not_truncate_robust_candidates_before_challenger_handoff() 
     source = FUNNEL.read_text(encoding="utf-8")
     assert "build_challenger_queue(\n        robust," in source
     assert "build_challenger_queue(\n        robust[:100]," not in source
+
+
+def test_missing_required_funding_never_becomes_evaluated_or_rejected() -> None:
+    rows = [
+        {
+            "realized_actions": 30,
+            "completed_round_trips": 30,
+            "selection_return_bps": None,
+            "funding_evidence_state": MODULE.FUNDING_UNAVAILABLE,
+        }
+        for _ in range(3)
+    ]
+
+    result = MODULE._classify_primary(rows)
+
+    assert result["evaluation_state"] == "FUNDING_EVIDENCE_UNAVAILABLE"
+    assert result["worst_primary_return_bps"] is None
+    assert result["approved"] is None
+
+
+def test_positive_funding_adjusted_returns_can_be_evaluated_only_with_complete_evidence() -> None:
+    rows = [
+        {
+            "realized_actions": 25,
+            "completed_round_trips": 20,
+            "selection_return_bps": value,
+            "funding_evidence_state": MODULE.FUNDING_COMPLETE,
+        }
+        for value in ("12", "8", "4")
+    ]
+
+    result = MODULE._classify_primary(rows)
+
+    assert result["evaluation_state"] == "EVALUATED"
+    assert result["worst_primary_return_bps"] == "4"
+    assert result["approved"] is True
+
+
+def test_prospective_uses_funding_adjusted_return_basis() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert "LANE1_RETURN_BASIS_FUNDING_V2" in source
+    assert "validate_completed_episode_funding_coverage" in source
+    assert "funding_cashflows" in source
+    assert "FUNDING_EVIDENCE_UNAVAILABLE" in source
