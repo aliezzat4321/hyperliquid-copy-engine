@@ -167,3 +167,27 @@ test('captured OPEN batches flush before post-flush OPEN freshness proof', () =>
   assert.doesNotMatch(gated, /!openHealthy/,
     'pre-flush health gate must not require the OPEN freshness that the flush itself establishes');
 });
+
+test('notification ingress prioritizes the hinted ACTIVE portfolio before ordinary feed reconciliation', () => {
+  const source = readFileSync(new URL('../../src/service.ts', import.meta.url), 'utf8');
+  const ingress = source.slice(source.indexOf("req.url === '/invo-notification'"));
+  const priority = ingress.indexOf('hydrateNotificationPriorityTarget(hints, receivedAtMs)');
+  const feedWake = ingress.indexOf("wake('push_notification'");
+  assert.ok(priority >= 0 && feedWake > priority,
+    'notification must start targeted portfolio resolution before the generic feed wake');
+  assert.match(source, /target\.lifecycle === 'ACTIVE'/);
+  assert.match(source, /directPortfolioHydrationQueue\.run\(target\.portfolioId/);
+  assert.match(source, /\[120, 280, 600, 1_200, 2_500\]/);
+});
+
+test('notification priority resolution stays shadow-only and canonical', () => {
+  const source = readFileSync(new URL('../../src/service.ts', import.meta.url), 'utf8');
+  const start = source.indexOf('async function hydrateNotificationPriorityTarget(');
+  const end = source.indexOf('async function hydrateClosedHistory(', start);
+  const priority = source.slice(start, end);
+  assert.match(priority, /if \(cfg\.live\) return 0;/);
+  assert.match(priority, /hydrateDirectTarget\(/,
+    'priority path must resolve canonical portfolio investments rather than trade notification text');
+  assert.match(priority, /execute\(signal, 'push_notification:priority_direct'/);
+  assert.match(priority, /signalWasSeen/);
+});
