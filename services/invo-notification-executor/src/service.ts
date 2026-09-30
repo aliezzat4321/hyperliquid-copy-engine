@@ -313,6 +313,9 @@ const directWatch = new EliteDirectWatchState(
 const inFlight = new Set<string>();
 const inFlightSourceEvents = new Set<string>();
 const sourceLifecycleQueue = new SourceLifecycleQueue();
+// Serialize OPEN hydration per portfolio across the periodic scanner and notification-triggered
+// priority reads. This prevents a slower periodic response from overwriting a newer watermark.
+const directPortfolioHydrationQueue = new SourceLifecycleQueue();
 let hydrating = false;
 let pendingWake: { source: string; hints?: NotificationHints; receivedAtMs: number; feedFilter?: InvoFeedSurface } | null = null;
 let lastSuccessPollMs = 0;
@@ -1956,6 +1959,41 @@ async function hydrateDirectTarget(
       selectorUpdatedAtMs == null ? undefined : selectorUpdatedAtMs) };
 }
 
+async function hydrateNotificationPriorityTarget(
+  hints: NotificationHints,
+  receivedAtMs: number,
+): Promise<number> {
+  if (cfg.live) return 0;
+  const username = hints.username?.replace(/^@/, '').toLowerCase();
+  const targets = directWatch.targets().filter(target =>
+    target.lifecycle === 'ACTIVE'
+    && (!hints.portfolioId || target.portfolioId === hints.portfolioId)
+    && (!username || target.username.toLowerCase() === username)
+  );
+  if (!targets.length) {
+    log({ type: 'notification_priority_unresolved_target', hints, receivedAtMs, live: false });
+    return 0;
+  }
+
+  let handled = 0;
+  for (const target of targets) {
+    await directPortfolioHydrationQueue.run(target.portfolioId, async () => {
+      const observedAtMs = Date.now();
+      directWatch.noteFallbackPoll(target.portfolioId, observedAtMs);
+      const captured = await hydrateDirectTarget(target, null, 'notification_priority', observedAtMs);
+      if (!captured) return;
+      for (const signal of captured.signals) {
+        await execute(signal, 'push_notification:priority_direct', receivedAtMs, 'direct_watch');
+      }
+      if (captured.signals.every(signal => signalWasSeen(signal, key => state.hasSeen(key)))) {
+        captured.commit(captured.highWaterMs);
+        handled += captured.signals.length;
+      }
+    });
+  }
+  return handled;
+}
+
 async function hydrateClosedHistory(
   target: ReturnType<EliteDirectWatchState['targets']>[number],
   reason: 'closed_history_baseline' | 'periodic_closed_poll',
@@ -2189,8 +2227,11 @@ async function scanEliteDirectWatch(nowMs = Date.now()) {
       async work => {
         try {
           if (work.phase === 'OPEN') {
-            const captured = await hydrateDirectTarget(
-              work.item.target, work.item.selectorUpdatedAtMs, work.item.reason, nowMs,
+            const captured = await directPortfolioHydrationQueue.run(
+              work.item.target.portfolioId,
+              () => hydrateDirectTarget(
+                work.item.target, work.item.selectorUpdatedAtMs, work.item.reason, nowMs,
+              ),
             );
             if (captured) capturedOpenSignals.push(captured);
           }
@@ -2533,8 +2574,28 @@ function startServer() {
           return json(res, 202, { ok: true, ignored: 'not_invo_package' });
         }
         const hints = extractNotificationHints(payload);
-        void wake('push_notification', hints, receivedAtMs, cfg.feedFilter, () => loopWatchdog.beat('feed', Date.now()));
-        return json(res, 202, { ok: true, hints });
+        // Push is the latency-sensitive path: resolve the hinted ACTIVE portfolio immediately.
+        // The feed wake remains an independent canonical event path/reconciliation source.
+        void (async () => {
+          try {
+            let found = await hydrateNotificationPriorityTarget(hints, receivedAtMs);
+            void wake('push_notification', hints, receivedAtMs, cfg.feedFilter,
+              () => loopWatchdog.beat('feed', Date.now()));
+            if (found === 0) {
+              for (const delayMs of [120, 280, 600, 1_200, 2_500]) {
+                await new Promise(resolveDelay => setTimeout(resolveDelay, delayMs));
+                found = await hydrateNotificationPriorityTarget(hints, receivedAtMs);
+                if (found > 0) break;
+              }
+            }
+            log({ type: 'notification_priority_resolution', hints, receivedAtMs,
+              resolvedSignalCount: found, resolutionLatencyMs: Date.now() - receivedAtMs, live: false });
+          } catch (error) {
+            log({ type: 'notification_priority_resolution_error', hints, receivedAtMs,
+              error: error instanceof Error ? error.message : String(error), live: false });
+          }
+        })();
+        return json(res, 202, { ok: true, hints, priorityResolutionQueued: !cfg.live });
       } catch (err) {
         return json(res, 400, { ok: false, error: err instanceof Error ? err.message : String(err) });
       }
