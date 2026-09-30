@@ -62,6 +62,66 @@ def _merge_identity_evidence(
     return merged
 
 
+def _latest_evaluated_outcome(row: dict[str, object]) -> dict[str, object] | None:
+    outcomes = row.get("prospective_outcomes", [])
+    if not isinstance(outcomes, list):
+        return None
+    for raw in reversed(outcomes):
+        if isinstance(raw, dict) and raw.get("evaluation_state") == "EVALUATED":
+            return raw
+    return None
+
+
+def record_prospective_outcomes(
+    output_path: Path,
+    outcomes: list[dict[str, object]],
+) -> dict[str, object]:
+    """Append prospective evidence to the queue's durable identity ledger.
+
+    The evaluator is allowed to add evidence only. It cannot move the frozen cutoff,
+    rewrite selection evidence, or silently convert insufficient observations into a
+    failure. Repeated identical observations are deduplicated.
+    """
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    by_key = {
+        str(row.get("candidate_key")): row
+        for row in outcomes
+        if isinstance(row, dict) and row.get("candidate_key")
+    }
+    if not by_key:
+        return payload
+
+    def apply(rows: object) -> None:
+        if not isinstance(rows, list):
+            return
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            key = str(row.get("candidate_key", ""))
+            outcome = by_key.get(key)
+            if outcome is None:
+                continue
+            recorded = row.setdefault("prospective_outcomes", [])
+            if not isinstance(recorded, list):
+                recorded = []
+                row["prospective_outcomes"] = recorded
+            fingerprint = outcome.get("evidence_fingerprint")
+            duplicate = any(
+                isinstance(existing, dict)
+                and fingerprint is not None
+                and existing.get("evidence_fingerprint") == fingerprint
+                for existing in recorded
+            )
+            if not duplicate:
+                recorded.append(dict(outcome))
+            row["last_prospective_outcome_at"] = outcome.get("observed_at")
+
+    apply(payload.get("candidates"))
+    apply(payload.get("demoted"))
+    apply(payload.get("candidate_history"))
+    _atomic_json(output_path, payload)
+    return payload
+
 def build_challenger_queue(
     robust: list[dict[str, object]],
     *,
@@ -93,14 +153,11 @@ def build_challenger_queue(
         old = json.loads(output_path.read_text(encoding="utf-8"))
         ledger = old.get("candidate_history")
         if not isinstance(ledger, list):
-            # Migrate the original V1 format. Its active and demoted rows are both
-            # evidence, even though older writers only consulted the active array.
             ledger = [*old.get("candidates", []), *old.get("demoted", [])]
         for raw in ledger:
             row = dict(raw)
             version = row.get("selection_contract_version")
             if version is None:
-                # The legacy queue was produced by this exact V1 selection contract.
                 version = LANE1_SELECTION_CONTRACT_V1
                 row["selection_contract_version"] = version
                 legacy_key = str(row["candidate_key"])
@@ -142,8 +199,6 @@ def build_challenger_queue(
                 if key in previous
                 else row
             )
-        # Consumers historically annotate the active/demoted projections. Merge only
-        # append-only outcome evidence back into the authoritative identity ledger.
         for projection in [*old.get("candidates", []), *old.get("demoted", [])]:
             projection_key = str(projection["candidate_key"])
             if projection_key not in previous and "selection_contract_version" not in projection:
@@ -186,19 +241,26 @@ def build_challenger_queue(
 
     candidates: list[dict[str, object]] = []
     rejections: list[dict[str, object]] = []
+    rejection_reason_by_key: dict[str, str] = {}
     seen: set[str] = set()
     for row in robust:
         wallet = str(row.get("wallet_address", "")).lower()
         coin = str(row.get("coin", ""))
         notional = str(row.get("notional_usd", ""))
         key = f"{selection_contract_version}|{wallet}|{coin}|{notional}"
+        old = previous.get(key, {})
         reason = universe_reason
         if key in seen:
             reason = "DUPLICATE_WALLET_COIN_NOTIONAL"
         elif reason is None and universe_wallets is not None and wallet not in universe_wallets:
             reason = "WALLET_NOT_IN_CURRENT_LEADERBOARD"
+        elif reason is None:
+            latest = _latest_evaluated_outcome(old)
+            if latest is not None and latest.get("approved") is False:
+                reason = "PROSPECTIVE_UNDERPERFORM"
         seen.add(key)
         if reason:
+            rejection_reason_by_key[key] = reason
             rejections.append(
                 {
                     "candidate_key": key,
@@ -207,7 +269,6 @@ def build_challenger_queue(
                 }
             )
             continue
-        old = previous.get(key, {})
         history = list(old.get("history", []))
         status = old.get("status")
         event = {
@@ -231,8 +292,6 @@ def build_challenger_queue(
                 "history": history,
             }
         )
-        # Outcomes may be written by an evaluator between queue refreshes. They belong
-        # to the immutable identity and must never be replaced by research input.
         if "prospective_outcomes" in old:
             candidate["prospective_outcomes"] = old["prospective_outcomes"]
         candidates.append(candidate)
@@ -244,18 +303,19 @@ def build_challenger_queue(
             continue
         demoted_row = dict(row)
         if row.get("status") == "challenger":
+            reason = rejection_reason_by_key.get(key, "NO_LONGER_ROBUST_OR_CURRENT")
             history = list(row.get("history", []))
             history.append(
                 {
                     "status": "demoted",
                     "observed_at": observed_at.isoformat(),
-                    "reason": "NO_LONGER_ROBUST_OR_CURRENT",
+                    "reason": reason,
                 }
             )
             demoted_row |= {
                 "status": "demoted",
                 "demoted_at": observed_at.isoformat(),
-                "demotion_reason": "NO_LONGER_ROBUST_OR_CURRENT",
+                "demotion_reason": reason,
                 "history": history,
             }
         demoted.append(demoted_row)
@@ -264,7 +324,7 @@ def build_challenger_queue(
         [*candidates, *demoted], key=lambda row: str(row["candidate_key"])
     )
     payload: dict[str, object] = {
-        "mode": "LANE1_SELECTIVE_CHALLENGER_QUEUE_V2",
+        "mode": "LANE1_SELECTIVE_CHALLENGER_QUEUE_V3",
         "selection_contract_version": selection_contract_version,
         "generated_at": observed_at.isoformat(),
         "real_trading": False,
