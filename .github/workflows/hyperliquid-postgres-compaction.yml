@@ -3,7 +3,7 @@ name: hyperliquid-postgres-compaction
 on:
   push:
     branches:
-      - codex/113-postgres-compaction-v1
+      - manager/120-postgres-compaction-plan
     paths:
       - "scripts/postgres_storage_compact_v1.py"
       - "tests/test_postgres_storage_compact_v1.py"
@@ -53,9 +53,11 @@ jobs:
         run: |
           set -euo pipefail
           test "$(findmnt -n -o SOURCE /mnt/HC_Volume_106576526)" = /dev/sdc
-          test "$(findmnt -n -o SOURCE -T /root/polymarket-smart-wallet)" = /dev/sda1
+          test -d /mnt/HC_Volume_106576526/hyperliquid/postgresql
           sudo -n -u postgres /usr/lib/postgresql/14/bin/pg_isready -p 5433
+          echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
           echo 'PLAN_MODE=READ_ONLY'
+          echo 'POLYMARKET_INSPECTION=NO'
           echo 'POLYMARKET_MUTATION=NO'
           echo 'REAL_TRADING_CHANGE=NO'
       - name: Build immutable compaction plan
@@ -76,6 +78,7 @@ jobs:
           echo "REVIEWED_PLAN_SHA256=$HASH"
           echo "REVIEWED_PLAN=$REVIEWED"
           echo 'DATABASE_MUTATION=NO'
+          echo 'POLYMARKET_INSPECTION=NO'
 
   apply-reviewed-plan:
     if: >-
@@ -101,10 +104,12 @@ jobs:
           test -f "$PLAN"
           test "$(sha256sum "$PLAN" | awk '{print $1}')" = "$REVIEWED_PLAN_SHA256"
           test "$(findmnt -n -o SOURCE /mnt/HC_Volume_106576526)" = /dev/sdc
-          test "$(findmnt -n -o SOURCE -T /root/polymarket-smart-wallet)" = /dev/sda1
+          test -d /mnt/HC_Volume_106576526/hyperliquid/postgresql
           systemctl stop hyperliquid-market-capture.timer 2>/dev/null || true
           systemctl stop hyperliquid-market-capture.service 2>/dev/null || true
+          echo 'TARGET_PROJECT=HYPERLIQUID_ONLY'
           echo 'MARKET_CAPTURE_QUIESCED=YES'
+          echo 'POLYMARKET_INSPECTION=NO'
           echo 'POLYMARKET_MUTATION=NO'
           echo 'REAL_TRADING_CHANGE=NO'
       - name: Apply exact reviewed compaction plan
@@ -128,5 +133,6 @@ jobs:
           df -hT /mnt/HC_Volume_106576526 || true
           pg_lsclusters || true
           echo 'MARKET_CAPTURE_RESUMED=NO'
+          echo 'POLYMARKET_INSPECTION=NO'
           echo 'POLYMARKET_MUTATION=NO'
           echo 'REAL_TRADING_CHANGE=NO'
