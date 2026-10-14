@@ -24,7 +24,7 @@ test('feed loop beats watchdog progress per page and per signal, not only once p
     'the pending-close, gap-recovery, baseline-recovery, and live sequential loops must all beat after each execute()');
 
   const wakeBody = source.slice(wakeFn, pollLoop);
-  assert.match(wakeBody, /fetchAndProcess\([\s\S]*?heartbeat\)/,
+  assert.match(wakeBody, /fetchAndProcess\([\s\S]*?current\.heartbeat,?\s*\)/,
     'wake() must forward its heartbeat into every fetchAndProcess call, including push-hydration retries');
 
   const pollLoopBody = source.slice(pollLoop, source.indexOf('\n}', pollLoop) + 2);
