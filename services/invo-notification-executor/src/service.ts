@@ -10,6 +10,8 @@ import { ManagedPosition, NotificationState } from './notification-state.js';
 import { TraderTracker } from './trader-tracker.js';
 import { liveScopeSkipReason } from './live-scope.js';
 import { fetchFeedBackfill } from './feed-backfill.js';
+import { FeedWakeQueue } from './feed-wake-queue.js';
+import { FeedSurfaceTimeoutRecovery, isInvoTransportTimeout } from './feed-surface-timeout-recovery.js';
 import { canProspectivelyRebaseGap, planUnrecoverableGap } from './gap-reconciliation.js';
 import {
   INVO_FEED_SURFACES,
@@ -145,6 +147,9 @@ function loadConfig() {
     // notification hydration) already fetched within this window. Never suppresses a push
     // wake, a startup baseline, gap recovery or close reconciliation.
     feedMinSurfaceRepollMs: Math.max(0, n('NOTIFICATION_TRADER_FEED_MIN_SURFACE_REPOLL_MS', pollMs)),
+    feedSurfaceTimeoutCooldownMs: Math.max(pollMs, n('NOTIFICATION_TRADER_FEED_TIMEOUT_COOLDOWN_MS', 30_000)),
+    feedSurfaceTimeoutMaxCooldownMs: Math.max(
+      30_000, n('NOTIFICATION_TRADER_FEED_TIMEOUT_MAX_COOLDOWN_MS', 5 * 60_000)),
     // Research requirement: accept canonical Invo signals up to 25 seconds old.
     maxSignalAgeMs: Math.max(1000, n('NOTIFICATION_TRADER_MAX_SIGNAL_AGE_MS', 25_000)),
     feedFilter,
@@ -314,7 +319,14 @@ const inFlight = new Set<string>();
 const inFlightSourceEvents = new Set<string>();
 const sourceLifecycleQueue = new SourceLifecycleQueue();
 let hydrating = false;
-let pendingWake: { source: string; hints?: NotificationHints; receivedAtMs: number; feedFilter?: InvoFeedSurface } | null = null;
+type FeedWake = {
+  source: string;
+  hints?: NotificationHints;
+  receivedAtMs: number;
+  feedFilter: InvoFeedSurface;
+  heartbeat: () => void;
+};
+const pendingWakes = new FeedWakeQueue<FeedWake>();
 let lastSuccessPollMs = 0;
 let unresolvedFeedGapSinceMs = 0;
 let backoffMs = 0;
@@ -374,6 +386,10 @@ invo.setAuthRequestObserver({
 });
 /** Rotating discovery polls of a surface another trigger just fetched are pure duplication. */
 const lastSurfaceFetchAtMs = new Map<InvoFeedSurface, number>();
+const feedSurfaceTimeoutRecovery = new FeedSurfaceTimeoutRecovery(
+  cfg.feedSurfaceTimeoutCooldownMs,
+  Math.max(cfg.feedSurfaceTimeoutCooldownMs, cfg.feedSurfaceTimeoutMaxCooldownMs),
+);
 async function acquireFeedRequestBudget() {
   await invoRequestBudget.acquire('FEED');
   feedRequestMetrics.pageRequests += 1;
@@ -1576,11 +1592,24 @@ async function fetchAndProcess(
   }
   const saved = state.getFeedCursor(feedFilter);
   const backfill = await fetchFeedBackfill(
-    lastPostId => invo.getFeed(feedFilter, lastPostId, cfg.feedLimit, acquireFeedRequestBudget, 'FEED'),
+    async lastPostId => {
+      try {
+        return await invo.getFeed(feedFilter, lastPostId, cfg.feedLimit, acquireFeedRequestBudget, 'FEED');
+      } catch (err) {
+        if (isInvoTransportTimeout(err)) {
+          const timeout = feedSurfaceTimeoutRecovery.noteTimeout(feedFilter, Date.now());
+          log({ type: "feed_surface_timeout_cooldown", source, feedFilter,
+            consecutiveTimeouts: timeout.consecutiveTimeouts, cooldownUntilMs: timeout.cooldownUntilMs,
+            cursorAdvanced: false, live: cfg.live });
+        }
+        throw err;
+      }
+    },
     saved?.postId ?? null,
     cfg.feedMaxPages,
     heartbeat,
   );
+  feedSurfaceTimeoutRecovery.noteSuccess(feedFilter);
   lastSurfaceFetchAtMs.set(feedFilter, Date.now());
   const posts = backfill.posts;
   // Persistence is scheduled only after the core reconciliation path below. A disk
@@ -1722,19 +1751,23 @@ async function wake(
   source: string, hints?: NotificationHints, receivedAtMs = Date.now(),
   feedFilter = cfg.feedFilter, heartbeat: () => void = () => {},
 ) {
-  pendingWake = { source, hints, receivedAtMs, feedFilter };
+  pendingWakes.enqueue({ source, hints, receivedAtMs, feedFilter, heartbeat });
   if (hydrating) return;
   hydrating = true;
   try {
-    while (pendingWake) {
-      const current = pendingWake;
-      pendingWake = null;
+    let current: FeedWake | null;
+    while ((current = pendingWakes.shift()) != null) {
       try {
-        let found = await fetchAndProcess(current.source, current.hints, current.receivedAtMs, current.feedFilter, heartbeat);
+        let found = await fetchAndProcess(
+          current.source, current.hints, current.receivedAtMs, current.feedFilter, current.heartbeat,
+        );
         if (current.source === 'push_notification' && current.hints && found === 0) {
           for (const delayMs of [120, 280, 600]) {
             await new Promise(r => setTimeout(r, delayMs));
-            found = await fetchAndProcess('push_hydration_retry', current.hints, current.receivedAtMs, current.feedFilter, heartbeat);
+            found = await fetchAndProcess(
+              'push_hydration_retry', current.hints, current.receivedAtMs,
+              current.feedFilter, current.heartbeat,
+            );
             if (found > 0) break;
           }
         }
@@ -2475,6 +2508,9 @@ function startServer() {
           feedLastCooldownUntilMs: feedRequestMetrics.lastCooldownUntilMs,
           redundantSurfacePollsSuppressed: feedRequestMetrics.redundantSurfacePollsSuppressed,
           minSurfaceRepollMs: cfg.feedMinSurfaceRepollMs,
+          surfaceTimeoutCooldownMs: cfg.feedSurfaceTimeoutCooldownMs,
+          surfaceTimeoutMaxCooldownMs: cfg.feedSurfaceTimeoutMaxCooldownMs,
+          surfaceTimeouts: feedSurfaceTimeoutRecovery.snapshot(),
           feedBackoffMs: backoffMs,
           // The ungated precondition traffic, reported separately so it can never be
           // mistaken for paced traffic and can never disappear from the footprint.
@@ -2556,6 +2592,15 @@ async function pollLoop() {
     await new Promise(r => setTimeout(r, wait));
     const surface = cfg.discoverySurfaces[discoverySurfaceIndex % cfg.discoverySurfaces.length];
     discoverySurfaceIndex += 1;
+    const surfaceCooldown = feedSurfaceTimeoutRecovery.rotatingPollCooldown(surface, Date.now());
+    if (surfaceCooldown) {
+      log({ type: 'feed_surface_poll_timeout_cooldown_skip', feedFilter: surface,
+        cooldownUntilMs: surfaceCooldown.cooldownUntilMs,
+        consecutiveTimeouts: surfaceCooldown.consecutiveTimeouts,
+        cursorAdvanced: false, live: cfg.live });
+      loopWatchdog.beat('feed', Date.now());
+      continue;
+    }
     await wake(`api_poll:${surface}`, undefined, Date.now(), surface, () => loopWatchdog.beat('feed', Date.now()));
     loopWatchdog.beat('feed', Date.now());
   }
@@ -2664,6 +2709,8 @@ async function main() {
       rateRecoveryIntervalMs: cfg.invoRateRecoveryIntervalMs,
       maxAcquireWaitMs: cfg.invoRequestMaxWaitMs,
       minSurfaceRepollMs: cfg.feedMinSurfaceRepollMs,
+      surfaceTimeoutCooldownMs: cfg.feedSurfaceTimeoutCooldownMs,
+      surfaceTimeoutMaxCooldownMs: cfg.feedSurfaceTimeoutMaxCooldownMs,
     },
     shadowExecutionPolicy: shadowPolicy,
     fundingOracleMaxDelayMs: cfg.shadowFundingOracleMaxDelayMs,
